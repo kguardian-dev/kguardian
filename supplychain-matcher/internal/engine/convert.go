@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"sort"
 	"strings"
 
@@ -102,11 +103,13 @@ func severity(s string) string {
 }
 
 // applyCVSS fills the per-vendor CVSS map (keyed by source, lowercased)
-// and the headline score: the highest v3/v4 base score, else v2.
+// and the headline score: the highest v3/v4 base score, else v2. A score
+// that is not a positive finite number counts as none: JSON cannot carry
+// NaN or Inf, so one would fail the whole image's response.
 func applyCVSS(w *wire.Vulnerability, cs []vulnerability.Cvss) {
 	var best float64
 	for _, c := range cs {
-		if c.Metrics.BaseScore <= 0 {
+		if s := c.Metrics.BaseScore; math.IsNaN(s) || math.IsInf(s, 0) || s <= 0 {
 			continue
 		}
 		src := strings.ToLower(c.Source)

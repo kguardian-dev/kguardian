@@ -138,9 +138,15 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 	n, err := writeMatch(w, s.Engine.DB(), vulns)
 	switch {
 	case errors.Is(err, errEncode):
-		// Our bug, not the client: the body is cut short where it failed.
+		// Our bug, not the client. If nothing has reached the client yet
+		// (writeMatch buffers the first 64 KiB), say so with a 500 rather
+		// than an empty 200; otherwise the body is cut short where it
+		// failed and the client sees it truncated.
 		s.Log.WithError(err).WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "written": n}).
 			Error("match response not delivered: encoding failed")
+		if n == 0 {
+			http.Error(w, "match failed: "+err.Error(), http.StatusInternalServerError)
+		}
 	case err != nil:
 		s.Log.WithError(err).WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "written": n}).
 			Warn(fmt.Sprintf("match response not delivered: client closed after %d bytes", n))

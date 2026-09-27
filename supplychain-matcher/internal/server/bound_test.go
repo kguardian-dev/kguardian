@@ -168,8 +168,12 @@ func TestEncodeFailureIsLoggedApart(t *testing.T) {
 	nan := math.NaN()
 	vulns[1].Score = &nan // json: unsupported value: NaN
 	resp := post(t, serve(t, &Server{Engine: fixedEngine{vulns}, Log: log}))
-	_, _ = io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	// Nothing had reached the client: an explicit 500, not an empty 200.
+	if resp.StatusCode != http.StatusInternalServerError || !strings.Contains(string(body), "encoding match response") {
+		t.Fatalf("status %d, body %q", resp.StatusCode, body)
+	}
 	for i := 0; i < 500; i++ {
 		for _, e := range hook.AllEntries() {
 			if strings.HasPrefix(e.Message, "match response not delivered: client closed") {
@@ -179,6 +183,33 @@ func TestEncodeFailureIsLoggedApart(t *testing.T) {
 				if e.Level != logrus.ErrorLevel || e.Data["digest"] != "sha256:fan" ||
 					!strings.Contains(e.Data[logrus.ErrorKey].(error).Error(), "finding 1 (CVE-2024-00001)") {
 					t.Fatalf("%+v", e)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no encode-failure log: %+v", hook.AllEntries())
+}
+
+// Past the first 64 KiB the status is already sent: the body is cut short
+// (the client reports it truncated) and the failure is still logged.
+func TestEncodeFailureAfterBytesSentTruncates(t *testing.T) {
+	log, hook := test.NewNullLogger()
+	vulns := findings(400, 16)
+	nan := math.NaN()
+	vulns[350].Score = &nan
+	resp := post(t, serve(t, &Server{Engine: fixedEngine{vulns}, Log: log}))
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(body) < 64<<10 || json.Valid(body) {
+		t.Fatalf("status %d, %d bytes, valid %v", resp.StatusCode, len(body), json.Valid(body))
+	}
+	for i := 0; i < 500; i++ {
+		for _, e := range hook.AllEntries() {
+			if e.Message == "match response not delivered: encoding failed" {
+				if w, _ := e.Data["written"].(int64); w <= 0 {
+					t.Fatalf("written %v", e.Data["written"])
 				}
 				return
 			}
