@@ -25,12 +25,13 @@ owner. A ReplicaSet's pods are profiled under their Deployment.
 
 <Warning>
 **unknown is not a pass.** When kguardian has no data for a dimension, or the
-source is not configured (vulnerability scanning, signatures), its status is
+source is not configured (vulnerability scanning), its status is
 `unknown`, and a readiness check it cannot evaluate prints `can't tell`. There
 is no numeric score: status is a tier (`ok`, `warn`, `risk`, `unknown`)
 derived from findings. Posture is `ok` only when all four core dimensions
-are known and ok, and images stay `unknown` until vulnerability data exists,
-so today no workload reads `ok`. Always read the status with its coverage.
+are known and ok, and images stay `unknown` until vulnerability data exists
+(or `risk` when a running image's signature does not verify), so today no
+workload reads `ok`. Always read the status with its coverage.
 </Warning>
 
 ## profile get
@@ -65,7 +66,7 @@ Readiness:
   trafficObserved24h      yes         Traffic observed for 6d 0h
   syscallCaptureComplete  no          Capture level medium on 1 pod(s)
   noWouldDeny24h          can't tell  No audit policy covers this workload
-  imageSigned             can't tell  Signature verification is not configured
+  imageSigned             can't tell  1 current digest(s): 1 not checked (no result yet: discovery has not reached it)
   podSecurityRestricted   can't tell  Every evaluated check passes restricted; 9 checks cannot be seen, so restricted is not confirmed
 ```
 
@@ -77,7 +78,22 @@ Readiness:
   a one-line reason under the posture.
 - **images** stays `unknown` until a vulnerability source exists. Running
   digests, mixed rollouts, crash loops and pull failures are still reported
-  as inventory facts and findings; they are not a verdict on the image.
+  as inventory facts and findings; they are not a verdict on the image. The
+  one exception is a current image whose signature does not verify: images
+  is then `risk`, with the finding `images.signatureInvalid/<container>`.
+- **Signature** shows the worst
+  [signature discovery](/cli/images#images-signers) verdict over the
+  workload's current digests, for example
+  `invalid (bad_signature), worst on container app sha256:ee6521f290b2…`, or
+  `verified by <identity> via <issuer> on every current digest (valid, not a trust decision)`.
+  `unknown (not_checked)` means a digest has never been checked, and
+  `not configured` means image signature discovery is switched off in
+  this deployment (signatures are then not checked and do not affect
+  images). The
+  `imageSigned` readiness row is `yes` only when every current digest
+  verified, `no` when any is invalid, unsigned or signed with a key
+  kguardian was not given, and `can't tell` otherwise. The line is absent
+  with a broker older than profile contract v1.8.
 - **PSS level** "at most restricted" means every check kguardian can evaluate
   passes, but volumes, host ports, AppArmor, SELinux, procMount and sysctls
   are not reported to kguardian and could still fail. That is why
@@ -114,7 +130,7 @@ payments   Deployment  ledger    warn    25%       network,podSecurity,images  0
 payments   Deployment  refunds   warn    25%       network,syscalls,images     0/0/2             1
 ```
 
-`UNKNOWN` lists the core dimensions kguardian has no data for; `images` is always among them until vulnerability data exists.
+`UNKNOWN` lists the core dimensions kguardian has no data for; `images` is among them until vulnerability data exists, unless a running image's signature does not verify (images is then `risk`).
 `--status unknown` lists the workloads it cannot judge at all. When more
 pages exist, the `--after` cursor is printed on stderr.
 

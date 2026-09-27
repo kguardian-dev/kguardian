@@ -175,7 +175,8 @@ POST /images/{digest}/attestation
   identity or provenance longer than the limits: those are stored whole or
   refused, never truncated, because trust policies match them.
 - A signature or attestation sent as verified must name its signer: a
-  keyless issuer AND SAN, or a key fingerprint. One that names no one is
+  keyless issuer AND SAN, or a key fingerprint with `signer_kind: key`
+  (blank counts as missing). One that names no one is
   stored as unverified with error `no_signer_identity`, and if that leaves
   a `verified` verdict with no verified signature, the verdict is derived
   again (tamper → `invalid`, an unchecked key signature → `key_signed`,

@@ -493,3 +493,56 @@ test("shrinkProfile cuts drift file lists but keeps filesTotal, truncated and or
   assert.deepEqual(d, { origins: ["memfd"], filesTotal: 42, truncated: true });
   assert.ok(out.trimmed.includes("drift.items detail (counts kept)"));
 });
+
+test("trimProfile: images.supplyChain (v1.8) keeps the worst verdict and caps digests and signers", () => {
+  const base = fixture("profile_warn.json") as Record<string, any>;
+  const signers = Array.from({ length: 8 }, (_, i) => ({ signerKind: "keyless", issuer: "https://token.actions.githubusercontent.com", san: `https://github.com/example/app/.github/workflows/r${i}.yaml@refs/heads/main` }));
+  const digests = Array.from({ length: 15 }, (_, i) => ({
+    container: "app", digest: `sha256:${String(i).padStart(64, "0")}`, verdict: i === 0 ? null : "verified",
+    reason: null, signers: i === 0 ? [] : signers, checkedAt: i === 0 ? null : "2026-09-27T00:00:00Z",
+  }));
+  const supplyChain = {
+    verdict: "unknown", reason: "not_checked", container: "app", digest: digests[0].digest, signers: [], checkedAt: null,
+    counts: { verified: 14, keySigned: 0, unsigned: 0, invalid: 0, unknown: 0, notChecked: 1 }, digests, truncated: false,
+  };
+  const got = trimProfile({ ...base, dimensions: { ...base.dimensions, images: { ...base.dimensions.images, supplyChain } } }) as any;
+  const sc = got.dimensions.images.supplyChain;
+  assert.equal(sc.verdict, "unknown");
+  assert.equal(sc.reason, "not_checked");
+  assert.deepEqual(sc.counts, supplyChain.counts, "counts cover every digest");
+  assert.equal(sc.digests.length, 10);
+  assert.equal(sc.digestsOmitted, 5);
+  assert.equal(sc.digests[1].signers.length, 3);
+  assert.equal(sc.digests[1].signersOmitted, 5);
+  // The broker's own omitted count is carried and added to.
+  const withBroker = trimProfile({ ...base, dimensions: { ...base.dimensions, images: { ...base.dimensions.images,
+    supplyChain: { ...supplyChain, digests: [{ ...digests[1], signersOmitted: 4 }] } } } }) as any;
+  assert.equal(withBroker.dimensions.images.supplyChain.digests[0].signersOmitted, 9);
+  assert.equal(sc.digests[0].verdict, null, "not checked stays null");
+  assert.match(got.note, /not_checked = never checked\) is never signed or unsigned/);
+  // A broker before v1.8 sends null: kept as null (unknown).
+  const old = trimProfile(base) as any;
+  assert.equal(old.dimensions.images.supplyChain, null);
+});
+
+// profile_signature_*.json: a v1.8 broker over real sigstore-go signature
+// results and SQL-seeded workloads (see test/fixtures/signing/README.md).
+test("trimProfile: a v1.8 capture with an invalid signature keeps risk and the verdict", () => {
+  const got = trimProfile(fixture("profile_signature_invalid.json")) as any;
+  assert.equal(got.posture.status, "risk");
+  assert.equal(got.dimensions.images.status, "risk");
+  assert.equal(got.dimensions.images.supplyChain.verdict, "invalid");
+  assert.equal(got.dimensions.images.supplyChain.reason, "bad_signature");
+  assert.deepEqual(got.dimensions.images.supplyChain.signers, []);
+  assert.equal(got.readiness.find((r: any) => r.id === "imageSigned").ok, false);
+  assert.ok(got.attention.some((f: any) => f.id === "images.signatureInvalid/app"));
+});
+
+test("trimProfile: supplyChain not_configured (discovery off) is kept and explained", () => {
+  const got = trimProfile(fixture("profile_signature_not_configured.json")) as any;
+  const sc = got.dimensions.images.supplyChain;
+  assert.equal(sc.status, "not_configured");
+  assert.equal(sc.verdict, "not_configured");
+  assert.equal(got.dimensions.images.status, "unknown", "stored results do not gate when discovery is off");
+  assert.match(got.note, /not_configured = discovery is off/);
+});

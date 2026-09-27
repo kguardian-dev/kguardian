@@ -737,6 +737,27 @@ render "image-trust-off-broker-netpol" "${SC_ON[@]}" --set broker.networkPolicy.
   fi
 }
 
+# Profile contract v1.8: the broker is told whether image signature
+# discovery is configured. "true" only with supplychain AND
+# signatureDiscovery on; every other combination is an explicit "false"
+# (the broker reads unset as on, so the chart must never leave it out).
+sig_env() {
+  workload Deployment kguardian-broker | awk '/name: SIGNATURE_DISCOVERY_ENABLED/ { getline; print $2 }'
+}
+for case in "sig-env-default:false" "sig-env-supplychain-only:false" "sig-env-discovery-on:true" "sig-env-discovery-without-supplychain:false"; do
+  name=${case%%:*} want=${case##*:}
+  case "$name" in
+    sig-env-default) args=() ;;
+    sig-env-supplychain-only) args=("${SC_ON[@]}") ;;
+    sig-env-discovery-on) args=("${SC_ON[@]}" --set supplychain.signatureDiscovery.enabled=true --set supplychain.brokerIngest.enabled=true) ;;
+    sig-env-discovery-without-supplychain) args=(--set supplychain.signatureDiscovery.enabled=true) ;;
+  esac
+  render "$name" "${args[@]}" && {
+    got="$(sig_env)"
+    [ "$got" = "\"$want\"" ] || { echo "FAIL [$name]: SIGNATURE_DISCOVERY_ENABLED is ${got:-missing}, want \"$want\""; fail=1; }
+  }
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

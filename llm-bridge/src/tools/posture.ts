@@ -154,6 +154,8 @@ export const PROFILE_CAPS = {
   driftItems: 20,
   driftNotEvaluated: 20,
   driftFilesPerItem: 5,
+  supplyChainDigests: 10,
+  signersPerDigest: 3,
 } as const;
 
 /** Set out[key] to a capped copy of src[key] (when present) and record the cut. */
@@ -205,9 +207,32 @@ function trimSyscalls(d: unknown): unknown {
   return out;
 }
 
+/** Cap `signers`; signersOmitted = the broker's omitted count plus ours. */
+function capSigners(out: Rec, src: Rec): void {
+  capInto(out, src, "signers", PROFILE_CAPS.signersPerDigest);
+  const broker = typeof src.signersOmitted === "number" ? src.signersOmitted : 0;
+  const ours = typeof out.signersOmitted === "number" ? out.signersOmitted : 0;
+  if (broker + ours > 0) out.signersOmitted = broker + ours;
+}
+
+/** images.supplyChain (contract v1.8): the worst verdict plus capped per-digest results. */
+function trimSupplyChain(sc: unknown): unknown {
+  if (!isRecord(sc)) return sc;
+  const out = pick(sc, ["status", "verdict", "reason", "container", "digest", "checkedAt", "counts", "truncated"]);
+  capSigners(out, sc);
+  capInto(out, sc, "digests", PROFILE_CAPS.supplyChainDigests, (x) => {
+    if (!isRecord(x)) return x;
+    const o = pick(x, ["container", "digest", "verdict", "reason", "checkedAt"]);
+    capSigners(o, x);
+    return o;
+  });
+  return out;
+}
+
 function trimImages(d: unknown): unknown {
   if (!isRecord(d)) return d;
-  const out = pick(d, [...ENVELOPE, "runningWindowSeconds", "truncated", "vulnerabilities", "supplyChain"]);
+  const out = pick(d, [...ENVELOPE, "runningWindowSeconds", "truncated", "vulnerabilities"]);
+  if (Object.prototype.hasOwnProperty.call(d, "supplyChain")) out.supplyChain = trimSupplyChain(d.supplyChain);
   capInto(out, d, "containers", PROFILE_CAPS.containers, (c) => {
     if (!isRecord(c)) return c;
     const o = pick(c, ["name", "kind", "mixedDigests", "stale"]);
@@ -244,7 +269,7 @@ export const UNTRUSTED_NOTE =
 
 /** What the model is told about reading a profile; attached to every result. */
 export const PROFILE_NOTE =
-  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status is ok only when all four core dimensions are known and ok; with any unknown dimension it is the worst known warn/risk, else unknown. Always report posture.coverage and unknownDimensions with it. images is unknown until vulnerability data exists; its digests, crash loops and pull failures are inventory facts, not a verdict. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. drift lists what changed since a baseline or ran without being shipped in the image (dimension drift findings; drift never sets posture). drift.evaluated names the checks that ran for the whole workload; a check not listed there, or listed in drift.notEvaluated (with its reason), was NOT evaluated, so no drift item for it never means no drift. " +
+  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status is ok only when all four core dimensions are known and ok; with any unknown dimension it is the worst known warn/risk, else unknown. Always report posture.coverage and unknownDimensions with it. images is unknown until vulnerability data exists (except risk when a running image's signature does not verify); its digests, crash loops and pull failures are inventory facts, not a verdict. images.supplyChain is the worst signature verdict over the running digests: verified = valid, not trusted; key_signed = not checked; unknown (not_checked = never checked) is never signed or unsigned; status not_configured = discovery is off, so never call the images signed or unsigned. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. drift lists what changed since a baseline or ran without being shipped in the image (dimension drift findings; drift never sets posture). drift.evaluated names the checks that ran for the whole workload; a check not listed there, or listed in drift.notEvaluated (with its reason), was NOT evaluated, so no drift item for it never means no drift. " +
   UNTRUSTED_NOTE;
 
 /** Trim GET /workloads/{ns}/{kind}/{name}/profile for the model. */

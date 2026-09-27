@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
@@ -161,6 +162,16 @@ func shortDigest(d string) string {
 
 // cell makes free text safe for a tabwriter column.
 func cell(s string) string {
-	s = strings.ReplaceAll(s, "\t", " ")
-	return strings.ReplaceAll(s, "\n", " ")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\t' || r == '\n':
+			return ' '
+		// Other control characters and invisible format characters (bidi
+		// overrides, zero-width marks, line separators) in cluster data
+		// never reach the terminal.
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029':
+			return '?'
+		}
+		return r
+	}, s)
 }

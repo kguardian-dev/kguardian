@@ -197,6 +197,14 @@ spec:
               value and `with` would drop it. The dict defaults keep an old
               values file without the block rendering.
             */}}
+            {{/*
+              Whether image signature discovery is configured, so a
+              workload profile can tell "feature off" (not_configured) from
+              "no result yet" (unknown). Explicit "false" only when the
+              chart turned it off; the broker treats an unset value as on.
+            */}}
+            - name: SIGNATURE_DISCOVERY_ENABLED
+              value: {{ if and .Values.supplychain.enabled (.Values.supplychain.signatureDiscovery | default dict).enabled }}"true"{{ else }}"false"{{ end }}
             {{- $inventory := .Values.broker.imageInventory | default dict }}
             {{- $inventoryRetention := $inventory.retention | default dict }}
             {{- if hasKey $inventory "runningWindowSeconds" }}

@@ -4,7 +4,7 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.7, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.8, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
 **Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
@@ -177,7 +177,8 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
 - `drift`: `{ "count": n, "byType": { "<type>": n } }` from the latest snapshot (section 2.8); `byType`
   is `{}` when there is no drift.
 - `posture`: see 2.2. `dimensions.images.runningDigests` / `mixedDigests` are `null` when there is no
-  inventory. `podSecurity.level` / `levelConfidence` are `null` when no current container is known.
+  inventory. `dimensions.images.signature` (v1.8) is `images.supplyChain.verdict` of the latest computed
+  profile, `null` when there is no current digest (absent in rows computed by an older broker). `podSecurity.level` / `levelConfidence` are `null` when no current container is known.
 
 ## 2. `GET /workloads/{namespace}/{kind}/{name}/profile` — full profile, computed live
 
@@ -361,11 +362,16 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
   **stored** version (`null` until the snapshotter stores one). `snapshotPending: true` = live differs
   from the stored version (always `true` when `version` is `null`).
 - `controls[].state`: networkPolicy `"audit" | "unknown"`; seccompProfile `"enforcing" | "audit" | "none"`;
-  imageAdmission always `null`. `inSync`: `true | false | null`.
+  imageAdmission always `null` (kguardian enforces no admission; signature results are in
+  `images.supplyChain`, section 2.6). `inSync`: `true | false | null`.
 - `readiness[].ok`: `true | false | null` (null = cannot tell).
   - `podSecurityRestricted` is `false` when the level is `baseline` or `privileged`. It is **`null`** when
     the level is `restricted`, because that is only an upper bound in v1 (checks kguardian cannot see,
     such as hostPath, may still fail). It is never `true` in v1.
+  - `imageSigned` (v1.8): `true` only when every current digest has a verified signature; `false` when any
+    is `invalid`, `unsigned` or `key_signed`; `null` when any could not be checked or was never checked
+    (and none is known-bad), and when there is no current digest. The message counts the verdicts.
+    `true` means valid signatures, not trusted signers.
 - `exposure`: distinct peers from observed flows; all `null` when there are no flows.
 - `drift`: section 2.8. Drift findings (dimension `"drift"`) are also in `findings` / `attention`.
 - `capabilities`: section 2.9. Observed capability use and the evidence behind the `capabilities` part of
@@ -410,6 +416,12 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
   - **images**: `unknown` while there is no vulnerability data for the running digests (always, until
     the P1-3 vulnerability source lands); then derived from findings. Inventory facts (digests, mixed
     rollouts, crash loops, pull failures) stay in the dimension's details, its reason and its findings.
+    Exception (v1.8): a current digest whose signature does not verify (`supplyChain.counts.invalid > 0`)
+    makes it `risk`. No signature result makes it `ok`. Once vulnerability data exists, `ok` from the
+    findings also needs `supplyChain.verdict: verified` (every current digest verified with a named
+    signer); otherwise the status stays `unknown`. All of this applies only when signature discovery
+    is configured: with `supplyChain.status: not_configured` signatures neither make images `risk` nor
+    keep it from `ok`, and the other image evidence decides.
 
 ### 2.3 `podSecurity` — Pod Security Standards
 
@@ -836,7 +848,81 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
   vulnerability data not configured"; `coverage.level: "partial"`). No inventory -> `unknown`, reason
   `no_inventory`.
 - `stale: true`: not in the current spec (see 2.3); listed, never a finding.
-- `vulnerabilities` / `supplyChain`: always `null` = **not configured**.
+- `vulnerabilities`: always `null` = **not configured**.
+- `supplyChain` (v1.8): the signature discovery results (`GET /images/{digest}/attestation`) of the
+  **current** (container, digest) pairs, the same pairs the drift checks read (section 2.8): each
+  container's running digests. A completed init container or a stale one is not current. `null` only when
+  there is no current pair. Shape:
+  - `status`: `configured`, or `not_configured` when image signature discovery is switched off in
+    the deployment. The chart sets the broker's `SIGNATURE_DISCOVERY_ENABLED` from
+    `supplychain.enabled` and `supplychain.signatureDiscovery.enabled`; only an explicit off value
+    (`false`, `0`, `no`, `off`) is not configured, and an unset value counts as configured, so missing
+    results are never mistaken for "feature off". `not_configured` has `verdict: "not_configured"`,
+    `reason`, `container`, `digest` and `checkedAt` `null`, zero `counts`, no `digests`, no findings,
+    reason `signatures_not_configured`, and `imageSigned` `null` with its own message. It is neither
+    `unknown` (could not be checked) nor `not_checked` (no result yet).
+  - `verdict`: the worst over those digests, in this order: `invalid`, `unsigned`, `key_signed`, `unknown`,
+    `verified`. A digest with no result (never checked) and a verdict this broker does not know count as
+    `unknown`; the aggregate then says `unknown` with reason `not_checked` for a never-checked digest.
+    `verified` only when every current digest verified. A `verified` result whose signers name no one
+    (a key signer needs its fingerprint, any other signer issuer + SAN; whitespace-only counts as missing) counts as `unknown` with
+    reason `no_signer_identity`, per digest and in the aggregate.
+  - `reason`, `container`, `digest`, `checkedAt` (`null` when never checked), `signers`: of the worst digest.
+    `signers` lists verified signers only (at most 8: `{signerKind: "keyless", issuer, san}` or
+    `{signerKind: "key", keyName, keyFingerprint}`; only signers with an identity), so it is `[]` unless
+    that digest verified. `signersOmitted` (absent when 0) counts the signers beyond the 8 listed.
+  - `counts`: `{verified, keySigned, unsigned, invalid, unknown, notChecked}` over every current digest.
+  - `digests[]`: `{container, digest, verdict, reason, signers, signersOmitted, checkedAt}` per current digest, `verdict:
+    null` = never checked. At most 64 (`truncated`); `counts` and `verdict` cover all.
+  - `verified` means a valid signature for the signer shown, not a trusted signer. Unknown and never
+    checked are never a pass.
+  - A second reason `signatures` summarises the counts ("2 current digest(s): 1 invalid, 1 verified").
+  - Not in the snapshot or its hash (section 3): results are re-checked daily and transient `unknown`s
+    would create versions without a behaviour change.
+- Signature findings (v1.8), one per container and kind: `images.signatureInvalid/<c>` high,
+  `images.unsigned/<c>` low, `images.signatureNotVerified/<c>` low (`key_signed`). None for unknown.
+
+From `GET /workloads/shop/StatefulSet/ledger/profile` -> 200 (capture
+`test/fixtures/posture/profile_signature_invalid.json`, from a v1.8 broker holding real signature results of
+the supplychain test fixtures; `body.dimensions.images.supplyChain`, then the `imageSigned` readiness row):
+
+```json
+{
+  "verdict": "invalid",
+  "reason": "bad_signature",
+  "container": "app",
+  "digest": "sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a",
+  "signers": [],
+  "checkedAt": "2026-09-26T22:24:27.860487Z",
+  "counts": {
+    "verified": 0,
+    "keySigned": 0,
+    "unsigned": 0,
+    "invalid": 1,
+    "unknown": 0,
+    "notChecked": 0
+  },
+  "digests": [
+    {
+      "container": "app",
+      "digest": "sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a",
+      "verdict": "invalid",
+      "reason": "bad_signature",
+      "signers": [],
+      "checkedAt": "2026-09-26T22:24:27.860487Z"
+    }
+  ],
+  "truncated": false
+}
+```
+
+```json
+{
+  "id": "imageSigned",
+  "ok": false,
+  "message": "1 current digest(s): 1 invalid"
+}
+```
 - Findings: `images.mixedDigests/<c>` low, `images.crashLoop/<c>` medium, `images.pullBackOff/<c>` medium.
 
 ### 2.7 `compute` (informational, not in the rollup)
@@ -1743,3 +1829,20 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     runtime inventory, no running container or no capture coverage is "not evaluated", never "no drift".
     Every check is in exactly one of `evaluated` and `notEvaluated`.
   - `/metrics` `kguardian_workload_drift` gains the `type="unshippedExecutable"` series.
+- 2026-09-27 (**v1.8**, image signatures in the profile; additive, one status change):
+  - `dimensions.images.supplyChain` is populated from signature discovery (section 2.6): the worst verdict
+    over the current digests with its digest, signers, reason and `checkedAt`, per-verdict `counts`, and
+    each digest's result. `null` now means only "no current digest".
+  - `images` status becomes `risk` when a current digest's signature does not verify; otherwise unchanged
+    (never `ok` from signatures). New reason `signatures`. New findings `images.signatureInvalid/<c>`
+    (high), `images.unsigned/<c>` and `images.signatureNotVerified/<c>` (low).
+  - Readiness `imageSigned` is computed (`true | false | null`, section 2) instead of always `null`;
+    `controls.imageAdmission.detail` no longer says signatures are not configured.
+  - List items gain `dimensions.images.signature`.
+  - The snapshot and its hash are unchanged: signature results do not create versions.
+  - A `verified` result that names no signer (blank counts as missing) is `unknown`
+    (`no_signer_identity`); `signersOmitted` counts signers beyond the 8 listed.
+  - `supplyChain.status` (`configured` | `not_configured`), from the chart-set
+    `SIGNATURE_DISCOVERY_ENABLED` (unset = configured). With discovery configured and vulnerability
+    data, images is `ok` only when every current digest verified with a named signer; with it not
+    configured, signatures do not affect the images status. `container` / `digest` may be `null`.

@@ -995,13 +995,17 @@ fn verified_without_a_signer_identity_is_not_verified() {
         );
     }
 
-    // A key signature with its fingerprint names a signer, with or without
-    // signer_kind.
-    for kind in [json!("key"), serde_json::Value::Null] {
+    // A key signature names its signer by fingerprint only with
+    // signer_kind "key": without the kind the evaluator could not match it,
+    // so it is not an identity here either.
+    for (kind, verdict) in [
+        (json!("key"), "verified"),
+        (serde_json::Value::Null, "unknown"),
+    ] {
         let mut b = body(&d(1), "verified");
         b["signatures"] = json!([{"format": "cosign-legacy", "source": "sig-tag", "verified": true,
             "signer_kind": kind, "key_name": "release", "key_fingerprint": "ab".repeat(32)}]);
-        assert_eq!(parse(&b, &d(1)).unwrap().verdict, "verified");
+        assert_eq!(parse(&b, &d(1)).unwrap().verdict, verdict, "{kind}");
     }
 
     // Attestations follow the same rule.

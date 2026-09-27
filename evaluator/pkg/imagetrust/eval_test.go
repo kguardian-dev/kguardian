@@ -138,6 +138,23 @@ func TestBlankSignerNeverMatchesAPermissivePolicy(t *testing.T) {
 	}
 }
 
+// A padded identity is not the one a policy was written for, even under a
+// match-anything policy: Unknown, never Trusted. (Relaxing the rule to
+// "non-blank" would make these Trusted.)
+func TestPaddedIdentityIsNotSelfIdentifying(t *testing.T) {
+	p := policy(t, v1alpha1.ImageTrustPolicySpec{Authorities: []v1alpha1.Authority{
+		{Keyless: &v1alpha1.KeylessAuthority{IssuerRegExp: ".*", SubjectRegExp: ".*"}},
+	}})
+	for _, s := range []Signer{
+		{Kind: "keyless", Issuer: "https://ours.example", SAN: " https://github.com/ours/app"},
+		{Kind: "keyless", Issuer: "https://ours.example ", SAN: "https://github.com/ours/app"},
+	} {
+		want(t, p, container(str("verified"), s), v1alpha1.ImageUnknown, ReasonNoSignerIdentity)
+	}
+	want(t, p, container(str("verified"), Signer{Kind: "keyless", Issuer: "https://ours.example", SAN: "https://github.com/ours/app"}),
+		v1alpha1.ImageTrusted, "")
+}
+
 // The attestation path shares trusts(): an attestation "signed" by a blank
 // signer never satisfies a requirement.
 func TestBlankAttestationSignerNeverSatisfiesARequirement(t *testing.T) {

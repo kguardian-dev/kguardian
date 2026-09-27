@@ -197,19 +197,15 @@ func fetchAndRenderSigners(digest, level, output string, w, errw io.Writer) erro
 	return signerGate(res, level, errw)
 }
 
-// namesSigner: a signer identity names someone (a keyless issuer and SAN,
-// or a key fingerprint). With no kind, either form counts.
+// namesSigner: a signer identity names someone: a key signer by its
+// fingerprint, any other (including one with no kind) by issuer AND SAN.
+// The evaluator's rule.
 func namesSigner(s api.SignerIdentity) bool {
 	set := func(v string) bool { return strings.TrimSpace(v) != "" }
-	keyless := set(s.Issuer) && set(s.SAN)
-	switch s.SignerKind {
-	case "key":
+	if s.SignerKind == "key" {
 		return set(s.KeyFingerprint)
-	case "":
-		return keyless || set(s.KeyFingerprint)
-	default:
-		return keyless
 	}
+	return set(s.Issuer) && set(s.SAN)
 }
 
 // anonymousVerified: the result says verified but no verified signature

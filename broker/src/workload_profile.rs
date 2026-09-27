@@ -110,6 +110,15 @@ pub const VERSION_ROW_COST_BYTES: u64 = 1_024;
 pub const SNAPSHOT_COST_BYTES: u64 = 128 * 1_024;
 /// One aggregated peer row.
 pub const PEER_ROW_COST_BYTES: u64 = 1_024;
+/// One signature result row: verdict, reason and up to
+/// [`SIGNERS_PER_DIGEST`] verified signers (issuer and SAN cut to 512
+/// bytes each).
+pub const SIGNATURE_ROW_COST_BYTES: u64 = 12 * 1_024;
+/// Verified signers listed per digest.
+pub const SIGNERS_PER_DIGEST: i64 = 8;
+/// Digests listed in `images.supplyChain.digests`; the counts and the
+/// worst verdict cover every current digest.
+pub const SUPPLY_CHAIN_DIGESTS_LISTED: usize = 64;
 
 /// Dimensions the posture rollup covers (compute is informational).
 pub const CORE_DIMENSIONS: [&str; 4] = ["network", "syscalls", "podSecurity", "images"];
@@ -471,6 +480,86 @@ pub struct DenialIn {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
+/// The stored signature discovery result for one digest
+/// (`image_attestations`, see `attestation.rs`).
+#[derive(Debug, Clone, QueryableByName, PartialEq)]
+pub struct SignatureRow {
+    #[diesel(sql_type = Text)]
+    pub digest: String,
+    #[diesel(sql_type = Text)]
+    pub verdict: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub reason: Option<String>,
+    #[diesel(sql_type = Timestamp)]
+    pub checked_at: NaiveDateTime,
+    /// Distinct verified signers WITH an identity, at most
+    /// [`SIGNERS_PER_DIGEST`]: `{signerKind: "keyless", issuer, san}` or
+    /// `{signerKind: "key", keyName, keyFingerprint}`. Unverified
+    /// signatures, and verified ones with neither issuer+SAN nor a key
+    /// fingerprint, never appear.
+    #[diesel(sql_type = Jsonb)]
+    pub signers: Value,
+    /// How many distinct such signers there are (before the cap).
+    #[diesel(sql_type = BigInt)]
+    pub signer_count: i64,
+}
+
+const SIGNATURES_SQL: &str = "SELECT a.digest, a.verdict, a.reason, a.checked_at, \
+    COALESCE(ids.agg, '[]'::jsonb) AS signers, ids.n AS signer_count \
+    FROM image_attestations a \
+    LEFT JOIN LATERAL ( \
+      SELECT jsonb_agg(x ORDER BY x::text) FILTER (WHERE rn <= $2) AS agg, count(*) AS n FROM ( \
+        SELECT x, row_number() OVER (ORDER BY x::text) AS rn FROM ( \
+          SELECT DISTINCT jsonb_strip_nulls(jsonb_build_object(\
+              'signerKind', COALESCE(s->>'signerKind', 'keyless'), 'issuer', left(s->>'issuer', 512), \
+              'san', left(s->>'san', 512), 'keyName', left(s->>'keyName', 256), \
+              'keyFingerprint', left(s->>'keyFingerprint', 128))) AS x \
+          FROM jsonb_array_elements(a.signatures) s \
+          WHERE (s->>'verified')::boolean \
+            AND CASE WHEN s->>'signerKind' = 'key' \
+                     THEN btrim(COALESCE(s->>'keyFingerprint', '')) <> '' \
+                     ELSE btrim(COALESCE(s->>'issuer', '')) <> '' AND btrim(COALESCE(s->>'san', '')) <> '' END \
+        ) d \
+      ) r \
+    ) ids ON true \
+    WHERE a.digest = ANY($1) ORDER BY a.digest LIMIT $3";
+
+/// Whether image signature discovery is configured, from the chart-set
+/// SIGNATURE_DISCOVERY_ENABLED. Only an explicit off value (false, 0, no,
+/// off) says it is not; unset or anything else is configured, so a broker
+/// that cannot tell never reports "not configured" for missing results.
+pub fn signature_discovery_configured() -> bool {
+    signature_discovery_configured_from(
+        std::env::var("SIGNATURE_DISCOVERY_ENABLED").ok().as_deref(),
+    )
+}
+
+pub(crate) fn signature_discovery_configured_from(v: Option<&str>) -> bool {
+    !matches!(
+        v.map(|x| x.trim().to_ascii_lowercase()).as_deref(),
+        Some("false" | "0" | "no" | "off")
+    )
+}
+
+/// A signer entry names who signed: a keyless issuer AND SAN, or a key
+/// fingerprint. `{signerKind: "keyless"}` alone names no one.
+fn has_signer_identity(signers: &Value) -> bool {
+    let set = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    // Same rule as ingest and the evaluator: a key signer by fingerprint,
+    // any other (including one with no kind) by issuer AND SAN.
+    signers.as_array().is_some_and(|a| {
+        a.iter()
+            .any(|x| match x.get("signerKind").and_then(Value::as_str) {
+                Some("key") => set(x, "keyFingerprint"),
+                _ => set(x, "issuer") && set(x, "san"),
+            })
+    })
+}
+
 /// Everything a profile is built from. Pure data, so [`build`] is unit
 /// tested without a database.
 #[derive(Debug, Clone, Default)]
@@ -499,6 +588,13 @@ pub struct Sources {
     /// Runtime inventory input of the `unshippedExecutable` drift check;
     /// `None` = not loaded (the check is then not evaluated).
     pub runtime: Option<crate::profile_drift::RuntimeDriftInput>,
+    /// Signature discovery results for the workload's digests, by digest.
+    /// A digest missing here has not been checked.
+    pub signatures: BTreeMap<String, SignatureRow>,
+    /// Signature discovery is switched off in the deployment
+    /// (SIGNATURE_DISCOVERY_ENABLED=false, set by the chart). `false`, the
+    /// default, means configured: the broker assumes it is on unless told.
+    pub signature_discovery_off: bool,
 }
 
 impl Sources {
@@ -613,6 +709,28 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         &crate::runtime_capabilities::current_pairs(&containers),
     )?);
 
+    // Every digest the inventory holds for the workload (at most
+    // WORKLOAD_CONTAINERS_MAX rows); the builder picks the current ones.
+    let digests: Vec<String> = containers
+        .iter()
+        .flat_map(|c| c.digests.iter().chain(c.previous_digests.iter()))
+        .map(|d| d.digest.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let signatures: BTreeMap<String, SignatureRow> = if digests.is_empty() {
+        BTreeMap::new()
+    } else {
+        sql_query(SIGNATURES_SQL)
+            .bind::<Array<Text>, _>(&digests)
+            .bind::<BigInt, _>(SIGNERS_PER_DIGEST)
+            .bind::<BigInt, _>(WORKLOAD_CONTAINERS_MAX)
+            .load::<SignatureRow>(conn)?
+            .into_iter()
+            .map(|r| (r.digest.clone(), r))
+            .collect()
+    };
+
     Ok(Sources {
         containers,
         containers_truncated: truncated,
@@ -631,6 +749,8 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         recent_versions,
         capabilities,
         runtime,
+        signatures,
+        signature_discovery_off: !signature_discovery_configured(),
     })
 }
 
@@ -656,6 +776,7 @@ pub fn profile_charge_kib() -> u32 {
         crate::runtime_capabilities::CAP_READ_COST_ROWS,
         512,
     ))
+    .saturating_add(cost_kib(WORKLOAD_CONTAINERS_MAX, SIGNATURE_ROW_COST_BYTES))
 }
 
 // ---------------------------------------------------------------------
@@ -1122,12 +1243,313 @@ pub struct ImagesDim {
     pub truncated: bool,
     /// Always null in v1: no vulnerability source is configured.
     pub vulnerabilities: Option<Value>,
-    /// Always null in v1: signatures/provenance are not configured.
-    pub supply_chain: Option<Value>,
+    /// Signature discovery results for the current digests (contract
+    /// v1.8, section 2.6); `null` when the workload has no current digest.
+    pub supply_chain: Option<SupplyChainView>,
+}
+
+/// One current digest's signature result. `verdict: null` = not checked.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureView {
+    pub container: String,
+    pub digest: String,
+    pub verdict: Option<String>,
+    pub reason: Option<String>,
+    pub signers: Value,
+    /// Signers beyond the [`SIGNERS_PER_DIGEST`] listed; omitted when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub signers_omitted: usize,
+    pub checked_at: Option<DateTime<Utc>>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureCounts {
+    pub verified: usize,
+    pub key_signed: usize,
+    pub unsigned: usize,
+    pub invalid: usize,
+    pub unknown: usize,
+    pub not_checked: usize,
+}
+
+/// `images.supplyChain` (contract v1.8): the worst signature verdict over
+/// the workload's current digests, the digest it came from, and every
+/// digest's result.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SupplyChainView {
+    /// `configured`, or `not_configured` when signature discovery is
+    /// switched off in the deployment: then nothing below is evaluated and
+    /// signatures do not gate the images status.
+    pub status: &'static str,
+    /// Worst over the current digests: invalid, unsigned, key_signed,
+    /// unknown (also a digest never checked, reason `not_checked`),
+    /// verified. `verified` only when every current digest verified.
+    /// `not_configured` with status `not_configured`.
+    pub verdict: String,
+    pub reason: Option<String>,
+    /// The worst digest and its container; `null` when not configured.
+    pub container: Option<String>,
+    pub digest: Option<String>,
+    /// The worst digest's verified signers (empty unless it verified).
+    pub signers: Value,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub signers_omitted: usize,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub counts: SignatureCounts,
+    pub digests: Vec<SignatureView>,
+    pub truncated: bool,
+}
+
+/// Worst first. An unrecognised verdict ranks as unknown.
+fn signature_rank(verdict: Option<&str>) -> u8 {
+    match verdict {
+        Some("invalid") => 0,
+        Some("unsigned") => 1,
+        Some("key_signed") => 2,
+        Some("verified") => 4,
+        _ => 3,
+    }
+}
+
+/// The current (container, digest) pairs: every running digest of each
+/// container, the same pairs the drift checks read
+/// (`runtime_capabilities::current_pairs`). A completed init container or
+/// a stale container is not current. Container order, newest digest first.
+fn current_digests(s: &Sources) -> Vec<(&str, &ContainerDigest)> {
+    s.containers
+        .iter()
+        .flat_map(|c| {
+            c.digests
+                .iter()
+                .map(move |d| (c.container_name.as_str(), d))
+        })
+        .collect()
+}
+
+fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<SupplyChainView> {
+    let current = current_digests(s);
+    if s.signature_discovery_off {
+        // Feature off is not missing data: say so, list nothing, gate
+        // nothing. Stored results from before it was switched off are not
+        // current evidence.
+        return (!current.is_empty()).then(|| SupplyChainView {
+            status: "not_configured",
+            verdict: "not_configured".into(),
+            reason: None,
+            container: None,
+            digest: None,
+            signers: json!([]),
+            signers_omitted: 0,
+            checked_at: None,
+            counts: SignatureCounts::default(),
+            digests: Vec::new(),
+            truncated: false,
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let views: Vec<SignatureView> = current
+        .into_iter()
+        .filter(|(c, d)| seen.insert((c.to_string(), d.digest.clone())))
+        .map(|(c, d)| match s.signatures.get(&d.digest) {
+            // "verified" with no signer identity (no issuer+SAN, no key
+            // fingerprint) names no one: unknown, never signed.
+            Some(r) if r.verdict == "verified" && !has_signer_identity(&r.signers) => {
+                SignatureView {
+                    container: c.to_string(),
+                    digest: d.digest.clone(),
+                    verdict: Some("unknown".into()),
+                    reason: Some("no_signer_identity".into()),
+                    signers: json!([]),
+                    signers_omitted: 0,
+                    checked_at: Some(utc(r.checked_at)),
+                }
+            }
+            Some(r) => {
+                let verified = r.verdict == "verified";
+                let shown = r.signers.as_array().map_or(0, Vec::len);
+                SignatureView {
+                    container: c.to_string(),
+                    digest: d.digest.clone(),
+                    verdict: Some(r.verdict.clone()),
+                    reason: r.reason.clone(),
+                    signers: if verified {
+                        r.signers.clone()
+                    } else {
+                        json!([])
+                    },
+                    signers_omitted: if verified {
+                        usize::try_from(r.signer_count)
+                            .unwrap_or(0)
+                            .saturating_sub(shown)
+                    } else {
+                        0
+                    },
+                    checked_at: Some(utc(r.checked_at)),
+                }
+            }
+            None => SignatureView {
+                container: c.to_string(),
+                digest: d.digest.clone(),
+                verdict: None,
+                reason: None,
+                signers: json!([]),
+                signers_omitted: 0,
+                checked_at: None,
+            },
+        })
+        .collect();
+    let worst = views
+        .iter()
+        .min_by_key(|v| signature_rank(v.verdict.as_deref()))?
+        .clone();
+    let mut counts = SignatureCounts::default();
+    let mut flagged = BTreeSet::new();
+    for v in &views {
+        let c = &v.container;
+        match v.verdict.as_deref() {
+            Some("verified") => counts.verified += 1,
+            Some("key_signed") => counts.key_signed += 1,
+            Some("unsigned") => counts.unsigned += 1,
+            Some("invalid") => counts.invalid += 1,
+            Some(_) => counts.unknown += 1,
+            None => counts.not_checked += 1,
+        }
+        // One finding per container and kind, from its worst digest.
+        let f = match v.verdict.as_deref() {
+            Some("invalid") => Some((
+                "signatureInvalid",
+                "high",
+                format!("Container {c} runs an image whose signature does not verify"),
+                format!(
+                    "{} has signatures and none verified ({}): tampered, made for another digest or malformed.",
+                    v.digest,
+                    v.reason.as_deref().unwrap_or("no reason given")
+                ),
+            )),
+            Some("unsigned") => Some((
+                "unsigned",
+                "low",
+                format!("Container {c} runs an unsigned image"),
+                format!("No signature was found for {}.", v.digest),
+            )),
+            Some("key_signed") => Some((
+                "signatureNotVerified",
+                "low",
+                format!("Container {c} runs an image signed with a key kguardian was not given"),
+                format!(
+                    "{} carries a key signature that was not checked; give the supplychain component the public key.",
+                    v.digest
+                ),
+            )),
+            _ => None,
+        };
+        if let Some((kind, sev, title, detail)) = f {
+            if flagged.insert((kind, c.clone())) {
+                findings.push(mk_finding(
+                    "images",
+                    format!("images.{kind}/{c}"),
+                    sev,
+                    Some(c.clone()),
+                    title,
+                    detail,
+                ));
+            }
+        }
+    }
+    let truncated = views.len() > SUPPLY_CHAIN_DIGESTS_LISTED;
+    let (verdict, reason) = match worst.verdict.as_deref() {
+        None => ("unknown".to_string(), Some("not_checked".to_string())),
+        Some(v) if signature_rank(Some(v)) == 3 => ("unknown".to_string(), worst.reason.clone()),
+        Some(v) => (v.to_string(), worst.reason.clone()),
+    };
+    Some(SupplyChainView {
+        status: "configured",
+        verdict,
+        reason,
+        container: Some(worst.container.clone()),
+        digest: Some(worst.digest.clone()),
+        signers: worst.signers.clone(),
+        signers_omitted: worst.signers_omitted,
+        checked_at: worst.checked_at,
+        counts,
+        digests: views
+            .into_iter()
+            .take(SUPPLY_CHAIN_DIGESTS_LISTED)
+            .collect(),
+        truncated,
+    })
+}
+
+impl SupplyChainView {
+    fn configured(&self) -> bool {
+        self.status == "configured"
+    }
+
+    /// "N digest(s): 2 verified, 1 not checked".
+    fn summary(&self) -> String {
+        if !self.configured() {
+            return "image signature discovery is not configured (supplychain.signatureDiscovery.enabled); signatures are not checked".into();
+        }
+        let c = &self.counts;
+        let parts: Vec<String> = [
+            (c.invalid, "invalid"),
+            (c.unsigned, "unsigned"),
+            (c.key_signed, "key-signed (not checked)"),
+            (c.unknown, "could not be checked"),
+            (c.not_checked, "not checked"),
+            (c.verified, "verified"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, l)| format!("{n} {l}"))
+        .collect();
+        let total = c.invalid + c.unsigned + c.key_signed + c.unknown + c.not_checked + c.verified;
+        format!("{total} current digest(s): {}", parts.join(", "))
+    }
+}
+
+/// The images status (contract v1.8), pure so it is tested before the
+/// vulnerability source is wired:
+///
+/// - a current digest whose signature does not verify -> `risk`, with or
+///   without vulnerability data;
+/// - no vulnerability data -> `unknown`;
+/// - with vulnerability data, the findings decide, except that `ok` needs
+///   every current digest verified: an unknown, never-checked, unsigned or
+///   key-signed digest leaves it `unknown`, never `ok`.
+fn images_status(
+    vulnerability_data: bool,
+    findings: &[Finding],
+    supply_chain: Option<&SupplyChainView>,
+) -> &'static str {
+    // Signatures gate only when discovery is configured: "feature off" is
+    // not unknown data. No supplyChain means no current digest, so there is
+    // nothing to vouch for: never ok.
+    let gate = supply_chain.filter(|sc| sc.configured());
+    if gate.is_some_and(|sc| sc.counts.invalid > 0) {
+        return "risk";
+    }
+    if !vulnerability_data {
+        return "unknown";
+    }
+    match status_from_findings(findings) {
+        "ok" if supply_chain.is_none() || gate.is_some_and(|sc| sc.verdict != "verified") => {
+            "unknown"
+        }
+        st => st,
+    }
 }
 
 fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
     let mut findings = Vec::new();
+    let supply_chain = build_supply_chain(s, &mut findings);
     let mut since: Option<NaiveDateTime> = None;
     let containers: Vec<ImageContainerView> = s
         .containers
@@ -1231,12 +1653,31 @@ fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
             .flat_map(|c| c.running.iter().map(|d| d.digest.as_str()))
             .collect();
         let vulnerability_data = false;
+        // Contract v1.8: a signature that does not verify is known-bad
+        // evidence about the running content, so it makes the dimension
+        // `risk` even without vulnerability data. Nothing about signatures
+        // can make it `ok`: unsigned, key-signed, unknown and not-checked
+        // leave it as it was, and a verified signature is not a pass.
+        let mut reasons = vec![reason(
+            "vulnerabilities_not_configured",
+            format!(
+                "{} running digest(s) across {} container(s); vulnerability data not configured",
+                running.len(),
+                current.len()
+            ),
+        )];
+        if let Some(sc) = &supply_chain {
+            reasons.push(reason(
+                if sc.configured() {
+                    "signatures"
+                } else {
+                    "signatures_not_configured"
+                },
+                sc.summary(),
+            ));
+        }
         Envelope {
-            status: if vulnerability_data {
-                status_from_findings(&findings)
-            } else {
-                "unknown"
-            },
+            status: images_status(vulnerability_data, &findings, supply_chain.as_ref()),
             coverage: Coverage {
                 level: "partial",
                 fraction: None,
@@ -1246,14 +1687,7 @@ fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
                     s.running_window_seconds
                 ),
             },
-            reasons: vec![reason(
-                "vulnerabilities_not_configured",
-                format!(
-                    "{} running digest(s) across {} container(s); vulnerability data not configured",
-                    running.len(),
-                    current.len()
-                ),
-            )],
+            reasons,
         }
     };
     (
@@ -1263,7 +1697,7 @@ fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
             containers,
             truncated: s.containers_truncated,
             vulnerabilities: None,
-            supply_chain: None,
+            supply_chain,
         },
         findings,
     )
@@ -2067,6 +2501,49 @@ pub fn rollup(dims: &[(&'static str, &Envelope)]) -> (PostureHead, Vec<&'static 
     )
 }
 
+/// `imageSigned`: true only when every current digest has a verified
+/// signature; false when any is invalid, unsigned or key-signed (not
+/// checked); unknown (`null`) when any could not be checked or was never
+/// checked. A verified signature is valid for its signer, not trusted.
+fn image_signed_readiness(sc: Option<&SupplyChainView>) -> Readiness {
+    let id = "imageSigned";
+    let Some(sc) = sc else {
+        return Readiness {
+            id,
+            ok: None,
+            message: "No current image digest for this workload".into(),
+        };
+    };
+    if !sc.configured() {
+        return Readiness {
+            id,
+            ok: None,
+            message: "Image signature discovery is not configured (supplychain.signatureDiscovery.enabled)".into(),
+        };
+    }
+    let c = &sc.counts;
+    let ok = if c.invalid + c.unsigned + c.key_signed > 0 {
+        Some(false)
+    } else if c.unknown + c.not_checked > 0 {
+        None
+    } else {
+        Some(true)
+    };
+    let message = match ok {
+        Some(true) => format!(
+            "{}; verified means valid for its signer, not trusted",
+            sc.summary()
+        ),
+        Some(false) => sc.summary(),
+        None if c.not_checked > 0 && c.unknown == 0 && c.verified == 0 => format!(
+            "{} (no result yet: discovery has not reached it)",
+            sc.summary()
+        ),
+        None => sc.summary(),
+    };
+    Readiness { id, ok, message }
+}
+
 fn fmt_age(secs: i64) -> String {
     let d = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
@@ -2163,7 +2640,7 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         Control {
             control: "imageAdmission",
             state: None,
-            detail: "Signature/admission checks are not configured".into(),
+            detail: "kguardian does not enforce image admission; signature results are in images.supplyChain and ImageTrustPolicy results are report-only".into(),
             in_sync: None,
         },
     ];
@@ -2218,11 +2695,7 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
                 message: "No audit policy covers this workload".into(),
             },
         },
-        Readiness {
-            id: "imageSigned",
-            ok: None,
-            message: "Signature verification is not configured".into(),
-        },
+        image_signed_readiness(images.supply_chain.as_ref()),
         match pod_security.analysis.level {
             // A restricted level that is only an upper bound cannot say
             // yes: checks kguardian cannot see (hostPath...) may fail.
@@ -2662,6 +3135,7 @@ fn list_summary(p: &Profile) -> Value {
                 "status": d.images.env.status,
                 "runningDigests": if d.images.containers.is_empty() { Value::Null } else { json!(running.len()) },
                 "mixedDigests": if d.images.containers.is_empty() { Value::Null } else { json!(d.images.containers.iter().any(|c| c.mixed_digests)) },
+                "signature": d.images.supply_chain.as_ref().map(|sc| &sc.verdict),
             },
             "compute": { "status": d.compute.env.status },
         },
@@ -3760,6 +4234,508 @@ mod tests {
         assert!(im.vulnerabilities.is_none());
         assert!(p.findings.iter().any(|f| f.id == "images.crashLoop/app"));
         assert!(p.posture.unknown_dimensions.contains(&"images"));
+    }
+
+    fn sig(d: &str, verdict: &str, reason: Option<&str>, signers: Value) -> (String, SignatureRow) {
+        (
+            d.to_string(),
+            SignatureRow {
+                digest: d.into(),
+                verdict: verdict.into(),
+                reason: reason.map(Into::into),
+                checked_at: ts(3),
+                signer_count: signers.as_array().map_or(0, |a| a.len() as i64),
+                signers,
+            },
+        )
+    }
+
+    fn keyless() -> Value {
+        json!([{"signerKind": "keyless", "issuer": "https://token.actions.githubusercontent.com",
+                "san": "https://github.com/example/app/.github/workflows/release.yaml@refs/heads/main"}])
+    }
+
+    /// Two containers, one digest each ('a' and 'b').
+    fn two_containers(sigs: Vec<(String, SignatureRow)>) -> Sources {
+        let mut b = container("sidecar", restricted());
+        b.digests[0].digest = digest('b');
+        Sources {
+            containers: vec![container("app", restricted()), b],
+            signatures: sigs.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    fn readiness<'a>(p: &'a Profile, id: &str) -> &'a Readiness {
+        p.readiness.iter().find(|r| r.id == id).unwrap()
+    }
+
+    /// Contract v1.8: never checked is unknown, never ok or unsigned.
+    #[test]
+    fn supply_chain_not_checked_is_unknown() {
+        let p = build(&key(), &two_containers(vec![]), now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.verdict.as_str(), sc.reason.as_deref()),
+            ("unknown", Some("not_checked"))
+        );
+        assert_eq!(sc.counts.not_checked, 2);
+        assert!(sc
+            .digests
+            .iter()
+            .all(|d| d.verdict.is_none() && d.checked_at.is_none()));
+        assert_eq!(p.dimensions.images.env.status, "unknown");
+        let r = readiness(&p, "imageSigned");
+        assert_eq!(r.ok, None);
+        assert!(r.message.contains("2 not checked"), "{}", r.message);
+        assert!(!p
+            .findings
+            .iter()
+            .any(|f| f.id.contains("unsigned") || f.id.contains("signature")));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["dimensions"]["images"]["supplyChain"]["counts"]["notChecked"],
+            2
+        );
+    }
+
+    /// Everything verified is readiness true, but never makes images ok.
+    #[test]
+    fn supply_chain_all_verified_is_ready_but_not_ok() {
+        let s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "verified", None, keyless()),
+        ]);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "verified");
+        assert_eq!(sc.signers, keyless());
+        assert_eq!(sc.checked_at, Some(utc(ts(3))));
+        assert_eq!(readiness(&p, "imageSigned").ok, Some(true));
+        assert!(readiness(&p, "imageSigned").message.contains("not trusted"));
+        assert_eq!(p.dimensions.images.env.status, "unknown");
+        assert_ne!(p.posture.head.status, "ok");
+    }
+
+    /// The worst verdict wins; a known-bad beats unknown, unknown beats
+    /// verified.
+    #[test]
+    fn supply_chain_worst_verdict_and_findings() {
+        let s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "unknown", Some("registry_auth"), json!([])),
+        ]);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.verdict.as_str(), sc.reason.as_deref()),
+            ("unknown", Some("registry_auth"))
+        );
+        assert_eq!(
+            (sc.container.as_deref().unwrap(), sc.signers.clone()),
+            ("sidecar", json!([]))
+        );
+        assert_eq!(readiness(&p, "imageSigned").ok, None);
+
+        let s = two_containers(vec![
+            sig(&digest('a'), "key_signed", Some("untrusted_key"), keyless()),
+            sig(&digest('b'), "unknown", Some("timeout"), json!([])),
+        ]);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "key_signed");
+        // Signers of a result that did not verify are never shown.
+        assert_eq!(sc.signers, json!([]));
+        assert_eq!(readiness(&p, "imageSigned").ok, Some(false));
+        let f = p
+            .findings
+            .iter()
+            .find(|f| f.id == "images.signatureNotVerified/app")
+            .unwrap();
+        assert_eq!(f.severity, "low");
+        assert_eq!(p.dimensions.images.env.status, "unknown");
+
+        let s = two_containers(vec![sig(&digest('a'), "unsigned", None, json!([]))]);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "unsigned");
+        assert_eq!((sc.counts.unsigned, sc.counts.not_checked), (1, 1));
+        assert!(p
+            .findings
+            .iter()
+            .any(|f| f.id == "images.unsigned/app" && f.severity == "low"));
+        assert_eq!(p.dimensions.images.env.status, "unknown");
+    }
+
+    /// A verified result must name its signer: an empty signer list or a
+    /// kind-only entry is unknown (`no_signer_identity`), never signed.
+    #[test]
+    fn supply_chain_verified_without_identity_is_unknown() {
+        for signers in [
+            json!([]),
+            json!([{"signerKind": "keyless"}]),
+            json!([{"signerKind": "keyless", "issuer": "https://x"}]),
+            json!([{"signerKind": "key", "keyName": "k"}]),
+            // A fingerprint without signerKind "key" is not an identity.
+            json!([{"keyFingerprint": "e2312c28"}]),
+        ] {
+            let s = two_containers(vec![
+                sig(&digest('a'), "verified", None, keyless()),
+                sig(&digest('b'), "verified", None, signers.clone()),
+            ]);
+            let p = build(&key(), &s, now());
+            let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+            assert_eq!(
+                (sc.verdict.as_str(), sc.reason.as_deref()),
+                ("unknown", Some("no_signer_identity")),
+                "{signers}"
+            );
+            assert_eq!((sc.counts.verified, sc.counts.unknown), (1, 1), "{signers}");
+            let d = sc.digests.iter().find(|d| d.digest == digest('b')).unwrap();
+            assert_eq!(d.verdict.as_deref(), Some("unknown"));
+            assert_eq!(d.signers, json!([]));
+            assert_eq!(readiness(&p, "imageSigned").ok, None, "{signers}");
+        }
+        // A key fingerprint alone is an identity.
+        let s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(
+                &digest('b'),
+                "verified",
+                None,
+                json!([{"signerKind": "key", "keyFingerprint": "e2312c28"}]),
+            ),
+        ]);
+        let p = build(&key(), &s, now());
+        assert_eq!(
+            p.dimensions.images.supply_chain.as_ref().unwrap().verdict,
+            "verified"
+        );
+        assert_eq!(readiness(&p, "imageSigned").ok, Some(true));
+    }
+
+    /// signersOmitted counts the signers beyond the listed ones.
+    #[test]
+    fn supply_chain_counts_omitted_signers() {
+        let (d, mut row) = sig(&digest('a'), "verified", None, keyless());
+        row.signer_count = 11;
+        let mut s = two_containers(vec![
+            (d, row),
+            sig(&digest('b'), "verified", None, keyless()),
+        ]);
+        s.containers.truncate(1);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.signers_omitted, sc.digests[0].signers_omitted),
+            (10, 10)
+        );
+        let v = serde_json::to_value(sc).unwrap();
+        assert_eq!(v["signersOmitted"], 10);
+        // Omitted when zero.
+        let p = build(
+            &key(),
+            &two_containers(vec![sig(&digest('a'), "verified", None, keyless())]),
+            now(),
+        );
+        let v = serde_json::to_value(p.dimensions.images.supply_chain.as_ref().unwrap()).unwrap();
+        assert!(v.get("signersOmitted").is_none());
+    }
+
+    /// Guard for when vulnerability data is wired: images is `ok` only
+    /// when the findings allow it AND every current digest verified.
+    #[test]
+    fn images_status_never_ok_with_unverified_signatures() {
+        let sc = |s: Sources| build(&key(), &s, now()).dimensions.images.supply_chain;
+        let verified = sc(two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "verified", None, keyless()),
+        ]));
+        let not_checked = sc(two_containers(vec![]));
+        let unsigned = sc(two_containers(vec![sig(
+            &digest('a'),
+            "unsigned",
+            None,
+            json!([]),
+        )]));
+        let invalid = sc(two_containers(vec![sig(
+            &digest('a'),
+            "invalid",
+            Some("bad_signature"),
+            json!([]),
+        )]));
+        assert_eq!(images_status(true, &[], verified.as_ref()), "ok");
+        assert_eq!(images_status(true, &[], not_checked.as_ref()), "unknown");
+        assert_eq!(images_status(true, &[], unsigned.as_ref()), "unknown");
+        assert_eq!(images_status(true, &[], None), "unknown");
+        assert_eq!(images_status(true, &[], invalid.as_ref()), "risk");
+        assert_eq!(images_status(false, &[], verified.as_ref()), "unknown");
+        assert_eq!(images_status(false, &[], invalid.as_ref()), "risk");
+        let medium = mk_finding(
+            "images",
+            "x".into(),
+            "medium",
+            None,
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(images_status(true, &[medium], not_checked.as_ref()), "warn");
+    }
+
+    /// SIGNATURE_DISCOVERY_ENABLED: only an explicit off value is "not
+    /// configured"; unset or anything else is configured.
+    #[test]
+    fn signature_discovery_configured_only_off_when_told() {
+        for v in [
+            None,
+            Some(""),
+            Some("true"),
+            Some("1"),
+            Some("yes"),
+            Some("maybe"),
+        ] {
+            assert!(signature_discovery_configured_from(v), "{v:?}");
+        }
+        for v in ["false", "FALSE", " 0 ", "no", "off"] {
+            assert!(!signature_discovery_configured_from(Some(v)), "{v}");
+        }
+    }
+
+    /// Discovery switched off: supplyChain says not_configured, gates
+    /// nothing, and stored results (from before it was switched off) are
+    /// not used. Not the same as unknown or not_checked.
+    #[test]
+    fn supply_chain_not_configured_does_not_gate() {
+        let mut s = two_containers(vec![sig(
+            &digest('a'),
+            "invalid",
+            Some("bad_signature"),
+            json!([]),
+        )]);
+        s.signature_discovery_off = true;
+        let p = build(&key(), &s, now());
+        let im = &p.dimensions.images;
+        let sc = im.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.status, sc.verdict.as_str()),
+            ("not_configured", "not_configured")
+        );
+        assert!(sc.digests.is_empty() && sc.container.is_none() && sc.reason.is_none());
+        assert_eq!(
+            im.env.status, "unknown",
+            "no vulnerability data: unknown as before, not risk"
+        );
+        assert_eq!(im.env.reasons[1].code, "signatures_not_configured");
+        assert!(!p
+            .findings
+            .iter()
+            .any(|f| f.id.starts_with("images.signature") || f.id.starts_with("images.unsigned")));
+        let r = readiness(&p, "imageSigned");
+        assert_eq!(r.ok, None);
+        assert!(r.message.contains("not configured"), "{}", r.message);
+        let v = serde_json::to_value(sc).unwrap();
+        assert_eq!(v["status"], "not_configured");
+        assert_eq!(
+            list_summary(&p)["dimensions"]["images"]["signature"],
+            "not_configured"
+        );
+        // With vulnerability data, the findings alone decide: ok is reachable.
+        assert_eq!(images_status(true, &[], Some(sc)), "ok");
+        // No current digest: no supplyChain at all.
+        let empty = Sources {
+            signature_discovery_off: true,
+            ..Default::default()
+        };
+        assert!(build(&key(), &empty, now())
+            .dimensions
+            .images
+            .supply_chain
+            .is_none());
+    }
+
+    /// The ruled modes with vulnerability data: configured and not all
+    /// verified-with-a-named-signer -> never ok; not configured -> not
+    /// gated; configured and all verified with named signers -> eligible.
+    #[test]
+    fn images_status_modes() {
+        let sc = |s: Sources| build(&key(), &s, now()).dimensions.images.supply_chain;
+        let configured_unverified = sc(two_containers(vec![sig(
+            &digest('a'),
+            "verified",
+            None,
+            keyless(),
+        )]));
+        let anonymous = sc(two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(
+                &digest('b'),
+                "verified",
+                None,
+                json!([{"signerKind": "keyless", "issuer": "https://x", "san": "   "}]),
+            ),
+        ]));
+        let all_verified = sc(two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "verified", None, keyless()),
+        ]));
+        let mut off = two_containers(vec![]);
+        off.signature_discovery_off = true;
+        let not_configured = sc(off);
+        assert_eq!(
+            images_status(true, &[], configured_unverified.as_ref()),
+            "unknown"
+        );
+        assert_eq!(images_status(true, &[], anonymous.as_ref()), "unknown");
+        assert_eq!(images_status(true, &[], all_verified.as_ref()), "ok");
+        assert_eq!(images_status(true, &[], not_configured.as_ref()), "ok");
+    }
+
+    /// Whitespace-only identity fields are missing (S1b).
+    #[test]
+    fn supply_chain_whitespace_identity_is_missing() {
+        for signers in [
+            json!([{"signerKind": "keyless", "issuer": "https://token.actions.githubusercontent.com", "san": "   "}]),
+            json!([{"signerKind": "keyless", "issuer": " ", "san": "https://github.com/example/app"}]),
+            json!([{"signerKind": "key", "keyFingerprint": "  "}]),
+        ] {
+            let s = two_containers(vec![
+                sig(&digest('a'), "verified", None, keyless()),
+                sig(&digest('b'), "verified", None, signers.clone()),
+            ]);
+            let p = build(&key(), &s, now());
+            let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+            assert_eq!(
+                (sc.verdict.as_str(), sc.reason.as_deref()),
+                ("unknown", Some("no_signer_identity")),
+                "{signers}"
+            );
+            assert_eq!(readiness(&p, "imageSigned").ok, None, "{signers}");
+        }
+    }
+
+    /// An unrecognised verdict counts as unknown, never as verified.
+    #[test]
+    fn supply_chain_unrecognised_verdict_is_unknown() {
+        let s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "trusted_somehow", None, json!([])),
+        ]);
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "unknown");
+        assert_eq!(sc.counts.unknown, 1);
+        assert_eq!(readiness(&p, "imageSigned").ok, None);
+    }
+
+    /// An invalid signature is known-bad evidence: images and posture are
+    /// risk even without vulnerability data.
+    #[test]
+    fn supply_chain_invalid_signature_is_risk() {
+        let s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "invalid", Some("bad_signature"), json!([])),
+        ]);
+        let p = build(&key(), &s, now());
+        let im = &p.dimensions.images;
+        assert_eq!(im.env.status, "risk");
+        assert_eq!(im.env.reasons[0].code, "vulnerabilities_not_configured");
+        assert_eq!(im.env.reasons[1].code, "signatures");
+        assert!(im.env.reasons[1]
+            .message
+            .starts_with("2 current digest(s): 1 invalid"));
+        let sc = im.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.verdict.as_str(), sc.digest.clone()),
+            ("invalid", Some(digest('b')))
+        );
+        let f = p
+            .findings
+            .iter()
+            .find(|f| f.id == "images.signatureInvalid/sidecar")
+            .unwrap();
+        assert_eq!(f.severity, "high");
+        assert!(p.attention.iter().any(|a| a.id == f.id));
+        assert_eq!(p.posture.head.status, "risk");
+        assert!(!p.posture.unknown_dimensions.contains(&"images"));
+        assert_eq!(readiness(&p, "imageSigned").ok, Some(false));
+    }
+
+    /// Only current digests count; stale containers and no inventory give
+    /// no supplyChain.
+    #[test]
+    fn supply_chain_current_digests_only() {
+        assert!(build(&key(), &Sources::default(), now())
+            .dimensions
+            .images
+            .supply_chain
+            .is_none());
+        let p = build(&key(), &Sources::default(), now());
+        assert_eq!(readiness(&p, "imageSigned").ok, None);
+
+        // A stale container (not running, not current) is ignored.
+        let mut stale = container("legacy", restricted());
+        stale.previous_digests = std::mem::take(&mut stale.digests);
+        stale.previous_digests[0].digest = digest('c');
+        stale.previous_digests[0].last_pod_name = None;
+        let mut s = two_containers(vec![
+            sig(&digest('a'), "verified", None, keyless()),
+            sig(&digest('b'), "verified", None, keyless()),
+            sig(&digest('c'), "invalid", Some("bad_signature"), json!([])),
+        ]);
+        s.containers.push(stale);
+        s.running_window_seconds = 900;
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "verified");
+        assert_eq!(sc.digests.len(), 2);
+        assert_ne!(p.dimensions.images.env.status, "risk");
+    }
+
+    /// Current pairs are the running (container, digest) pairs, as drift
+    /// reads them: a completed init container (current, not running) is not
+    /// one, so its signature does not decide the verdict.
+    #[test]
+    fn supply_chain_uses_the_current_pairs() {
+        let mut init = container("migrate", restricted());
+        init.container_kind = "init".into();
+        init.previous_digests = std::mem::take(&mut init.digests);
+        init.previous_digests[0].digest = digest('c');
+        init.previous_digests[0].ran_as_init = true;
+        init.previous_digests[0].state = Some("terminated".into());
+        let s = Sources {
+            containers: vec![container("app", restricted()), init],
+            live_pods: vec!["checkout-1".into()],
+            signatures: [
+                sig(&digest('a'), "verified", None, keyless()),
+                sig(&digest('c'), "invalid", Some("bad_signature"), json!([])),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(sc.verdict, "verified");
+        assert_eq!(sc.digests.len(), 1);
+        assert_eq!(sc.digests[0].container, "app");
+    }
+
+    /// Signature results are re-checked daily; they must not create new
+    /// stored versions.
+    #[test]
+    fn supply_chain_does_not_change_the_snapshot_hash() {
+        let a = build(&key(), &two_containers(vec![]), now());
+        let b = build(
+            &key(),
+            &two_containers(vec![sig(
+                &digest('a'),
+                "invalid",
+                Some("bad_signature"),
+                json!([]),
+            )]),
+            now(),
+        );
+        assert_eq!(a.content_hash, b.content_hash);
     }
 
     #[test]
@@ -4893,6 +5869,121 @@ mod live_tests {
             kind: "Deployment".into(),
             name: "checkout".into(),
         }
+    }
+
+    /// Contract v1.8 against the real schema: signature rows join by
+    /// digest, only verified signers are read (at most
+    /// SIGNERS_PER_DIGEST), and the profile and list summary carry them.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_profile_reads_signature_results() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-signatures";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, '7', "{}");
+        let d = format!("sha256:{}", "7".repeat(64));
+        let mut sigs: Vec<Value> = (0..10)
+            .map(|i| json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+                "signerKind": "keyless", "issuer": "https://token.actions.githubusercontent.com",
+                "san": format!("https://github.com/example/checkout/.github/workflows/r{i}.yaml@refs/heads/main")}))
+            .collect();
+        sigs.push(
+            json!({"format": "cosign-legacy", "source": "sig-tag", "verified": false,
+            "error": "bad_signature", "issuer": "https://claimed.example", "san": "attacker"}),
+        );
+        // Verified but naming no one: never read as a signer.
+        sigs.push(json!({"format": "cosign-bundle", "source": "referrers", "verified": true}));
+        sigs.push(json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+            "signerKind": "keyless", "issuer": "https://token.actions.githubusercontent.com", "san": ""}));
+        sigs.push(json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+            "signerKind": "keyless", "issuer": "https://token.actions.githubusercontent.com", "san": "   "}));
+        sigs.push(
+            json!({"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+            "signerKind": "key", "keyFingerprint": "  "}),
+        );
+        // A fingerprint without signerKind "key" names no one either.
+        sigs.push(
+            json!({"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+            "keyFingerprint": "ab".repeat(32)}),
+        );
+        conn.batch_execute(&format!(
+            "DELETE FROM image_attestations WHERE digest = '{d}'; \
+             INSERT INTO image_attestations (digest, repository, verdict, signatures, checked_at) \
+             VALUES ('{d}', 'ghcr.io/example/checkout', 'verified', '{}'::jsonb, timezone('UTC', NOW()));",
+            Value::Array(sigs)
+        ))
+        .expect("attestation");
+        let k = key(ns);
+        let s = load_sources(&mut conn, &k).expect("load");
+        let row = s.signatures.get(&d).expect("joined by digest");
+        let signers = row.signers.as_array().unwrap();
+        assert_eq!(signers.len(), SIGNERS_PER_DIGEST as usize);
+        assert_eq!(
+            row.signer_count, 10,
+            "only the ten signers with an identity count"
+        );
+        assert!(signers
+            .iter()
+            .all(|x| x["san"].as_str().is_some_and(|s| !s.is_empty())));
+        assert!(signers.iter().all(|x| x["signerKind"] == "keyless"
+            && x["issuer"] == "https://token.actions.githubusercontent.com"));
+        assert!(
+            !row.signers.to_string().contains("attacker"),
+            "an unverified signer was read"
+        );
+        let p = build(&k, &s, Utc::now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!((sc.verdict.as_str(), sc.counts.verified), ("verified", 1));
+        assert_eq!(sc.signers_omitted, 2);
+        assert_eq!(
+            p.readiness
+                .iter()
+                .find(|r| r.id == "imageSigned")
+                .unwrap()
+                .ok,
+            Some(true)
+        );
+        assert_eq!(
+            list_summary(&p)["dimensions"]["images"]["signature"],
+            "verified"
+        );
+
+        // Verified with only identity-less signatures: unknown.
+        conn.batch_execute(&format!(
+            "UPDATE image_attestations SET signatures = \
+             '[{{\"verified\": true}}, {{\"verified\": true, \"signerKind\": \"keyless\"}}]'::jsonb \
+             WHERE digest = '{d}';"
+        ))
+        .unwrap();
+        let s = load_sources(&mut conn, &k).unwrap();
+        assert_eq!(s.signatures[&d].signer_count, 0);
+        let p = build(&k, &s, Utc::now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.verdict.as_str(), sc.reason.as_deref()),
+            ("unknown", Some("no_signer_identity"))
+        );
+        assert_eq!(
+            p.readiness
+                .iter()
+                .find(|r| r.id == "imageSigned")
+                .unwrap()
+                .ok,
+            None
+        );
+
+        // No row: not checked, unknown.
+        conn.batch_execute(&format!(
+            "DELETE FROM image_attestations WHERE digest = '{d}';"
+        ))
+        .unwrap();
+        let p = build(&k, &load_sources(&mut conn, &k).unwrap(), Utc::now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert_eq!(
+            (sc.verdict.as_str(), sc.reason.as_deref()),
+            ("unknown", Some("not_checked"))
+        );
+        reset(&mut conn, ns);
     }
 
     #[test]
