@@ -65,3 +65,5 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
 natively in CI and the broker image is smoke-executed on both amd64 and arm64
 before the manifest is assembled.
+
+<!-- CI probe for #1702: exercises the migration-order guard; reverted in the next commit. -->
