@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/appprofile"
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/brokercause"
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -505,41 +505,19 @@ func (e *FeedError) Error() string {
 	return fmt.Sprintf("GET /attestations/running: %d %s", e.StatusCode, e.Message)
 }
 
-// ErrPageTooLarge: a feed page exceeded the read limit.
-var ErrPageTooLarge = errors.New("running container page too large")
+// HTTPStatus makes FeedError a brokercause.StatusCoder.
+func (e *FeedError) HTTPStatus() int { return e.StatusCode }
 
-// FeedCause is a coarse, user-safe description of a feed error: fixed
-// words and a status number only, never a URL, host, port, query or the
-// HTTP client's or the broker's error text.
+// ErrPageTooLarge: a feed page exceeded the read limit.
+var ErrPageTooLarge = fmt.Errorf("running container page too large: %w", brokercause.ErrTooLarge)
+
+// FeedCause is a coarse, user-safe description of a feed error (see
+// brokercause.Of); a truncated list has its own wording.
 func FeedCause(err error) string {
-	var fe *FeedError
-	var dns *net.DNSError
-	var op *net.OpError
-	var ne net.Error
-	var syn *json.SyntaxError
-	var typ *json.UnmarshalTypeError
-	switch {
-	case err == nil:
-		return "no error"
-	case errors.As(err, &fe):
-		return fmt.Sprintf("status %d", fe.StatusCode)
-	case errors.Is(err, ErrTruncated):
+	if errors.Is(err, ErrTruncated) {
 		return "too many running containers to read"
-	case errors.Is(err, ErrPageTooLarge):
-		return "response too large"
-	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
-		return "timed out"
-	case errors.Is(err, context.Canceled):
-		return "cancelled"
-	case errors.As(err, &dns):
-		return "name lookup failed"
-	case errors.As(err, &op) && op.Op == "dial":
-		return "connection failed"
-	case errors.As(err, &syn), errors.As(err, &typ):
-		return "invalid response"
-	default:
-		return "request failed"
 	}
+	return brokercause.Of(err)
 }
 
 // IsAuthError: the broker rejected the token (401/403). Not transient.

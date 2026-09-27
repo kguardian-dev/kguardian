@@ -104,6 +104,9 @@ func (e *BrokerError) Error() string {
 	return fmt.Sprintf("broker returned %d: %s", e.StatusCode, e.Message)
 }
 
+// HTTPStatus makes BrokerError a brokercause.StatusCoder.
+func (e *BrokerError) HTTPStatus() int { return e.StatusCode }
+
 // errorCode returns the broker error code, or "" for other errors.
 func errorCode(err error) string {
 	var be *BrokerError

@@ -79,7 +79,7 @@ evaluation the counts are left out of status, so their columns are blank,
 never a reassuring `0`; the containers last known are still listed in
 `findings` with the reason. The `BrokerRead` condition carries the same with a reason
 (`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and a
-coarse cause such as `connection failed`, `timed out` or `status 503`. The
+coarse cause such as `connection failed`, `timed out`, `TLS verification failed` or `status 503`. The
 broker's address and the raw error are never written to status; the
 evaluator logs them.
 

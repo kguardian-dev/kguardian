@@ -318,8 +318,10 @@ func TestComputeStatus_BrokerDownKeepsLastDataAndRetries(t *testing.T) {
 func TestComputeStatus_UnauthorizedNotRetriedEarly(t *testing.T) {
 	b := &fakeBroker{profileErr: &BrokerError{StatusCode: 401, Message: "unauthorized"}}
 	st, err := computeStatus(context.Background(), b, aspFixture(nil), now, testStaleAfter)
-	if err != nil {
-		t.Fatalf("auth failures wait for resync, got %v", err)
+	var te errTransient
+	var rep errReported
+	if errors.As(err, &te) || !errors.As(err, &rep) {
+		t.Fatalf("auth failures wait for resync and are logged, got %T %v", err, err)
 	}
 	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); c.Reason != v1alpha1.ReasonBrokerUnauthorized {
 		t.Errorf("ProfileAvailable = %+v", c)
@@ -418,7 +420,7 @@ func TestStaleness_TransientInsideWindowKeepsPosture(t *testing.T) {
 // the last successful refresh.
 func TestStaleness_PastWindowGoesUnknown(t *testing.T) {
 	asp := staleFixture(testStaleAfter + time.Second)
-	b := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
+	b := &fakeBroker{profileErr: dialErr()}
 	st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
 	var te errTransient
 	if !errors.As(err, &te) {
@@ -427,7 +429,7 @@ func TestStaleness_PastWindowGoesUnknown(t *testing.T) {
 	assertAllUnknown(t, st)
 	lastStr := asp.Status.LastSyncedAt.UTC().Format(time.RFC3339)
 	c := cond(t, st, v1alpha1.ConditionProfileAvailable)
-	for _, want := range []string{"connection refused", lastStr} {
+	for _, want := range []string{"(connection failed)", lastStr} {
 		if !strings.Contains(c.Message, want) {
 			t.Errorf("condition message %q lacks %q", c.Message, want)
 		}
@@ -459,7 +461,8 @@ func TestStaleness_AuthRejectedGoesUnknownImmediately(t *testing.T) {
 		asp := staleFixture(time.Second)
 		b := &fakeBroker{profileErr: &BrokerError{StatusCode: code, Message: "denied"}}
 		st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
-		if err != nil {
+		var te errTransient
+		if errors.As(err, &te) {
 			t.Fatalf("%d: auth failures are not retried early, got %v", code, err)
 		}
 		assertAllUnknown(t, st)

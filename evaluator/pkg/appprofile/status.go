@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/brokercause"
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +24,28 @@ type errTransient struct{ err error }
 
 func (e errTransient) Error() string { return e.err.Error() }
 func (e errTransient) Unwrap() error { return e.err }
+
+// errReported marks a broker read that failed for a reason an early retry
+// will not fix. Status carries only a coarse cause (brokercause.Of), so
+// reconcile logs this full error; it is not retried before the resync.
+type errReported struct{ err error }
+
+func (e errReported) Error() string { return e.err.Error() }
+func (e errReported) Unwrap() error { return e.err }
+
+// readErr is what computeStatus returns for a failed broker read: a
+// transient error to retry, nil for an authoritative "not found" (status
+// says so in full and it is not a fault), else errReported.
+func readErr(err error, retry bool) error {
+	switch {
+	case retry:
+		return errTransient{err}
+	case errorCode(err) == "workload_not_found", errorCode(err) == "revision_not_found":
+		return nil
+	default:
+		return errReported{err}
+	}
+}
 
 // computeStatus reads the broker and returns the complete status to apply.
 // prev is the status currently on the object: its conditions keep their
@@ -55,10 +78,7 @@ func computeStatus(ctx context.Context, b Broker, asp *v1alpha1.ApplicationSecur
 			setCond(&out, gen, v1alpha1.ConditionProfileAvailable, metav1.ConditionFalse, reason, msg)
 			setCond(&out, gen, v1alpha1.ConditionDeviated, metav1.ConditionUnknown,
 				v1alpha1.ReasonProfileUnavailable, "The workload profile could not be read")
-			if retry {
-				return out, errTransient{err}
-			}
-			return out, nil
+			return out, readErr(err, retry)
 		}
 		if keep {
 			out.LastSyncedAt = prev.LastSyncedAt
@@ -77,10 +97,7 @@ func computeStatus(ctx context.Context, b Broker, asp *v1alpha1.ApplicationSecur
 			setCond(&out, gen, v1alpha1.ConditionDeviated, metav1.ConditionUnknown,
 				v1alpha1.ReasonProfileUnavailable, "The workload profile could not be read")
 		}
-		if retry {
-			return out, errTransient{err}
-		}
-		return out, nil
+		return out, readErr(err, retry)
 	}
 
 	synced := metav1.NewTime(now.UTC())
@@ -97,7 +114,9 @@ func computeStatus(ctx context.Context, b Broker, asp *v1alpha1.ApplicationSecur
 }
 
 // classifyProfileError maps a broker error to (condition reason, message,
-// keep previous data, retry early).
+// keep previous data, retry early). Messages carry the broker's status or
+// a brokercause, never its error text: that can hold the broker's URL,
+// address, or whatever a proxy in front of it answered.
 func classifyProfileError(err error, ns string, ref v1alpha1.WorkloadRef) (string, string, bool, bool) {
 	key := ns + "/" + ref.Kind + "/" + ref.Name
 	code := statusCode(err)
@@ -116,28 +135,32 @@ func classifyProfileError(err error, ns string, ref v1alpha1.WorkloadRef) (strin
 		// Not transient: reported as unknown at once (keep=false), never
 		// as the last posture.
 		return v1alpha1.ReasonBrokerUnauthorized,
-			fmt.Sprintf("The broker rejected the evaluator's token (%d); the evaluator needs the READ-scope token", code),
+			fmt.Sprintf("The broker rejected the evaluator's token (status %d); the evaluator needs the READ-scope token", code),
 			false, false
 	case code == http.StatusBadRequest:
-		return v1alpha1.ReasonBrokerError, "The broker rejected the workload reference: " + err.Error(), false, false
+		// The profile routes answer 400 only for a malformed key; the
+		// broker's wording is restated here rather than echoed.
+		return v1alpha1.ReasonBrokerError,
+			"The broker rejected the workload reference " + key + " (status 400); namespace, kind and name must be non-empty and at most 253 characters",
+			false, false
 	case code != 0 && code < 500 && code != http.StatusTooManyRequests:
-		return v1alpha1.ReasonBrokerError, err.Error(), true, false
+		return v1alpha1.ReasonBrokerError, "The broker refused the profile read (" + brokercause.Of(err) + ")", true, false
 	default:
 		// Network error, 5xx, 503 read-budget shedding.
-		return v1alpha1.ReasonBrokerUnavailable, "Could not read the profile from the broker: " + err.Error(), true, true
+		return v1alpha1.ReasonBrokerUnavailable, "Could not read the profile from the broker (" + brokercause.Of(err) + ")", true, true
 	}
 }
 
-// staleMessage explains why the status is unknown: the broker error and
-// when the profile was last read successfully.
+// staleMessage explains why the status is unknown: the cause (see
+// brokercause.Of) and when the profile was last read successfully.
 func staleMessage(msg string, err error, last *metav1.Time, staleAfter time.Duration, authRejected bool) string {
 	when := "never"
 	if last != nil {
 		when = last.UTC().Format(time.RFC3339)
 	}
 	out := msg
-	if !strings.Contains(msg, err.Error()) {
-		out += " (" + err.Error() + ")"
+	if c := brokercause.Of(err); !strings.Contains(msg, c) {
+		out += " (" + c + ")"
 	}
 	out += "; last successful refresh: " + when
 	if authRejected {
@@ -188,11 +211,9 @@ func fillDeviation(ctx context.Context, b Broker, asp *v1alpha1.ApplicationSecur
 				fmt.Sprintf("Accepted revision %d does not exist on the broker (never stored, or pruned by version retention); accept a current revision", rev))
 			return nil
 		}
-		unknown(v1alpha1.ReasonProfileUnavailable, fmt.Sprintf("Could not read accepted revision %d: %v", rev, err))
-		if _, _, _, retry := classifyProfileError(err, asp.Namespace, ref); retry {
-			return errTransient{err}
-		}
-		return nil
+		unknown(v1alpha1.ReasonProfileUnavailable, fmt.Sprintf("Could not read accepted revision %d (%s)", rev, brokercause.Of(err)))
+		_, _, _, retry := classifyProfileError(err, asp.Namespace, ref)
+		return readErr(err, retry)
 	}
 	out.Accepted = &v1alpha1.AcceptedProfile{
 		Revision:      acc.Revision,
@@ -227,10 +248,9 @@ func fillDeviation(ctx context.Context, b Broker, asp *v1alpha1.ApplicationSecur
 	default:
 		latest, err := b.Version(ctx, asp.Namespace, ref.Kind, ref.Name, p.Version.Revision)
 		if err != nil {
-			dev.Message = fmt.Sprintf("The live profile differs from accepted revision %d; could not read revision %d for the per-dimension breakdown: %v", rev, p.Version.Revision, err)
-			if _, _, _, retry := classifyProfileError(err, asp.Namespace, ref); retry {
-				retryErr = errTransient{err}
-			}
+			dev.Message = fmt.Sprintf("The live profile differs from accepted revision %d; could not read revision %d for the per-dimension breakdown (%s)", rev, p.Version.Revision, brokercause.Of(err))
+			_, _, _, retry := classifyProfileError(err, asp.Namespace, ref)
+			retryErr = readErr(err, retry)
 			break
 		}
 		dev.ChangedDimensions = changedDimensions(acc.DimensionHashes, latest.DimensionHashes)
