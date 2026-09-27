@@ -33,7 +33,7 @@ metadata:
   namespace: prod
 spec:
   defaultAction: SCMP_ACT_LOG
-  architectures: [SCMP_ARCH_X86_64, SCMP_ARCH_ARM64]
+  architectures: [SCMP_ARCH_X86_64, SCMP_ARCH_AARCH64]
   syscalls:
     - names: [accept4, read, write]
       action: SCMP_ACT_ALLOW
@@ -45,7 +45,7 @@ spec:
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `defaultAction` | enum | yes | `SCMP_ACT_LOG`, `SCMP_ACT_ERRNO`, `SCMP_ACT_KILL`, `SCMP_ACT_KILL_PROCESS`. Applied to any syscall not matched below. Exports use `SCMP_ACT_LOG`. |
-| `architectures` | list of enum | no | `SCMP_ARCH_X86_64`, `SCMP_ARCH_ARM64`, `SCMP_ARCH_AARCH64`, `SCMP_ARCH_X86`, `SCMP_ARCH_X32`. Omitted ⇒ the rendered file has no `architectures` field and the runtime uses the native one. |
+| `architectures` | list of enum | no | `SCMP_ARCH_X86_64`, `SCMP_ARCH_AARCH64`, `SCMP_ARCH_X86`, `SCMP_ARCH_X32`. Omitted ⇒ the rendered file has no `architectures` field and the runtime uses the native one. `SCMP_ARCH_ARM64` is accepted for compatibility with older exports and is rendered on the node as `SCMP_ARCH_AARCH64`, the OCI name; new exports write `SCMP_ARCH_AARCH64`. |
 | `syscalls` | list, min 1 | yes | Each entry is `{ names, action, errnoRet? }`. |
 | `syscalls[].names` | list of string | yes | `^[a-z][a-z0-9_]{0,63}$` each. |
 | `syscalls[].action` | enum | yes | `SCMP_ACT_ALLOW` plus the four `defaultAction` values. kguardian only generates `SCMP_ACT_ALLOW`; the rest are for hand edits. |
