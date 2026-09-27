@@ -94,6 +94,14 @@ Readiness:
   verified, `no` when any is invalid, unsigned or signed with a key
   kguardian was not given, and `can't tell` otherwise. The line is absent
   with a broker older than profile contract v1.8.
+- **Image trust** (profile contract v1.9) counts the
+  [ImageTrustPolicy](/concepts/image-trust-policy) results for the
+  workload: how many would be denied, are unknown or are trusted, with one
+  example denial, e.g.
+  `2 would deny, 0 unknown, 0 trusted (2 policies; report-only); e.g. cluster/require-provenance: untrusted-signer on app`.
+  `unknown (...)` means the results could not be read (no evaluator, image
+  trust off, evaluator unreachable), never that nothing would be denied.
+  See [`images trust`](/cli/images#images-trust) for every workload.
 - **PSS level** "at most restricted" means every check kguardian can evaluate
   passes, but volumes, host ports, AppArmor, SELinux, procMount and sysctls
   are not reported to kguardian and could still fail. That is why

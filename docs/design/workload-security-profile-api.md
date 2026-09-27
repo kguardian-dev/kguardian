@@ -4,7 +4,7 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.8, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.9, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
 **Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
@@ -879,12 +879,31 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
   - A second reason `signatures` summarises the counts ("2 current digest(s): 1 invalid, 1 verified").
   - Not in the snapshot or its hash (section 3): results are re-checked daily and transient `unknown`s
     would create versions without a behaviour change.
+- `supplyChain.imageTrust` (v1.9): which ImageTrustPolicies and ClusterImageTrustPolicies would deny
+  this workload's containers: the evaluator's answer for the workload's namespace (the same results as
+  the broker's `GET /image-trust`), shaped to the workload.
+  `{available, reason?, evaluatedAt, total, wouldDeny, unknown, trusted, policies, results[{policy,
+  namespace, workload, container, digest, image, verdict, reason}], truncated}`, results `WouldDeny`
+  first, at most 20 (counts cover all). `available: false` with a `reason` (no evaluator, image trust
+  off, token refused, unreachable, the namespace's answer over 1 MiB) and `evaluatedAt: null` are
+  unknown, never "nothing would be denied". Read live by `GET .../profile` only: at most 2 s per read (a
+  slow or down evaluator makes it unavailable, the rest of the profile is served), cached per namespace
+  for 30 s (an unavailable answer for 10 s; at most 128 namespaces and about 16 MiB of results, oldest
+  evicted), shared by concurrent requests (one evaluator read per namespace at a time), and charged to
+  the read budget only on a real read (shed: unavailable, not cached). It is read only for a workload
+  that runs an image now (one small query, before anything else), so never for an unknown workload, and
+  while it is read the request holds only that 1 MiB charge: the profile's own read permit is taken after
+  it. `null` in stored versions and
+  exports. Report-only: it never sets posture, a
+  dimension status or readiness, and it is not in the snapshot or its hash.
 - Signature findings (v1.8), one per container and kind: `images.signatureInvalid/<c>` high,
   `images.unsigned/<c>` low, `images.signatureNotVerified/<c>` low (`key_signed`). None for unknown.
 
 From `GET /workloads/shop/StatefulSet/ledger/profile` -> 200 (capture
-`test/fixtures/posture/profile_signature_invalid.json`, from a v1.8 broker holding real signature results of
-the supplychain test fixtures; `body.dimensions.images.supplyChain`, then the `imageSigned` readiness row):
+`test/fixtures/posture/profile_signature_invalid.json`, from a v1.8 broker holding real sigstore-go
+signature results of the supplychain test fixtures over SQL-seeded workloads (see
+`test/fixtures/signing/README.md`); `body.dimensions.images.supplyChain`, then the `imageSigned` readiness
+row):
 
 ```json
 {
@@ -1846,3 +1865,8 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     `SIGNATURE_DISCOVERY_ENABLED` (unset = configured). With discovery configured and vulnerability
     data, images is `ok` only when every current digest verified with a named signer; with it not
     configured, signatures do not affect the images status. `container` / `digest` may be `null`.
+- 2026-09-27 (**v1.9**, ImageTrustPolicy results in the profile; additive):
+  - New `dimensions.images.supplyChain.imageTrust` (section 2.6): the evaluator's ImageTrustPolicy results
+    for the workload, read live by the profile GET (1 MiB, 2 s, cached per namespace 30 s / 10 s when unavailable), `null`
+    where not read. Unavailable is
+    `available: false` with the reason. Outside posture, statuses, readiness and the snapshot hash.
