@@ -546,3 +546,18 @@ test("trimProfile: supplyChain not_configured (discovery off) is kept and explai
   assert.equal(got.dimensions.images.status, "unknown", "stored results do not gate when discovery is off");
   assert.match(got.note, /not_configured = discovery is off/);
 });
+
+test("trimProfile: supplyChain.imageTrust (v1.9) is kept, capped, and unavailable stays unknown", () => {
+  const got = trimProfile(fixture("profile_image_trust_would_deny.json")) as any;
+  const it = got.dimensions.images.supplyChain.imageTrust;
+  assert.equal(it.available, true);
+  assert.equal(it.wouldDeny, 2);
+  assert.deepEqual(Object.keys(it.results[0]).sort(), ["container", "digest", "policy", "reason", "verdict"]);
+  assert.equal(got.posture.status, "warn", "image trust never sets posture");
+  const down = trimProfile(fixture("profile_image_trust_evaluator_down.json")) as any;
+  assert.equal(down.dimensions.images.supplyChain.imageTrust.available, false);
+  assert.match(down.dimensions.images.supplyChain.imageTrust.reason, /could not be reached/);
+  assert.match(down.dimensions.images.supplyChain.imageTrust.note, /available false is unknown, never 'nothing would be denied'/);
+  const many = trimProfile({ ...fixture("profile_image_trust_would_deny.json") as any }) as any;
+  assert.ok(many.dimensions.images.supplyChain.imageTrust.results.length <= 10);
+});

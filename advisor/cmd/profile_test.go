@@ -454,3 +454,33 @@ func TestCellBlanksControlAndFormatCharacters(t *testing.T) {
 		t.Errorf("cell = %q", got)
 	}
 }
+
+// Contract v1.9: supplyChain.imageTrust, from a local broker with the real
+// evaluator (captures profile_image_trust_*.json; SQL-seeded workloads, see
+// test/fixtures/signing/README.md). Report-only; unavailable is unknown.
+func TestProfileGet_ImageTrustLine(t *testing.T) {
+	startFakeBroker(t, map[string]string{
+		"/workloads/shop/Deployment/search/profile":     postureFixture(t, "profile_image_trust_would_deny.json"),
+		"/workloads/shop/Deployment/storefront/profile": postureFixture(t, "profile_image_trust_trusted.json"),
+	})
+	render := func(name string) string {
+		var out bytes.Buffer
+		if err := fetchAndRenderProfile(workloadRef{"shop", "Deployment", name}, "table", &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	mustContain(t, render("search"), "Image trust: 2 would deny, 0 unknown, 0 trusted (2 policies; report-only); e.g. cluster/require-provenance: untrusted-signer on app")
+	mustContain(t, render("storefront"), "Image trust: 0 would deny, 0 unknown, 2 trusted (2 policies; report-only)")
+	startFakeBroker(t, map[string]string{"/workloads/shop/Deployment/search/profile": postureFixture(t, "profile_image_trust_evaluator_down.json")})
+	mustContain(t, render("search"), "Image trust: unknown (the evaluator could not be reached")
+	// Older captures have no imageTrust: no line.
+	startFakeBroker(t, map[string]string{"/workloads/shop/Deployment/search/profile": postureFixture(t, "profile_signature_verified.json")})
+	var out bytes.Buffer
+	if err := fetchAndRenderProfile(workloadRef{"shop", "Deployment", "search"}, "table", &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Image trust:") {
+		t.Errorf("no imageTrust must not render a line:\n%s", out.String())
+	}
+}

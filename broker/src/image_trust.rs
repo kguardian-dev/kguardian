@@ -64,7 +64,7 @@ struct EvaluatorAnswer {
     results: Vec<TrustResult>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Answer {
     pub available: bool,
@@ -83,7 +83,7 @@ pub struct Answer {
     pub truncated: bool,
 }
 
-fn unavailable(reason: impl Into<String>) -> Answer {
+pub(crate) fn unavailable(reason: impl Into<String>) -> Answer {
     Answer {
         available: false,
         reason: Some(reason.into()),
@@ -108,6 +108,16 @@ fn rank(v: &str) -> u8 {
     }
 }
 
+/// The result belongs to the workload `kind` (case-insensitive) /
+/// `name`; `None` matches any.
+fn is_workload(r: &TrustResult, kind: Option<&str>, name: Option<&str>) -> bool {
+    let (k, n) = r
+        .workload
+        .split_once('/')
+        .unwrap_or(("", r.workload.as_str()));
+    kind.is_none_or(|x| x.eq_ignore_ascii_case(k)) && name.is_none_or(|x| x == n)
+}
+
 /// Filters, orders and bounds evaluator results. Pure.
 pub fn shape(
     evaluated_at: Option<String>,
@@ -117,13 +127,7 @@ pub fn shape(
     limit: usize,
 ) -> Answer {
     if kind.is_some() || name.is_some() {
-        results.retain(|r| {
-            let (k, n) = r
-                .workload
-                .split_once('/')
-                .unwrap_or(("", r.workload.as_str()));
-            kind.is_none_or(|x| x.eq_ignore_ascii_case(k)) && name.is_none_or(|x| x == n)
-        });
+        results.retain(|r| is_workload(r, kind, name));
     }
     results.sort_by(|a, b| {
         (
@@ -195,13 +199,35 @@ pub async fn fetch(
     namespace: Option<&str>,
     verdict: Option<&str>,
 ) -> Result<(Option<String>, Vec<TrustResult>), String> {
+    fetch_bounded(
+        base_url,
+        token,
+        namespace,
+        verdict,
+        MAX_EVALUATOR_BODY,
+        TIMEOUT,
+    )
+    .await
+}
+
+/// [`fetch`] with a smaller body cap and timeout, for callers that read
+/// it on every request (the workload profile).
+pub async fn fetch_bounded(
+    base_url: &str,
+    token: Option<&str>,
+    namespace: Option<&str>,
+    verdict: Option<&str>,
+    max_body: usize,
+    timeout: Duration,
+) -> Result<(Option<String>, Vec<TrustResult>), String> {
     let filters: Vec<(&str, &str)> = [("namespace", namespace), ("verdict", verdict)]
         .into_iter()
         .filter_map(|(k, v)| Some((k, v?)))
         .collect();
     let mut req = client()
         .get(format!("{}/image-trust", base_url.trim_end_matches('/')))
-        .query(&filters);
+        .query(&filters)
+        .timeout(timeout);
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -211,8 +237,8 @@ pub async fn fetch(
             warn!(error = %e, "image trust: evaluator unreachable");
             return Err(if e.is_timeout() {
                 format!(
-                    "the evaluator did not answer within {} s",
-                    TIMEOUT.as_secs()
+                    "the evaluator did not answer within {} ms",
+                    timeout.as_millis()
                 )
             } else {
                 format!("the evaluator could not be reached: {e}")
@@ -237,9 +263,9 @@ pub async fn fetch(
     loop {
         match resp.chunk().await {
             Ok(Some(c)) => {
-                if body.len() + c.len() > MAX_EVALUATOR_BODY {
+                if body.len() + c.len() > max_body {
                     return Err(format!(
-                        "the evaluator's answer is larger than {MAX_EVALUATOR_BODY} bytes; filter by namespace"
+                        "the evaluator's answer is larger than {max_body} bytes; filter by namespace"
                     ));
                 }
                 body.extend_from_slice(&c);
@@ -247,8 +273,8 @@ pub async fn fetch(
             Ok(None) => break,
             Err(e) if e.is_timeout() => {
                 return Err(format!(
-                    "the evaluator's answer did not arrive within {} s",
-                    TIMEOUT.as_secs()
+                    "the evaluator's answer did not arrive within {} ms",
+                    timeout.as_millis()
                 ))
             }
             Err(e) => return Err(format!("reading the evaluator's answer: {e}")),
@@ -257,6 +283,257 @@ pub async fn fetch(
     match serde_json::from_slice::<EvaluatorAnswer>(&body) {
         Ok(a) => Ok((a.evaluated_at, a.results)),
         Err(e) => Err(format!("the evaluator's answer did not parse: {e}")),
+    }
+}
+
+/// The largest evaluator answer the workload profile reads (one
+/// namespace); more makes its imageTrust unavailable, and
+/// `GET /image-trust?namespace=` still has it.
+pub const PROFILE_MAX_EVALUATOR_BODY: usize = 1024 * 1024;
+/// Results listed in a workload profile's imageTrust.
+pub const PROFILE_RESULTS: usize = 20;
+/// The profile's evaluator read gives up after this, so a slow or down
+/// evaluator costs a workload page at most this long.
+pub const PROFILE_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// How long a namespace's answer is reused by later profile reads.
+pub const CACHE_TTL: Duration = Duration::from_secs(30);
+/// How long a failed read ("unavailable") is reused, so a down evaluator
+/// is asked at most this often per namespace.
+pub const CACHE_TTL_UNAVAILABLE: Duration = Duration::from_secs(10);
+/// Namespaces cached at most; the oldest finished entry goes first.
+pub const CACHE_MAX_ENTRIES: usize = 128;
+/// Estimated bytes of cached results at most, across every namespace.
+/// The cache lives outside the read budget, so it is bounded here; a
+/// single answer larger than this is served but not kept.
+pub const CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+type Fetched = Result<(Option<String>, std::sync::Arc<Vec<TrustResult>>), String>;
+
+/// A finished read of one (evaluator, namespace).
+#[derive(Clone)]
+enum Done {
+    Value {
+        at: std::time::Instant,
+        value: Fetched,
+        bytes: usize,
+    },
+    /// The read budget was exhausted: nothing was read, nothing is kept.
+    Shed,
+}
+
+/// One read of one key, shared by every request that needs it while it
+/// runs (single-flight) and, once finished, until it expires.
+#[derive(Default)]
+struct Flight {
+    cell: tokio::sync::OnceCell<Done>,
+}
+
+impl Flight {
+    /// Usable now: still running (join it) or finished and fresh.
+    fn usable(&self, now: std::time::Instant) -> bool {
+        match self.cell.get() {
+            None => true,
+            Some(Done::Shed) => false,
+            Some(Done::Value { at, value, .. }) => {
+                let ttl = if value.is_ok() {
+                    CACHE_TTL
+                } else {
+                    CACHE_TTL_UNAVAILABLE
+                };
+                now.duration_since(*at) < ttl
+            }
+        }
+    }
+
+    fn finished(&self) -> Option<(std::time::Instant, usize)> {
+        match self.cell.get() {
+            Some(Done::Value { at, bytes, .. }) => Some((*at, *bytes)),
+            _ => None,
+        }
+    }
+}
+
+type Key = (String, String);
+
+/// (evaluator URL, namespace) -> its read. Bounded by entries and bytes;
+/// the oldest finished entries go first. Running reads are never evicted.
+#[derive(Default)]
+struct Cache {
+    entries: std::collections::HashMap<Key, std::sync::Arc<Flight>>,
+}
+
+impl Cache {
+    /// The flight for `key`: the running or fresh one, else a new one.
+    fn flight(&mut self, key: &Key, now: std::time::Instant) -> std::sync::Arc<Flight> {
+        if let Some(f) = self.entries.get(key).filter(|f| f.usable(now)) {
+            return f.clone();
+        }
+        self.entries.remove(key);
+        let f = std::sync::Arc::new(Flight::default());
+        if self.entries.len() >= CACHE_MAX_ENTRIES && !self.evict_oldest(None) {
+            // Every entry is a running read: serve this one uncached rather
+            // than grow past the bound.
+            return f;
+        }
+        self.entries.insert(key.clone(), f.clone());
+        f
+    }
+
+    fn evict_oldest(&mut self, keep: Option<&Key>) -> bool {
+        let oldest = self
+            .entries
+            .iter()
+            .filter(|(k, _)| Some(*k) != keep)
+            .filter_map(|(k, f)| f.finished().map(|(at, _)| (at, k.clone())))
+            .min();
+        match oldest {
+            Some((_, k)) => {
+                self.entries.remove(&k);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.entries
+            .values()
+            .filter_map(|f| f.finished().map(|(_, b)| b))
+            .sum()
+    }
+
+    /// After `key`'s flight finished: drop it if it was shed or is larger
+    /// than the whole cap, then evict the oldest others until the byte cap
+    /// holds.
+    fn settle(&mut self, key: &Key, flight: &std::sync::Arc<Flight>) {
+        let mine = self
+            .entries
+            .get(key)
+            .is_some_and(|f| std::sync::Arc::ptr_eq(f, flight));
+        match flight.cell.get() {
+            Some(Done::Shed) if mine => {
+                self.entries.remove(key);
+            }
+            Some(Done::Value { bytes, .. }) if mine && *bytes > CACHE_MAX_BYTES => {
+                self.entries.remove(key);
+            }
+            _ => {}
+        }
+        while self.bytes() > CACHE_MAX_BYTES && self.evict_oldest(Some(key)) {}
+    }
+}
+
+fn cache() -> &'static std::sync::Mutex<Cache> {
+    static C: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Rough resident size of cached results: their strings plus overhead.
+fn estimate_bytes(v: &Fetched) -> usize {
+    match v {
+        Err(reason) => reason.len() + 64,
+        Ok((at, results)) => {
+            at.as_ref().map_or(0, String::len)
+                + results
+                    .iter()
+                    .map(|r| {
+                        r.policy.len()
+                            + r.namespace.len()
+                            + r.workload.len()
+                            + r.container.len()
+                            + r.digest.len()
+                            + r.image.len()
+                            + r.verdict.len()
+                            + r.reason.as_ref().map_or(0, String::len)
+                            + 8 * std::mem::size_of::<String>()
+                    })
+                    .sum::<usize>()
+        }
+    }
+}
+
+/// The ImageTrustPolicy results for one workload, for its profile
+/// (contract v1.9): the namespace's results from the evaluator, shaped to
+/// the workload. No evaluator, or any failure, is `available: false` with
+/// the reason: unknown, never "nothing would be denied".
+///
+/// Call it only for a workload that exists (the profile handler resolves
+/// the workload first), so unknown namespaces never cost a read or a cache
+/// entry. Concurrent requests for one namespace share one read and one
+/// budget charge; a finished read is reused for [`CACHE_TTL`] (an
+/// unavailable one for [`CACHE_TTL_UNAVAILABLE`]).
+pub async fn for_workload(
+    audit: Option<&AuditClient>,
+    budget: &ReadBudget,
+    namespace: &str,
+    kind: &str,
+    name: &str,
+) -> Answer {
+    let Some(audit) = audit.filter(|a| a.enabled()) else {
+        return unavailable(
+            "no evaluator is configured (EVALUATOR_URL): ImageTrustPolicy results are not available",
+        );
+    };
+    let key: Key = (audit.base_url().to_string(), namespace.to_string());
+    let Ok(flight) = cache()
+        .lock()
+        .map(|mut c| c.flight(&key, std::time::Instant::now()))
+    else {
+        return unavailable("the image trust cache is unavailable");
+    };
+    let done = flight
+        .cell
+        .get_or_init(|| async {
+            // Charged once per real read, by whichever request runs it.
+            let Ok(_permit) = budget
+                .acquire(crate::read_budget::cost_kib(
+                    1,
+                    PROFILE_MAX_EVALUATOR_BODY as u64,
+                ))
+                .await
+            else {
+                return Done::Shed;
+            };
+            let token = read_token();
+            let value = fetch_bounded(
+                audit.base_url(),
+                token.as_deref(),
+                Some(namespace),
+                None,
+                PROFILE_MAX_EVALUATOR_BODY,
+                PROFILE_TIMEOUT,
+            )
+            .await
+            .map(|(at, results)| (at, std::sync::Arc::new(results)));
+            let bytes = estimate_bytes(&value);
+            Done::Value {
+                at: std::time::Instant::now(),
+                value,
+                bytes,
+            }
+        })
+        .await
+        .clone();
+    if let Ok(mut c) = cache().lock() {
+        c.settle(&key, &flight);
+    }
+    match done {
+        Done::Shed => unavailable("the broker is shedding reads (read budget); try again"),
+        Done::Value {
+            value: Err(reason), ..
+        } => unavailable(reason),
+        Done::Value {
+            value: Ok((at, results)),
+            ..
+        } => {
+            // Copy out only this workload's rows.
+            let mine: Vec<TrustResult> = results
+                .iter()
+                .filter(|r| is_workload(r, Some(kind), Some(name)))
+                .cloned()
+                .collect();
+            shape(at, mine, Some(kind), Some(name), PROFILE_RESULTS)
+        }
     }
 }
 

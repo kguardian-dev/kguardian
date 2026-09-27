@@ -342,6 +342,9 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 	}
 	if sc := p.SupplyChain(); sc != nil {
 		fmt.Fprintf(&b, "Signature:  %s\n", fmtSupplyChain(sc))
+		if it := sc.ImageTrust; it != nil {
+			fmt.Fprintf(&b, "Image trust: %s\n", fmtImageTrust(it))
+		}
 	}
 	b.WriteByte('\n')
 	out.WriteString(b.String())
@@ -469,6 +472,27 @@ func fmtSupplyChain(sc *api.ProfileSupplyChain) string {
 		return s + " on every current digest (valid, not a trust decision)"
 	}
 	return s + ", worst on container " + cell(sc.Container) + " " + cell(d)
+}
+
+// fmtImageTrust summarises which ImageTrustPolicies would deny the
+// workload. Report-only; unavailable or not evaluated is unknown.
+func fmtImageTrust(a *api.ImageTrustAnswer) string {
+	switch {
+	case !a.Available:
+		return "unknown (" + cell(a.Reason) + ")"
+	case a.EvaluatedAt == nil:
+		return "unknown (the evaluator has not finished a pass)"
+	case a.Total == 0:
+		return "no ImageTrustPolicy selects this workload"
+	}
+	s := fmt.Sprintf("%d would deny, %d unknown, %d trusted (%d policies; report-only)", a.WouldDeny, a.Unknown, a.Trusted, len(a.Policies))
+	for _, r := range a.Results {
+		if r.Verdict == "WouldDeny" {
+			s += "; e.g. " + cell(r.Policy) + ": " + cell(r.Reason) + " on " + cell(r.Container)
+			break
+		}
+	}
+	return s
 }
 
 // fetchAndRenderProfiles is the testable core of `profile list`.

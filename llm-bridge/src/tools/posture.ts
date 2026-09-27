@@ -156,6 +156,8 @@ export const PROFILE_CAPS = {
   driftFilesPerItem: 5,
   supplyChainDigests: 10,
   signersPerDigest: 3,
+  imageTrustResults: 10,
+  imageTrustPolicies: 10,
 } as const;
 
 /** Set out[key] to a capped copy of src[key] (when present) and record the cut. */
@@ -219,6 +221,19 @@ function capSigners(out: Rec, src: Rec): void {
 function trimSupplyChain(sc: unknown): unknown {
   if (!isRecord(sc)) return sc;
   const out = pick(sc, ["status", "verdict", "reason", "container", "digest", "checkedAt", "counts", "truncated"]);
+  if (Object.prototype.hasOwnProperty.call(sc, "imageTrust")) {
+    const it = sc.imageTrust;
+    if (isRecord(it)) {
+      const o = pick(it, ["available", "reason", "evaluatedAt", "total", "wouldDeny", "unknown", "trusted", "truncated"]);
+      capInto(o, it, "policies", PROFILE_CAPS.imageTrustPolicies);
+      capInto(o, it, "results", PROFILE_CAPS.imageTrustResults, (r) =>
+        isRecord(r) ? pick(r, ["verdict", "reason", "policy", "container", "digest"]) : r);
+      o.note = "Which ImageTrustPolicies would deny this workload: report-only, nothing is blocked. available false is unknown, never 'nothing would be denied'.";
+      out.imageTrust = o;
+    } else {
+      out.imageTrust = it;
+    }
+  }
   capSigners(out, sc);
   capInto(out, sc, "digests", PROFILE_CAPS.supplyChainDigests, (x) => {
     if (!isRecord(x)) return x;

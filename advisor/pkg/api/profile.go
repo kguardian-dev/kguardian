@@ -197,7 +197,10 @@ type ProfileSupplyChain struct {
 	Container string  `json:"container"`
 	Digest    string  `json:"digest"`
 	CheckedAt *string `json:"checkedAt"`
-	Signers   []struct {
+	// ImageTrust is the evaluator's ImageTrustPolicy answer for the
+	// workload (contract v1.9); nil when not read.
+	ImageTrust *ImageTrustAnswer `json:"imageTrust"`
+	Signers    []struct {
 		SignerKind string `json:"signerKind"`
 		Issuer     string `json:"issuer"`
 		SAN        string `json:"san"`
