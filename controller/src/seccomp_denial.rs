@@ -48,6 +48,7 @@ use crate::client::api_post_call_json;
 use crate::compute_config::ComputeConfig;
 use crate::compute_registry::{ComputeMap, ComputeRegistration, ComputeRegistry, ContainerCompute};
 use crate::models::{lookup_pod, pod_flags, ContainerMap};
+use crate::seccomp_crd::Architecture;
 use crate::Error;
 
 pub mod seccomp_denial_skel {
@@ -513,16 +514,17 @@ fn action_name(raw: u32) -> &'static str {
 
 /// `SCMP_ARCH_*` token for this binary's target architecture.
 ///
-/// Deliberately the same mapping as `arch_token` in `broker/src/seccomp.rs`
-/// — note that aarch64 is spelled `SCMP_ARCH_ARM64` there, not
-/// `SCMP_ARCH_AARCH64`, and the two must agree or a denial row's arch
-/// will not match the arch on the profile it belongs to.
+/// Taken from the CRD's own `Architecture` rather than a table of its
+/// own, so a denial row's arch is by construction the arch the Controller
+/// renders into the profile file, and the same mapping as `arch_token` in
+/// `broker/src/seccomp.rs` renders into every export. The three have to
+/// agree or a denial does not line up with the profile it belongs to.
+/// aarch64 is `SCMP_ARCH_AARCH64`, the libseccomp name; the
+/// `SCMP_ARCH_ARM64` this used to stamp was kguardian's own spelling, and
+/// the Broker folds it onto the real one on rows from a Controller that
+/// still sends it.
 fn scmp_arch_token() -> Option<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Some("SCMP_ARCH_X86_64"),
-        "aarch64" => Some("SCMP_ARCH_ARM64"),
-        _ => None,
-    }
+    Architecture::native().map(Architecture::as_str)
 }
 
 /// Resolve a syscall number to its name, falling back to `syscall_<nr>`.
@@ -3097,17 +3099,26 @@ mod tests {
         );
     }
 
-    /// `SCMP_ARCH_ARM64` and not `SCMP_ARCH_AARCH64`: `broker/src/seccomp.rs`
-    /// `arch_token` renders aarch64 that way into every exported profile's
-    /// `architectures` list, and a denial row that spelled it differently
-    /// would not line up with the profile it belongs to.
+    /// `SCMP_ARCH_AARCH64` and not `SCMP_ARCH_ARM64`: it is the token
+    /// libseccomp knows, the one `broker/src/seccomp.rs` `arch_token`
+    /// renders into every exported profile's `architectures` list, and
+    /// the one `seccomp_crd::render_profile` writes to the node file. A
+    /// denial row that spelled it differently would not line up with the
+    /// profile it belongs to. Pinned as literals on purpose: the Broker's
+    /// table is a separate crate, so this is the only place the spelling
+    /// the two sides share is written down on this side.
     #[test]
     fn the_arch_token_matches_the_brokers_spelling() {
         match std::env::consts::ARCH {
             "x86_64" => assert_eq!(scmp_arch_token(), Some("SCMP_ARCH_X86_64")),
-            "aarch64" => assert_eq!(scmp_arch_token(), Some("SCMP_ARCH_ARM64")),
+            "aarch64" => assert_eq!(scmp_arch_token(), Some("SCMP_ARCH_AARCH64")),
             _ => assert_eq!(scmp_arch_token(), None),
         }
+        assert_ne!(
+            scmp_arch_token(),
+            Some("SCMP_ARCH_ARM64"),
+            "runc rejects a profile carrying this spelling; a denial row must not carry it either"
+        );
     }
 
     // ---- what the Broker actually stored ----

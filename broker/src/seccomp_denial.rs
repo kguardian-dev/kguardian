@@ -683,6 +683,13 @@ fn fold_batch(denials: Vec<DenialInput>, now: DateTime<Utc>) -> FoldedBatch {
             d.first_seen = d.first_seen.min(now);
             d.last_seen = d.last_seen.min(now);
         }
+        // Before the fold as well: a Controller from before the aarch64
+        // fix still stamps `SCMP_ARCH_ARM64` on its rows, and the stored
+        // arch is read next to the profile's, which the newer Controller
+        // and the export both spell `SCMP_ARCH_AARCH64`.
+        d.arch = d
+            .arch
+            .map(|a| crate::seccomp::canonical_arch_token(&a).to_string());
         let key = (d.pod_uid.clone(), d.syscall.clone(), d.action.clone());
         match folded.get_mut(&key) {
             Some(existing) => {
@@ -2660,6 +2667,42 @@ mod tests {
         assert_eq!(rows[0].syscall_nr, Some(101));
         assert_eq!(rows[0].arch.as_deref(), Some("SCMP_ARCH_X86_64"));
         assert_eq!(rows[0].action_raw, Some(2_147_483_648));
+    }
+
+    /// A Controller still running the build that spelled aarch64
+    /// `SCMP_ARCH_ARM64` keeps sending it for as long as the rolling
+    /// upgrade takes. Stored as sent, those rows would sit beside a
+    /// profile — and beside rows from the upgraded nodes — that say
+    /// `SCMP_ARCH_AARCH64`, and the UI would show one workload denied on
+    /// two architectures. Folded on the way in, so the table only ever
+    /// holds the spelling the profile does.
+    #[test]
+    fn folding_stores_the_legacy_arm64_arch_as_aarch64() {
+        let mut old = input("web-1", "ptrace", "SCMP_ACT_LOG", 1);
+        old.arch = Some("SCMP_ARCH_ARM64".into());
+        let mut new = input("web-1", "ptrace", "SCMP_ACT_LOG", 2);
+        new.arch = Some("SCMP_ARCH_AARCH64".into());
+        let mut lone = input("web-2", "ptrace", "SCMP_ACT_LOG", 1);
+        lone.arch = Some(" SCMP_ARCH_ARM64 ".into());
+
+        let rows = fold_batch(vec![old, new, lone], ingest_now()).rows;
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            assert_eq!(
+                r.arch.as_deref(),
+                Some("SCMP_ARCH_AARCH64"),
+                "{}",
+                r.pod_name
+            );
+        }
+        // Folding did not disturb the sum, and the x86_64 default is untouched.
+        assert_eq!(rows.iter().map(|r| r.count).sum::<i64>(), 4);
+        let x86 = fold_batch(
+            vec![input("web-3", "ptrace", "SCMP_ACT_LOG", 1)],
+            ingest_now(),
+        )
+        .rows;
+        assert_eq!(x86[0].arch.as_deref(), Some("SCMP_ARCH_X86_64"));
     }
 
     // ---- capture heartbeat ---------------------------------------------

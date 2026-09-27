@@ -104,7 +104,7 @@ full capture and must land first.
   `<pod>-seccomp.json` to a local dir. `defaultAction` flag:
   `SCMP_ACT_ERRNO|KILL|LOG`.
 - `MergeSyscalls` helper exists (`seccomp.go:168`) but is currently unused.
-- Arch map: `x86_64 → SCMP_ARCH_X86_64`, `aarch64 → SCMP_ARCH_ARM64`.
+- Arch map: `x86_64 → SCMP_ARCH_X86_64`, `aarch64 → SCMP_ARCH_AARCH64`.
 
 **Gap:** nothing groups pods into workloads, nothing versions a profile, and
 nothing gets a file onto a node.

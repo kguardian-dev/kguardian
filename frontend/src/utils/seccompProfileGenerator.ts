@@ -10,9 +10,13 @@ import { quoteYamlValue } from './networkPolicyGenerator';
 // under test/fixtures/generators/seccomp. Previously the frontend hardcoded
 // the x86 arch set for every pod, so an aarch64 pod got an unusable x86
 // profile.
+//
+// Values are the OCI runtime-spec names, which is what runc validates
+// against: aarch64 is SCMP_ARCH_AARCH64. SCMP_ARCH_ARM64 is not an OCI name,
+// and a profile carrying it fails every pod that references it.
 const SECCOMP_ARCHITECTURES: Record<string, string[]> = {
   x86_64: ['SCMP_ARCH_X86_64'],
-  aarch64: ['SCMP_ARCH_ARM64'],
+  aarch64: ['SCMP_ARCH_AARCH64'],
 };
 
 /**

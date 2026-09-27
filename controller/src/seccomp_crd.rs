@@ -96,10 +96,21 @@ pub enum RuleAction {
     KillProcess,
 }
 
+/// A seccomp `architectures` entry, named the way libseccomp and the OCI
+/// runtime-spec name it (`SCMP_ARCH_*`). The runtime resolves each entry
+/// by name when it creates the container, and one it does not know fails
+/// the pod outright (`runc create failed: string SCMP_ARCH_ARM64 is not a
+/// valid arch for seccomp`) rather than being skipped. `SCMP_ARCH_ARM64`
+/// was kguardian's own spelling of aarch64 and no runtime accepts it; it
+/// stays accepted here so the CRs written with it keep validating, and the
+/// Controller writes it to the node file as `SCMP_ARCH_AARCH64`. Use
+/// `SCMP_ARCH_AARCH64` in new manifests.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum Architecture {
     #[serde(rename = "SCMP_ARCH_X86_64")]
     X8664,
+    // Not a libseccomp token. Kept only so existing CRs deserialise;
+    // `canonical` folds it onto `Aarch64` before anything is rendered.
     #[serde(rename = "SCMP_ARCH_ARM64")]
     Arm64,
     #[serde(rename = "SCMP_ARCH_X86")]
@@ -108,6 +119,43 @@ pub enum Architecture {
     X32,
     #[serde(rename = "SCMP_ARCH_AARCH64")]
     Aarch64,
+}
+
+impl Architecture {
+    /// The variant the runtime understands for this one. Everything but
+    /// the legacy `Arm64` already is; that one becomes `Aarch64`.
+    pub fn canonical(self) -> Self {
+        match self {
+            Architecture::Arm64 => Architecture::Aarch64,
+            other => other,
+        }
+    }
+
+    /// Serde's rename without the JSON quotes, so it can sort and compare
+    /// against the strings the Broker and the denial probe carry. For
+    /// every variant but `Arm64` this is the token a profile file carries;
+    /// `Arm64` never reaches a file (see `canonical`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Architecture::X8664 => "SCMP_ARCH_X86_64",
+            Architecture::Arm64 => "SCMP_ARCH_ARM64",
+            Architecture::X86 => "SCMP_ARCH_X86",
+            Architecture::X32 => "SCMP_ARCH_X32",
+            Architecture::Aarch64 => "SCMP_ARCH_AARCH64",
+        }
+    }
+
+    /// The architecture this binary was built for, as the profile file
+    /// spells it — what the denial probe stamps on every row so a denial
+    /// reads next to the profile it belongs to. `None` on a target
+    /// kguardian has no seccomp token for.
+    pub fn native() -> Option<Self> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some(Architecture::X8664),
+            "aarch64" => Some(Architecture::Aarch64),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -338,14 +386,22 @@ pub struct RenderedRule {
 /// Render the node file from a spec. Deterministic: names inside each
 /// rule are sorted and de-duplicated, rules keep their spec order (a
 /// later rule for the same name is the user's business), architectures
-/// are de-duplicated and sorted, and the output is pretty-printed JSON
-/// with a trailing newline. Same spec ⇒ same bytes ⇒ same hash on every
-/// node. A profile that denies anything adds `SECCOMP_FILTER_FLAG_LOG` so
-/// the kernel's verdicts stay observable after promotion.
+/// are folded to their libseccomp spelling, de-duplicated and sorted, and
+/// the output is pretty-printed JSON with a trailing newline. Same spec ⇒
+/// same bytes ⇒ same hash on every node. A profile that denies anything
+/// adds `SECCOMP_FILTER_FLAG_LOG` so the kernel's verdicts stay observable
+/// after promotion.
+///
+/// The fold is what lets a CR written with `SCMP_ARCH_ARM64` start
+/// working without an edit: the file is what the runtime reads, so it
+/// carries `SCMP_ARCH_AARCH64` whatever the spec said, and the changed
+/// bytes are what make every node rewrite the file on its next pass. It
+/// also means a spec naming the same architecture both ways renders one
+/// entry, so two CRs that mean the same thing hash the same.
 pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
     let architectures = spec.architectures.as_ref().map(|a| {
-        let mut a: Vec<Architecture> = a.clone();
-        a.sort_by_key(|x| serde_json::to_string(x).unwrap_or_default());
+        let mut a: Vec<Architecture> = a.iter().map(|x| x.canonical()).collect();
+        a.sort_by_key(|x| x.as_str());
         a.dedup();
         a
     });
@@ -437,10 +493,48 @@ mod tests {
         assert_eq!(fingerprint(&a), fingerprint(&b));
         let text = String::from_utf8(a).unwrap();
         assert!(text.ends_with('\n'));
-        // Architectures are sorted too.
-        let arm = text.find("SCMP_ARCH_ARM64").unwrap();
+        // Architectures are sorted too, in their rendered spelling: the
+        // spec says `Arm64`, the file says `SCMP_ARCH_AARCH64`.
+        let arm = text.find("SCMP_ARCH_AARCH64").unwrap();
         let x86 = text.find("SCMP_ARCH_X86_64").unwrap();
         assert!(arm < x86);
+    }
+
+    /// `SCMP_ARCH_ARM64` is not a libseccomp token, and a profile that
+    /// lists it never starts a pod: runc refuses the container with
+    /// `string SCMP_ARCH_ARM64 is not a valid arch for seccomp`. It was
+    /// kguardian's own spelling, so every arm64 profile ever exported
+    /// carries it and every CR applied from one still says it. Those CRs
+    /// have to keep deserialising, and the file they produce has to be
+    /// the one the runtime accepts — and the same bytes a CR that already
+    /// says `SCMP_ARCH_AARCH64` produces, or the two hash differently for
+    /// no reason a user can see.
+    #[test]
+    fn legacy_arm64_renders_as_the_libseccomp_aarch64_token() {
+        let legacy = render_profile(&spec(&["read"]));
+        let text = String::from_utf8(legacy.clone()).unwrap();
+        assert!(text.contains("SCMP_ARCH_AARCH64"), "{text}");
+        assert!(
+            !text.contains("SCMP_ARCH_ARM64"),
+            "the spelling runc rejects must never reach a node file:\n{text}"
+        );
+
+        let mut s = spec(&["read"]);
+        s.architectures = Some(vec![Architecture::Aarch64, Architecture::X8664]);
+        assert_eq!(render_profile(&s), legacy, "either spelling, same bytes");
+
+        // Both spellings in one spec collapse to one entry, in sorted order.
+        s.architectures = Some(vec![
+            Architecture::X8664,
+            Architecture::Arm64,
+            Architecture::Aarch64,
+        ]);
+        let v: serde_json::Value = serde_json::from_slice(&render_profile(&s)).unwrap();
+        assert_eq!(
+            v["architectures"],
+            serde_json::json!(["SCMP_ARCH_AARCH64", "SCMP_ARCH_X86_64"])
+        );
+        assert_eq!(render_profile(&s), legacy);
     }
 
     #[test]
@@ -455,7 +549,7 @@ mod tests {
             v,
             serde_json::json!({
                 "defaultAction": "SCMP_ACT_LOG",
-                "architectures": ["SCMP_ARCH_ARM64", "SCMP_ARCH_X86_64"],
+                "architectures": ["SCMP_ARCH_AARCH64", "SCMP_ARCH_X86_64"],
                 "syscalls": [ { "names": ["read"], "action": "SCMP_ACT_ALLOW" } ]
             })
         );
@@ -567,6 +661,15 @@ workloadRef:
 "#;
         let s: SeccompProfileSpec = serde_norway::from_str(yaml).unwrap();
         assert_eq!(s.default_action, DefaultAction::Log);
+        // The legacy aarch64 spelling still deserialises — existing CRs
+        // must not start failing validation — and folds to the real one.
+        assert_eq!(
+            s.architectures.as_deref(),
+            Some(&[Architecture::X8664, Architecture::Arm64][..])
+        );
+        assert_eq!(Architecture::Arm64.canonical(), Architecture::Aarch64);
+        assert_eq!(Architecture::Aarch64.canonical(), Architecture::Aarch64);
+        assert_eq!(Architecture::X8664.canonical(), Architecture::X8664);
         assert_eq!(
             s.workload_ref.as_ref().unwrap().kind,
             WorkloadKind::Deployment
@@ -652,6 +755,10 @@ workloadRef:
             "name: v1alpha1",
             "status: {}", // subresource enabled
             "- SCMP_ACT_KILL_PROCESS",
+            // The libseccomp aarch64 token, and the legacy spelling the
+            // schema keeps accepting so already-applied CRs stay valid.
+            "- SCMP_ARCH_AARCH64",
+            "- SCMP_ARCH_ARM64",
             "pattern: ^[a-z][a-z0-9_]{0,63}$",
             "minItems: 1",
             "x-kubernetes-list-type: map",

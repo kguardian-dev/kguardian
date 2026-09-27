@@ -113,13 +113,15 @@ func TestValidateProfile_EmptyArchitectureSlice(t *testing.T) {
 
 // BuildSeccompProfile must map the arch strings the controller actually
 // records — Rust's std::env::consts::ARCH: "x86_64" / "aarch64"
-// (controller/src/syscall.rs). A regression here reintroduces the bug where
-// the map keyed on the never-written "ARM64", so ARM nodes got a profile with
-// "architectures": null that ValidateProfile rejects.
+// (controller/src/syscall.rs) — to the OCI runtime-spec arch names. Two
+// regressions are guarded here: keying the map on the never-written "ARM64"
+// gave ARM nodes a profile with "architectures": null that ValidateProfile
+// rejects, and spelling the value SCMP_ARCH_ARM64 (not an OCI name) gave
+// them a profile runc refuses to start a pod with.
 func TestBuildSeccompProfile_MapsControllerArchStrings(t *testing.T) {
 	cases := map[string]string{
 		"x86_64":  "SCMP_ARCH_X86_64",
-		"aarch64": "SCMP_ARCH_ARM64",
+		"aarch64": "SCMP_ARCH_AARCH64",
 	}
 	for arch, want := range cases {
 		profile := BuildSeccompProfile([]string{"read", "write"}, arch, "SCMP_ACT_ERRNO")
