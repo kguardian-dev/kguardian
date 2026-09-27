@@ -207,11 +207,12 @@ func TestMatcherOutageNeverQuarantines(t *testing.T) {
 	}
 }
 
-// An error quarantine is not forever: after the TTL the digest is tried
-// once more, and quarantined again at once if it still fails.
+// An error quarantine is not forever: after its TTL (1h, doubling for
+// each repeat) the digest is tried once more, and quarantined again at
+// once if it still fails.
 func TestErrorQuarantineLiftsAfterItsTTL(t *testing.T) {
 	now := time.Unix(1000, 0)
-	f := &failMatcher{built: time.Unix(100, 0), err: errors.New("matcher returned 500 Internal Server Error: match failed")}
+	f := &failMatcher{built: time.Unix(100, 0), err: errors.New("matcher returned 400 Bad Request: bad JSON")}
 	c, mt := newCoord(f, "")
 	c.now = func() time.Time { return now }
 	s := trivySBOM("sha256:bad", "openssl")
@@ -224,10 +225,15 @@ func TestErrorQuarantineLiftsAfterItsTTL(t *testing.T) {
 		t.Fatalf("%d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
 	}
 	now = now.Add(time.Hour)
-	tick(c) // TTL up: one more try, which fails and re-quarantines
+	tick(c) // 1h up: one more try, which fails and re-quarantines (2h)
 	tick(c)
 	if f.n() != 4 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
 		t.Fatalf("after the TTL: %d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+	now = now.Add(time.Hour)
+	tick(c)
+	if f.n() != 4 {
+		t.Fatalf("the second quarantine lasts 2h: %d calls after 1h", f.n())
 	}
 	f.setErr(nil)
 	now = now.Add(time.Hour)
@@ -289,5 +295,29 @@ func TestNoMarkerLeftAfterAMatch(t *testing.T) {
 				t.Fatalf("left behind: %v", left)
 			}
 		})
+	}
+}
+
+func TestErrorQuarantineTTLDoublesUpTo24h(t *testing.T) {
+	c, _ := newCoord(&failMatcher{}, "")
+	want := []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour, 24 * time.Hour, 24 * time.Hour}
+	for i, w := range want {
+		if got := c.ttlLocked(&groupState{errorQuarantines: i + 1}); got != w {
+			t.Errorf("quarantine %d: %s, want %s", i+1, got, w)
+		}
+	}
+}
+
+// A match that times out says nothing about the SBOM either.
+func TestMatchDeadlineNeverQuarantines(t *testing.T) {
+	f := &failMatcher{built: time.Unix(100, 0), err: fmt.Errorf("matcher: %w", context.DeadlineExceeded)}
+	c, mt := newCoord(f, "")
+	c.Offer(trivySBOM("sha256:slow", "openssl"))
+	pass(c)
+	for i := 0; i < 5; i++ {
+		tick(c)
+	}
+	if f.n() != 6 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 {
+		t.Fatalf("%d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
 	}
 }

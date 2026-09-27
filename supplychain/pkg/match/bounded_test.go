@@ -162,7 +162,7 @@ func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
 	if _, err := m.Match(context.Background(), sbomFor("sha256:x")); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("refused: %v", err)
 	}
-	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout} {
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout, http.StatusInternalServerError} {
 		m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "vulnerability database not loaded", code)
 		}))
@@ -170,10 +170,11 @@ func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
 			t.Errorf("%d: %v", code, err)
 		}
 	}
-	m500 := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "match failed: boom", http.StatusInternalServerError)
+	// A 4xx other than 413 is about the input: it counts.
+	m400 := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad JSON: unexpected end", http.StatusBadRequest)
 	}))
-	if _, err := m500.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) {
-		t.Errorf("500 is a failure of this match: %v", err)
+	if _, err := m400.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTooLarge) {
+		t.Errorf("400 is a failure of this input: %v", err)
 	}
 }
