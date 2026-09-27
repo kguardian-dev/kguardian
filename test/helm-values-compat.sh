@@ -758,6 +758,29 @@ for case in "sig-env-default:false" "sig-env-supplychain-only:false" "sig-env-di
   }
 done
 
+# 13a. The ImageTrustPolicy CRDs are release resources, rendered by
+# default (whether or not evaluation or the evaluator is on) and kept on
+# uninstall. They must not be in crds/: Helm (and Flux) never upgrade that
+# directory, so an upgraded install would have no CRDs.
+itp_crds_rendered() {
+  local label="$1" crd doc
+  for crd in imagetrustpolicies.kguardian.dev clusterimagetrustpolicies.kguardian.dev; do
+    doc="$(workload CustomResourceDefinition "$crd")"
+    [ -n "$doc" ] || { echo "FAIL [$label]: CRD $crd not rendered"; fail=1; continue; }
+    grep -q 'helm.sh/resource-policy: keep' <<<"$doc" || \
+      { echo "FAIL [$label]: CRD $crd must carry helm.sh/resource-policy: keep"; fail=1; }
+  done
+}
+render "itp-crds-default" && itp_crds_rendered "itp-crds-default"
+render "itp-crds-image-trust-on" "${IT_ON[@]}" && itp_crds_rendered "itp-crds-image-trust-on"
+render "itp-crds-evaluator-off" --set evaluator.enabled=false && itp_crds_rendered "itp-crds-evaluator-off"
+render "itp-crds-off" --set evaluator.imageTrust.installCRDs=false && {
+  assert_absent "itp-crds-off" "imagetrustpolicies.kguardian.dev"
+}
+if grep -lqE 'kind: (Cluster)?ImageTrustPolicy$' "$CHART"/crds/*.yaml 2>/dev/null; then
+  echo "FAIL [itp-crds-not-in-crds-dir]: ImageTrustPolicy CRDs must not ship in crds/ (never upgraded)"; fail=1
+fi
+
 # 14. Runtime inventory (#1533 P1-2) and capability counting (P2-7) are
 # opt-in: by default the controller loads neither probe. Each switch flips
 # only its own env var, and neither adds RBAC.

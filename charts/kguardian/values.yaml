@@ -1773,6 +1773,14 @@ evaluator:
     enabled: null
     # -- How often every policy is re-evaluated (minimum 30s).
     interval: 5m
+    # -- Install the ImageTrustPolicy and ClusterImageTrustPolicy CRDs as
+    # release resources (kept on `helm uninstall`, like the SeccompProfile
+    # CRD), so `helm upgrade` installs and updates them. Independent of
+    # `enabled`: the CRDs exist so policies can be written before evaluation
+    # is on. Set false if you manage CRDs yourself; then apply
+    # `charts/kguardian/files/kguardian.dev_imagetrustpolicies.yaml` and
+    # `kguardian.dev_clusterimagetrustpolicies.yaml`.
+    installCRDs: true
 
   # -- Additional environment variables for the evaluator
   env: []

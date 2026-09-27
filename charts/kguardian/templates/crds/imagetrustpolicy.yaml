@@ -1,0 +1,25 @@
+{{- /*
+ImageTrustPolicy and ClusterImageTrustPolicy CRDs, rendered as release
+resources so an upgrade installs them and picks up schema changes (Helm
+applies crds/ on first install only, and Flux skips crds/ on upgrade by
+default; they shipped there briefly, so an upgraded install had none). Same
+pattern as the SeccompProfile and ApplicationSecurityProfile CRDs.
+`helm.sh/resource-policy: keep` stops `helm uninstall` from deleting the
+CRDs and every policy with them. A CRD that already exists without Helm's
+ownership metadata (installed from crds/ or by hand) must be labelled and
+annotated for this release first; see UPGRADING.md.
+*/ -}}
+{{- if .Values.evaluator.imageTrust.installCRDs }}
+{{- range $file := list "files/kguardian.dev_imagetrustpolicies.yaml" "files/kguardian.dev_clusterimagetrustpolicies.yaml" }}
+{{- $raw := $.Files.Get $file }}
+{{- if not $raw }}
+{{- fail (printf "evaluator.imageTrust.installCRDs is true but %s is missing from the chart" $file) }}
+{{- end }}
+{{- $crd := $raw | fromYaml }}
+{{- $meta := $crd.metadata }}
+{{- $_ := set $meta "annotations" (merge (dict "helm.sh/resource-policy" "keep") (default (dict) $meta.annotations)) }}
+{{- $_ := set $meta "labels" (merge (default (dict) $meta.labels) (include "kguardian.labels" $ | fromYaml)) }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

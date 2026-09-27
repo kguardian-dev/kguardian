@@ -211,8 +211,9 @@ func (r *Runner) clock() time.Time {
 	return time.Now()
 }
 
-// policies lists both kinds. A CRD that is not installed (Helm installs
-// crds/ only on first install) is "no policies", logged once.
+// policies lists both kinds. A CRD that is not installed (the chart's
+// evaluator.imageTrust.installCRDs off, or not applied yet) is "no
+// policies", logged once; once it appears the next pass picks it up.
 func (r *Runner) policies(ctx context.Context) ([]policyRef, error) {
 	var out []policyRef
 	for _, gvr := range []schema.GroupVersionResource{PolicyGVR, ClusterGVR} {
@@ -223,7 +224,7 @@ func (r *Runner) policies(ctx context.Context) ([]policyRef, error) {
 				r.absent = map[schema.GroupVersionResource]bool{}
 			}
 			if !r.absent[gvr] {
-				r.Log.WithField("resource", gvr.Resource).Info("image trust: CRD not installed; apply charts/kguardian/crds to use it")
+				r.Log.WithField("resource", gvr.Resource).Info("image trust: CRD not installed; enable evaluator.imageTrust.installCRDs or apply charts/kguardian/files/kguardian.dev_*imagetrustpolicies.yaml")
 			}
 			r.absent[gvr] = true
 			r.mu.Unlock()
