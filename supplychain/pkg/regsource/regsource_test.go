@@ -3,6 +3,7 @@ package regsource
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type lister struct {
@@ -174,4 +176,81 @@ func TestToPayloadDigestKindUnknownUnlessPlatformManifest(t *testing.T) {
 			t.Errorf("inventory kind %q: payload image %+v", inv, p.Image)
 		}
 	}
+}
+
+type gatedLister struct {
+	release chan struct{}
+	images  []broker.Image
+}
+
+func (l gatedLister) RunningImages(ctx context.Context) ([]broker.Image, error) {
+	select {
+	case <-l.release:
+	case <-ctx.Done():
+	}
+	return l.images, nil
+}
+
+type blockingFetcher struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingFetcher) FetchSBOMs(ctx context.Context, _, _, _ string) ([]registry.FoundSBOM, []string, error) {
+	f.started <- struct{}{}
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+	}
+	return nil, nil, nil
+}
+
+// Readiness follows the listing, not the lookups: a fresh pod's first pass
+// fetches every running digest, which can take minutes and must not hold
+// the pod NotReady past a helm/Flux --wait.
+func TestReadyOnceListedWhileLookupsRun(t *testing.T) {
+	var images []broker.Image
+	for i := range 20 {
+		images = append(images, broker.Image{Digest: fmt.Sprintf("sha256:%064x", i), Repository: "ghcr.io/x/y"})
+	}
+	l := gatedLister{release: make(chan struct{}), images: images}
+	f := &blockingFetcher{started: make(chan struct{}, len(images)), release: make(chan struct{})}
+	log, hook := logtest.NewNullLogger()
+	src := &Source{Lister: l, Fetcher: f, Sink: &sink{}, Log: log, Metrics: metrics.New()}
+	done := make(chan struct{})
+	go func() { defer close(done); src.Pass(context.Background()) }()
+
+	time.Sleep(20 * time.Millisecond)
+	if src.Ready() {
+		t.Fatal("ready before the inventory answered")
+	}
+	close(l.release)
+	<-f.started // a lookup is in flight and blocked
+	if !src.Ready() {
+		t.Fatal("not ready while the first pass's lookups are still running")
+	}
+	if firstPassLogs(hook) != 0 {
+		t.Fatal("first pass logged as complete while lookups still run")
+	}
+	close(f.release)
+	<-done
+	e := hook.LastEntry()
+	if firstPassLogs(hook) != 1 || e.Level != logrus.InfoLevel || e.Data["running"] != 20 || e.Data["looked_up"] != 20 || e.Data["duration"] == nil {
+		t.Fatalf("first-pass log: %d entries, last %+v", firstPassLogs(hook), e)
+	}
+	// Only the first pass is announced.
+	src.Pass(context.Background())
+	if firstPassLogs(hook) != 1 {
+		t.Fatal("later pass logged as the first")
+	}
+}
+
+func firstPassLogs(h *logtest.Hook) int {
+	n := 0
+	for _, e := range h.AllEntries() {
+		if e.Message == "registry sbom source: first pass complete" {
+			n++
+		}
+	}
+	return n
 }

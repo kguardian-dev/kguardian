@@ -192,6 +192,12 @@ to turn it on. It is egress to the registries of your running images.
 2. It looks each digest up at most once a day, found or not, so steady
    state is one inventory listing per interval and no registry traffic.
    Lookups run on 2 workers.
+   The source counts as ready for `/readyz` once the first listing has
+   returned (or failed). It does not wait for the lookups: on a fresh pod
+   every running digest is due, and fetching them all can take minutes.
+   An info line, `registry sbom source: first pass complete`, reports when
+   that pass ends, with the running and looked-up digest counts and the
+   duration.
 3. Lookups are anonymous and go through the [address guard](#digest-kind-registry-lookup).
    `allowPrivateRegistries` applies here too.
 
@@ -412,7 +418,7 @@ and no identity.
 | Path | |
 |---|---|
 | `GET /healthz` | 200 while the process serves. |
-| `GET /readyz` | 200 once discovery has answered and every running informer has synced and is not failing (see [Lifecycle and readiness](#lifecycle-and-readiness)). |
+| `GET /readyz` | 200 once discovery has answered and every running informer has synced and is not failing (see [Lifecycle and readiness](#lifecycle-and-readiness)), and the registry SBOM source, if on, has had its first inventory listing answered. It never waits on the Grype matcher or its database. |
 | `GET /metrics` | Prometheus text format. |
 
 There is no data endpoint. Findings go to the broker, which owns storage,

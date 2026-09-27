@@ -59,6 +59,7 @@ type Source struct {
 	mu      sync.Mutex
 	checked map[string]time.Time
 	ready   bool
+	passed  bool // the first full pass has finished and been logged
 }
 
 func (s *Source) defaults() {
@@ -82,8 +83,12 @@ func (s *Source) defaults() {
 	}
 }
 
-// Ready is true after the first inventory pass (successful or not): an
-// unreachable broker must not keep the pod NotReady.
+// Ready is true once the first inventory listing has returned, whether it
+// succeeded or not. It does not wait for that pass's registry lookups: on
+// a fresh pod every running digest is due, and fetching them all can take
+// minutes, which would fail a helm/Flux --wait upgrade. Lookups continue in
+// the background and are counted in the lookup metrics. An unreachable
+// broker must not keep the pod NotReady either.
 func (s *Source) Ready() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,8 +111,11 @@ func (s *Source) Run(ctx context.Context) {
 // Pass runs one inventory listing and the lookups it calls for.
 func (s *Source) Pass(ctx context.Context) {
 	s.defaults()
-	defer func() { s.mu.Lock(); s.ready = true; s.mu.Unlock() }()
+	start := s.now()
 	images, err := s.Lister.RunningImages(ctx)
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
 	if err != nil {
 		s.Log.WithError(err).Warn("registry sbom source: listing running images failed")
 		s.count("list_error")
@@ -136,6 +144,18 @@ func (s *Source) Pass(ctx context.Context) {
 	}
 	close(work)
 	wg.Wait()
+	s.mu.Lock()
+	first := !s.passed && ctx.Err() == nil
+	if first {
+		s.passed = true
+	}
+	s.mu.Unlock()
+	if first {
+		// Readiness does not wait for this pass, so say when it is done.
+		s.Log.WithFields(logrus.Fields{"running": len(images), "looked_up": len(due),
+			"duration": s.now().Sub(start).Round(time.Millisecond).String()}).
+			Info("registry sbom source: first pass complete")
+	}
 }
 
 func (s *Source) due(images []broker.Image) []broker.Image {
