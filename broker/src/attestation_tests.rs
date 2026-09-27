@@ -223,10 +223,17 @@ fn caps_list_lengths() {
 #[test]
 fn truncates_long_strings_on_char_boundaries() {
     let mut v = body(&d(1), "verified");
-    v["signatures"][1]["detail"] = json!("é".repeat(10_000));
+    // "éé " is 5 bytes, so byte 256 falls inside an 'é'.
+    v["signatures"][1]["detail"] = json!("éé ".repeat(4_000));
     let p = parse(&v, &d(1)).unwrap();
     let det = p.signatures[1].detail.as_ref().unwrap();
-    assert!(det.len() <= MAX_DETAIL && det.chars().all(|c| c == 'é'));
+    assert!(det.len() <= MAX_DETAIL && det.len() > MAX_DETAIL - 4);
+    assert!(det.chars().all(|c| c == 'é' || c == ' '));
+    // A detail whose first MAX_REDACT_INPUT bytes are one word is that
+    // word straddling the redaction bound: dropped, not truncated.
+    v["signatures"][1]["detail"] = json!("é".repeat(10_000));
+    let p = parse(&v, &d(1)).unwrap();
+    assert_eq!(p.signatures[1].detail, None);
 }
 
 // A verified identity is stored whole or refused, never truncated: a
@@ -1281,6 +1288,8 @@ fn jwt_redaction_stays_linear() {
         "abcdefghij.".repeat(n / 11),
         "eyJhbGciOiJub25lIn0.".repeat(n / 20),
         format!("x%3D{}", "%3D=".repeat(n / 4)),
+        ".".repeat(n),
+        "%3D".repeat(n / 3),
     ];
     for input in cases {
         JWT_SCANNED.with(|c| c.set(0));
@@ -1293,4 +1302,57 @@ fn jwt_redaction_stays_linear() {
             &input[..12]
         );
     }
+}
+
+/// Only the first MAX_REDACT_INPUT bytes of a detail are redacted and the
+/// word straddling the cut is dropped: a URL, host or JWT that the cut
+/// would split never reaches the stored or served detail, however much the
+/// text before it shrinks when redacted.
+#[test]
+fn detail_straddling_the_redaction_bound_is_dropped() {
+    // One URL word that redacts to "<url>", so the straddling word would
+    // otherwise land inside the 256-byte cap.
+    let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJlMTIzNDU2Nzg5";
+    for straddler in [
+        jwt,
+        "https://registry.internal/v2/app",
+        "registry.internal",
+        "user:pass@10.1.2.3:5000/x",
+    ] {
+        for into in [1usize, 5, 12, 16] {
+            let url = format!(
+                "https://filler.example/{}",
+                "a".repeat(MAX_REDACT_INPUT - 4 - 1 - into - 23)
+            );
+            let text = format!("GET {url} {straddler} tail-secret");
+            assert!(text.len() > MAX_REDACT_INPUT);
+            let cut = 4 + url.len() + 1;
+            assert!(
+                cut < MAX_REDACT_INPUT && cut + straddler.len() > MAX_REDACT_INPUT,
+                "{straddler} {into}"
+            );
+            let got = redact_bounded(&text);
+            assert_eq!(got, "GET <url>", "{straddler} {into}");
+            // Through ingest (redact, then cap) and the read path.
+            let mut b = body(&d(1), "verified");
+            b["signatures"][1]["detail"] = json!(text);
+            let p = parse(&b, &d(1)).unwrap();
+            assert_eq!(p.signatures[1].detail.as_deref(), Some("GET <url>"));
+            let mut stored = json!([{"verified": false, "error": "registry_auth", "detail": text}]);
+            redact_details_json(&mut stored);
+            assert_eq!(stored[0]["detail"], "GET <url>");
+        }
+    }
+    // Short details are redacted whole, as before.
+    assert_eq!(
+        redact_bounded("dial tcp 10.0.0.5:5000: refused"),
+        "dial tcp <host>: refused"
+    );
+    // A cut inside a multi-byte character stays on a char boundary.
+    let text = format!(
+        "{} ü{}",
+        "é".repeat(MAX_REDACT_INPUT / 2 - 1),
+        "x".repeat(10)
+    );
+    let _ = redact_bounded(&text);
 }

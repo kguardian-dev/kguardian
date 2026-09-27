@@ -72,6 +72,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 const MAX_URI: usize = 1024; // issuer, SAN, builder, source repo
 const MAX_SHORT: usize = 128; // reasons, formats, refs
 const MAX_DETAIL: usize = 256;
+/// How much of a `detail` is redacted; the rest is discarded unread. Bounds
+/// redaction's cost whatever its rules, since it runs before the cap.
+const MAX_REDACT_INPUT: usize = 4096;
 const MAX_KEY_PEM: usize = 4096;
 const TOO_MANY: &str = "too many items";
 
@@ -480,8 +483,26 @@ fn is_dotted_name(h: &str) -> bool {
 
 fn redact_detail(detail: &mut Option<String>) {
     if let Some(d) = detail.as_mut() {
-        *d = redact_endpoints(d);
+        *d = redact_bounded(d);
     }
+}
+
+/// [`redact_endpoints`] over at most the first [`MAX_REDACT_INPUT`] bytes
+/// of `text`. When the text is longer, the cut is moved back to the last
+/// whitespace, so a word straddling it (a URL, a host, a token that would
+/// only be partly recognised) is dropped with everything after it, never
+/// served unredacted. Callers cap the result as before.
+fn redact_bounded(text: &str) -> String {
+    if text.len() <= MAX_REDACT_INPUT {
+        return redact_endpoints(text);
+    }
+    let mut end = MAX_REDACT_INPUT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &text[..end];
+    let head = head.rfind(char::is_whitespace).map_or("", |i| &head[..i]);
+    redact_endpoints(head)
 }
 
 /// [`redact_endpoints`] over every `detail` in a stored signatures or
@@ -490,7 +511,7 @@ pub fn redact_details_json(list: &mut serde_json::Value) {
     if let Some(items) = list.as_array_mut() {
         for item in items {
             if let Some(serde_json::Value::String(d)) = item.get_mut("detail") {
-                *d = redact_endpoints(d);
+                *d = redact_bounded(d);
             }
         }
     }
