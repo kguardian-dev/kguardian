@@ -106,7 +106,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.18.2"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.19.0"` | Broker version tag (auto-updated by release-please) |
 | broker.imageInventory.retention | object | `{"batchSize":5000,"days":30,"intervalSeconds":3600}` | Retention for the image inventory: `images` (one row per image digest) and `workload_containers` (one row per workload, container and digest, with its securityContext). Running pods refresh their rows continuously, so only digests no running pod has reported for `days` are pruned (a finished rollout's old image, a deleted workload), followed by images nothing references any more. The tables are sized by what runs, not by time. |
 | broker.imageInventory.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. Same [100, 100000] clamp as `broker.audit.retention.batchSize`, for the same reason. |
 | broker.imageInventory.retention.days | int | `30` | Prune inventory rows no running pod has refreshed for this many days. Set to 0 to disable pruning (rows of deleted workloads are then kept forever). |
