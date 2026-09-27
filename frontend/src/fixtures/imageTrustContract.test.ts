@@ -93,11 +93,61 @@ const REASONS_SHOWN = VULN_CAPTURES.flatMap((c) => {
   return [t.reason, ...(t.results ?? []).map((r) => r.reason)].filter((r): r is string => typeof r === 'string').map((reason) => ({ from: c.request, reason }));
 });
 
-test('no image trust reason the UI shows carries an internal address (URL, host:port)', () => {
+/**
+ * What an internal address looks like in a reason. Tuned so an address is
+ * caught however it is written, and ordinary reason text is not:
+ * sha256:<hex> digests, clock times (12:35:00) and key:number text
+ * (status:404, timeout:30) pass. Known limit: an unhyphenated single-label
+ * host with a 2-3 digit port ("evaluator:80") reads like "status:404" and
+ * is not caught.
+ */
+const ADDRESS: Record<string, RegExp> = {
+  url: /:\/\//,
+  dottedOrIpv4HostPort: /\b(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/i,
+  // A single-label host (a Kubernetes service name): hyphenated, or with a 4-5 digit port.
+  serviceHostPort: /\b(?:[a-z][a-z0-9]*-[a-z0-9-]*[a-z0-9]:\d{2,5}|[a-z][a-z0-9-]*:\d{4,5})\b/i,
+  bracketedIpv6: /\[[0-9a-f]*:[0-9a-f:.]*\](?::\d{1,5})?/i,
+  // Bare IPv6: a "::" with at least one hex group, or all 8 groups (a clock time has 3 and no "::").
+  bareIpv6: /(?<![0-9a-z:])(?:(?:[0-9a-f]{1,4}:){1,7}:|(?:[0-9a-f]{1,4}:){0,6}(?::[0-9a-f]{1,4}){1,7}|:(?::[0-9a-f]{1,4}){1,7}|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4})(?![0-9a-z:])/i,
+};
+const addressIn = (s: string) => Object.entries(ADDRESS).filter(([, re]) => re.test(s)).map(([name]) => name);
+
+test.each([
+  ['kguardian-evaluator:8080 refused', 'serviceHostPort'],
+  ['evaluator:8080 refused', 'serviceHostPort'],
+  ['kguardian-evaluator:80', 'serviceHostPort'],
+  ['[fd00::1]:8080 timed out', 'bracketedIpv6'],
+  ['fd00::1 unreachable', 'bareIpv6'],
+  ['::1 refused', 'bareIpv6'],
+  ['2001:db8:0:0:0:0:0:1 down', 'bareIpv6'],
+  ['dial 127.0.0.1:56431', 'dottedOrIpv4HostPort'],
+  ['evaluator.kguardian.svc:8080', 'dottedOrIpv4HostPort'],
+  ['http://evaluator/image-trust', 'url'],
+])('the address guard catches %s', (text, pattern) => {
+  expect(addressIn(text)).toContain(pattern);
+});
+
+test.each([
+  'the evaluator could not be reached: connection failed',
+  'digest sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235',
+  'sha256:1234567890123456',
+  'checked at 12:35:00',
+  '2026-09-27T12:35:00Z',
+  'status:404',
+  'timeout:30',
+  'code:500',
+  'reason: 42 checks',
+  'std::io::Error',
+  "the Broker's counts do not add up (2 counted, total 1)",
+  'no evaluator is configured (EVALUATOR_URL): ImageTrustPolicy results are not available',
+])('the address guard leaves ordinary text alone: %s', (text) => {
+  expect(addressIn(text)).toEqual([]);
+});
+
+test('no image trust reason the UI shows carries an internal address (URL, host:port, service:port, IPv6)', () => {
   // The evaluator-down fixtures must be among them, or this proves nothing.
   expect(REASONS_SHOWN.some((x) => /evaluator/i.test(x.reason))).toBe(true);
   for (const { from, reason } of REASONS_SHOWN) {
-    expect(reason, `${from}: ${reason}`).not.toMatch(/:\/\//);
-    expect(reason, `${from}: ${reason}`).not.toMatch(/\b(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/i);
+    expect(addressIn(reason), `${from}: ${reason}`).toEqual([]);
   }
 });
