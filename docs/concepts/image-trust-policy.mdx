@@ -78,8 +78,10 @@ release-signed   evaluated    12           2            1         4m            
 evaluation the counts are left out of status, so their columns are blank,
 never a reassuring `0`; the containers last known are still listed in
 `findings` with the reason. The `BrokerRead` condition carries the same with a reason
-(`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and the
-error.
+(`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and a
+coarse cause such as `connection failed`, `timed out` or `status 503`. The
+broker's address and the raw error are never written to status; the
+evaluator logs them.
 
 `status.evaluation` has the counts and up to 20 `findings` (would-deny
 first):

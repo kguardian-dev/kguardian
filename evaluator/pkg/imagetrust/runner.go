@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -170,11 +171,15 @@ func (r *Runner) Pass(ctx context.Context) error {
 		if !fs.at.IsZero() {
 			when = fs.at.UTC().Format(time.RFC3339)
 		}
+		// The status (message and BrokerRead condition) is readable by
+		// anyone who can read the policy: it carries a coarse cause, never
+		// the broker's URL, host, port or the HTTP client's error text.
+		// The full error is logged below.
 		fs.unknownReason = ReasonBrokerUnavailable
-		fs.message = fmt.Sprintf("cannot read running images from the broker (%v); last successful read: %s; unknown because nothing was read within %s", ferr, when, window)
+		fs.message = fmt.Sprintf("cannot read running images from the broker (%s); last successful read: %s; unknown because nothing was read within %s", FeedCause(ferr), when, window)
 		if auth {
 			fs.unknownReason = ReasonBrokerUnauthorized
-			fs.message = fmt.Sprintf("the broker rejected the evaluator's token (%v); it needs the READ-scope token; last successful read: %s", ferr, when)
+			fs.message = fmt.Sprintf("the broker rejected the evaluator's token (%s); it needs the READ-scope token; last successful read: %s", FeedCause(ferr), when)
 		}
 		r.Log.WithError(ferr).Warn("image trust: broker unreadable; reporting containers as unknown")
 	}
@@ -500,6 +505,43 @@ func (e *FeedError) Error() string {
 	return fmt.Sprintf("GET /attestations/running: %d %s", e.StatusCode, e.Message)
 }
 
+// ErrPageTooLarge: a feed page exceeded the read limit.
+var ErrPageTooLarge = errors.New("running container page too large")
+
+// FeedCause is a coarse, user-safe description of a feed error: fixed
+// words and a status number only, never a URL, host, port, query or the
+// HTTP client's or the broker's error text.
+func FeedCause(err error) string {
+	var fe *FeedError
+	var dns *net.DNSError
+	var op *net.OpError
+	var ne net.Error
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		return "no error"
+	case errors.As(err, &fe):
+		return fmt.Sprintf("status %d", fe.StatusCode)
+	case errors.Is(err, ErrTruncated):
+		return "too many running containers to read"
+	case errors.Is(err, ErrPageTooLarge):
+		return "response too large"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.As(err, &dns):
+		return "name lookup failed"
+	case errors.As(err, &op) && op.Op == "dial":
+		return "connection failed"
+	case errors.As(err, &syn), errors.As(err, &typ):
+		return "invalid response"
+	default:
+		return "request failed"
+	}
+}
+
 // IsAuthError: the broker rejected the token (401/403). Not transient.
 func IsAuthError(err error) bool {
 	var fe *FeedError
@@ -559,7 +601,7 @@ func (b *BrokerFeed) Running(ctx context.Context) ([]Container, error) {
 			return nil, &FeedError{StatusCode: resp.StatusCode, Message: msg}
 		}
 		if len(body) > limit {
-			return nil, fmt.Errorf("GET /attestations/running: page larger than %d bytes; refusing a truncated read", limit)
+			return nil, fmt.Errorf("GET /attestations/running: page larger than %d bytes; refusing a truncated read: %w", limit, ErrPageTooLarge)
 		}
 		var p runningPage
 		if err := json.Unmarshal(body, &p); err != nil {

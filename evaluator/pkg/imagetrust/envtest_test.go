@@ -229,4 +229,22 @@ func TestStatusAgainstARealAPIServer(t *testing.T) {
 		t.Fatalf("unauthorized state = %q", s.Evaluation.State)
 	}
 	blankCounts("unauthorized")
+
+	// A real feed at a closed port, past the window: the stored status
+	// message and BrokerRead condition carry the cause, never the broker's
+	// address or the HTTP client's error text.
+	r.Feed = &BrokerFeed{BaseURL: "http://127.0.0.1:1"}
+	ck.t = ck.t.Add(20 * time.Minute)
+	_ = r.Pass(ctx)
+	s := status("p")
+	if s.Evaluation.State != v1alpha1.StateBrokerUnavailable ||
+		!strings.Contains(s.Message, "cannot read running images from the broker (connection failed)") {
+		t.Fatalf("closed-port status = %q / %q", s.Evaluation.State, s.Message)
+	}
+	assertUserSafe(t, "stored status.message", s.Message)
+	c = meta.FindStatusCondition(s.Conditions, v1alpha1.ConditionBrokerRead)
+	if c == nil {
+		t.Fatal("no BrokerRead condition stored")
+	}
+	assertUserSafe(t, "stored BrokerRead condition", c.Message)
 }
