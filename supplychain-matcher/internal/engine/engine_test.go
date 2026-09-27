@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -271,4 +272,48 @@ func TestMatchRealDB(t *testing.T) {
 	// The alpine 3.20 SBOM (distro only in PURL qualifiers) must match
 	// without error; this release has no open distro advisories.
 	_ = count(alpineComponents(t)...)
+}
+
+// A NaN or Inf CVSS score is no score: that finding is kept without it, and
+// the image's response still encodes, with every other finding intact.
+// Before, one NaN failed the whole image's match every time, so it was
+// quarantined and lost all its findings.
+func TestNonFiniteScoresAreNoScore(t *testing.T) {
+	mk := func(id string, scores ...float64) match.Match {
+		var cs []vulnerability.Cvss
+		for _, s := range scores {
+			cs = append(cs, vulnerability.Cvss{Source: "nvd@nist.gov", Version: "3.1", Vector: "CVSS:3.1/AV:N",
+				Metrics: vulnerability.CvssMetrics{BaseScore: s}})
+		}
+		return match.Match{
+			Package: pkg.Package{Name: "libssl3", Version: "3.3.2-r0", Type: "apk", PURL: "pkg:apk/alpine/libssl3@3.3.2-r0"},
+			Vulnerability: vulnerability.Vulnerability{Reference: vulnerability.Reference{ID: id, Namespace: "alpine:distro:alpine:3.20"},
+				Metadata: &vulnerability.Metadata{Severity: "High", Cvss: cs,
+					EPSS: []vulnerability.EPSS{{CVE: id, EPSS: math.NaN(), Percentile: math.Inf(1)}}}},
+		}
+	}
+	ms := []match.Match{
+		mk("CVE-2099-0001", math.NaN()),
+		mk("CVE-2099-0002", math.Inf(1)),
+		mk("CVE-2099-0003", math.Inf(-1), 6.1),
+		mk("CVE-2099-0004", 9.8),
+	}
+	got := convert(ms, pathIndex(nil))
+	if len(got) != 4 {
+		t.Fatalf("%d findings", len(got))
+	}
+	for _, v := range got[:2] {
+		if v.Score != nil || v.CVSS != nil || v.Severity != "HIGH" || v.EPSS != nil || v.EPSSPercentile != nil {
+			t.Errorf("%s: %+v", v.ID, v)
+		}
+	}
+	if v := got[2]; v.Score == nil || *v.Score != 6.1 {
+		t.Errorf("%s: finite score beside -Inf lost: %+v", v.ID, v)
+	}
+	if v := got[3]; v.Score == nil || *v.Score != 9.8 {
+		t.Errorf("%s: %+v", v.ID, v)
+	}
+	if _, err := json.Marshal(wire.MatchResponse{Vulnerabilities: got}); err != nil {
+		t.Fatalf("response does not encode: %v", err)
+	}
 }
