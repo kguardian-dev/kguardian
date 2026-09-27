@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.0](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.2...evaluator/v0.5.0) (2026-09-27)
+
+
+### Features
+
+* **evaluator:** ApplicationSecurityProfile CRD with evaluator-written status ([8f7c3bd](https://github.com/kguardian-dev/kguardian/commit/8f7c3bd28a376c73ddfd35c43531fc80df72da5c))
+* **evaluator:** ImageTrustPolicy and ClusterImageTrustPolicy in report mode ([e6c208a](https://github.com/kguardian-dev/kguardian/commit/e6c208a245cfa61924fa513aa2b42698d1ec3f11))
+
+
+### Bug Fixes
+
+* **broker:** charge the running feed at its worst-case row ([6c41fb8](https://github.com/kguardian-dev/kguardian/commit/6c41fb8804d8af885490385dc0018287800d2b78))
+* **deps:** update kubernetes monorepo to v0.37.1 ([#1640](https://github.com/kguardian-dev/kguardian/issues/1640)) ([2ec380b](https://github.com/kguardian-dev/kguardian/commit/2ec380b9d5517e74275cc87c207c779812b28c4b))
+* **evaluator:** a never-read broker is explicit in status; real API server test ([793ee68](https://github.com/kguardian-dev/kguardian/commit/793ee68bb77b7dd83c61d2af783d54ab74f783c1))
+* **evaluator:** a verified result that names no signer is Unknown ([7be678e](https://github.com/kguardian-dev/kguardian/commit/7be678e66a29e53c5a42adb98a82f69e159709bc))
+* **evaluator:** bound how long a stale ApplicationSecurityProfile posture is shown ([7bfc2c2](https://github.com/kguardian-dev/kguardian/commit/7bfc2c2ae6252604644d3356037676c0bfd54106))
+* **evaluator:** check the response body close error and lint the evaluator in CI ([#1687](https://github.com/kguardian-dev/kguardian/issues/1687)) ([eef83af](https://github.com/kguardian-dev/kguardian/commit/eef83afdda5b3c819db65a6e5346c2865f885b6f))
+* **evaluator:** keep broker error text out of ApplicationSecurityProfile status ([8ea6f6f](https://github.com/kguardian-dev/kguardian/commit/8ea6f6feeb56f8e6d57fddeeb82dc62f6c8ac886))
+* **evaluator:** keep the broker address out of ImageTrustPolicy status ([#1712](https://github.com/kguardian-dev/kguardian/issues/1712)) ([8bbd107](https://github.com/kguardian-dev/kguardian/commit/8bbd107e696776f2a23d50416f0f9ad85c914a93))
+* **evaluator:** map an unrecognised profile status to unknown ([047df9e](https://github.com/kguardian-dev/kguardian/commit/047df9e94f4a1712c7b8a53bbf8d89360e94ef9d))
+* **evaluator:** no counts without a current evaluation ([84191fa](https://github.com/kguardian-dev/kguardian/commit/84191fae27640147299eefa29b8d1ef22f6e51f2))
+* **evaluator:** server-side apply status, bounded staleness, authenticated /image-trust ([f31a3f6](https://github.com/kguardian-dev/kguardian/commit/f31a3f64adbed4f995c249b66c94a886102779d0))
+
 ## [0.4.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.1...evaluator/v0.4.2) (2026-09-11)
 
 
