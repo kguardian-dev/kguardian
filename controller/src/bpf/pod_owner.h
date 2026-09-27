@@ -217,7 +217,12 @@ static __always_inline bool exe_is_sealed_copy(struct task_struct *task)
     struct file *f = BPF_CORE_READ(task, mm, exe_file);
     if (!f)
         return false;
-    if (BPF_CORE_READ(f, f_inode, i_nlink) == 0)
+    // A failed read is "not sealed" (counted), never a zero link count.
+    struct inode *inode = BPF_CORE_READ(f, f_inode);
+    unsigned int nlink;
+    if (!inode || bpf_core_read(&nlink, sizeof(nlink), &inode->i_nlink) != 0)
+        return false;
+    if (nlink == 0)
         return true;
     struct vfsmount *vfs = BPF_CORE_READ(f, f_path.mnt);
     if (!vfs)
