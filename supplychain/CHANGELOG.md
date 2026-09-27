@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.1.0...supplychain/v0.1.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **supplychain:** bound held SBOMs by estimated bytes without losing match state; GOMEMLIMIT from the memory limit; attestation ready after the first inventory read ([#1731](https://github.com/kguardian-dev/kguardian/issues/1731)) ([5e5216f](https://github.com/kguardian-dev/kguardian/commit/5e5216f893bbdee70703baf31a7de5d227bf87f8))
+
 ## 0.1.0 (2026-09-27)
 
 
