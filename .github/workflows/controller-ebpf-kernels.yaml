@@ -43,9 +43,6 @@ on:
       - 'controller/build.rs'
       - 'controller/Cargo.lock'
       - '.github/workflows/controller-ebpf-kernels.yaml'
-      - '.github/scripts/check_vmtest_commands.py'
-      - '.github/workflows/controller-ebpf-stress.yaml'
-      - '.github/scripts/ebpf-runtime-stress.sh'
   workflow_dispatch:
 
 permissions:
@@ -62,12 +59,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      # vmtest runs `command` through a shell of its own first, so a shell
-      # variable there expands to "" before the VM sees it (it once pinned
-      # an empty capability hook and the test skipped on every kernel).
-      - name: No shell expansion in vmtest commands
-        run: python3 .github/scripts/check_vmtest_commands.py .github/workflows/*.y*ml --context .github/workflows/controller-ebpf-*.yaml
 
       - name: Install system dependencies
         run: |

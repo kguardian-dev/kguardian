@@ -1227,11 +1227,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update Chart.yaml with PR version
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd charts/kguardian
           # Use PR number as version suffix
           CURRENT_VERSION=$(grep '^version:' Chart.yaml | awk '{print $2}')
-          PR_VERSION="${CURRENT_VERSION}-pr${{ github.event.pull_request.number }}"
+          PR_VERSION="${CURRENT_VERSION}-pr${PR_NUMBER}"
           sed -i "s/^version:.*/version: ${PR_VERSION}/" Chart.yaml
           echo "Updated chart version to: ${PR_VERSION}"
           cat Chart.yaml | grep version
