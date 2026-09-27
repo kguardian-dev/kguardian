@@ -790,6 +790,20 @@ if [ "$(helm template compat "$CHART" --set controller.runtimeInventory.mode=ful
     --show-only templates/clusterrole.yaml 2>/dev/null)" != "$BASE_RBAC" ]; then
   echo "FAIL [runtime-inventory-rbac]: runtime inventory and capabilities must not change the ClusterRole"; fail=1
 fi
+# Capabilities with the inventory off would be silently dropped by the
+# controller, so the chart refuses it (default mode and explicit off).
+CAPS_NEEDS_MODE="controller.runtimeInventory.capabilities requires controller.runtimeInventory.mode exec or full"
+assert_render_fails "runtime-inventory-capabilities-mode-default" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.capabilities=true
+assert_render_fails "runtime-inventory-capabilities-mode-off" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.mode=off --set controller.runtimeInventory.capabilities=true
+assert_render_fails "runtime-inventory-capabilities-mode-off-mixed-case" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.mode=Off --set controller.runtimeInventory.capabilities=true
+# ...but an explicit "false" (string or bool) with mode off still renders.
+render "runtime-inventory-capabilities-false-string" --set-string controller.runtimeInventory.capabilities=false && {
+  [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"false"' ] || \
+    { echo "FAIL [runtime-inventory-capabilities-false-string]: capabilities=\"false\" must render \"false\""; fail=1; }
+}
 assert_render_fails "runtime-inventory-bad-mode" "controller.runtimeInventory.mode must be one of off, exec, full" \
   --set controller.runtimeInventory.mode=on
 

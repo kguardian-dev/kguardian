@@ -109,12 +109,19 @@ spec:
           {{- if not (has $runtimeMode (list "off" "exec" "full")) }}
           {{- fail (printf "controller.runtimeInventory.mode must be one of off, exec, full (got %q)" $runtimeMode) }}
           {{- end }}
+          {{- $runtimeCaps := (.Values.controller.runtimeInventory | default dict).capabilities | default false }}
+          {{- /* The controller counts capabilities only when the inventory runs and
+                 would silently drop the flag with mode off; refuse the combination.
+                 "On" is what the controller reads as on: true, 1 or on. */}}
+          {{- if and (has ($runtimeCaps | toString | trim | lower) (list "true" "1" "on")) (eq $runtimeMode "off") }}
+          {{- fail "controller.runtimeInventory.capabilities requires controller.runtimeInventory.mode exec or full" }}
+          {{- end }}
           # Per-container exec / library inventory (values.yaml
           # `controller.runtimeInventory`).
           - name: RUNTIME_INVENTORY
             value: {{ $runtimeMode | quote }}
           - name: RUNTIME_INVENTORY_CAPABILITIES
-            value: {{ (.Values.controller.runtimeInventory | default dict).capabilities | default false | quote }}
+            value: {{ $runtimeCaps | quote }}
           {{- $compute := .Values.compute | default dict }}
           {{- if $compute.enabled }}
           # Compute gauges + noisy-neighbour detection (values.yaml `compute`).
