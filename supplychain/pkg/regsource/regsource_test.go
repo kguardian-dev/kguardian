@@ -17,6 +17,7 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type lister struct {
@@ -214,7 +215,8 @@ func TestReadyOnceListedWhileLookupsRun(t *testing.T) {
 	}
 	l := gatedLister{release: make(chan struct{}), images: images}
 	f := &blockingFetcher{started: make(chan struct{}, len(images)), release: make(chan struct{})}
-	src := &Source{Lister: l, Fetcher: f, Sink: &sink{}, Log: quiet(), Metrics: metrics.New()}
+	log, hook := logtest.NewNullLogger()
+	src := &Source{Lister: l, Fetcher: f, Sink: &sink{}, Log: log, Metrics: metrics.New()}
 	done := make(chan struct{})
 	go func() { defer close(done); src.Pass(context.Background()) }()
 
@@ -227,6 +229,28 @@ func TestReadyOnceListedWhileLookupsRun(t *testing.T) {
 	if !src.Ready() {
 		t.Fatal("not ready while the first pass's lookups are still running")
 	}
+	if firstPassLogs(hook) != 0 {
+		t.Fatal("first pass logged as complete while lookups still run")
+	}
 	close(f.release)
 	<-done
+	e := hook.LastEntry()
+	if firstPassLogs(hook) != 1 || e.Level != logrus.InfoLevel || e.Data["running"] != 20 || e.Data["looked_up"] != 20 || e.Data["duration"] == nil {
+		t.Fatalf("first-pass log: %d entries, last %+v", firstPassLogs(hook), e)
+	}
+	// Only the first pass is announced.
+	src.Pass(context.Background())
+	if firstPassLogs(hook) != 1 {
+		t.Fatal("later pass logged as the first")
+	}
+}
+
+func firstPassLogs(h *logtest.Hook) int {
+	n := 0
+	for _, e := range h.AllEntries() {
+		if e.Message == "registry sbom source: first pass complete" {
+			n++
+		}
+	}
+	return n
 }

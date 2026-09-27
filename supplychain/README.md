@@ -195,6 +195,9 @@ to turn it on. It is egress to the registries of your running images.
    The source counts as ready for `/readyz` once the first listing has
    returned (or failed). It does not wait for the lookups: on a fresh pod
    every running digest is due, and fetching them all can take minutes.
+   An info line, `registry sbom source: first pass complete`, reports when
+   that pass ends, with the running and looked-up digest counts and the
+   duration.
 3. Lookups are anonymous and go through the [address guard](#digest-kind-registry-lookup).
    `allowPrivateRegistries` applies here too.
 

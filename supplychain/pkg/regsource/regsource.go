@@ -59,6 +59,7 @@ type Source struct {
 	mu      sync.Mutex
 	checked map[string]time.Time
 	ready   bool
+	passed  bool // the first full pass has finished and been logged
 }
 
 func (s *Source) defaults() {
@@ -110,6 +111,7 @@ func (s *Source) Run(ctx context.Context) {
 // Pass runs one inventory listing and the lookups it calls for.
 func (s *Source) Pass(ctx context.Context) {
 	s.defaults()
+	start := s.now()
 	images, err := s.Lister.RunningImages(ctx)
 	s.mu.Lock()
 	s.ready = true
@@ -142,6 +144,18 @@ func (s *Source) Pass(ctx context.Context) {
 	}
 	close(work)
 	wg.Wait()
+	s.mu.Lock()
+	first := !s.passed && ctx.Err() == nil
+	if first {
+		s.passed = true
+	}
+	s.mu.Unlock()
+	if first {
+		// Readiness does not wait for this pass, so say when it is done.
+		s.Log.WithFields(logrus.Fields{"running": len(images), "looked_up": len(due),
+			"duration": s.now().Sub(start).Round(time.Millisecond).String()}).
+			Info("registry sbom source: first pass complete")
+	}
 }
 
 func (s *Source) due(images []broker.Image) []broker.Image {
