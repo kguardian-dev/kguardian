@@ -60,6 +60,9 @@ export function trustState(sc: SupplyChainDimension | null | undefined): TrustSt
   if (t === null) return { kind: 'not_read' };
   if (!t.available) return { kind: 'unavailable', reason: t.reason?.trim() || 'no reason given' };
   if (t.evaluatedAt === null) return { kind: 'pending' };
+  // Every count must be a whole, non-negative number, or nothing below can be trusted.
+  const valid = (x: unknown) => typeof x === 'number' && Number.isInteger(x) && x >= 0;
+  if (![t.total, t.wouldDeny, t.unknown, t.trusted].every(valid)) return { kind: 'unavailable', reason: "the Broker's counts are not valid" };
   // Counts that add up to more than the total are not an answer anyone can read.
   if (t.wouldDeny + t.unknown + t.trusted > t.total) return { kind: 'unavailable', reason: `the Broker's counts do not add up (${t.wouldDeny + t.unknown + t.trusted} counted, total ${t.total})` };
   if (t.total === 0) return { kind: 'none_apply' };

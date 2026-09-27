@@ -155,3 +155,19 @@ test('truncated: the counts come from the Broker summary, not from the results l
   expect(within(b).getAllByRole('listitem').map((r) => r.getAttribute('data-trust-verdict'))).toEqual(['Trusted']);
   expect(within(b).getByText('More results than listed; the counts above cover all of them.')).toBeTruthy();
 });
+
+test.each([
+  ['total missing', { total: undefined }],
+  ['every count missing', { total: undefined, wouldDeny: undefined, unknown: undefined, trusted: undefined }],
+  ['a negative count', { wouldDeny: -1 }],
+  ['a string count', { trusted: 'x' }],
+  ['a non-integer total', { total: 2.5 }],
+  ['a NaN count', { unknown: Number.NaN }],
+] as const)('counts that are not whole non-negative numbers (%s) are unknown as a whole, never rendered', async (_, patch) => {
+  page('ledger', withTrust('ledger', { ...ledgerTrust(), ...(patch as unknown as Partial<ImageTrust>) }));
+  const b = await block();
+  expect(b.getAttribute('data-trust-state')).toBe('unavailable');
+  expect(within(b).getByTestId('trust-summary').textContent).toBe("Image trust policies: unknown, the Broker's counts are not valid.");
+  expect(b.textContent).not.toMatch(/undefined|NaN|-1 would|x trusted|0\.5/);
+  expect(within(b).queryByRole('list', { name: 'Image trust results' })).toBeNull();
+});
