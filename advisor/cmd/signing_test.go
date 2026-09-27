@@ -405,13 +405,14 @@ func TestPlainHTTPTokenWarning(t *testing.T) {
 func TestImagesSigners_VerifiedWithoutASignerIdentityIsUnknown(t *testing.T) {
 	d := signDigest["storefront"]
 	for name, sig := range map[string]string{
-		"no kind":        `{"format":"cosign-bundle","source":"referrers","verified":true}`,
-		"kind only":      `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless"}`,
-		"issuer only":    `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":"https://token.actions.githubusercontent.com"}`,
-		"key without fp": `{"format":"cosign-legacy","source":"sig-tag","verified":true,"signerKind":"key","keyName":"release"}`,
-		"blank san":      `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":"https://token.actions.githubusercontent.com","san":"   "}`,
-		"blank issuer":   `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":" ","san":"https://github.com/example/app"}`,
-		"blank fp":       `{"format":"cosign-legacy","source":"sig-tag","verified":true,"signerKind":"key","keyName":"release","keyFingerprint":"  "}`,
+		"no kind":         `{"format":"cosign-bundle","source":"referrers","verified":true}`,
+		"kind only":       `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless"}`,
+		"issuer only":     `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":"https://token.actions.githubusercontent.com"}`,
+		"key without fp":  `{"format":"cosign-legacy","source":"sig-tag","verified":true,"signerKind":"key","keyName":"release"}`,
+		"blank san":       `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":"https://token.actions.githubusercontent.com","san":"   "}`,
+		"blank issuer":    `{"format":"cosign-bundle","source":"referrers","verified":true,"signerKind":"keyless","issuer":" ","san":"https://github.com/example/app"}`,
+		"blank fp":        `{"format":"cosign-legacy","source":"sig-tag","verified":true,"signerKind":"key","keyName":"release","keyFingerprint":"  "}`,
+		"fp without kind": `{"format":"cosign-legacy","source":"sig-tag","verified":true,"keyName":"release","keyFingerprint":"e2312c28"}`,
 	} {
 		body := `{"digest":"` + d + `","repository":"ghcr.io/example/app","verdict":"verified","reason":null,"trustRoot":"public-good",` +
 			`"signedVia":"self","signedDigest":"` + d + `","signatures":[` + sig + `],"attestations":[],"checkedAt":"2026-09-27T00:00:00","receivedAt":"2026-09-27T00:00:01"}`
