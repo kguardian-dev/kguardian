@@ -357,12 +357,19 @@ impl BudgetExhausted {
     /// in-flight reads finish, which is a sub-second-to-seconds timescale,
     /// not the minutes a bare 503 implies to most clients.
     pub fn into_response(self) -> HttpResponse {
+        self.into_response_with_hint("retry, or lower ?limit=")
+    }
+
+    /// [`Self::into_response`] with the endpoint's own advice in place of
+    /// "lower ?limit=", for a read that has no limit to lower (the CycloneDX
+    /// export is one document, all or nothing).
+    pub fn into_response_with_hint(self, hint: &str) -> HttpResponse {
         HttpResponse::ServiceUnavailable()
             .insert_header(("Retry-After", "1"))
             .body(format!(
                 "broker read memory budget exhausted: this request needs {} KiB of a {} KiB \
                  budget and waited {} ms without getting it. The request was REFUSED, not \
-                 truncated — retry, or lower ?limit=. Raise BROKER_READ_MEMORY_BUDGET_MB \
+                 truncated — {hint}. Raise BROKER_READ_MEMORY_BUDGET_MB \
                  (and the container memory limit with it) if this is persistent.",
                 self.requested_kib,
                 self.total_kib,
@@ -738,6 +745,28 @@ mod tests {
             Some("1"),
             "clients need to know this is retryable in ~seconds"
         );
+    }
+
+    #[actix_web::test]
+    async fn shed_hint_replaces_the_limit_advice() {
+        let err = BudgetExhausted {
+            requested_kib: 160_000,
+            total_kib: 262_144,
+            waited: Duration::from_millis(5_000),
+        };
+        let body = |r: HttpResponse| async move {
+            let b = actix_web::body::to_bytes(r.into_body()).await.unwrap();
+            String::from_utf8(b.to_vec()).unwrap()
+        };
+        let default = body(err.into_response()).await;
+        assert!(default.contains("retry, or lower ?limit=."), "{default}");
+        let hinted = body(err.into_response_with_hint("retry when other reads finish")).await;
+        assert!(!hinted.contains("?limit="), "{hinted}");
+        assert!(
+            hinted.contains("REFUSED, not truncated — retry when other reads finish."),
+            "{hinted}"
+        );
+        assert!(hinted.contains("BROKER_READ_MEMORY_BUDGET_MB"), "{hinted}");
     }
 
     #[tokio::test]

@@ -1111,6 +1111,14 @@ const REDACTION_CASES: &[(&str, &str)] = &[
     ("spaced eyAiYWxnIjogIlJTMjU2IiB9.eyAic3ViIjogInJvYm90IiB9.lzf9X3L41RxKyRttDEjUGh5eyeagOShUqGFe7xCfwb-p4lY3ASiPKbPXP2rCtp7dLBnyZL7kYqW68g_Sfs8UwA rejected", "spaced <redacted> rejected"),
     ("newline ewogICJhbGciOiAiUlMyNTYiCn0.ewogICJzdWIiOiAicm9ib3QiCn0.Ee0gH4NjIK25i6sWhqKNmAEhDHc28-7FgNz8Q_5dBJtNeKej67koZchRftAhEfamUto1JIcrajHX_-RYd0TV6w rejected", "newline <redacted> rejected"),
     ("spaced dir eyAiYWxnIjogImRpciIsICJlbmMiOiAiQTI1NkdDTSIgfQ..5-7nYV7zXzDkm0gu.FcrnUAcgHhJhew_tp-Fkd5b_AivqjtAqgqF1kw8jN803lMUiCABtaw.GvDAy9YlZYqsLJ-qB9E8RA bad", "spaced dir <redacted> bad"),
+    // A host glued to a key: the key stays, the host goes.
+    ("dial addr=reg.internal:443 failed", "dial addr=<host> failed"),
+    ("host:reg.internal:443 refused", "host:<host> refused"),
+    ("server=10.0.0.5:5000", "server=<host>"),
+    ("upstream=[fd00::5]:443 reset", "upstream=<host> reset"),
+    ("registry:REG.Corp.Example/v2/app denied", "registry:<host>/… denied"),
+    ("addr=reg.internal:443.", "addr=<host>."),
+    ("a=b=reg.internal:443", "a=b=<host>"),
     // Must pass unchanged.
     (
         "bad_signature: signature for sha256:0123456789abcdef does not match",
@@ -1127,6 +1135,8 @@ const REDACTION_CASES: &[(&str, &str)] = &[
     ),
     ("status:404 at 12:35:00Z, e.g. a retry", "status:404 at 12:35:00Z, e.g. a retry"),
     ("x509: certificate signed by unknown authority", "x509: certificate signed by unknown authority"),
+    ("k8s=1.34.1 status:404 retry:3 at=12:35:00Z", "k8s=1.34.1 status:404 retry:3 at=12:35:00Z"),
+    ("listen=:8080 mode:strict", "listen=:8080 mode:strict"),
     ("signed with a public key; no keys are configured", "signed with a public key; no keys are configured"),
 ];
 

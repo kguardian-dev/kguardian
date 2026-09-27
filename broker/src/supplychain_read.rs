@@ -54,7 +54,11 @@ pub const COMPONENT_ROW_COST_BYTES: u64 = 20 * 1024;
 /// row): 19 487 B when every field is at its ingest cap and made of
 /// characters JSON escapes, ~2.8 KiB for a typical package. Charged at the
 /// worst case so a hostile SBOM cannot outrun the budget; an export larger
-/// than the whole budget is clamped to it and runs alone.
+/// than the whole budget is clamped to it and runs alone. 20 KiB is the
+/// worst case plus 5% (20 480 / 19 487 = 1.051): the measurement is
+/// byte-exact, so the headroom only absorbs allocator-layout changes (a
+/// new Rust or serde_json version); the test fails before the charge is
+/// ever below the real cost.
 pub const EXPORT_COMPONENT_COST_BYTES: u64 = 20 * 1024;
 /// Per grouped CVE row: id, a few counts, up to 5 package names.
 pub const CVE_ROW_COST_BYTES: u64 = 2 * 1024;
@@ -1360,7 +1364,13 @@ pub async fn get_image_sbom_cyclonedx(
         .await
     {
         Ok(p) => p,
-        Err(shed) => return Ok(shed.into_response()),
+        // One document, no limit to lower: say what does help.
+        Err(shed) => {
+            return Ok(shed.into_response_with_hint(
+                "the export is one document and cannot be made smaller; retry when other \
+                 reads finish, or read it in pages with GET /images/{digest}/sbom?limit=",
+            ))
+        }
     };
     let d3 = digest.clone();
     let out = web::block(move || -> Result<Export, DbError> {

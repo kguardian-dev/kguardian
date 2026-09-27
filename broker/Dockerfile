@@ -33,8 +33,9 @@ COPY --from=build /app/broker/target/release/broker /broker
 # a tokio blocking thread (web::block; the pool grows to hundreds), each
 # thread got its own arena, and each arena kept its high-water mark: ten
 # one-at-a-time SBOM exports left 736 MiB resident, 717 MiB of it in 38
-# arenas of ~64 MiB. With 2 arenas the same run stays at 145 MiB. See the
-# PR that added this for the harness numbers. A pod can still override it.
+# arenas of ~64 MiB. With 2 arenas and the cheaper export (#1723) the same
+# run stays at 68 MiB, and 18 concurrent reads of every kind at 92 MiB
+# (5 256 MiB before); #1723 has the harness. A pod can still override it.
 ENV MALLOC_ARENA_MAX=2
 
 EXPOSE 9090
