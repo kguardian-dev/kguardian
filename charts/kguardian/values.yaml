@@ -1756,7 +1756,7 @@ evaluator:
     # -- Evaluator image pull policy
     pullPolicy: IfNotPresent
     # -- Evaluator version tag (auto-updated by release-please)
-    tag: "v0.4.2"
+    tag: "v0.5.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
