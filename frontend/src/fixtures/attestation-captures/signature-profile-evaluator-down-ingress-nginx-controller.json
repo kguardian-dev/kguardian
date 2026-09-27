@@ -2,31 +2,31 @@
   "body": {
     "attention": [
       {
-        "container": "node-exporter",
+        "container": "controller",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/node-exporter",
+        "id": "podSecurity.allowPrivilegeEscalation/controller",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container node-exporter allows privilege escalation"
+        "title": "Container controller allows privilege escalation"
       },
       {
-        "container": "node-exporter",
+        "container": "controller",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/node-exporter",
+        "id": "podSecurity.capabilitiesNotDropped/controller",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container node-exporter does not drop ALL capabilities"
+        "title": "Container controller does not drop ALL capabilities"
       }
     ],
     "capabilities": {
       "containers": [
         {
-          "container": "node-exporter",
+          "container": "controller",
           "denied": [],
           "digests": [
-            "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa"
+            "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4"
           ],
           "evidence": "insufficient",
           "observedSince": null,
@@ -39,7 +39,7 @@
       ],
       "windowHours": 168
     },
-    "contentHash": "fnv1a64:0f3e2c61aa8d2f8b",
+    "contentHash": "fnv1a64:24f89939508eab54",
     "controls": [
       {
         "control": "networkPolicy",
@@ -83,15 +83,15 @@
           {
             "kind": "regular",
             "mixedDigests": false,
-            "name": "node-exporter",
+            "name": "controller",
             "previous": [],
             "running": [
               {
-                "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
-                "firstSeen": "2026-09-27T04:36:10.915617Z",
-                "imageRef": "quay.io/prometheus/node-exporter:v1.8.2",
-                "lastPodName": "node-exporter-z9y8x",
-                "lastSeen": "2026-09-27T04:36:10.915617Z",
+                "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
+                "firstSeen": "2026-09-27T04:36:10.929890Z",
+                "imageRef": "registry.k8s.io/ingress-nginx/controller:v1.11.2",
+                "lastPodName": "ingress-nginx-controller-1a2b3-cdefg",
+                "lastSeen": "2026-09-27T04:36:10.929890Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T04:36:10.915617Z"
+          "observedSince": "2026-09-27T04:36:10.929890Z"
         },
         "reasons": [
           {
@@ -113,58 +113,46 @@
           },
           {
             "code": "signatures",
-            "message": "1 current digest(s): 1 could not be checked"
+            "message": "1 current digest(s): 1 not checked"
           }
         ],
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
-          "checkedAt": "2026-09-27T01:36:12Z",
-          "container": "node-exporter",
+          "checkedAt": null,
+          "container": "controller",
           "counts": {
             "invalid": 0,
             "keySigned": 0,
-            "notChecked": 0,
-            "unknown": 1,
+            "notChecked": 1,
+            "unknown": 0,
             "unsigned": 0,
             "verified": 0
           },
-          "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+          "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
           "digests": [
             {
-              "checkedAt": "2026-09-27T01:36:12Z",
-              "container": "node-exporter",
-              "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
-              "reason": "rate_limited",
+              "checkedAt": null,
+              "container": "controller",
+              "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
+              "reason": null,
               "signers": [],
-              "verdict": "unknown"
+              "verdict": null
             }
           ],
           "imageTrust": {
-            "available": true,
-            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
-            "policies": [
-              "cluster/monitoring-signed"
-            ],
-            "results": [
-              {
-                "container": "node-exporter",
-                "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
-                "image": "quay.io/prometheus/node-exporter",
-                "namespace": "observability",
-                "policy": "cluster/monitoring-signed",
-                "reason": "rate_limited",
-                "verdict": "Unknown",
-                "workload": "DaemonSet/node-exporter"
-              }
-            ],
-            "total": 1,
+            "available": false,
+            "evaluatedAt": null,
+            "policies": [],
+            "reason": "the evaluator could not be reached: connection failed",
+            "results": [],
+            "total": 0,
             "truncated": false,
             "trusted": 0,
-            "unknown": 1,
+            "unknown": 0,
             "wouldDeny": 0
           },
-          "reason": "rate_limited",
+          "reason": "not_checked",
           "signers": [],
           "status": "configured",
           "truncated": false,
@@ -209,18 +197,18 @@
       "podSecurity": {
         "containers": [
           {
-            "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+            "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
             "failing": [
               {
                 "check": "privilegeEscalation",
-                "field": "spec.containers[node-exporter].securityContext.allowPrivilegeEscalation",
+                "field": "spec.containers[controller].securityContext.allowPrivilegeEscalation",
                 "level": "restricted",
                 "message": "allowPrivilegeEscalation must be set to false",
                 "value": null
               },
               {
                 "check": "capabilitiesRestricted",
-                "field": "spec.containers[node-exporter].securityContext.capabilities.drop",
+                "field": "spec.containers[controller].securityContext.capabilities.drop",
                 "level": "restricted",
                 "message": "capabilities.drop must include ALL",
                 "value": null
@@ -228,7 +216,7 @@
             ],
             "kind": "regular",
             "level": "baseline",
-            "name": "node-exporter",
+            "name": "controller",
             "securityContext": {
               "allowPrivilegeEscalation": null,
               "capabilitiesAdd": null,
@@ -247,7 +235,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T04:36:10.915617Z"
+          "observedSince": "2026-09-27T04:36:10.929890Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -272,7 +260,7 @@
         "reasons": [
           {
             "code": "pss_fails_restricted",
-            "message": "At most baseline: node-exporter (regular) fail(s) a restricted check; unevaluated checks may lower it further"
+            "message": "At most baseline: controller (regular) fail(s) a restricted check; unevaluated checks may lower it further"
           },
           {
             "code": "pod_fields_unknown",
@@ -282,14 +270,13 @@
         "recommendation": {
           "caveats": [
             "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
-            "This looks like a node agent (DaemonSet or hostNetwork). CNI plugins, CSI drivers and node agents usually need privileges restricted forbids; a namespace-level PSS exemption is often the right answer instead of this patch.",
-            "Capabilities for node-exporter are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
+            "Capabilities for controller are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
             "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
           ],
           "format": "strategic-merge-patch",
           "recommendation": true,
           "targetLevel": "restricted",
-          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: node-exporter\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n"
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: controller\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n"
         },
         "staleContainers": [],
         "status": "warn",
@@ -339,7 +326,7 @@
       "items": [],
       "notEvaluated": [
         {
-          "container": "node-exporter",
+          "container": "controller",
           "reason": "no_inventory",
           "type": "unshippedExecutable"
         },
@@ -363,34 +350,34 @@
     },
     "findings": [
       {
-        "container": "node-exporter",
+        "container": "controller",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/node-exporter",
+        "id": "podSecurity.allowPrivilegeEscalation/controller",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container node-exporter allows privilege escalation"
+        "title": "Container controller allows privilege escalation"
       },
       {
-        "container": "node-exporter",
+        "container": "controller",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/node-exporter",
+        "id": "podSecurity.capabilitiesNotDropped/controller",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container node-exporter does not drop ALL capabilities"
+        "title": "Container controller does not drop ALL capabilities"
       },
       {
-        "container": "node-exporter",
+        "container": "controller",
         "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
         "dimension": "podSecurity",
-        "id": "podSecurity.readOnlyRootFilesystem/node-exporter",
+        "id": "podSecurity.readOnlyRootFilesystem/controller",
         "severity": "low",
         "tier": null,
-        "title": "Container node-exporter root filesystem is writable"
+        "title": "Container controller root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T04:36:12.344069661Z",
+    "generatedAt": "2026-09-27T04:36:15.573122245Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -406,7 +393,7 @@
         },
         {
           "dimension": "podSecurity",
-          "message": "At most baseline: node-exporter (regular) fail(s) a restricted check; unevaluated checks may lower it further",
+          "message": "At most baseline: controller (regular) fail(s) a restricted check; unevaluated checks may lower it further",
           "status": "warn"
         },
         {
@@ -440,7 +427,7 @@
       },
       {
         "id": "imageSigned",
-        "message": "1 current digest(s): 1 could not be checked",
+        "message": "1 current digest(s): 1 not checked (no result yet: discovery has not reached it)",
         "ok": null
       },
       {
@@ -453,20 +440,20 @@
     "version": null,
     "workload": {
       "clusterId": "primary",
-      "kind": "DaemonSet",
-      "name": "node-exporter",
-      "namespace": "observability",
+      "kind": "Deployment",
+      "name": "ingress-nginx-controller",
+      "namespace": "ingress-nginx",
       "pods": {
         "live": 1,
         "names": [
-          "node-exporter-z9y8x"
+          "ingress-nginx-controller-1a2b3-cdefg"
         ],
         "truncated": false
       },
       "transient": false
     }
   },
-  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
-  "request": "GET /workloads/observability/DaemonSet/node-exporter/profile",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
+  "request": "GET /workloads/ingress-nginx/Deployment/ingress-nginx-controller/profile",
   "status": 200
 }

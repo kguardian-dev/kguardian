@@ -1,10 +1,10 @@
 {
   "body": {
     "attestations": [],
-    "checkedAt": "2026-09-26T22:11:49",
+    "checkedAt": "2026-09-27T01:36:12",
     "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
     "reason": null,
-    "receivedAt": "2026-09-27T01:11:50.027927",
+    "receivedAt": "2026-09-27T04:36:12.158604",
     "repository": "docker.io/grafana/grafana",
     "signatures": [
       {
@@ -21,7 +21,7 @@
     "trustRoot": "public-good",
     "verdict": "key_signed"
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /images/sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c/attestation",
   "status": 200
 }

@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
-                "firstSeen": "2026-09-27T01:11:49.988147Z",
+                "firstSeen": "2026-09-27T04:36:10.915617Z",
                 "imageRef": "quay.io/prometheus/node-exporter:v1.8.2",
                 "lastPodName": "node-exporter-z9y8x",
-                "lastSeen": "2026-09-27T01:11:49.988147Z",
+                "lastSeen": "2026-09-27T04:36:10.915617Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:11:49.988147Z"
+          "observedSince": "2026-09-27T04:36:10.915617Z"
         },
         "reasons": [
           {
@@ -131,6 +131,30 @@
           },
           "digest": null,
           "digests": [],
+          "imageTrust": {
+            "available": true,
+            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
+            "policies": [
+              "cluster/monitoring-signed"
+            ],
+            "results": [
+              {
+                "container": "node-exporter",
+                "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+                "image": "quay.io/prometheus/node-exporter",
+                "namespace": "observability",
+                "policy": "cluster/monitoring-signed",
+                "reason": "rate_limited",
+                "verdict": "Unknown",
+                "workload": "DaemonSet/node-exporter"
+              }
+            ],
+            "total": 1,
+            "truncated": false,
+            "trusted": 0,
+            "unknown": 1,
+            "wouldDeny": 0
+          },
           "reason": null,
           "signers": [],
           "status": "not_configured",
@@ -214,7 +238,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:11:49.988147Z"
+          "observedSince": "2026-09-27T04:36:10.915617Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -357,7 +381,7 @@
         "title": "Container node-exporter root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:11:53.382981201Z",
+    "generatedAt": "2026-09-27T04:36:18.757576489Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -433,7 +457,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/observability/DaemonSet/node-exporter/profile",
   "status": 200
 }

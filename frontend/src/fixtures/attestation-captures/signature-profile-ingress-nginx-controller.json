@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
-                "firstSeen": "2026-09-27T01:11:50.002882Z",
+                "firstSeen": "2026-09-27T04:36:10.929890Z",
                 "imageRef": "registry.k8s.io/ingress-nginx/controller:v1.11.2",
                 "lastPodName": "ingress-nginx-controller-1a2b3-cdefg",
-                "lastSeen": "2026-09-27T01:11:50.002882Z",
+                "lastSeen": "2026-09-27T04:36:10.929890Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:11:50.002882Z"
+          "observedSince": "2026-09-27T04:36:10.929890Z"
         },
         "reasons": [
           {
@@ -140,6 +140,30 @@
               "verdict": null
             }
           ],
+          "imageTrust": {
+            "available": true,
+            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
+            "policies": [
+              "cluster/monitoring-signed"
+            ],
+            "results": [
+              {
+                "container": "controller",
+                "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
+                "image": "registry.k8s.io/ingress-nginx/controller",
+                "namespace": "ingress-nginx",
+                "policy": "cluster/monitoring-signed",
+                "reason": "not-checked",
+                "verdict": "Unknown",
+                "workload": "Deployment/ingress-nginx-controller"
+              }
+            ],
+            "total": 1,
+            "truncated": false,
+            "trusted": 0,
+            "unknown": 1,
+            "wouldDeny": 0
+          },
           "reason": "not_checked",
           "signers": [],
           "status": "configured",
@@ -223,7 +247,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:11:50.002882Z"
+          "observedSince": "2026-09-27T04:36:10.929890Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -365,7 +389,7 @@
         "title": "Container controller root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:11:50.227988267Z",
+    "generatedAt": "2026-09-27T04:36:12.362757379Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -441,7 +465,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/ingress-nginx/Deployment/ingress-nginx-controller/profile",
   "status": 200
 }

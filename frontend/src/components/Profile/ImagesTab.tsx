@@ -8,7 +8,8 @@ import { DigestRow } from '../Vulns/SupplyChainTab';
 import { NotTrustedNote } from '../Vulns/SignatureParts';
 import { AdmissionPolicyModal } from '../Vulns/AdmissionPolicyModal';
 import { SectionSkeleton } from './parts';
-import type { ImageContainer, ImageDigestRow, ImagesDimension } from '../../types/profile';
+import type { ImageContainer, ImageDigestRow, ImagesDimension, SupplyChainDimension } from '../../types/profile';
+import { ImageTrustBlock } from './ImageTrustBlock';
 import { asStatus, formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
 import { digestStateLabel } from '../../utils/profileView';
 import { EmptyState } from '../ui/EmptyState';
@@ -80,7 +81,7 @@ function ContainerCard({ c }: { c: ImageContainer }) {
 }
 
 /** Who signed this workload's running images, and its admission policy export. */
-function SupplyChainPanel({ sig, workload, api }: { sig: WorkloadSignatureState; workload: { ns: string; kind: string; name: string }; api: VulnApi }) {
+function SupplyChainPanel({ sig, workload, api, supplyChain }: { sig: WorkloadSignatureState; workload: { ns: string; kind: string; name: string }; api: VulnApi; supplyChain: SupplyChainDimension | null }) {
   const [exporting, setExporting] = useState(false);
   return (
     <Panel
@@ -109,6 +110,7 @@ function SupplyChainPanel({ sig, workload, api }: { sig: WorkloadSignatureState;
           <NotTrustedNote className="px-4 py-2.5 border-t border-hubble-border" />
         </>
       )}
+      <ImageTrustBlock supplyChain={supplyChain} />
       {exporting && <AdmissionPolicyModal api={api} scope={{ kind: 'workload', namespace: workload.ns, workloadKind: workload.kind, name: workload.name }} onClose={() => setExporting(false)} />}
     </Panel>
   );
@@ -151,7 +153,7 @@ export function ImagesTab({ dim, signatures, workload, api }: { dim: ImagesDimen
       </Panel>
 
       {signatures && workload && api ? (
-        <SupplyChainPanel sig={signatures} workload={workload} api={api} />
+        <SupplyChainPanel sig={signatures} workload={workload} api={api} supplyChain={dim.supplyChain} />
       ) : (
         <Panel icon={FileBadge2} title="Supply chain">
           <p className="px-4 py-3 text-xs text-tertiary">Signature results are not loaded here.</p>

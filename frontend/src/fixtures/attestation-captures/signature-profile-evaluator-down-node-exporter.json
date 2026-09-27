@@ -141,27 +141,15 @@
             }
           ],
           "imageTrust": {
-            "available": true,
-            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
-            "policies": [
-              "cluster/monitoring-signed"
-            ],
-            "results": [
-              {
-                "container": "node-exporter",
-                "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
-                "image": "quay.io/prometheus/node-exporter",
-                "namespace": "observability",
-                "policy": "cluster/monitoring-signed",
-                "reason": "rate_limited",
-                "verdict": "Unknown",
-                "workload": "DaemonSet/node-exporter"
-              }
-            ],
-            "total": 1,
+            "available": false,
+            "evaluatedAt": null,
+            "policies": [],
+            "reason": "the evaluator could not be reached: connection failed",
+            "results": [],
+            "total": 0,
             "truncated": false,
             "trusted": 0,
-            "unknown": 1,
+            "unknown": 0,
             "wouldDeny": 0
           },
           "reason": "rate_limited",
@@ -390,7 +378,7 @@
         "title": "Container node-exporter root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T04:36:12.344069661Z",
+    "generatedAt": "2026-09-27T04:36:15.553137362Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -466,7 +454,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
   "request": "GET /workloads/observability/DaemonSet/node-exporter/profile",
   "status": 200
 }

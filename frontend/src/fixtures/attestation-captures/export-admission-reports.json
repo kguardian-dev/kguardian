@@ -16,7 +16,7 @@
         "refused": null
       }
     ],
-    "generatedAt": "2026-09-27T01:11:50.135878509+00:00",
+    "generatedAt": "2026-09-27T04:36:12.251850591+00:00",
     "mode": "audit",
     "profile": {
       "contentHash": "fnv1a64:d529c30c060a9d90",
@@ -30,7 +30,7 @@
       "namespace": "payments"
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/payments/CronJob/reports/export?artifacts=admission&mode=audit&format=zip-manifest",
   "status": 200
 }

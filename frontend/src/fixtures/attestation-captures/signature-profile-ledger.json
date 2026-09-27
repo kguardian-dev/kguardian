@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
-                "firstSeen": "2026-09-27T01:11:49.960077Z",
+                "firstSeen": "2026-09-27T04:36:10.888133Z",
                 "imageRef": "ghcr.io/example/ledger:2.3.1",
                 "lastPodName": "ledger-5c6d7-klmno",
-                "lastSeen": "2026-09-27T01:11:49.960077Z",
+                "lastSeen": "2026-09-27T04:36:10.888133Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:11:49.960077Z"
+          "observedSince": "2026-09-27T04:36:10.888133Z"
         },
         "reasons": [
           {
@@ -119,7 +119,7 @@
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
-          "checkedAt": "2026-09-26T22:11:49Z",
+          "checkedAt": "2026-09-27T01:36:12Z",
           "container": "ledger",
           "counts": {
             "invalid": 0,
@@ -132,7 +132,7 @@
           "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
           "digests": [
             {
-              "checkedAt": "2026-09-26T22:11:49Z",
+              "checkedAt": "2026-09-27T01:36:12Z",
               "container": "ledger",
               "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
               "reason": null,
@@ -146,6 +146,40 @@
               "verdict": "verified"
             }
           ],
+          "imageTrust": {
+            "available": true,
+            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
+            "policies": [
+              "cluster/example-org-releases",
+              "payments/payments-release-signers"
+            ],
+            "results": [
+              {
+                "container": "ledger",
+                "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+                "image": "ghcr.io/example/ledger",
+                "namespace": "payments",
+                "policy": "cluster/example-org-releases",
+                "reason": "untrusted-signer",
+                "verdict": "WouldDeny",
+                "workload": "Deployment/ledger"
+              },
+              {
+                "container": "ledger",
+                "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+                "image": "ghcr.io/example/ledger",
+                "namespace": "payments",
+                "policy": "payments/payments-release-signers",
+                "verdict": "Trusted",
+                "workload": "Deployment/ledger"
+              }
+            ],
+            "total": 2,
+            "truncated": false,
+            "trusted": 1,
+            "unknown": 0,
+            "wouldDeny": 1
+          },
           "reason": null,
           "signers": [
             {
@@ -235,7 +269,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:11:49.960077Z"
+          "observedSince": "2026-09-27T04:36:10.888133Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -377,7 +411,7 @@
         "title": "Container ledger root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:11:50.164470555Z",
+    "generatedAt": "2026-09-27T04:36:12.304418930Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -453,7 +487,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/payments/Deployment/ledger/profile",
   "status": 200
 }
