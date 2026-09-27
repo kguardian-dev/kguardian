@@ -188,6 +188,13 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		}
 		return err
 	}
+	// Status has only a coarse cause; the full error goes to the log.
+	// Transient errors are logged by processNext when they are retried.
+	var rep errReported
+	if errors.As(brokerErr, &rep) {
+		c.log.WithError(rep.err).WithField("profile", key).Warn("broker read failed; status reports the cause, next try at resync")
+		return nil
+	}
 	return brokerErr
 }
 

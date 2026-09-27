@@ -936,12 +936,17 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
-      # Name the real API server test in the log and fail unless it passed:
-      # a test that silently skips reads as green otherwise (#1690).
+      # Name the real API server tests in the log and fail unless each
+      # passed: a test that silently skips reads as green otherwise (#1690).
+      # pipefail: a failing go test fails the step even though tee succeeds.
+      # grep without -q prints the matched PASS line into the log.
       - name: envtest (named)
         run: |
+          set -o pipefail
           go test -count=1 -v -run '^TestStatusAgainstARealAPIServer$' ./pkg/imagetrust | tee envtest.log
-          grep -q -- '--- PASS: TestStatusAgainstARealAPIServer' envtest.log
+          grep -- '--- PASS: TestStatusAgainstARealAPIServer' envtest.log
+          go test -count=1 -v -run '^TestStatusHidesBrokerAddressOnARealAPIServer$' ./pkg/appprofile | tee envtest-appprofile.log
+          grep -- '--- PASS: TestStatusHidesBrokerAddressOnARealAPIServer' envtest-appprofile.log
 
   # Build Evaluator
   build-evaluator:

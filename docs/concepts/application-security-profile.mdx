@@ -74,12 +74,14 @@ Status follows the [profile contract](https://github.com/kguardian-dev/kguardian
 | `accepted` | The version named by `spec.acceptedRevision`. |
 | `deviation.state` | `None` (live profile matches the accepted revision), `Changed`, or `Unknown` (no accepted revision, or the broker no longer has it). |
 | `deviation.changedDimensions` | Dimensions whose content changed since the accepted revision. Absent while the change is still `snapshotPending`, because the per-dimension breakdown exists only for stored versions. |
-| `lastSyncedAt` | When the profile was last read successfully. If a refresh fails, `ProfileAvailable` turns `False` and the previous data stays only while it is younger than the staleness window (`evaluator.applicationSecurityProfiles.staleAfter`, default 3× `resyncInterval`); the message says how old it is. Past the window, or at once when the broker rejects the evaluator's token, posture and every dimension become `unknown`, with a reason naming the error and this time. The next successful read restores them. |
+| `lastSyncedAt` | When the profile was last read successfully. If a refresh fails, `ProfileAvailable` turns `False` and the previous data stays only while it is younger than the staleness window (`evaluator.applicationSecurityProfiles.staleAfter`, default 3× `resyncInterval`); the message says how old it is. Past the window, or at once when the broker rejects the evaluator's token, posture and every dimension become `unknown`, with a reason naming the cause and this time. The next successful read restores them. |
 
 Conditions:
 
 - `ProfileAvailable`: `True`/`ProfileRetrieved`, or `False` with `WorkloadNotFound` (check kind and name, or the workload has not been observed yet), `BrokerUnavailable`, `BrokerUnauthorized`, `BrokerError` (for example a broker too old to serve the profile routes), `DuplicateWorkloadRef`.
 - `Deviated`: `True`/`ProfileChanged`, `False`/`MatchesAccepted`, or `Unknown` with `NoAcceptedRevision`, `AcceptedRevisionNotFound` or `ProfileUnavailable`.
+
+When a broker read fails, messages give a coarse cause such as `connection failed`, `timed out`, `TLS verification failed` or `status 503`. The broker's address and its error text are never written to status; the evaluator logs the full error.
 
 Revisions come from the broker's version history, which keeps the newest `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50) per workload for `PROFILE_VERSIONS_RETENTION_DAYS` (default 90). An accepted revision that has been pruned reports `AcceptedRevisionNotFound`; accept a current one.
 
