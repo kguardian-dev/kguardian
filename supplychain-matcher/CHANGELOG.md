@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/kguardian-dev/kguardian/compare/supplychain-matcher/v0.1.0...supplychain-matcher/v0.1.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **supplychain-matcher:** a NaN or Inf CVSS score is no score; an encode failure before any byte is sent answers 500 ([#1733](https://github.com/kguardian-dev/kguardian/issues/1733)) ([48eaa38](https://github.com/kguardian-dev/kguardian/commit/48eaa384d553cf39fe77e4a26d968196bc3d3334))
+* **supplychain-matcher:** distinct file paths before the 16-path cap; log an encoding failure apart from a closed client ([#1730](https://github.com/kguardian-dev/kguardian/issues/1730)) ([757dd54](https://github.com/kguardian-dev/kguardian/commit/757dd547865eb20a641162c2d1af2706ff9e52ea))
+
 ## 0.1.0 (2026-09-27)
 
 
