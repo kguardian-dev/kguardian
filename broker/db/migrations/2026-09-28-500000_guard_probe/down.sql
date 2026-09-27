@@ -1,1 +1,0 @@
--- CI probe for #1702: must be rejected by the migration-order guard. Reverted.
