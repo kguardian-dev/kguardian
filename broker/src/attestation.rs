@@ -72,6 +72,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 const MAX_URI: usize = 1024; // issuer, SAN, builder, source repo
 const MAX_SHORT: usize = 128; // reasons, formats, refs
 const MAX_DETAIL: usize = 256;
+/// How much of a `detail` is redacted; the rest is discarded unread. Bounds
+/// redaction's cost whatever its rules, since it runs before the cap.
+const MAX_REDACT_INPUT: usize = 4096;
 const MAX_KEY_PEM: usize = 4096;
 const TOO_MANY: &str = "too many items";
 
@@ -220,31 +223,37 @@ fn redact_word(word: &str) -> String {
     redact_secrets(word)
 }
 
-/// Replaces each JWT (`eyJ<b64url>.<b64url>[.<b64url>]`, starting the
-/// word or after a non-base64url character such as `=`) with `<redacted>`.
+/// Replaces each JWT, JWS or JWE with `<redacted>`. A token starts the
+/// word or follows a non-base64url character or `%3D` (a URL-encoded
+/// `=`); segments are base64url with optional `=` padding, joined by dots.
+/// Two rules, either suffices:
+///
+/// - structural: 3 (JWS) or 5 (JWE) segments of at least 10 characters
+///   each (a JWE's second may be empty: direct key), the first decoding to
+///   text whose first non-whitespace character is `{` (a JSON header in any
+///   formatting: `eyJ`, `eyAi`, `ewog`, ...);
+/// - `eyJ` prefix: a header and at least one more non-empty segment, taking
+///   every segment up to five, even empty ones (alg `none` ends in a dot; a
+///   direct-key JWE has an empty second segment).
+///
+/// Long dotted host names and digests fail both: their labels do not decode
+/// to `{` and do not start with `eyJ`.
 fn redact_jwts(word: &str) -> String {
-    let b64 = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
     let bytes = word.as_bytes();
     let mut out = String::with_capacity(word.len());
     let mut i = 0;
     while i < bytes.len() {
-        let at_start = i == 0 || !b64(bytes[i - 1]);
-        if at_start && bytes[i..].starts_with(b"eyJ") {
-            // header, '.', payload (non-empty), then an optional '.sig'.
-            let seg = |from: usize| from + bytes[from..].iter().take_while(|&&c| b64(c)).count();
-            let h = seg(i);
-            if h < bytes.len() && bytes[h] == b'.' {
-                let p = seg(h + 1);
-                if p > h + 1 {
-                    let end = if p < bytes.len() && bytes[p] == b'.' {
-                        seg(p + 1)
-                    } else {
-                        p
-                    };
-                    out.push_str("<redacted>");
-                    i = end;
-                    continue;
-                }
+        let boundary = i == 0
+            || !is_b64url(bytes[i - 1])
+            || (i >= 3 && bytes[i - 3..i].eq_ignore_ascii_case(b"%3d"));
+        // Only where a token can start: trying at every position of a run
+        // of `=` (each one a boundary) rescans the run from each, which is
+        // quadratic in a detail that is redacted before it is capped.
+        if boundary && is_b64url(bytes[i]) {
+            if let Some(end) = jwt_end(bytes, i) {
+                out.push_str("<redacted>");
+                i = end;
+                continue;
             }
         }
         let c = word[i..].chars().next().unwrap_or_default();
@@ -252,6 +261,91 @@ fn redact_jwts(word: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+// Bytes jwt_end has scanned on this thread: the tests bound it to prove
+// redaction stays linear.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static JWT_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn is_b64url(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
+}
+
+/// Where the token starting at `i` ends, if one does.
+fn jwt_end(b: &[u8], i: usize) -> Option<usize> {
+    // Up to five dot-joined segments: (start, end without padding, end).
+    let mut segs: Vec<(usize, usize, usize)> = Vec::new();
+    let mut j = i;
+    while segs.len() < 5 {
+        let s = j;
+        while j < b.len() && is_b64url(b[j]) {
+            j += 1;
+        }
+        let data_end = j;
+        while j < b.len() && b[j] == b'=' {
+            j += 1;
+        }
+        segs.push((s, data_end, j));
+        if j < b.len() && b[j] == b'.' && segs.len() < 5 {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    #[cfg(test)]
+    JWT_SCANNED.with(|c| c.set(c.get() + (j - i)));
+    // A direct-key JWE (alg dir) has an empty second segment.
+    let structural = |k: usize| {
+        segs.len() >= k
+            && segs[..k]
+                .iter()
+                .enumerate()
+                .all(|(n, &(s, e, _))| e - s >= 10 || (k == 5 && n == 1 && e == s))
+            && decodes_to_json(&b[segs[0].0..segs[0].1])
+    };
+    if structural(5) {
+        return Some(segs[4].2);
+    }
+    if structural(3) {
+        return Some(segs[2].2);
+    }
+    if b[i..].starts_with(b"eyJ") && segs.len() >= 2 && segs[1..].iter().any(|&(s, e, _)| e > s) {
+        return Some(segs[segs.len() - 1].2);
+    }
+    None
+}
+
+/// Whether base64url `seg` decodes to text whose first non-whitespace
+/// character is `{`.
+fn decodes_to_json(seg: &[u8]) -> bool {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    };
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in seg {
+        let Some(v) = val(c) else { return false };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            let byte = (acc >> bits) as u8;
+            acc &= (1 << bits) - 1;
+            match byte {
+                b' ' | b'\t' | b'\n' | b'\r' => continue,
+                b'{' => return true,
+                _ => return false,
+            }
+        }
+    }
+    false
 }
 
 /// `alg:hex` as in `sha256:<64 hex>`.
@@ -389,8 +483,26 @@ fn is_dotted_name(h: &str) -> bool {
 
 fn redact_detail(detail: &mut Option<String>) {
     if let Some(d) = detail.as_mut() {
-        *d = redact_endpoints(d);
+        *d = redact_bounded(d);
     }
+}
+
+/// [`redact_endpoints`] over at most the first [`MAX_REDACT_INPUT`] bytes
+/// of `text`. When the text is longer, the cut is moved back to the last
+/// whitespace, so a word straddling it (a URL, a host, a token that would
+/// only be partly recognised) is dropped with everything after it, never
+/// served unredacted. Callers cap the result as before.
+fn redact_bounded(text: &str) -> String {
+    if text.len() <= MAX_REDACT_INPUT {
+        return redact_endpoints(text);
+    }
+    let mut end = MAX_REDACT_INPUT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &text[..end];
+    let head = head.rfind(char::is_whitespace).map_or("", |i| &head[..i]);
+    redact_endpoints(head)
 }
 
 /// [`redact_endpoints`] over every `detail` in a stored signatures or
@@ -399,7 +511,7 @@ pub fn redact_details_json(list: &mut serde_json::Value) {
     if let Some(items) = list.as_array_mut() {
         for item in items {
             if let Some(serde_json::Value::String(d)) = item.get_mut("detail") {
-                *d = redact_endpoints(d);
+                *d = redact_bounded(d);
             }
         }
     }

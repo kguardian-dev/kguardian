@@ -61,8 +61,8 @@ The stored result for one digest, or `404`.
 - A key signature has `signerKind: "key"`, `keyName` and `keyFingerprint`
   (sha256 of the DER public key) instead of `issuer` and `san`. A
   key-signed bundle also carries `keyHint`, verified or not.
-- An unverified signature or attestation has `error` and `detail` and no
-  identity: a claimed signer is never shown as a fact. `detail` is the
+- An unverified signature or attestation has `error`, usually `detail`, and
+  no identity: a claimed signer is never shown as a fact. `detail` is the
   verifier's error text with endpoints and secrets removed, at ingest and
   again when served for rows stored earlier: URLs become `<url>`; host
   names, IP addresses and `host:port`, with anything after them, become
@@ -70,7 +70,12 @@ The stored result for one digest, or `404`.
   its `@sha256:` digest); userinfo becomes `<credentials>@`; and token,
   password or signature values, JWTs, and the word after `Bearer`, become
   `<redacted>`. Digests, reason codes and version numbers are kept. The
-  rule errs toward removing too much. `error` is the reason code. Unverified
+  rule errs toward removing too much. Only the first 4 KiB of the text is
+  redacted, and the result is cut to 256 bytes; a word crossing the 4 KiB
+  point is dropped with everything after it. So `detail` can be shorter than
+  the verifier's text, and is omitted when it can't be safely shortened
+  (for example, one unbroken word longer than 4 KiB). `error` is always
+  present and is the reason code. Unverified
   attestations carry no `provenance` either.
 - Each attestation has `predicateType`, `payloadSha256` (sha256 of the
   in-toto statement) and, for SLSA provenance, `provenance.builderId`,
