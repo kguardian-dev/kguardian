@@ -19,15 +19,15 @@
         "verified": true
       }
     ],
-    "checkedAt": "2026-09-26T22:56:02",
+    "checkedAt": "2026-09-27T01:36:12",
     "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
     "reason": null,
-    "receivedAt": "2026-09-27T01:56:02.994042",
+    "receivedAt": "2026-09-27T04:36:12.140498",
     "repository": "ghcr.io/example/checkout",
     "signatures": [
       {
         "format": "sigstore-bundle",
-        "integratedTime": "2026-09-24T01:56:02Z",
+        "integratedTime": "2026-09-24T04:36:12Z",
         "issuer": "https://token.actions.githubusercontent.com",
         "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
         "signerKind": "keyless",
@@ -41,7 +41,7 @@
     "trustRoot": "public-good",
     "verdict": "verified"
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/attestation",
   "status": 200
 }

@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "firstSeen": "2026-09-27T01:56:01.757027Z",
+                "firstSeen": "2026-09-27T04:36:10.894784Z",
                 "imageRef": "ghcr.io/example/reports:1.0.3",
                 "lastPodName": "reports-29012345-pqrst",
-                "lastSeen": "2026-09-27T01:56:01.757027Z",
+                "lastSeen": "2026-09-27T04:36:10.894784Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T04:36:10.894784Z"
         },
         "reasons": [
           {
@@ -119,7 +119,7 @@
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
-          "checkedAt": "2026-09-26T22:56:02Z",
+          "checkedAt": "2026-09-27T01:36:12Z",
           "container": "reports",
           "counts": {
             "invalid": 0,
@@ -132,7 +132,7 @@
           "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
           "digests": [
             {
-              "checkedAt": "2026-09-26T22:56:02Z",
+              "checkedAt": "2026-09-27T01:36:12Z",
               "container": "reports",
               "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
               "reason": null,
@@ -144,7 +144,7 @@
             "available": false,
             "evaluatedAt": null,
             "policies": [],
-            "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56431/image-trust?namespace=payments)",
+            "reason": "the evaluator could not be reached: connection failed",
             "results": [],
             "total": 0,
             "truncated": false,
@@ -235,7 +235,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T04:36:10.894784Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -386,7 +386,7 @@
         "title": "Container reports root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:06.406995281Z",
+    "generatedAt": "2026-09-27T04:36:15.524122910Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -462,7 +462,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
   "request": "GET /workloads/payments/CronJob/reports/profile",
   "status": 200
 }

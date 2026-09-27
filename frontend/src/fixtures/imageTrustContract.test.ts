@@ -84,3 +84,20 @@ test('every verdict is an evaluator verdict constant, and every reason an evalua
     if (r.reason != null) expect([...EVALUATOR_REASONS, ...DISCOVERY_REASONS], `${from}: reason ${String(r.reason)}`).toContain(r.reason);
   }
 });
+
+/** Every imageTrust `reason` in the captured profiles (unavailable answers and per-result reasons). */
+const REASONS_SHOWN = VULN_CAPTURES.flatMap((c) => {
+  const body = c.body as Partial<WorkloadProfile> | null;
+  const t = body && typeof body === 'object' ? body.dimensions?.images?.supplyChain?.imageTrust : undefined;
+  if (!t) return [];
+  return [t.reason, ...(t.results ?? []).map((r) => r.reason)].filter((r): r is string => typeof r === 'string').map((reason) => ({ from: c.request, reason }));
+});
+
+test('no image trust reason the UI shows carries an internal address (URL, host:port)', () => {
+  // The evaluator-down fixtures must be among them, or this proves nothing.
+  expect(REASONS_SHOWN.some((x) => /evaluator/i.test(x.reason))).toBe(true);
+  for (const { from, reason } of REASONS_SHOWN) {
+    expect(reason, `${from}: ${reason}`).not.toMatch(/:\/\//);
+    expect(reason, `${from}: ${reason}`).not.toMatch(/\b(?:\d{1,3}(?:\.\d{1,3}){3}|localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/i);
+  }
+});

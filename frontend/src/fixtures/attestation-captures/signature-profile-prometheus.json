@@ -97,10 +97,10 @@
             "running": [
               {
                 "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
-                "firstSeen": "2026-09-27T01:56:01.771147Z",
+                "firstSeen": "2026-09-27T04:36:10.908456Z",
                 "imageRef": "quay.io/prometheus/prometheus:v2.54.1",
                 "lastPodName": "prometheus-0",
-                "lastSeen": "2026-09-27T01:56:01.771147Z",
+                "lastSeen": "2026-09-27T04:36:10.908456Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -113,7 +113,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:56:01.771147Z"
+          "observedSince": "2026-09-27T04:36:10.908456Z"
         },
         "reasons": [
           {
@@ -128,7 +128,7 @@
         "runningWindowSeconds": 900,
         "status": "risk",
         "supplyChain": {
-          "checkedAt": "2026-09-26T22:56:02Z",
+          "checkedAt": "2026-09-27T01:36:12Z",
           "container": "prometheus",
           "counts": {
             "invalid": 1,
@@ -141,7 +141,7 @@
           "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
           "digests": [
             {
-              "checkedAt": "2026-09-26T22:56:02Z",
+              "checkedAt": "2026-09-27T01:36:12Z",
               "container": "prometheus",
               "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
               "reason": "bad_signature",
@@ -151,7 +151,7 @@
           ],
           "imageTrust": {
             "available": true,
-            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
+            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
             "policies": [
               "cluster/monitoring-signed"
             ],
@@ -256,7 +256,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:56:01.771147Z"
+          "observedSince": "2026-09-27T04:36:10.908456Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -407,7 +407,7 @@
         "title": "Container prometheus root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:03.186911206Z",
+    "generatedAt": "2026-09-27T04:36:12.335085427Z",
     "posture": {
       "coverage": 0.5,
       "reasons": [
@@ -482,7 +482,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/observability/StatefulSet/prometheus/profile",
   "status": 200
 }

@@ -3,7 +3,7 @@
     "items": [
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T22:56:02",
+        "checkedAt": "2026-09-27T01:36:12",
         "container": "manager",
         "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
         "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
@@ -18,7 +18,7 @@
     ],
     "nextAfter": null
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /attestations/running?namespace=flux-system",
   "status": 200
 }

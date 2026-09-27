@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
-                "firstSeen": "2026-09-27T01:56:01.785011Z",
+                "firstSeen": "2026-09-27T04:36:10.922872Z",
                 "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
                 "lastPodName": "source-controller-8b9c0-abcde",
-                "lastSeen": "2026-09-27T01:56:01.785011Z",
+                "lastSeen": "2026-09-27T04:36:10.922872Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:56:01.785011Z"
+          "observedSince": "2026-09-27T04:36:10.922872Z"
         },
         "reasons": [
           {
@@ -133,7 +133,7 @@
           "digests": [],
           "imageTrust": {
             "available": true,
-            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
+            "evaluatedAt": "2026-09-27T14:36:11.004315196+10:00",
             "policies": [
               "cluster/monitoring-signed"
             ],
@@ -238,7 +238,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:56:01.785011Z"
+          "observedSince": "2026-09-27T04:36:10.922872Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -380,7 +380,7 @@
         "title": "Container manager root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:10.501013066Z",
+    "generatedAt": "2026-09-27T04:36:18.768002377Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -456,7 +456,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 46f9701ef (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/flux-system/Deployment/source-controller/profile",
   "status": 200
 }
