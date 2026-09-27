@@ -1084,6 +1084,15 @@ const REDACTION_CASES: &[(&str, &str)] = &[
     ("X-Amz-Signature=deadbeef expired", "X-Amz-Signature=<redacted> expired"),
     ("Authorization: Bearer eyJabc.def.ghi rejected", "Authorization: Bearer <redacted> rejected"),
     ("header Basic dXNlcjpwYXNz", "header Basic <redacted>"),
+    // JWTs: a secret, labelled <redacted> (not <host>) wherever they sit.
+    ("token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl expired", "token <redacted> expired"),
+    ("Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl", "Authorization: Bearer <redacted>"),
+    ("GET /v2/token?assertion=eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl 401", "GET /v2/token?… 401"),
+    ("callback?state=eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl&x=1 rejected", "callback?state=<redacted>&x=1 rejected"),
+    // An unsecured JWT (alg none) ends in an empty signature: the dot is
+    // part of the token.
+    ("unsigned eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0. rejected", "unsigned <redacted> rejected"),
+    ("id eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl: invalid", "id <redacted>: invalid"),
     // Must pass unchanged.
     (
         "bad_signature: signature for sha256:0123456789abcdef does not match",

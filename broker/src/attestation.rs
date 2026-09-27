@@ -176,6 +176,10 @@ pub fn redact_endpoints(text: &str) -> String {
 
 /// One whitespace/quote-delimited word of [`redact_endpoints`].
 fn redact_word(word: &str) -> String {
+    // A JWT is a secret wherever it sits (alone, after `key=`, in a
+    // query): `<redacted>`, not mistaken for a dotted host name.
+    let jwt_free = redact_jwts(word);
+    let word = jwt_free.as_str();
     // Trailing sentence punctuation stays outside ("lookup host: ...").
     let core = word.trim_end_matches(['.', ':', '!', '?']);
     let punct = &word[core.len()..];
@@ -214,6 +218,40 @@ fn redact_word(word: &str) -> String {
         }
     }
     redact_secrets(word)
+}
+
+/// Replaces each JWT (`eyJ<b64url>.<b64url>[.<b64url>]`, starting the
+/// word or after a non-base64url character such as `=`) with `<redacted>`.
+fn redact_jwts(word: &str) -> String {
+    let b64 = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
+    let bytes = word.as_bytes();
+    let mut out = String::with_capacity(word.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_start = i == 0 || !b64(bytes[i - 1]);
+        if at_start && bytes[i..].starts_with(b"eyJ") {
+            // header, '.', payload (non-empty), then an optional '.sig'.
+            let seg = |from: usize| from + bytes[from..].iter().take_while(|&&c| b64(c)).count();
+            let h = seg(i);
+            if h < bytes.len() && bytes[h] == b'.' {
+                let p = seg(h + 1);
+                if p > h + 1 {
+                    let end = if p < bytes.len() && bytes[p] == b'.' {
+                        seg(p + 1)
+                    } else {
+                        p
+                    };
+                    out.push_str("<redacted>");
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        let c = word[i..].chars().next().unwrap_or_default();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// `alg:hex` as in `sha256:<64 hex>`.

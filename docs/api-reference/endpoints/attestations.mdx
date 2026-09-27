@@ -68,7 +68,7 @@ The stored result for one digest, or `404`.
   names, IP addresses and `host:port`, with anything after them, become
   `<host>` or `<host>/…` (an image reference with a registry keeps only
   its `@sha256:` digest); userinfo becomes `<credentials>@`; and token,
-  password or signature values, and the word after `Bearer`, become
+  password or signature values, JWTs, and the word after `Bearer`, become
   `<redacted>`. Digests, reason codes and version numbers are kept. The
   rule errs toward removing too much. `error` is the reason code. Unverified
   attestations carry no `provenance` either.
