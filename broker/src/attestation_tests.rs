@@ -1022,3 +1022,206 @@ fn verified_without_a_signer_identity_is_not_verified() {
         "an unverified attestation's provenance is not a fact"
     );
 }
+
+/// `detail` never shows API clients a URL or a host:port; digests, reason
+/// codes and the rest of the text survive.
+#[test]
+fn detail_redacts_urls_and_host_ports() {
+    for (input, want) in REDACTION_CASES {
+        let got = redact_endpoints(input);
+        assert_eq!(&got, want, "{input}");
+        assert!(!got.contains("://"), "{input}");
+        // Ingest redacts and the read path redacts again.
+        assert_eq!(redact_endpoints(&got), got, "not idempotent: {input}");
+    }
+}
+
+/// `detail` in, what API clients see out. The first block must redact;
+/// the last block (digests, reason codes, versions, times) must pass
+/// unchanged.
+const REDACTION_CASES: &[(&str, &str)] = &[
+    // The review's three leaks and bare IPv6.
+    ("user:pass@reg.example.com:443/v2/?token=abc", "<credentials>@<host>/…"),
+    ("dial tcp: lookup registry.internal: no such host", "dial tcp: lookup <host>: no such host"),
+    ("fetching reg.corp.example/v2/x failed", "fetching <host>/… failed"),
+    ("dial fd00::5:5000 refused", "dial <host> refused"),
+    ("dial tcp [fd00::5]:5000: refused", "dial tcp <host>: refused"),
+    // Already handled before, kept.
+    (
+        "GET https://ghcr.io/v2/org/app/manifests/sha256-abc.sig: UNAUTHORIZED: authentication required",
+        "GET <url>: UNAUTHORIZED: authentication required",
+    ),
+    (
+        "Get \"http://registry.local:5000/v2/\": dial tcp 10.0.0.5:5000: connect: connection refused",
+        "Get \"<url>\": dial tcp <host>: connect: connection refused",
+    ),
+    ("lookup on 10.96.0.10:53: no such host", "lookup on <host>: no such host"),
+    ("dial tcp [::1]:5000: refused", "dial tcp <host>: refused"),
+    ("oci://example/app (referrers)", "<url> (referrers)"),
+    ("connect to 10.1.2.3 failed", "connect to <host> failed"),
+    // Hostname shapes.
+    ("lookup registry.internal. failed", "lookup <host>. failed"),
+    ("host \"registry.internal.\" unreachable", "host \"<host>.\" unreachable"),
+    ("GET REG.CORP.EXAMPLE/V2/ denied", "GET <host>/… denied"),
+    ("lookup xn--bcher-kva.xn--p1ai: no such host", "lookup <host>: no such host"),
+    ("lookup bücher.example: timeout", "lookup <host>: timeout"),
+    ("pull registry.例え.jp/app failed", "pull <host>/… failed"),
+    ("dial registry.kube-system.svc.cluster.local:5000", "dial <host>"),
+    ("pull from localhost:5000/app failed", "pull from <host>/… failed"),
+    ("pull registry:5000/app failed", "pull <host>/… failed"),
+    ("image localhost:5000/app:1.0 missing", "image <host>/… missing"),
+    (
+        "ref ghcr.io/org/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bad",
+        "ref <host>/…@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef bad",
+    ),
+    // Credentials and tokens.
+    ("robot$ci@registry.internal/app denied", "<credentials>@<host>/… denied"),
+    ("auth as admin:s3cret@10.0.0.5:5000", "auth as <credentials>@<host>"),
+    ("see reg.example.com/v2/#access_token=abc", "see <host>/…"),
+    ("GET /v2/app/token?scope=x&password=hunter2 401", "GET /v2/app/token?… 401"),
+    ("callback#access_token=abc123 rejected", "callback#access_token=<redacted> rejected"),
+    ("retry with token=abc&x=1 password=hunter2", "retry with token=<redacted>&x=1 password=<redacted>"),
+    ("X-Amz-Signature=deadbeef expired", "X-Amz-Signature=<redacted> expired"),
+    ("Authorization: Bearer eyJabc.def.ghi rejected", "Authorization: Bearer <redacted> rejected"),
+    ("header Basic dXNlcjpwYXNz", "header Basic <redacted>"),
+    // Must pass unchanged.
+    (
+        "bad_signature: signature for sha256:0123456789abcdef does not match",
+        "bad_signature: signature for sha256:0123456789abcdef does not match",
+    ),
+    (
+        "digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ),
+    ("no_signer_identity untrusted_root registry_auth", "no_signer_identity untrusted_root registry_auth"),
+    (
+        "cosign v2.4.1 on go1.27.1 with k8s 1.34.1 and 1.0.0-beta (v1.2.3-rc.1)",
+        "cosign v2.4.1 on go1.27.1 with k8s 1.34.1 and 1.0.0-beta (v1.2.3-rc.1)",
+    ),
+    ("status:404 at 12:35:00Z, e.g. a retry", "status:404 at 12:35:00Z, e.g. a retry"),
+    ("x509: certificate signed by unknown authority", "x509: certificate signed by unknown authority"),
+    ("signed with a public key; no keys are configured", "signed with a public key; no keys are configured"),
+];
+
+/// Ingest and the read path both redact, so rows stored before the rule
+/// are served redacted too.
+#[test]
+fn detail_is_redacted_at_ingest_and_on_read() {
+    let mut b = body(&d(1), "verified");
+    b["signatures"][1]["detail"] =
+        json!("GET https://registry.internal:8443/v2/app/manifests/x: 401");
+    b["attestations"][1]["detail"] = json!("dial tcp 10.1.2.3:443: i/o timeout");
+    let p = parse(&b, &d(1)).unwrap();
+    assert_eq!(p.signatures[1].detail.as_deref(), Some("GET <url>: 401"));
+    assert_eq!(
+        p.attestations[1].detail.as_deref(),
+        Some("dial tcp <host>: i/o timeout")
+    );
+    let mut stored = json!([{"verified": false, "error": "registry_auth", "detail": "Get \"https://reg.example.com:5000/v2/\": 401"}]);
+    redact_details_json(&mut stored);
+    assert_eq!(stored[0]["detail"], "Get \"<url>\": 401");
+}
+
+/// Every redaction case through the real routes: POST
+/// /images/{d}/attestation stores the redacted detail, and GET redacts a
+/// row written before the rule (inserted raw, as a legacy row would be).
+#[actix_web::test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+async fn live_detail_redaction_through_the_routes() {
+    use actix_web::http::header;
+    use actix_web::{middleware::from_fn, test as atest, App};
+    use diesel::r2d2::{self, ConnectionManager};
+    const SC: &str = "supplychain-token-0123456789";
+    const READ: &str = "read-token-0123456789";
+    let mut conn = live_conn();
+    let url = std::env::var("KG_TEST_DATABASE_URL").unwrap();
+    let pool = r2d2::Pool::builder()
+        .max_size(2)
+        .build(ConnectionManager::<PgConnection>::new(url))
+        .unwrap();
+    let auth = crate::auth::AuthConfig::from_lookup(|k| match k {
+        "BROKER_TOKEN_SUPPLYCHAIN" => Some(SC.to_string()),
+        "BROKER_TOKEN_READ" => Some(READ.to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let app = atest::init_service(
+        App::new()
+            .wrap(from_fn(crate::auth::authenticate))
+            .app_data(actix_web::web::Data::new(auth))
+            .app_data(actix_web::web::Data::new(pool))
+            .app_data(actix_web::web::Data::new(
+                crate::ReadBudget::with_budget_kib(64 * 1024, std::time::Duration::from_secs(1)),
+            ))
+            .configure(crate::routes::configure),
+    )
+    .await;
+    let get = |dg: &str| {
+        atest::TestRequest::get()
+            .uri(&format!("/images/{dg}/attestation"))
+            .insert_header((header::AUTHORIZATION, format!("Bearer {READ}")))
+            .to_request()
+    };
+    for (i, (input, want)) in REDACTION_CASES.iter().enumerate() {
+        // Ingest: stored redacted.
+        let dg = d(1000 + i as u32);
+        add_image(&mut conn, &dg);
+        let mut v = body(&dg, "verified");
+        // The fixture's checked_at is fixed; ingest refuses a future one.
+        v["checked_at"] = json!((Utc::now() - chrono::Duration::minutes(1)).to_rfc3339());
+        v["signatures"][1]["detail"] = json!(input);
+        v["attestations"][1]["detail"] = json!(input);
+        let resp = atest::call_service(
+            &app,
+            atest::TestRequest::post()
+                .uri(&format!("/images/{dg}/attestation"))
+                .insert_header((header::AUTHORIZATION, format!("Bearer {SC}")))
+                .insert_header((header::CONTENT_TYPE, "application/json"))
+                .set_payload(serde_json::to_vec(&v).unwrap())
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success(), "{input}: {}", resp.status());
+        let stored: String = sql_query(
+            "SELECT signatures->1->>'detail' AS s FROM image_attestations WHERE digest = $1",
+        )
+        .bind::<Text, _>(&dg)
+        .get_result::<StoredDetail>(&mut conn)
+        .unwrap()
+        .s;
+        assert_eq!(&stored, want, "stored at ingest: {input}");
+        let out: serde_json::Value = atest::call_and_read_body_json(&app, get(&dg)).await;
+        assert_eq!(
+            out["signatures"][1]["detail"], *want,
+            "read after ingest: {input}"
+        );
+        assert_eq!(
+            out["attestations"][1]["detail"], *want,
+            "read after ingest: {input}"
+        );
+
+        // Legacy row: the raw text in the database, redacted on read.
+        sql_query(
+            "UPDATE image_attestations SET \
+             signatures = jsonb_set(signatures, '{1,detail}', to_jsonb($2::text)), \
+             attestations = jsonb_set(attestations, '{1,detail}', to_jsonb($2::text)) \
+             WHERE digest = $1",
+        )
+        .bind::<Text, _>(&dg)
+        .bind::<Text, _>(*input)
+        .execute(&mut conn)
+        .unwrap();
+        let out: serde_json::Value = atest::call_and_read_body_json(&app, get(&dg)).await;
+        assert_eq!(out["signatures"][1]["detail"], *want, "legacy row: {input}");
+        assert_eq!(
+            out["attestations"][1]["detail"], *want,
+            "legacy row: {input}"
+        );
+    }
+}
+
+#[derive(diesel::QueryableByName)]
+struct StoredDetail {
+    #[diesel(sql_type = Text)]
+    s: String,
+}

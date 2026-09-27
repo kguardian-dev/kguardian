@@ -11,7 +11,7 @@
             "truncated": false
         }
     },
-    "generatedAt": "2026-09-27T00:43:30.795559070Z",
+    "generatedAt": "2026-09-27T02:20:36.676579975Z",
     "contentHash": "fnv1a64:2dd7444ad19c0d09",
     "version": {
         "revision": 1,
@@ -421,7 +421,7 @@
                 },
                 "imageTrust": {
                     "available": false,
-                    "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust?namespace=shop)",
+                    "reason": "the evaluator could not be reached: connection failed",
                     "evaluatedAt": null,
                     "total": 0,
                     "wouldDeny": 0,

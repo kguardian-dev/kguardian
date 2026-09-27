@@ -231,18 +231,15 @@ pub async fn fetch_bounded(
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
+    // Every reason below is a fixed phrase plus a coarse cause: API
+    // clients (read scope) see it, so it never carries the evaluator's URL,
+    // host, port, query or the HTTP client's error text. The full error is
+    // logged here instead.
     let mut resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, "image trust: evaluator unreachable");
-            return Err(if e.is_timeout() {
-                format!(
-                    "the evaluator did not answer within {} ms",
-                    timeout.as_millis()
-                )
-            } else {
-                format!("the evaluator could not be reached: {e}")
-            });
+            warn!(error = %e, "image trust: evaluator request failed");
+            return Err(Cause::from_send(&e).reason(timeout));
         }
     };
     match resp.status().as_u16() {
@@ -257,7 +254,12 @@ pub async fn fetch_bounded(
                 "the evaluator refused the broker's read token; check that the broker and the evaluator hold the same READ-scope token",
             ))
         }
-        s => return Err(format!("the evaluator answered {s}")),
+        s => {
+            // Server-side log only: the operator needs to know which
+            // evaluator answered.
+            warn!(status = s, url = %resp.url(), "image trust: evaluator answered an unexpected status");
+            return Err(Cause::Status(s).reason(timeout));
+        }
     }
     let mut body = Vec::new();
     loop {
@@ -271,18 +273,61 @@ pub async fn fetch_bounded(
                 body.extend_from_slice(&c);
             }
             Ok(None) => break,
-            Err(e) if e.is_timeout() => {
-                return Err(format!(
-                    "the evaluator's answer did not arrive within {} ms",
-                    timeout.as_millis()
-                ))
+            Err(e) => {
+                warn!(error = %e, "image trust: reading the evaluator's answer failed");
+                return Err(if e.is_timeout() {
+                    Cause::BodyTimeout
+                } else {
+                    Cause::BodyRead
+                }
+                .reason(timeout));
             }
-            Err(e) => return Err(format!("reading the evaluator's answer: {e}")),
         }
     }
     match serde_json::from_slice::<EvaluatorAnswer>(&body) {
         Ok(a) => Ok((a.evaluated_at, a.results)),
-        Err(e) => Err(format!("the evaluator's answer did not parse: {e}")),
+        Err(e) => {
+            warn!(error = %e, "image trust: the evaluator's answer did not parse");
+            Err(Cause::Invalid.reason(timeout))
+        }
+    }
+}
+
+/// Why an evaluator read failed, coarse enough to show to any API client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cause {
+    Timeout,
+    Connect,
+    Request,
+    Status(u16),
+    BodyTimeout,
+    BodyRead,
+    Invalid,
+}
+
+impl Cause {
+    fn from_send(e: &reqwest::Error) -> Cause {
+        if e.is_timeout() {
+            Cause::Timeout
+        } else if e.is_connect() {
+            Cause::Connect
+        } else {
+            Cause::Request
+        }
+    }
+
+    /// The user-safe reason: fixed words and numbers only.
+    pub(crate) fn reason(self, timeout: Duration) -> String {
+        let ms = timeout.as_millis();
+        match self {
+            Cause::Timeout => format!("the evaluator did not answer within {ms} ms"),
+            Cause::Connect => "the evaluator could not be reached: connection failed".into(),
+            Cause::Request => "the evaluator could not be reached: request failed".into(),
+            Cause::Status(s) => format!("the evaluator answered with status {s}"),
+            Cause::BodyTimeout => format!("the evaluator's answer did not arrive within {ms} ms"),
+            Cause::BodyRead => "the evaluator's answer could not be read".into(),
+            Cause::Invalid => "the evaluator sent an invalid response".into(),
+        }
     }
 }
 

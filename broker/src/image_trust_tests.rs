@@ -138,7 +138,7 @@ async fn fetch_failures_are_unavailable_never_empty() {
         (404, "image trust evaluation is off"),
         (401, "refused the broker's read token"),
         (403, "refused the broker's read token"),
-        (500, "answered 500"),
+        (500, "answered with status 500"),
     ] {
         let url = fake_evaluator(status, "{}").await;
         let reason = fetch(&url, None, None, None).await.unwrap_err();
@@ -148,7 +148,7 @@ async fn fetch_failures_are_unavailable_never_empty() {
     assert!(fetch(&url, None, None, None)
         .await
         .unwrap_err()
-        .contains("did not parse"));
+        .contains("sent an invalid response"));
     // Nothing listening.
     let reason = fetch("http://127.0.0.1:1", None, None, None)
         .await
@@ -573,4 +573,112 @@ async fn for_workload_is_single_flight() {
         1,
         "exactly one evaluator read"
     );
+}
+
+/// A reason shown to API clients never carries the evaluator's address or
+/// the HTTP client's error text.
+fn assert_user_safe(reason: &str) {
+    for bad in [
+        "http",
+        "://",
+        "127.0.0.1",
+        "localhost",
+        "?namespace",
+        "error sending",
+        "tcp",
+        "os error",
+    ] {
+        assert!(
+            !reason.to_ascii_lowercase().contains(bad),
+            "{bad:?} in {reason:?}"
+        );
+    }
+    // No host:port (a colon followed by digits).
+    let b = reason.as_bytes();
+    for i in 0..b.len().saturating_sub(1) {
+        assert!(
+            !(b[i] == b':' && b[i + 1].is_ascii_digit()),
+            "a port in {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn every_cause_reason_is_user_safe() {
+    let t = std::time::Duration::from_millis(2_000);
+    for c in [
+        Cause::Timeout,
+        Cause::Connect,
+        Cause::Request,
+        Cause::Status(502),
+        Cause::BodyTimeout,
+        Cause::BodyRead,
+        Cause::Invalid,
+    ] {
+        let r = c.reason(t);
+        assert_user_safe(&r);
+        assert!(r.starts_with("the evaluator"), "{r}");
+    }
+    assert_eq!(
+        Cause::Connect.reason(t),
+        "the evaluator could not be reached: connection failed"
+    );
+    assert_eq!(
+        Cause::Status(502).reason(t),
+        "the evaluator answered with status 502"
+    );
+}
+
+/// Real failures: a closed port, a stall, a bad status and a bad body
+/// all give a safe reason, never the URL or the client's error text.
+#[actix_web::test]
+async fn real_failures_give_user_safe_reasons() {
+    for base in [
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:9",
+        "http://localhost:1",
+    ] {
+        let r = fetch_bounded(
+            base,
+            None,
+            Some("shop"),
+            None,
+            1024,
+            std::time::Duration::from_millis(1_500),
+        )
+        .await
+        .unwrap_err();
+        assert_user_safe(&r);
+        assert!(
+            r.starts_with("the evaluator could not be reached")
+                || r.starts_with("the evaluator did not answer"),
+            "{r}"
+        );
+    }
+    let (stall, _) = counting_evaluator(std::time::Duration::from_secs(5), ONE_DENY).await;
+    let r = fetch_bounded(
+        &stall,
+        None,
+        Some("shop"),
+        None,
+        1024,
+        std::time::Duration::from_millis(300),
+    )
+    .await
+    .unwrap_err();
+    assert_user_safe(&r);
+    assert_eq!(r, "the evaluator did not answer within 300 ms");
+    for (status, body, want) in [
+        (500, "{}", "the evaluator answered with status 500"),
+        (
+            200,
+            "<html>not json</html>",
+            "the evaluator sent an invalid response",
+        ),
+    ] {
+        let url = fake_evaluator(status, body).await;
+        let r = fetch(&url, None, Some("shop"), None).await.unwrap_err();
+        assert_user_safe(&r);
+        assert_eq!(r, want);
+    }
 }

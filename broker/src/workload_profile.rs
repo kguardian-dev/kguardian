@@ -6347,6 +6347,68 @@ mod live_tests {
         reset(&mut live_conn(), ns);
     }
 
+    /// EVALUATOR_URL at a closed port: the profile's imageTrust reason is
+    /// the fixed, user-safe one, never the evaluator's URL or the client's
+    /// error text.
+    #[actix_web::test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    async fn live_profile_evaluator_reason_hides_the_url() {
+        use actix_web::{test as atest, App};
+        let ns = "kgtest-profile-reason";
+        {
+            let mut conn = live_conn();
+            reset(&mut conn, ns);
+            seed(&mut conn, ns, '4', "{}");
+        }
+        let audit = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("EVALUATOR_URL", "http://127.0.0.1:1");
+            let a = crate::audit::AuditClient::from_env();
+            std::env::remove_var("EVALUATOR_URL");
+            a
+        };
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(2)
+            .build(ConnectionManager::<PgConnection>::new(
+                std::env::var("KG_TEST_DATABASE_URL").unwrap(),
+            ))
+            .unwrap();
+        let app = atest::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(ReadBudget::with_budget_kib(
+                    512 * 1024,
+                    std::time::Duration::from_millis(0),
+                )))
+                .app_data(web::Data::new(audit))
+                .service(get_workload_profile),
+        )
+        .await;
+        let req = atest::TestRequest::get()
+            .uri(&format!("/workloads/{ns}/Deployment/checkout/profile"))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let it = &v["dimensions"]["images"]["supplyChain"]["imageTrust"];
+        assert_eq!(it["available"], false);
+        assert_eq!(
+            it["reason"],
+            "the evaluator could not be reached: connection failed"
+        );
+        let text = String::from_utf8_lossy(&body);
+        for bad in [
+            "127.0.0.1:1",
+            "http://127.0.0.1",
+            "error sending request",
+            "?namespace=",
+        ] {
+            assert!(!text.contains(bad), "{bad} in the profile body");
+        }
+        reset(&mut live_conn(), ns);
+    }
+
     /// The profile GET with a stalled evaluator: served in about
     /// PROFILE_TIMEOUT with imageTrust unavailable, everything else intact.
     #[actix_web::test]

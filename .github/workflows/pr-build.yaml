@@ -503,9 +503,18 @@ jobs:
           base="$(git ls-tree --name-only FETCH_HEAD broker/db/migrations/ | xargs -r -n1 basename | sort)"
           max="$(cut -d_ -f1 <<<"$base" | sort | tail -1)"
           [ -n "$max" ] || { echo "::error::no migrations found on $BASE_REF"; exit 1; }
+          echo "base $BASE_REF newest migration: $max"
+          checked=0
           for m in $(comm -13 <(echo "$base") <(ls broker/db/migrations | sort)); do
             [[ "${m%%_*}" > "$max" ]] || { echo "::error::migration $m must sort after $max (the base's newest)"; exit 1; }
+            echo "OK: $m sorts after $max"
+            checked=$((checked + 1))
           done
+          if [ "$checked" -eq 0 ]; then
+            echo "no new migrations; base newest $max"
+          else
+            echo "new migrations checked: $checked"
+          fi
 
       - name: Install system dependencies
         # diesel-postgres links against libpq at build time; libpq5 in the
