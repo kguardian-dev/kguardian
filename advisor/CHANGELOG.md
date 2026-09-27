@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.10.0...advisor/v1.11.0) (2026-09-27)
+
+
+### Features
+
+* **advisor:** add images vulns/sbom and vulns list/exposure commands ([e20a974](https://github.com/kguardian-dev/kguardian/commit/e20a974db94fb2de2c816ca51f9ae5161e7e854e))
+* **advisor:** add profile and images commands ([df21a49](https://github.com/kguardian-dev/kguardian/commit/df21a4964045e4f47338242f136f3611921ed94c))
+* **advisor:** adopt profile contract v1.2 (no scores) ([acb5c9a](https://github.com/kguardian-dev/kguardian/commit/acb5c9ab06d75e712a8fe248362caf132c635431))
+* **advisor:** adopt profile contract v1.3 status rules ([9009d6f](https://github.com/kguardian-dev/kguardian/commit/9009d6fdd4245b2130286852f4baec5d68e563cf))
+* **advisor:** broker token for the CLI and errors on 401/403 ([199fee1](https://github.com/kguardian-dev/kguardian/commit/199fee1707c40a2b2a7ac2df627b8f806fbe7666))
+* **advisor:** images admission-policy command ([41200d6](https://github.com/kguardian-dev/kguardian/commit/41200d6144feb6656c05bb86c465392bdd39dde6))
+* **advisor:** images signers and images trust, with --fail-on gates ([52aeaff](https://github.com/kguardian-dev/kguardian/commit/52aeaff9382dfd24b355ebde4cf498f1c8f028fd))
+* **advisor:** profile get shows the ImageTrustPolicy results ([947a834](https://github.com/kguardian-dev/kguardian/commit/947a8341dd9aba0374322b34d181b08c3f19eee8))
+* **advisor:** profile get summarises drift and what was not evaluated ([44f2683](https://github.com/kguardian-dev/kguardian/commit/44f2683d7a89d780f43227d47799665748aa40f4))
+* **advisor:** show the worst signature verdict in profile get ([63b235e](https://github.com/kguardian-dev/kguardian/commit/63b235e5265709f5d7721c7c53f13bfb8c628bdf))
+
+
+### Bug Fixes
+
+* **advisor:** a '-' tier means not computed yet, never low risk ([560bafc](https://github.com/kguardian-dev/kguardian/commit/560bafc07d02cd765709737038ea5fa6127c9ea6))
+* **advisor:** a key fingerprint names a signer only on a key signer ([e9c3f05](https://github.com/kguardian-dev/kguardian/commit/e9c3f05a593a1bef0017b0f127a49a501e7b3572))
+* **advisor:** add a token hint to auth errors and print unknown diff levels as unknown ([989fbbb](https://github.com/kguardian-dev/kguardian/commit/989fbbb8f1ce1650a2b40ec5aed9439eb7c34bd2))
+* **advisor:** drop 'scanners found' from the vulns help ([97e86b8](https://github.com/kguardian-dev/kguardian/commit/97e86b886db9dede00439b98ef11455498e73a8c))
+* **advisor:** exit 2 when images vulns --fail-on could not check ([e22980f](https://github.com/kguardian-dev/kguardian/commit/e22980ff464c42622fc5788fd607532831bb827a))
+* **advisor:** images signers treats a verified result without a signer identity as unknown ([96ada90](https://github.com/kguardian-dev/kguardian/commit/96ada90c5caee056a65b825d6f4074cced98c808))
+* **advisor:** label unknownDimensions as not scored ([6918d2d](https://github.com/kguardian-dev/kguardian/commit/6918d2db70b078100e574e26d7efe11290a9ea86))
+* **advisor:** name the vulnerability sources and require a full sha256 digest ([49a562a](https://github.com/kguardian-dev/kguardian/commit/49a562a74b6067bd7b718cf3fa08da48ba5091f4))
+* **advisor:** never write a truncated admission policy ([1a3d9cc](https://github.com/kguardian-dev/kguardian/commit/1a3d9cceff6510b9a18db1e804de95938dcaac23))
+* **advisor:** profile get says how many drift checks were evaluated ([34c315f](https://github.com/kguardian-dev/kguardian/commit/34c315fccb948e76301aeabb3df8f9b6e2cb71ce))
+* **advisor:** show risk tiers and in-use state for vulnerabilities ([359c772](https://github.com/kguardian-dev/kguardian/commit/359c77219f5da2c370eaa7e0b2b4c80f7245fa43))
+* **advisor:** write admission-policy -f through a temporary file and rename ([317d920](https://github.com/kguardian-dev/kguardian/commit/317d9207c5924debf8a8a2164b06844c736f6547))
+* **deps:** update kubernetes monorepo to v0.37.1 ([#1640](https://github.com/kguardian-dev/kguardian/issues/1640)) ([2ec380b](https://github.com/kguardian-dev/kguardian/commit/2ec380b9d5517e74275cc87c207c779812b28c4b))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.9.0...advisor/v1.10.0) (2026-09-11)
 
 
