@@ -122,6 +122,74 @@ fn names_a_signer(
     }
 }
 
+/// Replaces what a `detail` must not show API clients: URLs (anything with
+/// a `scheme://`) become `<url>` and `host:port` tokens become `<host>`.
+/// `detail` is the supplychain verifier's error text; registry errors quote
+/// request URLs (and the hosts and ports of private registries). The
+/// reason code in `error` is unaffected. Pure.
+pub fn redact_endpoints(text: &str) -> String {
+    let stop =
+        |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '<' | '>' | ',' | ';');
+    let mut out = String::with_capacity(text.len());
+    for token in text.split_inclusive(stop) {
+        // A token here is a run of non-stop chars plus the stop char that
+        // ended it (if any).
+        let (word, tail) = match token.char_indices().last() {
+            Some((j, c)) if stop(c) => (&token[..j], &token[j..]),
+            _ => (token, ""),
+        };
+        let lower = word.to_ascii_lowercase();
+        let redacted = if lower.contains("://") {
+            "<url>"
+        } else if is_host_port(word) {
+            "<host>"
+        } else {
+            word
+        };
+        out.push_str(redacted);
+        out.push_str(tail);
+    }
+    out
+}
+
+/// `name:port`, `1.2.3.4:port` or `[v6]:port`, optionally followed by a
+/// path: the port is 1-5 digits and the host has a dot, is `localhost`,
+/// or is bracketed. A digest (`sha256:<hex>`) is not a port.
+fn is_host_port(word: &str) -> bool {
+    let w = word.trim_end_matches(['.', ':']);
+    let hostport = w.split('/').next().unwrap_or(w);
+    let Some((host, port)) = hostport.rsplit_once(':') else {
+        return false;
+    };
+    let port_ok = !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
+    let host_ok = (host.starts_with('[') && host.ends_with(']'))
+        || host.eq_ignore_ascii_case("localhost")
+        || (host.contains('.')
+            && !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'));
+    port_ok && host_ok
+}
+
+fn redact_detail(detail: &mut Option<String>) {
+    if let Some(d) = detail.as_mut() {
+        *d = redact_endpoints(d);
+    }
+}
+
+/// [`redact_endpoints`] over every `detail` in a stored signatures or
+/// attestations array.
+pub fn redact_details_json(list: &mut serde_json::Value) {
+    if let Some(items) = list.as_array_mut() {
+        for item in items {
+            if let Some(serde_json::Value::String(d)) = item.get_mut("detail") {
+                *d = redact_endpoints(d);
+            }
+        }
+    }
+}
+
 /// What an unknown (well-formed) reason code is stored as.
 pub const UNRECOGNISED_REASON: &str = "unrecognised_reason";
 
@@ -686,6 +754,7 @@ pub fn parse_post(
         cap_str(&mut s.format, MAX_SHORT);
         cap_str(&mut s.source, MAX_SHORT);
         cap(&mut s.error, MAX_SHORT);
+        redact_detail(&mut s.detail);
         cap(&mut s.detail, MAX_DETAIL);
         cap(&mut s.subject, MAX_SHORT + 64);
         cap_signer(
@@ -706,6 +775,7 @@ pub fn parse_post(
         cap_str(&mut a.format, MAX_SHORT);
         cap_str(&mut a.source, MAX_SHORT);
         cap(&mut a.error, MAX_SHORT);
+        redact_detail(&mut a.detail);
         cap(&mut a.detail, MAX_DETAIL);
         cap(&mut a.subject, MAX_SHORT + 64);
         cap(&mut a.payload_sha256, 64);
@@ -1053,7 +1123,12 @@ async fn get_attestation(
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
     Ok(match row {
-        Some(r) => HttpResponse::Ok().json(r),
+        Some(mut r) => {
+            // Rows stored before ingest redacted `detail`.
+            redact_details_json(&mut r.signatures);
+            redact_details_json(&mut r.attestations);
+            HttpResponse::Ok().json(r)
+        }
         None => HttpResponse::NotFound().body("No data found"),
     })
 }

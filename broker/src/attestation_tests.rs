@@ -1022,3 +1022,50 @@ fn verified_without_a_signer_identity_is_not_verified() {
         "an unverified attestation's provenance is not a fact"
     );
 }
+
+/// `detail` never shows API clients a URL or a host:port; digests, reason
+/// codes and the rest of the text survive.
+#[test]
+fn detail_redacts_urls_and_host_ports() {
+    for (input, want) in [
+        (
+            "GET https://ghcr.io/v2/org/app/manifests/sha256-abc.sig: UNAUTHORIZED: authentication required",
+            "GET <url> UNAUTHORIZED: authentication required",
+        ),
+        (
+            "Get \"http://registry.local:5000/v2/\": dial tcp 10.0.0.5:5000: connect: connection refused",
+            "Get \"<url>\": dial tcp <host> connect: connection refused",
+        ),
+        ("lookup on 10.96.0.10:53: no such host", "lookup on <host> no such host"),
+        ("dial tcp [::1]:5000: refused", "dial tcp <host> refused"),
+        ("pull from localhost:5000/app failed", "pull from <host> failed"),
+        (
+            "bad_signature: signature for sha256:0123456789abcdef does not match",
+            "bad_signature: signature for sha256:0123456789abcdef does not match",
+        ),
+        ("oci://example/app (referrers)", "<url> (referrers)"),
+    ] {
+        let got = redact_endpoints(input);
+        assert_eq!(got, want, "{input}");
+        assert!(!got.contains("://"));
+    }
+}
+
+/// Ingest and the read path both redact, so rows stored before the rule
+/// are served redacted too.
+#[test]
+fn detail_is_redacted_at_ingest_and_on_read() {
+    let mut b = body(&d(1), "verified");
+    b["signatures"][1]["detail"] =
+        json!("GET https://registry.internal:8443/v2/app/manifests/x: 401");
+    b["attestations"][1]["detail"] = json!("dial tcp 10.1.2.3:443: i/o timeout");
+    let p = parse(&b, &d(1)).unwrap();
+    assert_eq!(p.signatures[1].detail.as_deref(), Some("GET <url> 401"));
+    assert_eq!(
+        p.attestations[1].detail.as_deref(),
+        Some("dial tcp <host> i/o timeout")
+    );
+    let mut stored = json!([{"verified": false, "error": "registry_auth", "detail": "Get \"https://reg.example.com:5000/v2/\": 401"}]);
+    redact_details_json(&mut stored);
+    assert_eq!(stored[0]["detail"], "Get \"<url>\": 401");
+}
