@@ -76,13 +76,11 @@ export const SIGNERS_NOTE =
 
 export const NO_SIGNER_IDENTITY = "no_signer_identity";
 
-/** A signer is named by a keyless issuer AND SAN, or a key fingerprint. */
+/** A signer is named: a key signer by its fingerprint, any other (including one with no kind) by issuer AND SAN. */
 export function namesSigner(s: Rec): boolean {
   const set = (v: unknown) => typeof v === "string" && v.trim() !== "";
-  const keyless = set(s.issuer) && set(s.san);
   if (s.signerKind === "key") return set(s.keyFingerprint);
-  if (s.signerKind === undefined || s.signerKind === null || s.signerKind === "") return keyless || set(s.keyFingerprint);
-  return keyless;
+  return set(s.issuer) && set(s.san);
 }
 
 function signer(s: Rec): Rec {

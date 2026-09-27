@@ -304,6 +304,8 @@ test("get_image_signers: verified without a signer identity is unknown, never si
     { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless", issuer: "https://token.actions.githubusercontent.com", san: "   " },
     { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless", issuer: " ", san: "https://github.com/example/app" },
     { format: "cosign-legacy", source: "sig-tag", verified: true, signerKind: "key", keyName: "release", keyFingerprint: "  " },
+    // A fingerprint without signerKind "key" is not an identity.
+    { format: "cosign-legacy", source: "sig-tag", verified: true, keyName: "release", keyFingerprint: "e2312c28" },
   ]) {
     const got = trimSigners({ ...base, signatures: [sig], attestations: [{ predicateType: "https://slsa.dev/provenance/v1", verified: true }] }) as any;
     assert.equal(got.verdict, "unknown", JSON.stringify(sig));
