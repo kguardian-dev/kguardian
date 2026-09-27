@@ -62,7 +62,10 @@ The stored result for one digest, or `404`.
   (sha256 of the DER public key) instead of `issuer` and `san`. A
   key-signed bundle also carries `keyHint`, verified or not.
 - An unverified signature or attestation has `error` and `detail` and no
-  identity: a claimed signer is never shown as a fact. Unverified
+  identity: a claimed signer is never shown as a fact. `detail` is the
+  verifier's error text with URLs replaced by `<url>` and `host:port`
+  tokens by `<host>` (at ingest, and again when served for rows stored
+  earlier); `error` is the reason code. Unverified
   attestations carry no `provenance` either.
 - Each attestation has `predicateType`, `payloadSha256` (sha256 of the
   in-toto statement) and, for SLSA provenance, `provenance.builderId`,
@@ -150,6 +153,14 @@ and bounded. One entry per (policy, running container):
   its answer was larger than 16 MiB (filter by namespace). This is
   unknown, never "nothing would be denied".
 - `evaluatedAt` is `null` until the evaluator has finished a pass.
+- `reason` is a fixed phrase with a coarse cause and never contains the
+  evaluator's address or the HTTP client's error text:
+  `the evaluator could not be reached: connection failed` (or `request
+  failed`), `the evaluator did not answer within N ms`, `the evaluator
+  answered with status N`, `the evaluator's answer did not arrive within
+  N ms`, `the evaluator's answer could not be read`, `the evaluator sent an
+  invalid response`, plus the size, image-trust-off and token cases above.
+  The broker logs the full error at warn.
 
 All reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.

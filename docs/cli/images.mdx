@@ -396,9 +396,9 @@ $ kubectl kguardian images trust -n shop --fail-on would-deny
 gate: 5 container result(s) would be denied (exit 1)
 
 $ kubectl kguardian images trust --fail-on would-deny     # evaluator down
-Image trust results are not available: the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust)
+Image trust results are not available: the evaluator could not be reached: connection failed
 Whether anything would be denied is unknown.
-gate: could not check (exit 2): the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust)
+gate: could not check (exit 2): the evaluator could not be reached: connection failed
 ```
 
 ## images admission-policy

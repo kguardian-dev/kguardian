@@ -886,7 +886,10 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
   namespace, workload, container, digest, image, verdict, reason}], truncated}`, results `WouldDeny`
   first, at most 20 (counts cover all). `available: false` with a `reason` (no evaluator, image trust
   off, token refused, unreachable, the namespace's answer over 1 MiB) and `evaluatedAt: null` are
-  unknown, never "nothing would be denied". Read live by `GET .../profile` only: at most 2 s per read (a
+  unknown, never "nothing would be denied". The `reason` is a fixed phrase with a coarse cause
+  (connection failed, timed out, status N, invalid response; the attestations API page lists them) and
+  never the evaluator's URL or the HTTP client's error text. Read live by `GET .../profile` only: at most
+  2 s per read (a
   slow or down evaluator makes it unavailable, the rest of the profile is served), cached per namespace
   for 30 s (an unavailable answer for 10 s; at most 128 namespaces and about 16 MiB of results, oldest
   evicted), shared by concurrent requests (one evaluator read per namespace at a time), and charged to
