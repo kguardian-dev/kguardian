@@ -70,8 +70,8 @@ describe('CVE drawer headline', () => {
     const labels = headlineLabels();
     expect(labels).toContain('KEV');
     expect(labels.some((l) => l?.startsWith('Exposed'))).toBe(true);
-    // In use is unknown on every captured row (no runtime inventory on main yet).
-    expect(labels).toContain('Loaded: unknown');
+    // openssl ran in checkout (the Broker's runtime inventory).
+    expect(labels).toContain('Executed');
     expect(labels).not.toContain('No outside ingress seen (7d)');
   });
 

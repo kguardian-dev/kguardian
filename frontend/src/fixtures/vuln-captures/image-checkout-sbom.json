@@ -4,7 +4,11 @@
     "items": [
       {
         "class": null,
-        "filePaths": [],
+        "filePaths": [
+          "/usr/bin/openssl",
+          "/usr/lib/libssl.so.3",
+          "/usr/lib/libcrypto.so.3"
+        ],
         "id": 1,
         "layerDigest": null,
         "licenses": [
@@ -19,7 +23,9 @@
       },
       {
         "class": null,
-        "filePaths": [],
+        "filePaths": [
+          "/usr/lib/libz.so.1.3.1"
+        ],
         "id": 2,
         "layerDigest": null,
         "licenses": [
@@ -34,7 +40,9 @@
       },
       {
         "class": null,
-        "filePaths": [],
+        "filePaths": [
+          "/bin/busybox"
+        ],
         "id": 3,
         "layerDigest": null,
         "licenses": [
@@ -89,12 +97,12 @@
       "osEosl": false,
       "osFamily": null,
       "osName": null,
-      "receivedAt": "2026-09-26T09:31:43.687573",
+      "receivedAt": "2026-09-27T01:27:37.070235",
       "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
       "sbomFormat": "CycloneDX",
       "sbomSources": [],
       "sbomTrust": "scanned",
-      "scannedAt": "2026-09-26T03:31:41",
+      "scannedAt": "2026-09-26T19:27:36",
       "scannerName": "Trivy",
       "scannerVersion": "0.58.1",
       "source": "trivy-operator"
@@ -110,19 +118,19 @@
         "osEosl": false,
         "osFamily": null,
         "osName": null,
-        "receivedAt": "2026-09-26T09:31:43.687573",
+        "receivedAt": "2026-09-27T01:27:37.070235",
         "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
         "sbomFormat": "CycloneDX",
         "sbomSources": [],
         "sbomTrust": "scanned",
-        "scannedAt": "2026-09-26T03:31:41",
+        "scannedAt": "2026-09-26T19:27:36",
         "scannerName": "Trivy",
         "scannerVersion": "0.58.1",
         "source": "trivy-operator"
       }
     ]
   },
-  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/sbom",
   "status": 200
 }

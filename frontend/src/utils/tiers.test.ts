@@ -71,9 +71,19 @@ test("a finding's chips are the Broker's factors with the facts' labels", () => 
   const checkout = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body;
   const kev = checkout.items.find((f) => f.id === 'CVE-2099-0001')!;
   expect(kev.tier).toBe('P0');
-  // No runtime inventory on main yet: in use is unknown, for a stated reason.
-  expect(findingFactors(kev).map((f) => f.label).sort()).toEqual(['CVSS 9.8', 'EPSS 34%', 'Exposed', 'Fix: 3.3.2-r0', 'KEV', 'Loaded: unknown']);
-  expect(findingFactors(kev).find((f) => f.key === 'inuse')!.title).toMatch(/no runtime capture/);
+  // The Broker saw /usr/bin/openssl executed in the checkout container (seeded runtime inventory).
+  expect(findingFactors(kev).map((f) => f.label).sort()).toEqual(['CVSS 9.8', 'EPSS 34%', 'Executed', 'Exposed', 'Fix: 3.3.2-r0', 'KEV']);
+});
+
+test('in-use states are the Broker\'s: executed, loaded, not observed, and unknown with its reason', () => {
+  const items = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items;
+  const inuse = (id: string) => findingFactors(items.find((f) => f.id === id)!).find((f) => f.key === 'inuse')!;
+  expect(inuse('CVE-2099-0001').label).toBe('Executed'); // openssl
+  expect(inuse('CVE-2099-0003').label).toBe('Loaded'); // zlib: libz mapped
+  expect(inuse('CVE-2099-0004').label).toBe('Not observed loaded'); // busybox: covered, never run
+  // express is an npm package: the kernel cannot see a language package load.
+  expect(inuse('CVE-2099-0002').label).toBe('Loaded: unknown');
+  expect(inuse('CVE-2099-0002').title).toMatch(/language/i);
 });
 
 test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', () => {
@@ -95,9 +105,8 @@ test('captured: a finding no source reported on shows KEV and EPSS as "not repor
   expect(findingFactors(express).some((f) => f.key === 'kev')).toBe(false);
 });
 
-test('a Background finding reads "Not observed loaded" (not in any capture until the runtime inventory lands)', () => {
+test('a Background finding reads "Not observed loaded" (captured: busybox, covered and never run)', () => {
   const busybox = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items.find((f) => f.id === 'CVE-2099-0004')!;
-  // Test-local: the captured finding as a Broker with runtime data would send it.
-  const bg = { ...busybox, tier: 'Background', tierFactors: ['in_use:installed_not_observed', 'severity:low', 'exposed'], inUseState: 'installed_not_observed', inUse: false };
-  expect(findingFactors(bg).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
+  expect(busybox).toMatchObject({ tier: 'Background', inUseState: 'installed_not_observed', inUse: false });
+  expect(findingFactors(busybox).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
 });

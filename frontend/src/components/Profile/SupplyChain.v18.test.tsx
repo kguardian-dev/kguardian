@@ -86,3 +86,12 @@ test.each(Object.keys(WL))('%s with discovery off: "Not configured", its own sta
   expect(chip.getAttribute('title')).toMatch(/Signatures do not affect the posture\.$/);
   expect(chip.getAttribute('aria-label')).toBe('Supply chain: not configured');
 });
+
+test('the Not configured badge is neutral and dashed, never a good (green) tone', async () => {
+  page('checkout', true);
+  const { chip } = await strip();
+  const badge = chip.querySelector('[data-signature="not_configured"]')!;
+  expect(badge.className).toMatch(/border-dashed/);
+  expect(badge.className).toMatch(/text-tertiary/);
+  expect(badge.className).not.toMatch(/state-enforcing|severity-|success|green/);
+});

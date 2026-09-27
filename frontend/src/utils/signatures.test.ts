@@ -4,6 +4,7 @@ import type { AttestationPage, ImageAttestation, RunningSignaturePage } from '..
 import type { WorkloadProfile } from '../types/profile';
 import {
   asSignatureState,
+  profileSigner,
   reasonText,
   SIGNATURE_TONE,
   signatureBadgeText,
@@ -135,4 +136,13 @@ test('profile supplyChain (v1.8): verified with only blank signer identities is 
   const never = vulnCapture<WorkloadProfile>('signature-profile-ingress-nginx-controller').body.dimensions.images.supplyChain!;
   expect([never.verdict, never.reason]).toEqual(['unknown', 'not_checked']);
   expect(summaryFromProfile(never)!.worst).toBe('unchecked');
+});
+
+test('profile signer: a keyless signer with an issuer but a blank SAN has no identity, so "verified" reads unknown', () => {
+  expect(profileSigner({ signerKind: 'keyless', issuer: 'https://token.actions.githubusercontent.com', san: '   ' })).toBeNull();
+  expect(profileSigner({ signerKind: 'keyless', issuer: '', san: 'https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0' })).toBeNull();
+  expect(profileSigner({ signerKind: 'key', keyName: 'k', keyFingerprint: '  ' })).toBeNull();
+  const sc = vulnCapture<WorkloadProfile>('signature-profile-checkout').body.dimensions.images.supplyChain!;
+  const blankSan = { ...sc, signers: [{ signerKind: 'keyless', issuer: 'https://token.actions.githubusercontent.com', san: '   ' }] };
+  expect(summaryFromProfile(blankSan)!.worst).toBe('unknown');
 });

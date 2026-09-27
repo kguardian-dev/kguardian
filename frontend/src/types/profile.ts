@@ -344,6 +344,8 @@ export interface WorkloadProfile {
   };
   /** Absent from a broker without drift (contract v1.4+; notEvaluated v1.7). */
   drift?: ProfileDrift;
+  /** Observed capability use and its evidence (P2-7); absent from an older broker. */
+  capabilities?: ProfileCapabilities;
 }
 
 /** A drift check that could not run for a container (null = the workload), and why. */
@@ -353,11 +355,94 @@ export interface DriftNotEvaluated {
   reason: string;
 }
 
+/** One file an `unshippedExecutable` item lists (contract v1.7). */
+export interface UnshippedFile {
+  path: string;
+  kind: 'exec' | 'lib' | string;
+  /** writableLayer | memfd | deleted (the runtime inventory's unshipped origins). */
+  origin: string;
+  digest: string;
+  /** false: the kernel path walk was cut and `path` is a suffix. */
+  pathComplete: boolean;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/** A drift item's detail, by type (contract section 2.8). Unknown types keep whatever the Broker sent. */
+export interface DriftDetail {
+  // tagMoved
+  imageRef?: string;
+  digests?: string[];
+  since?: string;
+  // imageChangedSinceExport
+  containerInExport?: boolean;
+  exportedDigests?: string[];
+  newDigests?: string[];
+  // securityContextRegression
+  newlyFailing?: string[];
+  levelFrom?: string | null;
+  levelTo?: string | null;
+  // unshippedExecutable
+  origins?: string[];
+  files?: UnshippedFile[];
+  filesTotal?: number;
+  truncated?: boolean;
+}
+
+export interface DriftItem {
+  type: string;
+  findingId: string;
+  severity: FindingSeverity;
+  container: string | null;
+  detail?: DriftDetail;
+}
+
 export interface ProfileDrift {
   /** Checks that ran for the whole workload. One not listed was not evaluated. Absent = none. */
   evaluated?: string[];
   notEvaluated?: DriftNotEvaluated[];
-  items: { type: string; findingId: string; severity: FindingSeverity; container: string | null }[];
+  items: DriftItem[];
+}
+
+/** One capability's checks (contract section 2.9). */
+export interface CapabilityUse {
+  capability: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface CapabilityRecommendation {
+  drop: string[];
+  /** Every used and every probed capability, except the probed-only ones in `probedOmitted`. */
+  add: string[];
+  /** The part of `add` there only because of probes: remove only after a person confirms. */
+  probedKept: string[];
+  probedOmitted: { capability: string; reason: string }[];
+  /** Settings `add` depends on (allowPrivilegeEscalation: false when anything was omitted). */
+  requires?: { allowPrivilegeEscalation?: boolean } | null;
+}
+
+export interface ContainerCapabilities {
+  container: string;
+  digests: string[];
+  used: CapabilityUse[];
+  denied: CapabilityUse[];
+  probed: CapabilityUse[];
+  /** sufficient: every current digest watched for the whole window. */
+  evidence: 'sufficient' | 'insufficient' | string;
+  reason: string | null;
+  observedSince: string | null;
+  /** null without sufficient evidence. */
+  recommendation: CapabilityRecommendation | null;
+  /** Capabilities added today that were never used or probed (only with sufficient evidence). */
+  unusedAdded: string[];
+}
+
+/** Contract v1.6+ (P2-7): not a dimension, never sets posture. */
+export interface ProfileCapabilities {
+  windowHours: number;
+  containers: ContainerCapabilities[];
 }
 
 export interface VersionListItem extends VersionRef {

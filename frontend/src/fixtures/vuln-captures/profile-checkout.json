@@ -1,0 +1,564 @@
+{
+  "body": {
+    "attention": [
+      {
+        "container": "app",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.allowPrivilegeEscalation/app",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container app allows privilege escalation"
+      },
+      {
+        "container": "app",
+        "detail": "The runtime's default capability set stays granted.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.capabilitiesNotDropped/app",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container app does not drop ALL capabilities"
+      }
+    ],
+    "capabilities": {
+      "containers": [
+        {
+          "container": "app",
+          "denied": [
+            {
+              "capability": "NET_RAW",
+              "count": 2,
+              "firstSeen": "2026-09-24T23:27:36",
+              "lastSeen": "2026-09-25T00:27:36"
+            }
+          ],
+          "digests": [
+            "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235"
+          ],
+          "evidence": "sufficient",
+          "observedSince": "2026-09-18T17:27:36",
+          "probed": [
+            {
+              "capability": "SYS_ADMIN",
+              "count": 18,
+              "firstSeen": "2026-09-18T18:27:36",
+              "lastSeen": "2026-09-27T00:57:36"
+            }
+          ],
+          "reason": null,
+          "recommendation": {
+            "add": [
+              "CHOWN",
+              "NET_BIND_SERVICE"
+            ],
+            "drop": [
+              "ALL"
+            ],
+            "probedKept": [],
+            "probedOmitted": [
+              {
+                "capability": "SYS_ADMIN",
+                "reason": "probed only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need"
+              }
+            ],
+            "requires": {
+              "allowPrivilegeEscalation": false
+            }
+          },
+          "unusedAdded": [],
+          "used": [
+            {
+              "capability": "CHOWN",
+              "count": 1,
+              "firstSeen": "2026-09-18T18:27:36",
+              "lastSeen": "2026-09-18T18:27:36"
+            },
+            {
+              "capability": "NET_BIND_SERVICE",
+              "count": 8,
+              "firstSeen": "2026-09-18T18:27:36",
+              "lastSeen": "2026-09-27T00:57:36"
+            }
+          ]
+        }
+      ],
+      "windowHours": 168
+    },
+    "contentHash": "fnv1a64:991370c1e9563227",
+    "controls": [
+      {
+        "control": "networkPolicy",
+        "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+        "inSync": null,
+        "state": "unknown"
+      },
+      {
+        "control": "seccompProfile",
+        "detail": "No SeccompProfile CR references this workload",
+        "inSync": null,
+        "state": "none"
+      },
+      {
+        "control": "imageAdmission",
+        "detail": "kguardian does not enforce image admission; signature results are in images.supplyChain and ImageTrustPolicy results are report-only",
+        "inSync": null,
+        "state": null
+      }
+    ],
+    "dimensions": {
+      "compute": {
+        "containers": [],
+        "coverage": {
+          "fraction": null,
+          "level": "none",
+          "note": "no compute samples",
+          "observedSince": null
+        },
+        "reasons": [
+          {
+            "code": "no_compute_data",
+            "message": "No compute samples for this workload's live pods (collection off or no live pods)"
+          }
+        ],
+        "status": "unknown",
+        "truncated": false
+      },
+      "images": {
+        "containers": [
+          {
+            "kind": "regular",
+            "mixedDigests": false,
+            "name": "app",
+            "previous": [],
+            "running": [
+              {
+                "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+                "firstSeen": "2026-09-27T01:27:36.923052Z",
+                "imageRef": "ghcr.io/example/checkout:4.2.0",
+                "lastPodName": "checkout-7d9f8-abcde",
+                "lastSeen": "2026-09-27T01:27:36.923052Z",
+                "ranAsInit": false,
+                "state": "running",
+                "stateReason": null
+              }
+            ],
+            "stale": false
+          }
+        ],
+        "coverage": {
+          "fraction": null,
+          "level": "partial",
+          "note": "inventory only (running window 900 s); no vulnerability data",
+          "observedSince": "2026-09-27T01:27:36.923052Z"
+        },
+        "reasons": [
+          {
+            "code": "vulnerabilities_not_configured",
+            "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
+          },
+          {
+            "code": "signatures",
+            "message": "1 current digest(s): 1 not checked"
+          }
+        ],
+        "runningWindowSeconds": 900,
+        "status": "unknown",
+        "supplyChain": {
+          "checkedAt": null,
+          "container": "app",
+          "counts": {
+            "invalid": 0,
+            "keySigned": 0,
+            "notChecked": 1,
+            "unknown": 0,
+            "unsigned": 0,
+            "verified": 0
+          },
+          "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+          "digests": [
+            {
+              "checkedAt": null,
+              "container": "app",
+              "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+              "reason": null,
+              "signers": [],
+              "verdict": null
+            }
+          ],
+          "reason": "not_checked",
+          "signers": [],
+          "status": "configured",
+          "truncated": false,
+          "verdict": "unknown"
+        },
+        "truncated": false,
+        "vulnerabilities": null
+      },
+      "network": {
+        "coverage": {
+          "fraction": null,
+          "level": "full",
+          "note": "Flows from the workload's pod(s) (2 live)",
+          "observedSince": "2026-09-26T21:27:36Z"
+        },
+        "peers": [
+          {
+            "direction": "ingress",
+            "firstSeen": "2026-09-26T23:27:36Z",
+            "flows": 1,
+            "lastSeen": "2026-09-26T23:27:36Z",
+            "peer": {
+              "ip": "10.244.4.10",
+              "kind": "pod",
+              "name": "ingress-nginx-controller-1a2b3-cdefg",
+              "namespace": "ingress-nginx",
+              "workloadKind": "Deployment",
+              "workloadName": "ingress-nginx-controller"
+            },
+            "port": 8080,
+            "protocol": "TCP"
+          },
+          {
+            "direction": "ingress",
+            "firstSeen": "2026-09-26T21:27:36Z",
+            "flows": 1,
+            "lastSeen": "2026-09-26T21:27:36Z",
+            "peer": {
+              "ip": "10.244.1.20",
+              "kind": "pod",
+              "name": "ledger-5c6d7-klmno",
+              "namespace": "payments",
+              "workloadKind": "Deployment",
+              "workloadName": "ledger"
+            },
+            "port": 8080,
+            "protocol": "TCP"
+          },
+          {
+            "direction": "ingress",
+            "firstSeen": "2026-09-26T22:27:36Z",
+            "flows": 1,
+            "lastSeen": "2026-09-26T22:27:36Z",
+            "peer": {
+              "ip": "81.2.69.160",
+              "kind": "external",
+              "name": null,
+              "namespace": null,
+              "workloadKind": null,
+              "workloadName": null
+            },
+            "port": 8080,
+            "protocol": "TCP"
+          },
+          {
+            "direction": "egress",
+            "firstSeen": "2026-09-26T23:27:36Z",
+            "flows": 1,
+            "lastSeen": "2026-09-26T23:27:36Z",
+            "peer": {
+              "ip": "10.244.1.20",
+              "kind": "pod",
+              "name": "ledger-5c6d7-klmno",
+              "namespace": "payments",
+              "workloadKind": "Deployment",
+              "workloadName": "ledger"
+            },
+            "port": 5432,
+            "protocol": "TCP"
+          }
+        ],
+        "policy": {
+          "audit": null,
+          "enforced": null
+        },
+        "reasons": [
+          {
+            "code": "policy_state_unknown",
+            "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker"
+          }
+        ],
+        "status": "unknown",
+        "summary": {
+          "egress": {
+            "external": 0,
+            "peers": 1,
+            "ports": [
+              "TCP/5432"
+            ]
+          },
+          "ingress": {
+            "external": 1,
+            "peers": 3,
+            "ports": [
+              "TCP/8080"
+            ]
+          }
+        },
+        "truncated": false
+      },
+      "podSecurity": {
+        "containers": [
+          {
+            "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+            "failing": [
+              {
+                "check": "privilegeEscalation",
+                "field": "spec.containers[app].securityContext.allowPrivilegeEscalation",
+                "level": "restricted",
+                "message": "allowPrivilegeEscalation must be set to false",
+                "value": null
+              },
+              {
+                "check": "capabilitiesRestricted",
+                "field": "spec.containers[app].securityContext.capabilities.drop",
+                "level": "restricted",
+                "message": "capabilities.drop must include ALL",
+                "value": null
+              }
+            ],
+            "kind": "regular",
+            "level": "baseline",
+            "name": "app",
+            "securityContext": {
+              "allowPrivilegeEscalation": null,
+              "capabilitiesAdd": null,
+              "capabilitiesDrop": null,
+              "privileged": null,
+              "readOnlyRootFilesystem": null,
+              "runAsGroup": null,
+              "runAsNonRoot": null,
+              "runAsUser": null,
+              "seccompProfileType": null
+            },
+            "source": "running"
+          }
+        ],
+        "coverage": {
+          "fraction": 0.33,
+          "level": "partial",
+          "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
+          "observedSince": "2026-09-27T01:27:36.923052Z"
+        },
+        "level": "baseline",
+        "levelConfidence": "upper_bound",
+        "pod": {
+          "automountServiceAccountToken": null,
+          "failing": [],
+          "hostIPC": null,
+          "hostNetwork": null,
+          "hostPID": null,
+          "hostUsers": null,
+          "known": false,
+          "securityContext": {
+            "fsGroup": null,
+            "runAsGroup": null,
+            "runAsNonRoot": null,
+            "runAsUser": null,
+            "seccompProfileType": null
+          },
+          "serviceAccountName": null
+        },
+        "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+        "reasons": [
+          {
+            "code": "pss_fails_restricted",
+            "message": "At most baseline: app (regular) fail(s) a restricted check; unevaluated checks may lower it further"
+          },
+          {
+            "code": "pod_fields_unknown",
+            "message": "The pod-level block (host namespaces, pod securityContext) was not reported; those checks are unevaluated"
+          }
+        ],
+        "recommendation": {
+          "caveats": [
+            "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+            "Capabilities for app come from observed use: every capability check the container made while kguardian watched it continuously for the evidence window. A capability used less often than that window (a yearly rotation, a rare admin path) would be missing; widen the window (CAPABILITY_EVIDENCE_WINDOW_HOURS) for such workloads.",
+            "Container app leaves out SYS_ADMIN: seen only in non-audited checks (the memory admin-reserve check every root process makes, or a seccomp filter installed without no_new_privs), and allowPrivilegeEscalation: false, which this patch keeps or sets, gives no_new_privs.",
+            "Container app used CHOWN; the patch keeps them because the container needs them, so it stays below restricted, which allows only NET_BIND_SERVICE.",
+            "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
+          ],
+          "format": "strategic-merge-patch",
+          "recommendation": true,
+          "targetLevel": "restricted",
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: app\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n            add: [\"CHOWN\", \"NET_BIND_SERVICE\"]  # observed in use; never drop these\n"
+        },
+        "staleContainers": [],
+        "status": "warn",
+        "unevaluatedChecks": [
+          "hostProcess",
+          "hostPathVolumes",
+          "hostPorts",
+          "hostProbesLifecycle",
+          "appArmor",
+          "seLinux",
+          "procMount",
+          "sysctls",
+          "volumeTypes",
+          "hostNamespaces",
+          "runAsNonRoot",
+          "seccompRestricted"
+        ]
+      },
+      "syscalls": {
+        "capture": null,
+        "coverage": {
+          "fraction": null,
+          "level": "none",
+          "note": "no syscall aggregate for this workload",
+          "observedSince": null
+        },
+        "cr": null,
+        "denials": null,
+        "observed": null,
+        "reasons": [
+          {
+            "code": "no_observations",
+            "message": "No syscalls have been captured for this workload"
+          }
+        ],
+        "status": "unknown"
+      }
+    },
+    "drift": {
+      "baselines": {
+        "export": null,
+        "securityContext": null
+      },
+      "evaluated": [
+        "tagMoved",
+        "unshippedExecutable"
+      ],
+      "items": [],
+      "notEvaluated": [
+        {
+          "container": null,
+          "reason": "no_export",
+          "type": "imageChangedSinceExport"
+        },
+        {
+          "container": null,
+          "reason": "no_baseline",
+          "type": "securityContextRegression"
+        }
+      ]
+    },
+    "exposure": {
+      "egressExternal": 0,
+      "egressPeers": 1,
+      "ingressExternal": 1,
+      "ingressPeers": 3
+    },
+    "findings": [
+      {
+        "container": "app",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.allowPrivilegeEscalation/app",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container app allows privilege escalation"
+      },
+      {
+        "container": "app",
+        "detail": "The runtime's default capability set stays granted.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.capabilitiesNotDropped/app",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container app does not drop ALL capabilities"
+      },
+      {
+        "container": "app",
+        "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+        "dimension": "podSecurity",
+        "id": "podSecurity.readOnlyRootFilesystem/app",
+        "severity": "low",
+        "tier": null,
+        "title": "Container app root filesystem is writable"
+      }
+    ],
+    "generatedAt": "2026-09-27T01:29:32.423626698Z",
+    "posture": {
+      "coverage": 0.25,
+      "reasons": [
+        {
+          "dimension": "network",
+          "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+          "status": "unknown"
+        },
+        {
+          "dimension": "syscalls",
+          "message": "No syscalls have been captured for this workload",
+          "status": "unknown"
+        },
+        {
+          "dimension": "podSecurity",
+          "message": "At most baseline: app (regular) fail(s) a restricted check; unevaluated checks may lower it further",
+          "status": "warn"
+        },
+        {
+          "dimension": "images",
+          "message": "1 running digest(s) across 1 container(s); vulnerability data not configured",
+          "status": "unknown"
+        }
+      ],
+      "status": "warn",
+      "unknownDimensions": [
+        "network",
+        "syscalls",
+        "images"
+      ]
+    },
+    "readiness": [
+      {
+        "id": "trafficObserved24h",
+        "message": "Traffic observed for 4h 1m",
+        "ok": false
+      },
+      {
+        "id": "syscallCaptureComplete",
+        "message": "No syscall capture for this workload",
+        "ok": null
+      },
+      {
+        "id": "noWouldDeny24h",
+        "message": "No audit policy covers this workload",
+        "ok": null
+      },
+      {
+        "id": "imageSigned",
+        "message": "1 current digest(s): 1 not checked (no result yet: discovery has not reached it)",
+        "ok": null
+      },
+      {
+        "id": "podSecurityRestricted",
+        "message": "At most baseline",
+        "ok": false
+      }
+    ],
+    "snapshotPending": false,
+    "version": {
+      "contentHash": "fnv1a64:991370c1e9563227",
+      "createdAt": "2026-09-27T01:28:43.980032Z",
+      "revision": 1
+    },
+    "workload": {
+      "clusterId": "primary",
+      "kind": "Deployment",
+      "name": "checkout",
+      "namespace": "payments",
+      "pods": {
+        "live": 2,
+        "names": [
+          "checkout-7d9f8-abcde",
+          "checkout-7d9f8-fghij"
+        ],
+        "truncated": false
+      },
+      "transient": false
+    }
+  },
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /workloads/payments/Deployment/checkout/profile",
+  "status": 200
+}

@@ -32,7 +32,7 @@ describe('ImagesView: Vulnerabilities tab', () => {
     const tierOf = (id: string) => rows.find((r) => within(r).queryByText(id))!.querySelector('[data-tier]')!.getAttribute('data-tier');
     expect(tierOf('CVE-2099-0001')).toBe('P0');
     expect(tierOf('CVE-2099-0005')).toBe('P2'); // high, no fix, not exposed: the Broker's rule, not ours
-    expect(tierOf('CVE-2099-0004')).toBe('P2'); // installed but in use unknown: no runtime inventory on main yet
+    expect(tierOf('CVE-2099-0004')).toBe('Background'); // busybox: installed, covered and never run
     const kev = rows.find((r) => within(r).queryByText('CVE-2099-0001'))!;
     // Chips render twice (stacked under the id on phones, own column from sm up).
     const chips = [...kev.querySelectorAll('td:nth-child(3) [data-factor]')].map((c) => c.getAttribute('data-factor'));
@@ -127,10 +127,9 @@ test('a failed read never shows zero counts', async () => {
 
 describe('Background and null tiers', () => {
   test('a Background row carries a visible caveat, not only a tooltip', async () => {
-    // Test-local: busybox as Background, as a Broker with runtime data would send it
-    // (the runtime inventory, P1-2, is not on main, so no capture has Background yet).
-    const withBackground = { ...cvePage, items: cvePage.items.map((c) => (c.id === 'CVE-2099-0004' ? { ...c, tier: 'Background', inUse: false, inUseState: 'installed_not_observed' } : c)) };
-    render(view({ api: replayVulnApi([answer('GET /vulnerabilities?limit=50', withBackground)]).api }));
+    // Captured: busybox is Background on a real Broker.
+    expect(cvePage.items.find((c) => c.id === 'CVE-2099-0004')!.tier).toBe('Background');
+    render(view({ api: replayVulnApi().api }));
     await screen.findAllByTestId('cve-row');
     expect(screen.getByTestId('background-caveat').textContent).toMatch(/Not proof it is unreachable/);
   });

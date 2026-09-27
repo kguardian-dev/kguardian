@@ -5,9 +5,12 @@
  *  - ./vuln-captures (default): a Broker at current main with in-use tiers
  *    (#1678), seeded through its real ingest routes by
  *    ./vuln-captures/capture.py. Every file carries `provenance: "captured
- *    from broker <sha> ..."`. The runtime inventory (P1-2) is not on main
- *    yet, so every finding's in-use state is `unknown` (no_runtime_data):
- *    Loaded / Executed / Background come only from tests that say so.
+ *    from broker <sha> ..."`. The seed includes the controller's runtime
+ *    posts (executables, coverage heartbeats, capabilities), so in-use
+ *    states, capability evidence and runtime drift are the Broker's own:
+ *    checkout's openssl executed, zlib loaded, busybox installed and never
+ *    run (Background); the workload profiles (`profile-<name>`) and
+ *    capability reads (`capabilities-<name>`) come from the same world.
  *  - ./vuln-captures-1671: the same world captured from a Broker at #1671
  *    (f3595b640), before tiers: no `tier`, `tierFactors` or `inUseDetail`.
  *    It stands in for an older Broker.
