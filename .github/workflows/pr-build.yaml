@@ -492,10 +492,13 @@ jobs:
       # database. A new migration directory (present here, absent on the
       # base) must sort after every migration already on the base.
       - name: New broker migrations sort after the base's newest
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-          base="$(git ls-tree --name-only FETCH_HEAD broker/db/migrations/ | xargs -n1 basename | sort)"
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          base="$(git ls-tree --name-only FETCH_HEAD broker/db/migrations/ | xargs -r -n1 basename | sort)"
           max="$(cut -d_ -f1 <<<"$base" | sort | tail -1)"
+          [ -n "$max" ] || { echo "::error::no migrations found on $BASE_REF"; exit 1; }
           for m in $(comm -13 <(echo "$base") <(ls broker/db/migrations | sort)); do
             [[ "${m%%_*}" > "$max" ]] || { echo "::error::migration $m must sort after $max (the base's newest)"; exit 1; }
           done
