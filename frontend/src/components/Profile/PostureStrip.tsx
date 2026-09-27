@@ -3,7 +3,7 @@ import { asStatus, DIMENSION_LABEL, pssLevelText } from '../../utils/posture';
 import type { ProfileTab } from '../../utils/profileView';
 import { StatusPill } from './parts';
 import type { WorkloadSignatureState } from '../../hooks/useSignatures';
-import { SIGNATURE_LABEL, signerShort, signerText, stateCounts, workloadSignatureText } from '../../utils/signatures';
+import { SIGNATURE_LABEL, signerShort, signerText, stateCounts, summaryFromProfile, workloadSignatureText, type SignatureState } from '../../utils/signatures';
 import { SignatureBadge } from '../Vulns/SignatureParts';
 
 const ORDER: DimensionName[] = ['network', 'syscalls', 'podSecurity', 'images', 'compute'];
@@ -93,7 +93,7 @@ export function PostureStrip({ profile, onOpenTab, signatures }: { profile: Work
         })}
         {signatures && (
           <li data-dimension="supplyChain">
-            <SupplyChainChip sig={signatures} onOpen={() => onOpenTab('images')} />
+            <SupplyChainChip profile={profile} sig={signatures} onOpen={() => onOpenTab('images')} />
           </li>
         )}
       </ul>
@@ -111,18 +111,41 @@ export function PostureStrip({ profile, onOpenTab, signatures }: { profile: Work
   );
 }
 
+/** How a verdict affects the posture under profile contract v1.8 (section 2.2, images). */
+function postureEffect(worst: SignatureState): string {
+  if (worst === 'invalid') return 'Affects the posture: an invalid signature makes Images risk.';
+  if (worst === 'verified') return 'Verified with a named signer lets Images be OK once vulnerability data exists; signatures alone never make it OK.';
+  return 'Not verified: keeps Images from OK once vulnerability data exists, but is not a risk on its own.';
+}
+
 /**
- * The workload's image signatures: its worst running image, from the
- * supplychain component's verdicts. Informational, like compute: the
- * Broker's posture rollup does not include it. Unknown and not checked are
- * never good, and a verified image shows its signer, never "trusted".
+ * The workload's image signatures. From the profile's `images.supplyChain`
+ * (contract v1.8) when the Broker has it, so the chip and the posture rollup
+ * read the same verdict; from the running signature feed only for an older
+ * Broker (supplyChain null while current digests run). `not_configured`
+ * (discovery off) is its own state, neither unknown nor not checked.
+ * Unknown and not checked are never good; verified shows its signer.
  */
-function SupplyChainChip({ sig, onOpen }: { sig: WorkloadSignatureState; onOpen: () => void }) {
+function SupplyChainChip({ profile, sig, onOpen }: { profile: WorkloadProfile; sig: WorkloadSignatureState; onOpen: () => void }) {
   const cls = 'inline-flex items-center gap-1.5 rounded-control border border-hubble-border bg-hubble-card px-2 py-1 text-xs hover:border-hubble-border-strong hover:bg-hubble-hover/40 transition-colors';
-  const s = sig.summary;
+  const images = profile.dimensions.images;
+  const sc = images.supplyChain;
+  const running = images.containers.some((c) => c.running.length > 0);
+  const fromProfile = sc != null;
+  const notConfigured = sc != null && (sc.status === 'not_configured' || sc.verdict === 'not_configured');
+  const s = sc != null ? summaryFromProfile(sc) : running ? sig.summary : null;
   let body;
   let title: string;
-  if (s) {
+  let effect: string;
+  if (notConfigured) {
+    body = (
+      <span data-signature="not_configured" className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary">
+        Not configured
+      </span>
+    );
+    title = 'Image signature discovery is off in this deployment: no signature is checked.';
+    effect = 'Signatures do not affect the posture.';
+  } else if (s) {
     const n = s.digests.length;
     const bad = s.byState[s.worst].length;
     const detail =
@@ -137,23 +160,28 @@ function SupplyChainChip({ sig, onOpen }: { sig: WorkloadSignatureState; onOpen:
           : null;
     body = (
       <>
-        <SignatureBadge state={s.worst} />
+        <SignatureBadge state={s.worst} reason={fromProfile ? sc?.reason : undefined} />
         {detail && <span className="text-tertiary">{detail}</span>}
       </>
     );
     title = `${workloadSignatureText(s)}${n > 1 ? ` (${stateCounts(s)})` : ''}`;
-  } else if (sig.loading) {
+    effect = fromProfile ? postureEffect(s.worst) : 'Informational: this Broker\'s posture does not use signatures.';
+  } else if (!fromProfile && running && sig.loading) {
     body = <span className="text-tertiary">…</span>;
     title = 'Reading signature results';
-  } else if (sig.error != null) {
+    effect = '';
+  } else if (!fromProfile && running && sig.error != null) {
     body = <StatusPill status="unknown">read failed</StatusPill>;
     title = 'The signature read failed: unknown.';
+    effect = '';
   } else {
     body = <StatusPill status="unknown" />;
-    title = sig.truncated ? 'Not read (capped): unknown.' : 'No running image of this workload is in the inventory: unknown.';
+    title = !running ? 'No current digest for this workload: unknown.' : sig.truncated ? 'Not read (capped): unknown.' : 'No signature result for its running images: unknown.';
+    effect = '';
   }
+  const name = notConfigured ? 'not configured' : s ? `${SIGNATURE_LABEL[s.worst]}${s.worst === 'verified' && s.signers.length ? `, signed by ${s.signers.map(signerText).join('; ')}` : ''}` : 'no data';
   return (
-    <button type="button" onClick={onOpen} title={`${title}\nInformational: not part of the rollup.`} aria-label={`Supply chain: ${s ? `${SIGNATURE_LABEL[s.worst]}${s.worst === 'verified' && s.signers.length ? `, signed by ${s.signers.map(signerText).join('; ')}` : ''}` : 'no data'}`} className={cls}>
+    <button type="button" onClick={onOpen} title={effect ? `${title}\n${effect}` : title} aria-label={`Supply chain: ${name}`} data-source={fromProfile ? 'profile' : 'feed'} className={cls}>
       <span className="text-secondary">Supply chain</span>
       {body}
     </button>

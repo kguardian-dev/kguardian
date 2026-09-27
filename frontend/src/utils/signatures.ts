@@ -1,5 +1,6 @@
 import type { LensBadge } from '../types';
 import type { RunningImageSignature, SignatureCheck, SignatureVerdict, Signer } from '../types/attestations';
+import type { ProfileSigner, SupplyChainDimension } from '../types/profile';
 
 /**
  * How image signature results are shown. The rules this exists to hold:
@@ -250,4 +251,37 @@ export function splitHeader(text: string): { header: string[]; body: string } {
   let i = 0;
   while (i < lines.length && lines[i].startsWith('#')) i++;
   return { header: lines.slice(0, i).map((l) => l.replace(/^# ?/, '')), body: lines.slice(i).join('\n') };
+}
+
+/** A profile signer (v1.8) as a Signer; one without an identity is none. */
+export function profileSigner(p: ProfileSigner): Signer | null {
+  const blank = (v?: string | null) => !v || !v.trim();
+  if (p.signerKind === 'key') return blank(p.keyFingerprint) ? null : { kind: 'key', keyName: p.keyName ?? undefined, keyFingerprint: p.keyFingerprint ?? undefined };
+  return blank(p.issuer) || blank(p.san) ? null : { kind: 'keyless', issuer: p.issuer ?? undefined, san: p.san ?? undefined };
+}
+
+/**
+ * The profile's supplyChain (v1.8) as a workload summary: the same shape the
+ * running feed folds into, so the chip reads one source whichever the
+ * Broker has. The worst state is the Broker's verdict (`not_checked` reads as
+ * not checked; `no_signer_identity` and a verified verdict without a named
+ * signer as unknown). Per-state counts come from the Broker's counts.
+ * `null` for `not_configured`, which the caller shows as its own state.
+ */
+export function summaryFromProfile(sc: SupplyChainDimension): WorkloadSignatures | null {
+  if (sc.status === 'not_configured' || sc.verdict === 'not_configured') return null;
+  const signers = uniqueSigners(sc.signers.map(profileSigner).filter((s): s is Signer => s !== null));
+  let worst: SignatureState = sc.verdict === 'unknown' && sc.reason === 'not_checked' ? 'unchecked' : asSignatureState(sc.verdict);
+  if (worst === 'verified' && signers.length === 0) worst = 'unknown';
+  const fill = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `${tag}-${i}`);
+  const c = sc.counts;
+  const byState: Record<SignatureState, string[]> = {
+    verified: fill(c.verified, 'v'),
+    key_signed: fill(c.keySigned, 'k'),
+    unsigned: fill(c.unsigned, 'u'),
+    invalid: fill(c.invalid, 'i'),
+    unknown: fill(c.unknown, 'x'),
+    unchecked: fill(c.notChecked, 'n'),
+  };
+  return { byState, digests: Object.values(byState).flat(), signers, worst };
 }

@@ -3,7 +3,7 @@
     "items": [
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "manager",
         "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
         "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
@@ -31,7 +31,7 @@
       },
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "node-exporter",
         "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
         "imageRef": "quay.io/prometheus/node-exporter:v1.8.2",
@@ -45,7 +45,7 @@
       },
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "grafana",
         "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
         "imageRef": "docker.io/grafana/grafana:11.2.0",
@@ -59,7 +59,7 @@
       },
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "prometheus",
         "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
         "imageRef": "quay.io/prometheus/prometheus:v2.54.1",
@@ -73,7 +73,7 @@
       },
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "reports",
         "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
         "imageRef": "ghcr.io/example/reports:1.0.3",
@@ -104,7 +104,7 @@
             "verified": true
           }
         ],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "app",
         "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
         "imageRef": "ghcr.io/example/checkout:4.2.0",
@@ -114,7 +114,7 @@
         "signers": [
           {
             "format": "sigstore-bundle",
-            "integratedTime": "2026-09-23T22:20:55Z",
+            "integratedTime": "2026-09-24T01:11:49Z",
             "issuer": "https://token.actions.githubusercontent.com",
             "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
             "signerKind": "keyless",
@@ -129,7 +129,7 @@
       },
       {
         "attestations": [],
-        "checkedAt": "2026-09-26T19:20:55",
+        "checkedAt": "2026-09-26T22:11:49",
         "container": "ledger",
         "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
         "imageRef": "ghcr.io/example/ledger:2.3.1",
@@ -154,7 +154,7 @@
     ],
     "nextAfter": null
   },
-  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
   "request": "GET /attestations/running",
   "status": 200
 }

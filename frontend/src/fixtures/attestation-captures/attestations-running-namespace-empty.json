@@ -3,7 +3,7 @@
     "items": [],
     "nextAfter": null
   },
-  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
   "request": "GET /attestations/running?namespace=no-such-namespace",
   "status": 200
 }
