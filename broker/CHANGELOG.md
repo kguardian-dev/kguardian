@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.0...broker/v1.19.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **broker:** cap glibc malloc arenas at two ([1aa8b79](https://github.com/kguardian-dev/kguardian/commit/1aa8b79d802879eae8e88e868a6e087834db4afc))
+* **broker:** export shed hint, key-prefixed hosts in attestation detail, [#1723](https://github.com/kguardian-dev/kguardian/issues/1723) notes ([#1724](https://github.com/kguardian-dev/kguardian/issues/1724)) ([0fbf260](https://github.com/kguardian-dev/kguardian/commit/0fbf260170b569844cdf71baec50a3cddcd7ead9))
+* **broker:** keep JWT redaction linear on runs of = ([b6ffe9e](https://github.com/kguardian-dev/kguardian/commit/b6ffe9e28bcffc9114a94a19c16448e3ad90aa01))
+* **broker:** read and charge the CycloneDX export by what it emits ([daf6fc2](https://github.com/kguardian-dev/kguardian/commit/daf6fc21487baf09cce28742a0c3fc50bbd3db92))
+* **broker:** redact JWTs by structure, not only the eyJ prefix ([f7b6fa8](https://github.com/kguardian-dev/kguardian/commit/f7b6fa86575170051ded4c79e7d2f3ff7c45c4cb))
+* **broker:** redact only a bounded prefix of attestation detail ([88a6eb7](https://github.com/kguardian-dev/kguardian/commit/88a6eb7ffac2de6e31d5a151c4db5eca6286657b))
+
 ## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.2...broker/v1.19.0) (2026-09-27)
 
 
