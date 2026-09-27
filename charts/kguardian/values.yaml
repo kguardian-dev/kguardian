@@ -41,7 +41,7 @@ controller:
     # -- Controller image pull policy
     pullPolicy: IfNotPresent
     # -- Controller version tag (auto-updated by release-please)
-    tag: "1.15.1"
+    tag: "1.16.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -476,7 +476,7 @@ broker:
     # -- Broker image pull policy
     pullPolicy: IfNotPresent
     # -- Broker version tag (auto-updated by release-please)
-    tag: "1.18.2"
+    tag: "1.19.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -1279,7 +1279,7 @@ frontend:
     # -- Frontend image pull policy
     pullPolicy: IfNotPresent
     # -- Frontend version tag (auto-updated by release-please)
-    tag: "1.19.0"
+    tag: "1.20.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -1579,7 +1579,7 @@ llmBridge:
     # -- LLM Bridge image pull policy
     pullPolicy: IfNotPresent
     # -- LLM Bridge version tag (auto-updated by release-please)
-    tag: "1.11.2"
+    tag: "1.12.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -1756,7 +1756,7 @@ evaluator:
     # -- Evaluator image pull policy
     pullPolicy: IfNotPresent
     # -- Evaluator version tag (auto-updated by release-please)
-    tag: "v0.4.2"
+    tag: "v0.5.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -1938,7 +1938,7 @@ supplychain:
     # -- Supplychain image pull policy
     pullPolicy: IfNotPresent
     # -- Supplychain version tag
-    tag: "v0.1.0"
+    tag: "v0.1.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -2008,7 +2008,7 @@ supplychain:
       # -- Matcher image pull policy
       pullPolicy: IfNotPresent
       # -- Matcher version tag
-      tag: "v0.1.0"
+      tag: "v0.1.1"
       # -- Overrides the image tag using SHA digest
       sha: ""
     # -- Loopback port the matcher listens on inside the pod
