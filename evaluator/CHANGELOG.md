@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.5.0...evaluator/v0.5.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **chart:** install the ImageTrustPolicy CRDs as release resources ([5be0044](https://github.com/kguardian-dev/kguardian/commit/5be0044aefd7272ab95f8d99ff61c5645eb820ac))
+* **evaluator:** point the missing ImageTrustPolicy CRD log at the chart value ([f799072](https://github.com/kguardian-dev/kguardian/commit/f799072efdcd8b571025c0253daf77515d6d3243))
+
 ## [0.5.0](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.2...evaluator/v0.5.0) (2026-09-27)
 
 
