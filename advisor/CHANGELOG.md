@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.0...advisor/v1.11.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* name the aarch64 seccomp architecture SCMP_ARCH_AARCH64 so arm64 pods can start ([#1742](https://github.com/kguardian-dev/kguardian/issues/1742)) ([acb1cbd](https://github.com/kguardian-dev/kguardian/commit/acb1cbda8068ede73f37a30acf13787fa2485e01))
+
 ## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.10.0...advisor/v1.11.0) (2026-09-27)
 
 
