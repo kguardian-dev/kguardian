@@ -1,0 +1,137 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Controller eBPF runtime stress
+
+# Manual only (workflow_dispatch; no schedule, push or pull_request
+# trigger: CI minutes are a real cost). Loops the real-runtime capability
+# test (runc and crun, create/start and exec) on 6.18 with preempt=full
+# while every CPU is kept busy, and prints the runtime object's drop
+# counter after each iteration. The library and capability probes run
+# preemptible and take their parse state from task storage; a get that
+# fails (another task holds the per-CPU busy lock) is counted as a drop,
+# which makes coverage insufficient rather than wrong. This measures how
+# often that happens under preemption.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Iterations of the real-runtime test
+        type: number
+        default: 50
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controller-ebpf-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # The input goes into a vmtest command, which a shell parses on the
+      # runner: validate it through the environment first and use only the
+      # validated output there.
+      - name: Validate iterations
+        id: it
+        env:
+          ITER: ${{ inputs.iterations }}
+        run: |
+          [[ "$ITER" =~ ^[0-9]+$ ]] && [ "$ITER" -ge 1 ] && [ "$ITER" -le 500 ] || { echo "::error::iterations must be 1-500"; exit 1; }
+          echo "iterations=$ITER" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libelf-dev \
+            libseccomp-dev \
+            libbpf-dev \
+            zlib1g-dev \
+            pkg-config \
+            protobuf-compiler
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            controller/target/
+          key: ${{ runner.os }}-cargo-controller-test-${{ hashFiles('controller/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-controller-test-
+            ${{ runner.os }}-cargo-controller-
+
+      - name: Build the test binary
+        working-directory: controller
+        run: |
+          bin=$(cargo test --all-features --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.kind == ["lib"]) | .executable' \
+            | tail -1)
+          test -x "$bin"
+          cp "$bin" "$GITHUB_WORKSPACE/ebpf-load-test"
+
+      # Real container runtimes for the capability probe's runtime-setup
+      # test: static release binaries, pinned by version and sha256 (the
+      # checksums published with each release), never installed.
+      - name: Fetch container runtimes
+        env:
+          RUNC_VERSION: v1.5.2
+          RUNC_SHA256: 599f6f94ff8c5057241eff0d54c3c74f95c34935b6457b33fe545defc61e9488
+          CRUN_VERSION: 1.30.1
+          CRUN_SHA256: e7b059390e27d0f283e1debbe89d9c5847870f3d8325f31ccd954533fdd6ea78
+        run: |
+          mkdir -p runtimes
+          curl -fsSL -o runtimes/runc "https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}/runc.amd64"
+          curl -fsSL -o runtimes/crun "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-amd64-disable-systemd"
+          echo "${RUNC_SHA256}  runtimes/runc" | sha256sum -c -
+          echo "${CRUN_SHA256}  runtimes/crun" | sha256sum -c -
+          chmod +x runtimes/runc runtimes/crun
+
+      - name: Fetch kernels
+        env:
+          K618: quay.io/lvh-images/kernel-images@sha256:756c37658d791ed78ecc4ee8a327cf18291bfea14360ef11030082a34453afb7 # 6.18-main
+        run: |
+          mkdir -p kernels
+          for pair in "6.18:$K618"; do
+            ver="${pair%%:*}"; image="${pair#*:}"
+            id=$(docker create "$image" /nonexistent)
+            docker cp "$id:/data/kernels/$ver/boot/." "kernels/$ver"
+            # overlayfs is a module in these images; the runtime inventory
+            # test insmods it to check image vs writable-layer detection
+            # (it skips that part, and says so, without it).
+            docker export "$id" | tar -x -C "kernels/$ver" --wildcards '*/fs/overlayfs/overlay.ko' || true
+            find "kernels/$ver" -name overlay.ko -exec cp {} "kernels/overlay-$ver.ko" \; -quit
+            docker rm "$id" >/dev/null
+            cp kernels/$ver/vmlinuz-* "kernels/vmlinuz-$ver"
+          done
+          ls -la kernels
+
+      # No shell variables ($x) in these commands: vmtest runs the command
+      # through a shell of its own first, which expands them to "" before
+      # the /bin/bash -c inside the VM sees them. A `for h in ...; do
+      # HOOK=$h` loop here once pinned an empty hook and the capability
+      # test skipped on every kernel.
+      - name: Stress on 6.18 (preempt=full, CPU hog)
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: stress-6.18
+          kernel: kernels/vmlinuz-6.18
+          kernel_args: preempt=full
+          command: /bin/bash ${{ github.workspace }}/.github/scripts/ebpf-runtime-stress.sh ${{ github.workspace }} ${{ steps.it.outputs.iterations }}

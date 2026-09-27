@@ -37,7 +37,7 @@
 //!   (`io.cri-containerd.kind=sandbox`) because it needs no RPC on this
 //!   path and names the app containers positively.
 //! * runc's pre-filter setup syscalls ([`RUNTIME_PREFILTER_SYSCALLS`],
-//!   skipped in the kernel for `runc:[…]` tasks).
+//!   skipped in the kernel for runtime setup, decided by provenance).
 //!
 //! # Knobs
 //!
@@ -92,7 +92,8 @@ pub const TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Syscalls the container runtime makes only BEFORE it installs the
 /// container's seccomp filter, and that the probe therefore skips for
-/// tasks named `runc:[…]` (never for the app itself). Resolved to numbers
+/// runtime setup (`is_runtime_setup` in `bpf/pod_owner.h`: decided by
+/// provenance, never by name, so never for the app). Resolved to numbers
 /// per arch and written into the `runtime_prefilter` map; see the comment
 /// on that map in `bpf/syscall.bpf.c` for why this is a short list and
 /// not "everything runc init does".
@@ -1526,7 +1527,7 @@ int main(int argc, char **argv) {{
     // ---- runtime pre-filter list -------------------------------------------
 
     /// Coordinator item 2: runc's pre-filter setup syscalls are skipped
-    /// for `runc:[` tasks. Pin that the list resolves on the supported
+    /// for runtime setup. Pin that the list resolves on the supported
     /// arches and that nothing runc makes UNDER the filter is in it.
     #[test]
     fn runtime_prefilter_list_resolves_and_excludes_post_filter_syscalls() {
@@ -1564,14 +1565,17 @@ int main(int argc, char **argv) {{
         }
     }
 
-    /// The probe gates the skip on the comm prefix and applies it on both
-    /// capture paths; pinned at source level since eBPF cannot be loaded
-    /// in the unit tests.
+    /// The probe gates the skip on provenance (never on the task's own
+    /// name) and applies it on both capture paths; pinned at source level
+    /// here, and end to end by the kernel matrix
+    /// (`syscall_prefilter_skips_runtime_setup_by_provenance`).
     #[test]
-    fn the_probe_skips_prefilter_syscalls_only_for_runc_tasks_on_both_paths() {
+    fn the_probe_skips_prefilter_syscalls_only_for_runtime_setup_on_both_paths() {
         let src = include_str!("bpf/syscall.bpf.c");
+        assert!(src.contains("    return is_runtime_setup();\n}"));
         assert!(
-            src.contains("comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c'")
+            !src.contains("bpf_get_current_comm"),
+            "the task's own name decides nothing"
         );
         assert_eq!(
             src.matches("if (runtime_prefilter_skip(syscall_id))")
