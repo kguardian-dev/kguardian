@@ -255,7 +255,9 @@ pub async fn fetch_bounded(
             ))
         }
         s => {
-            warn!(status = s, "image trust: evaluator answered an unexpected status");
+            // Server-side log only: the operator needs to know which
+            // evaluator answered.
+            warn!(status = s, url = %resp.url(), "image trust: evaluator answered an unexpected status");
             return Err(Cause::Status(s).reason(timeout));
         }
     }

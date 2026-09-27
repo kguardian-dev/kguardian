@@ -63,9 +63,14 @@ The stored result for one digest, or `404`.
   key-signed bundle also carries `keyHint`, verified or not.
 - An unverified signature or attestation has `error` and `detail` and no
   identity: a claimed signer is never shown as a fact. `detail` is the
-  verifier's error text with URLs replaced by `<url>` and `host:port`
-  tokens by `<host>` (at ingest, and again when served for rows stored
-  earlier); `error` is the reason code. Unverified
+  verifier's error text with endpoints and secrets removed, at ingest and
+  again when served for rows stored earlier: URLs become `<url>`; host
+  names, IP addresses and `host:port`, with anything after them, become
+  `<host>` or `<host>/…` (an image reference with a registry keeps only
+  its `@sha256:` digest); userinfo becomes `<credentials>@`; and token,
+  password or signature values, and the word after `Bearer`, become
+  `<redacted>`. Digests, reason codes and version numbers are kept. The
+  rule errs toward removing too much. `error` is the reason code. Unverified
   attestations carry no `provenance` either.
 - Each attestation has `predicateType`, `payloadSha256` (sha256 of the
   in-toto statement) and, for SLSA provenance, `provenance.builderId`,

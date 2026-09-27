@@ -122,54 +122,231 @@ fn names_a_signer(
     }
 }
 
-/// Replaces what a `detail` must not show API clients: URLs (anything with
-/// a `scheme://`) become `<url>` and `host:port` tokens become `<host>`.
-/// `detail` is the supplychain verifier's error text; registry errors quote
-/// request URLs (and the hosts and ports of private registries). The
-/// reason code in `error` is unaffected. Pure.
+/// Replaces what a `detail` must not show API clients. `detail` is the
+/// supplychain verifier's error text, and registry errors quote request
+/// URLs, private registry hosts, credentials and tokens. The rule is broad
+/// and accepts over-redaction:
+///
+/// - anything with a `scheme://` becomes `<url>`;
+/// - userinfo (`user:pass@`, `user@` before a host) becomes `<credentials>@`;
+/// - a host token becomes `<host>`, and anything after it (port, path,
+///   query, fragment) `<host>/…`. A host is a dotted name whose last label
+///   is letters or `xn--` punycode and at least two long (`registry.internal`,
+///   `REG.corp.example.`, IDN names), an IPv4 address, an IPv6 address
+///   (bracketed, or bare with `::` or three or more colons), `localhost:port`,
+///   or a single-label `name:port/path`. An image reference in free text
+///   therefore becomes `<host>/…`, keeping a trailing `@sha256:<hex>`;
+/// - the value of a secret-looking `key=value` (token, password, sig, …)
+///   and the word after `Bearer`/`Basic` become `<redacted>`; the query
+///   string of a bare path is dropped.
+///
+/// Digests (`sha256:<hex>`), reason codes (snake_case), and versions
+/// (`v1.2.3`, `1.34.1`, `1.0.0-beta`: the last label is not all letters)
+/// are kept. The reason code in `error` is unaffected. Pure.
 pub fn redact_endpoints(text: &str) -> String {
-    let stop =
-        |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '<' | '>' | ',' | ';');
+    let stop = |c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ')' | '<' | '>' | ',' | ';')
+    };
     let mut out = String::with_capacity(text.len());
+    let mut after_auth_scheme = false;
     for token in text.split_inclusive(stop) {
-        // A token here is a run of non-stop chars plus the stop char that
-        // ended it (if any).
+        // A token is a run of non-stop chars plus the stop char that ended
+        // it (if any).
         let (word, tail) = match token.char_indices().last() {
             Some((j, c)) if stop(c) => (&token[..j], &token[j..]),
             _ => (token, ""),
         };
-        let lower = word.to_ascii_lowercase();
-        let redacted = if lower.contains("://") {
-            "<url>"
-        } else if is_host_port(word) {
-            "<host>"
+        if word.is_empty() {
+            out.push_str(tail);
+            continue;
+        }
+        // `redacted` is the inside of an earlier `<redacted>` (`<` and `>`
+        // split words), left as is so redacting twice changes nothing.
+        if after_auth_scheme && word != "redacted" {
+            out.push_str("<redacted>");
         } else {
-            word
-        };
-        out.push_str(redacted);
+            out.push_str(&redact_word(word));
+        }
+        after_auth_scheme =
+            word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic");
         out.push_str(tail);
     }
     out
 }
 
-/// `name:port`, `1.2.3.4:port` or `[v6]:port`, optionally followed by a
-/// path: the port is 1-5 digits and the host has a dot, is `localhost`,
-/// or is bracketed. A digest (`sha256:<hex>`) is not a port.
-fn is_host_port(word: &str) -> bool {
-    let w = word.trim_end_matches(['.', ':']);
-    let hostport = w.split('/').next().unwrap_or(w);
-    let Some((host, port)) = hostport.rsplit_once(':') else {
-        return false;
+/// One whitespace/quote-delimited word of [`redact_endpoints`].
+fn redact_word(word: &str) -> String {
+    // Trailing sentence punctuation stays outside ("lookup host: ...").
+    let core = word.trim_end_matches(['.', ':', '!', '?']);
+    let punct = &word[core.len()..];
+    if core.is_empty() {
+        return word.to_string();
+    }
+    if core.contains("://") {
+        return format!("<url>{punct}");
+    }
+    // An image reference's digest survives: `<host>/…@sha256:<hex>`.
+    let (body, digest) = match core.rfind('@') {
+        Some(i) if is_digest(&core[i + 1..]) => (&core[..i], &core[i..]),
+        _ => (core, ""),
     };
-    let port_ok = !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
-    let host_ok = (host.starts_with('[') && host.ends_with(']'))
-        || host.eq_ignore_ascii_case("localhost")
-        || (host.contains('.')
-            && !host.is_empty()
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'));
-    port_ok && host_ok
+    // Userinfo is non-empty: a lone `@` is what `<credentials>@` leaves
+    // between its `>` and `<`, and redacting is idempotent (the read path
+    // redacts rows that ingest already did).
+    let (creds, rest) = match body.rfind('@') {
+        Some(i) if i > 0 => (true, &body[i + 1..]),
+        _ => (false, body),
+    };
+    let cut = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (hostport, after) = rest.split_at(cut);
+    if is_host(hostport, !after.is_empty()) {
+        let creds = if creds { "<credentials>@" } else { "" };
+        let after = if after.is_empty() { "" } else { "/…" };
+        return format!("{creds}<host>{after}{digest}{punct}");
+    }
+    if creds {
+        return format!("<credentials>@{}{digest}{punct}", redact_secrets(rest));
+    }
+    // A bare path keeps its path, not its query or fragment.
+    if core.starts_with('/') {
+        if let Some(i) = core.find(['?', '#']) {
+            return format!("{}?…{punct}", &core[..i]);
+        }
+    }
+    redact_secrets(word)
+}
+
+/// `alg:hex` as in `sha256:<64 hex>`.
+fn is_digest(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(alg, hex)| {
+        !alg.is_empty()
+            && alg.bytes().all(|b| b.is_ascii_alphanumeric())
+            && hex.len() >= 32
+            && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// Replaces the value of each secret-looking `key=value` (after `?`, `&`,
+/// `#`, `;` or at the start) with `<redacted>`.
+fn redact_secrets(word: &str) -> String {
+    const KEYS: &[&str] = &[
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "client_secret",
+        "api_key",
+        "apikey",
+        "key",
+        "sig",
+        "signature",
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "code",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-goog-signature",
+        "x-goog-credential",
+    ];
+    let mut out = String::with_capacity(word.len());
+    let mut rest = word;
+    loop {
+        let Some(eq) = rest.find('=') else {
+            out.push_str(rest);
+            return out;
+        };
+        let key_start = rest[..eq].rfind(['?', '&', '#', ';']).map_or(0, |i| i + 1);
+        let key = &rest[key_start..eq];
+        out.push_str(&rest[..=eq]);
+        rest = &rest[eq + 1..];
+        if KEYS.iter().any(|k| key.eq_ignore_ascii_case(k)) {
+            let end = rest.find(['&', '#']).unwrap_or(rest.len());
+            if end > 0 {
+                out.push_str("<redacted>");
+            }
+            rest = &rest[end..];
+        }
+    }
+}
+
+/// Whether `hostport` (a word up to its first `/`, `?` or `#`) names a
+/// host; `has_path` is whether something followed it.
+fn is_host(hostport: &str, has_path: bool) -> bool {
+    let hp = hostport.trim_end_matches('.');
+    if hp.is_empty() {
+        return false;
+    }
+    // [v6] or [v6]:port.
+    if let Some(inner) = hp.strip_prefix('[') {
+        return match inner.split_once(']') {
+            Some((_, "")) => true,
+            Some((_, p)) => p.strip_prefix(':').is_some_and(is_port),
+            None => false,
+        };
+    }
+    if is_bare_ipv6(hp) {
+        return true;
+    }
+    let (host, port) = match hp.rsplit_once(':') {
+        Some((h, p)) if is_port(p) => (h.trim_end_matches('.'), Some(p)),
+        Some(_) => return false,
+        None => (hp, None),
+    };
+    if host.is_empty() {
+        return false;
+    }
+    if is_ipv4(host) || is_dotted_name(host) {
+        return true;
+    }
+    let single_label = host.chars().all(|c| c.is_alphanumeric() || c == '-');
+    port.is_some() && (host.eq_ignore_ascii_case("localhost") || (single_label && has_path))
+}
+
+fn is_port(p: &str) -> bool {
+    !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_ipv4(h: &str) -> bool {
+    let parts: Vec<&str> = h.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok())
+}
+
+/// Unbracketed IPv6: hex digits, colons (with `::` or at least three of
+/// them, so `12:35:00` is not one), optional dotted IPv4 tail and zone.
+fn is_bare_ipv6(h: &str) -> bool {
+    let addr = h.split('%').next().unwrap_or(h);
+    let colons = addr.matches(':').count();
+    (addr.contains("::") || colons >= 3)
+        && colons >= 2
+        && addr
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+/// Labels of letters, digits and `-` (any script) joined by dots, the last
+/// one letters only (at least two) or `xn--` punycode.
+fn is_dotted_name(h: &str) -> bool {
+    let labels: Vec<&str> = h.split('.').collect();
+    if labels.len() < 2
+        || labels.iter().any(|l| {
+            l.is_empty() || l.len() > 63 || !l.chars().all(|c| c.is_alphanumeric() || c == '-')
+        })
+    {
+        return false;
+    }
+    let tld = labels[labels.len() - 1];
+    let lower = tld.to_lowercase();
+    lower.starts_with("xn--") || (tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
 }
 
 fn redact_detail(detail: &mut Option<String>) {
