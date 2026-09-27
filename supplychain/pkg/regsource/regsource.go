@@ -82,8 +82,12 @@ func (s *Source) defaults() {
 	}
 }
 
-// Ready is true after the first inventory pass (successful or not): an
-// unreachable broker must not keep the pod NotReady.
+// Ready is true once the first inventory listing has returned, whether it
+// succeeded or not. It does not wait for that pass's registry lookups: on
+// a fresh pod every running digest is due, and fetching them all can take
+// minutes, which would fail a helm/Flux --wait upgrade. Lookups continue in
+// the background and are counted in the lookup metrics. An unreachable
+// broker must not keep the pod NotReady either.
 func (s *Source) Ready() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,8 +110,10 @@ func (s *Source) Run(ctx context.Context) {
 // Pass runs one inventory listing and the lookups it calls for.
 func (s *Source) Pass(ctx context.Context) {
 	s.defaults()
-	defer func() { s.mu.Lock(); s.ready = true; s.mu.Unlock() }()
 	images, err := s.Lister.RunningImages(ctx)
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
 	if err != nil {
 		s.Log.WithError(err).Warn("registry sbom source: listing running images failed")
 		s.count("list_error")
