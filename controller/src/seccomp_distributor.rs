@@ -197,6 +197,7 @@ pub async fn run() -> Result<(), Error> {
         cluster: None,
         fetch: |key| Box::pin(fetch_workload(key)),
         last_nodes: BTreeSet::new(),
+        mirrors: MirrorLedger::default(),
     };
 
     let mut ticker = tokio::time::interval(rec.cfg.interval);
@@ -530,6 +531,97 @@ struct Reconciler {
     /// back to no nodes at all: `distribution` reading `0/0` and `Ready`
     /// flipping to `False` for a pass, both mirrored to the broker.
     last_nodes: BTreeSet<String>,
+    /// What the broker last accepted for each CR; see `MirrorLedger`.
+    mirrors: MirrorLedger,
+}
+
+/// Quiet reconciles an unchanged mirror sits out before it is re-sent
+/// anyway. Ten is about five minutes at the default resync — a broker
+/// that lost the row (a restore, a fresh database behind the same
+/// address) is whole again inside that. Reconciles replayed by watch
+/// events count too, so the refresh comes sooner while status writes are
+/// landing, which is when the body is changing anyway.
+const MIRROR_REFRESH_PASSES: u32 = 10;
+
+/// What this node last successfully mirrored for each CR, so
+/// `PUT /seccomp/crs/{ns}/{name}` is sent when the mirror would change
+/// and not otherwise.
+///
+/// The mirror body is the spec, the file hash and the distribution
+/// summary. In steady state none of them moves, and yet every node PUT it
+/// for every CR on every pass: on a 70-node cluster with eight CRs that
+/// was ~19 upserts a second, 70 writers contending on the same eight
+/// rows, and the `Lock:transactionid` and `IO:XactSync` waits made the
+/// upsert the second hottest statement on a database this distributor was
+/// already 99% of the load on. The row's content was identical before
+/// and after every one of them.
+///
+/// The ledger is this node's memory only, so it errs towards sending. An
+/// entry is forgotten when a PUT fails, so the next reconcile retries;
+/// when the broker was unavailable for the CR's workload this pass,
+/// because a broker that could not be read is one this node cannot vouch
+/// for still holding the row — an outage that replaced the database
+/// converges on the first pass after it, not the tenth; and when the CR
+/// is deleted, so a recreated CR with the same spec is mirrored again. An
+/// unchanged body is re-sent every `MIRROR_REFRESH_PASSES` regardless,
+/// for whatever none of those catch. A fresh controller starts empty and
+/// mirrors everything on its first pass, as before.
+#[derive(Debug, Default)]
+struct MirrorLedger {
+    by_cr: BTreeMap<String, Mirrored>,
+}
+
+#[derive(Debug)]
+struct Mirrored {
+    /// `mirror_fingerprint` of the body the broker accepted.
+    fingerprint: String,
+    /// Reconciles since that PUT that sent nothing.
+    quiet: u32,
+}
+
+impl MirrorLedger {
+    /// Whether the body with this `fingerprint` must be PUT for `id` now.
+    /// A `false` counts as one quiet reconcile towards the refresh.
+    fn needs_put(&mut self, id: &str, fingerprint: &str) -> bool {
+        match self.by_cr.get_mut(id) {
+            Some(m) if m.fingerprint == fingerprint => {
+                m.quiet += 1;
+                m.quiet >= MIRROR_REFRESH_PASSES
+            }
+            _ => true,
+        }
+    }
+
+    /// The broker accepted `fingerprint` for `id`.
+    fn record_put(&mut self, id: String, fingerprint: String) {
+        self.by_cr.insert(
+            id,
+            Mirrored {
+                fingerprint,
+                quiet: 0,
+            },
+        );
+    }
+
+    /// Nothing is known to be mirrored for `id`; the next reconcile PUTs.
+    fn forget(&mut self, id: &str) {
+        self.by_cr.remove(id);
+    }
+
+    /// Drop every CR not in `live`. A CR deleted while the watch was
+    /// being rebuilt sends no `Delete` event, and its entry would
+    /// otherwise outlive it.
+    fn retain_only(&mut self, live: &BTreeSet<String>) {
+        self.by_cr.retain(|id, _| live.contains(id));
+    }
+}
+
+/// FNV-1a of the serialised mirror body — the same `fingerprint` the
+/// profile file uses, over the whole PUT payload rather than the fields
+/// the ledger happens to know about, so anything `mirror_body` starts
+/// carrying is compared without the ledger learning of it.
+fn mirror_fingerprint(body: &serde_json::Value) -> String {
+    fingerprint(&serde_json::to_vec(body).expect("a json Value serialises"))
 }
 
 /// One row of the broker's `GET /seccomp/profiles`, which is also the
@@ -690,11 +782,14 @@ impl Reconciler {
                 }
             }
         }
+        let live: BTreeSet<String> = crs.iter().map(|c| cr_id(c.as_ref())).collect();
+        self.mirrors.retain_only(&live);
         debug!(
             crs = crs.len(),
             present = present.len(),
             failed,
             broker_reads = self.cluster.as_ref().map_or(0, |c| c.readings.len()),
+            mirrored = self.mirrors.by_cr.len(),
             "seccomp profile distribution pass"
         );
         self.report_node_status(&present).await;
@@ -784,29 +879,40 @@ impl Reconciler {
         // conditions carry forward.
         let fetch = self.fetch;
         let no_nodes = BTreeSet::new();
-        let (live, summaries) = match self.cluster.as_mut() {
+        let (live, reading) = match self.cluster.as_mut() {
             Some(ClusterData { nodes, readings }) => {
-                let summaries = match cr.spec.workload_ref.as_ref() {
-                    Some(wr) => readings
-                        .get_or_fetch(workload_key(&ns, wr), fetch)
-                        .await
-                        .summaries(),
+                let reading = match cr.spec.workload_ref.as_ref() {
+                    Some(wr) => Some(readings.get_or_fetch(workload_key(&ns, wr), fetch).await),
                     None => None,
                 };
-                (&nodes.names, summaries)
+                (&nodes.names, reading)
             }
             None => (&no_nodes, None),
         };
+        let broker_unavailable = matches!(reading, Some(BrokerReading::Unavailable));
+        let summaries = reading.and_then(BrokerReading::summaries);
         let desired = desired_summary(cr, &status, &nodes_view, &hash, &localhost, live, summaries);
         if !summary_equal(&status, &desired) {
             self.apply_summary(&ns, &name, &desired).await?;
         }
 
-        // 4. Mirror to the broker. Best-effort: the file and status are
-        // already right; the UI just lags until the next pass.
-        if let Err(e) = mirror_cr(&ns, &name, &cr.spec, &hash, desired.distribution.as_ref()).await
-        {
-            debug!(cr = %cr_id(cr), "seccomp CR mirror failed (will retry next pass): {e}");
+        // 4. Mirror to the broker, when the mirror would change (see
+        // `MirrorLedger`). Best-effort: the file and status are already
+        // right; the UI just lags until the next pass.
+        let id = cr_id(cr);
+        if broker_unavailable {
+            self.mirrors.forget(&id);
+        }
+        let body = mirror_body(&cr.spec, &hash, desired.distribution.as_ref());
+        let print = mirror_fingerprint(&body);
+        if self.mirrors.needs_put(&id, &print) {
+            match mirror_cr(&ns, &name, body).await {
+                Ok(()) => self.mirrors.record_put(id, print),
+                Err(e) => {
+                    self.mirrors.forget(&id);
+                    debug!(cr = %id, "seccomp CR mirror failed (will retry next pass): {e}");
+                }
+            }
         }
 
         Ok(Some((localhost, hash)))
@@ -902,9 +1008,12 @@ impl Reconciler {
     }
 
     /// The user deleted the CR: remove its file and the broker mirror.
-    async fn on_delete(&self, cr: &SeccompProfile) {
+    async fn on_delete(&mut self, cr: &SeccompProfile) {
         let Some(ns) = cr.namespace() else { return };
         let name = cr.name_any();
+        // Whatever the DELETE below does, a CR recreated under this name
+        // must be mirrored afresh, not judged against the old body.
+        self.mirrors.forget(&cr_id(cr));
         let localhost = localhost_profile_path(&ns, &name);
         match safe_relative_path(&localhost) {
             Some(rel) => match delete_profile_file(&self.cfg.root.join(rel)) {
@@ -965,22 +1074,13 @@ fn delete_profile_file(dest: &Path) -> Result<bool, Error> {
     }
 }
 
-/// `PUT /seccomp/crs/{ns}/{name}` body: the spec verbatim, the file hash,
-/// and the distribution as this node computed it.
-async fn mirror_cr(
-    ns: &str,
-    name: &str,
-    spec: &SeccompProfileSpec,
-    hash: &str,
-    distribution: Option<&Distribution>,
-) -> Result<(), Error> {
-    api_put_call(
-        mirror_body(spec, hash, distribution),
-        &format!("seccomp/crs/{ns}/{name}"),
-    )
-    .await
+/// `PUT /seccomp/crs/{ns}/{name}` with a `mirror_body`.
+async fn mirror_cr(ns: &str, name: &str, body: serde_json::Value) -> Result<(), Error> {
+    api_put_call(body, &format!("seccomp/crs/{ns}/{name}")).await
 }
 
+/// The mirror body: the spec verbatim, the file hash, and the
+/// distribution as this node computed it.
 pub fn mirror_body(
     spec: &SeccompProfileSpec,
     hash: &str,
@@ -1953,6 +2053,7 @@ mod tests {
             cluster: None,
             fetch,
             last_nodes: BTreeSet::new(),
+            mirrors: MirrorLedger::default(),
         };
         (rec, writer)
     }
@@ -3656,6 +3757,112 @@ mod tests {
         assert_eq!(cluster.readings.len(), 1, "{:?}", cluster.readings);
         assert!(cluster.readings.broker_down);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The steady state on a large fleet: nothing about the CR changed
+    /// since the broker accepted it, so no PUT — for nine quiet
+    /// reconciles, then one anyway, so a broker that lost the row gets
+    /// it back inside `MIRROR_REFRESH_PASSES`.
+    #[test]
+    fn an_unchanged_mirror_is_not_re_put_until_the_refresh() {
+        let mut ledger = MirrorLedger::default();
+        assert!(
+            ledger.needs_put("prod/web", "aaaa"),
+            "nothing recorded yet: the first pass mirrors"
+        );
+        ledger.record_put("prod/web".into(), "aaaa".into());
+
+        let sent: Vec<bool> = (0..MIRROR_REFRESH_PASSES)
+            .map(|_| ledger.needs_put("prod/web", "aaaa"))
+            .collect();
+        let quiet = sent.iter().filter(|s| !**s).count();
+        assert_eq!(quiet, MIRROR_REFRESH_PASSES as usize - 1, "{sent:?}");
+        assert_eq!(sent.last(), Some(&true), "the refresh is the last one");
+
+        // A PUT resets the clock.
+        ledger.record_put("prod/web".into(), "aaaa".into());
+        assert!(!ledger.needs_put("prod/web", "aaaa"));
+    }
+
+    /// A different body — the spec edited, the file re-rendered, another
+    /// node becoming ready — is sent at once, however recently the last
+    /// PUT was; and a CR the ledger has never seen is sent regardless of
+    /// what it knows about other CRs.
+    #[test]
+    fn a_changed_mirror_is_put_at_once() {
+        let mut ledger = MirrorLedger::default();
+        ledger.record_put("prod/web".into(), "aaaa".into());
+        assert!(!ledger.needs_put("prod/web", "aaaa"));
+        assert!(ledger.needs_put("prod/web", "bbbb"), "the body changed");
+        assert!(ledger.needs_put("prod/api", "aaaa"), "another CR entirely");
+    }
+
+    /// The three ways an entry is dropped — a failed PUT, a broker that
+    /// was unavailable this pass, a deleted CR — all make the next
+    /// reconcile send, whatever the body. Entries for CRs that left the
+    /// store without a `Delete` event go with the pass's prune.
+    #[test]
+    fn a_forgotten_mirror_is_retried_next_reconcile() {
+        let mut ledger = MirrorLedger::default();
+        ledger.record_put("prod/web".into(), "aaaa".into());
+        ledger.record_put("prod/api".into(), "cccc".into());
+        assert!(!ledger.needs_put("prod/web", "aaaa"));
+
+        ledger.forget("prod/web");
+        assert!(
+            ledger.needs_put("prod/web", "aaaa"),
+            "same body, but the PUT it remembers did not happen or may not have stuck"
+        );
+        assert!(
+            !ledger.needs_put("prod/api", "cccc"),
+            "other CRs are untouched"
+        );
+
+        ledger.retain_only(&BTreeSet::from(["prod/web".to_string()]));
+        assert!(
+            ledger.needs_put("prod/api", "cccc"),
+            "pruned with the store: `api` is gone from it"
+        );
+    }
+
+    /// The fingerprint is over the PUT body itself, so it moves with the
+    /// spec, the hash and the distribution — the three things the mirror
+    /// carries — and with nothing else.
+    #[test]
+    fn the_mirror_fingerprint_follows_the_body() {
+        let spec = cr("prod", "deployment-web", Some("web")).spec;
+        let fleet = live(&["a", "b"]);
+        let ready = compute_distribution(&[node("a", "h1"), node("b", "h1")], "h1", &fleet);
+        let partial = compute_distribution(&[node("a", "h1"), node("b", "h0")], "h1", &fleet);
+
+        let base = mirror_fingerprint(&mirror_body(&spec, "h1", Some(&ready)));
+        assert_eq!(
+            base,
+            mirror_fingerprint(&mirror_body(&spec, "h1", Some(&ready))),
+            "deterministic across builds of the same body"
+        );
+        assert_ne!(
+            base,
+            mirror_fingerprint(&mirror_body(&spec, "h1", Some(&partial))),
+            "a node becoming ready changes the mirror"
+        );
+        assert_ne!(
+            base,
+            mirror_fingerprint(&mirror_body(&spec, "h2", Some(&ready))),
+            "a re-rendered file changes the mirror"
+        );
+        assert_ne!(
+            base,
+            mirror_fingerprint(&mirror_body(&spec, "h1", None)),
+            "a summary not yet computed is a different mirror"
+        );
+        let mut edited = cr("prod", "deployment-web", Some("web")).spec;
+        edited.default_action = DefaultAction::Errno;
+        assert_ne!(
+            base,
+            mirror_fingerprint(&mirror_body(&edited, "h1", Some(&ready))),
+            "an edited spec changes the mirror"
+        );
     }
 
     #[test]

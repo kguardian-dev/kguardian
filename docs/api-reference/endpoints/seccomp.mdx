@@ -355,8 +355,9 @@ modified by this call. The same `409` partial-capture gate applies.
 
 Controller-only. Mirrors a `SeccompProfile` CR into the broker so the UI can
 show CR state and drift without talking to the API server. Every controller
-sends the same payload on every watch event and resync; the write is
-idempotent.
+sends it when the payload would change, after a failed or doubtful send, and
+otherwise once every ten quiet reconciles (about five minutes at the default
+resync), so a row the Broker lost still comes back; the write is idempotent.
 
 ```json
 {
