@@ -2403,6 +2403,7 @@ mod tests {
         })
         .unwrap();
         let rb = rb.build().unwrap();
+        let _diag = OnFailure(|| cap_diagnostics(&sk, &events));
 
         let me = std::env::current_exe().unwrap();
         // The container's own code is a different executable from its
@@ -2716,6 +2717,56 @@ mod tests {
         let _ = std::fs::remove_dir(&pod_dir);
     }
 
+    /// Prints its closure's diagnostics when dropped while the test is
+    /// panicking (an assertion failed), so a failed VM run says what the
+    /// probe saw, not only what was missing.
+    struct OnFailure<F: Fn() -> String>(F);
+
+    impl<F: Fn() -> String> Drop for OnFailure<F> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!("on failure: {}", (self.0)());
+            }
+        }
+    }
+
+    /// The runtime object's per-CPU drop counter (events it could not
+    /// attribute or queue, including a parse state it could not get), and
+    /// its sum.
+    fn runtime_drop_counts(
+        sk: &crate::runtime_inventory::runtime_inventory_skel::RuntimeInventorySkel,
+    ) -> (Vec<u64>, u64) {
+        let per_cpu: Vec<u64> = sk
+            .maps
+            .runtime_drops
+            .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
+            .ok()
+            .flatten()
+            .map(|v| {
+                v.iter()
+                    .map(|b| u64::from_ne_bytes(b[..8].try_into().unwrap()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sum = per_cpu.iter().sum();
+        (per_cpu, sum)
+    }
+
+    /// Drop counts and unattributed capability events, for [`OnFailure`].
+    fn cap_diagnostics(
+        sk: &crate::runtime_inventory::runtime_inventory_skel::RuntimeInventorySkel,
+        events: &Mutex<Vec<crate::runtime_capabilities::CapEventData>>,
+    ) -> String {
+        let (per_cpu, sum) = runtime_drop_counts(sk);
+        let evs = events.lock().unwrap_or_else(|p| p.into_inner());
+        let unattributed = evs.iter().filter(|e| e.container_id().is_none()).count();
+        format!(
+            "runtime_drops per CPU {per_cpu:?} (sum {sum}); capability events {}, unattributed \
+             (no container id) {unattributed}",
+            evs.len()
+        )
+    }
+
     /// `prefix-<pid>-<nanos>`: unique even across VMs that share the host's
     /// /tmp (vmtest mounts the host filesystem) and reuse the same pids.
     fn unique_name(prefix: &str) -> String {
@@ -2970,6 +3021,7 @@ mod tests {
     #[ignore = "needs root, cgroup v2, a BTF-enabled kernel and KG_RUNC/KG_CRUN; run by the ebpf-kernels CI job"]
     fn capability_setup_of_real_runtimes_is_not_counted() {
         use crate::runtime_capabilities::FLAG_GRANTED;
+        use std::sync::Arc;
 
         let mut rt = RealRuntimes::new();
         let mut storage = MaybeUninit::uninit();
@@ -2981,9 +3033,18 @@ mod tests {
             attached.cap_error
         );
         eprintln!("capability hook: {:?}", attached.cap_hook);
+        let events: Arc<Mutex<Vec<crate::runtime_capabilities::CapEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
         let mut rb = RingBufferBuilder::new();
-        rb.add(&sk.maps.cap_events, |_: &[u8]| 0).unwrap();
+        rb.add(&sk.maps.cap_events, move |data: &[u8]| {
+            let ev: crate::runtime_capabilities::CapEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const _) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
         let rb = rb.build().unwrap();
+        let _diag = OnFailure(|| cap_diagnostics(&sk, &events));
 
         let pod = "/kubepods/besteffort/pod7b3d0a2f-8c5e-4f1b-a02d-1234567890ab".to_string();
         let names: Vec<&'static str> = rt.runtimes.iter().map(|r| r.0).collect();
@@ -3090,6 +3151,8 @@ mod tests {
             );
             eprintln!("asserted: crun-as-runc foreground run: container command counted");
         }
+        let (per_cpu, sum) = runtime_drop_counts(&sk);
+        eprintln!("runtime_drops: sum {sum} per CPU {per_cpu:?}");
         drop(rb);
     }
 
@@ -3138,6 +3201,20 @@ mod tests {
         })
         .unwrap();
         let rb = rb.build().unwrap();
+        // The syscall object keeps no drop counter (a full ring buffer
+        // forgets the sighting, so it is reported again) and its parse state
+        // is per-CPU (never unavailable): on failure, print what arrived.
+        let _diag = OnFailure(|| {
+            let evs = events.lock().unwrap_or_else(|p| p.into_inner());
+            let unattributed = evs.iter().filter(|e| e.generation == 0).count();
+            let cgroups: std::collections::BTreeSet<u64> =
+                evs.iter().map(|e| e.cgroup_id).collect();
+            format!(
+                "syscall events {}, from {} cgroups, unattributed (generation 0) {unattributed}",
+                evs.len(),
+                cgroups.len()
+            )
+        });
         let netns = std::fs::metadata("/proc/self/ns/net").unwrap().ino();
         // Register this netns under pod `i`'s generation (as the pod watcher
         // would) and return the pod's cgroup path and generation.
