@@ -61,14 +61,47 @@ type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A captured CPU architecture (as the controller records it, from
-/// Rust's `std::env::consts::ARCH`) mapped to its seccomp arch token.
-/// Unknown values are dropped rather than guessed — an invalid
-/// `architectures` entry makes the whole profile unloadable.
+/// Rust's `std::env::consts::ARCH`) mapped to its seccomp arch token,
+/// spelled the way libseccomp and the OCI runtime-spec spell it. The
+/// runtime resolves each `architectures` entry by name when it creates
+/// the container and refuses one it does not know rather than skipping
+/// it, so an invalid entry makes the whole profile unloadable. That is
+/// also why unknown values are dropped rather than guessed.
+///
+/// aarch64 is `SCMP_ARCH_AARCH64`. This table used to say
+/// `SCMP_ARCH_ARM64`, a spelling of kguardian's own that no runtime
+/// accepts (`runc create failed: string SCMP_ARCH_ARM64 is not a valid
+/// arch for seccomp`), so every profile exported for an arm64 workload
+/// failed at container creation. [`canonical_arch_token`] folds that
+/// spelling back onto this one wherever a token comes in from outside.
+/// The controller's `seccomp_denial::scmp_arch_token` and the CRD's
+/// `Architecture` carry the same mapping, and the three must agree or a
+/// denial row does not line up with the profile it belongs to.
 fn arch_token(arch: &str) -> Option<&'static str> {
     match arch {
         "x86_64" => Some("SCMP_ARCH_X86_64"),
-        "aarch64" => Some("SCMP_ARCH_ARM64"),
+        "aarch64" => Some("SCMP_ARCH_AARCH64"),
         _ => None,
+    }
+}
+
+/// Fold a `SCMP_ARCH_*` token that arrived from outside — a mirrored
+/// CR's `spec.architectures`, the `arch` on a denial row — onto the
+/// spelling [`arch_token`] emits, trimmed.
+///
+/// CRs applied from an export made while kguardian wrote
+/// `SCMP_ARCH_ARM64` are still in git and still on clusters, and a
+/// controller from before the fix still stamps that token on its denial
+/// rows during a rolling upgrade. Both end up beside the observed set in
+/// the summaries and the UI, so they have to share one spelling or an
+/// aarch64 workload reads as having a CR, or denials, for some other
+/// architecture. Anything else passes through as it came: the Broker
+/// reports architectures, it does not validate them, and the CRD's enum
+/// already rejected anything it does not know.
+pub(crate) fn canonical_arch_token(token: &str) -> &str {
+    match token.trim() {
+        "SCMP_ARCH_ARM64" => "SCMP_ARCH_AARCH64",
+        t => t,
     }
 }
 
@@ -2545,12 +2578,17 @@ impl CrMirror {
                 }
             }
         }
+        // Folded onto the libseccomp spelling, so a CR still written with
+        // `SCMP_ARCH_ARM64` mirrors as the same architecture the observed
+        // set and the node file report. The set then also collapses a
+        // spec that lists the same architecture both ways.
         let arches: BTreeSet<String> = spec
             .architectures
             .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.trim().to_string())
+            .iter()
+            .map(|a| canonical_arch_token(a))
             .filter(|a| !a.is_empty())
+            .map(String::from)
             .collect();
         let (workload_kind, workload_name) = match spec.workload_ref {
             Some(w) if !w.kind.trim().is_empty() && !w.name.trim().is_empty() => (
@@ -2709,7 +2747,7 @@ mod tests {
     fn fingerprint_distinguishes_arch() {
         assert_ne!(
             fp(&["read"], &["SCMP_ARCH_X86_64"]),
-            fp(&["read"], &["SCMP_ARCH_ARM64"])
+            fp(&["read"], &["SCMP_ARCH_AARCH64"])
         );
     }
 
@@ -2723,10 +2761,46 @@ mod tests {
         assert_eq!(p.syscalls[0].names, vec!["openat", "read", "write"]);
     }
 
+    /// aarch64 must come out as `SCMP_ARCH_AARCH64`, the token libseccomp
+    /// knows. The `SCMP_ARCH_ARM64` this once produced is not one, and a
+    /// profile carrying it fails every pod that references it at `runc
+    /// create` — every arm64 export kguardian ever produced was unusable.
     #[test]
     fn build_profile_maps_both_arches_and_drops_unknown() {
         let p = build_profile("read", "aarch64,x86_64,riscv64", "SCMP_ACT_LOG");
-        assert_eq!(p.architectures, vec!["SCMP_ARCH_ARM64", "SCMP_ARCH_X86_64"]);
+        assert_eq!(
+            p.architectures,
+            vec!["SCMP_ARCH_AARCH64", "SCMP_ARCH_X86_64"]
+        );
+        assert!(
+            !p.architectures.iter().any(|a| a == "SCMP_ARCH_ARM64"),
+            "not a libseccomp token; runc refuses a profile that lists it"
+        );
+    }
+
+    /// The legacy spelling folds onto the real one; everything else,
+    /// including a token the Broker has never heard of, passes through
+    /// trimmed — reporting is the Broker's job here, not validation.
+    #[test]
+    fn canonical_arch_token_folds_only_the_legacy_arm64_spelling() {
+        assert_eq!(canonical_arch_token("SCMP_ARCH_ARM64"), "SCMP_ARCH_AARCH64");
+        assert_eq!(
+            canonical_arch_token(" SCMP_ARCH_ARM64 "),
+            "SCMP_ARCH_AARCH64"
+        );
+        assert_eq!(
+            canonical_arch_token("SCMP_ARCH_AARCH64"),
+            "SCMP_ARCH_AARCH64"
+        );
+        assert_eq!(
+            canonical_arch_token(" SCMP_ARCH_X86_64"),
+            "SCMP_ARCH_X86_64"
+        );
+        assert_eq!(
+            canonical_arch_token("SCMP_ARCH_RISCV64"),
+            "SCMP_ARCH_RISCV64"
+        );
+        assert_eq!(canonical_arch_token("  "), "");
     }
 
     #[test]
@@ -3518,12 +3592,41 @@ mod tests {
             m.syscalls, "mmap,read,write",
             "ERRNO rule and invalid name excluded"
         );
-        assert_eq!(m.architectures, "SCMP_ARCH_ARM64,SCMP_ARCH_X86_64");
+        assert_eq!(
+            m.architectures, "SCMP_ARCH_AARCH64,SCMP_ARCH_X86_64",
+            "the legacy aarch64 spelling is trimmed and folded onto the libseccomp one"
+        );
         assert_eq!(m.default_action, "SCMP_ACT_ERRNO");
         assert_eq!(m.hash, "abc");
         assert_eq!(m.workload_kind.as_deref(), Some("Deployment"));
         assert_eq!(m.workload_name.as_deref(), Some("web"));
         assert_eq!((m.ready, m.total, m.dist_state.as_str()), (3, 4, "Partial"));
+    }
+
+    /// A CR applied from an export made before the fix says
+    /// `SCMP_ARCH_ARM64`; one written since says `SCMP_ARCH_AARCH64`; one
+    /// hand-edited in between may say both. All three describe the same
+    /// architecture and must mirror as one entry, so the `cr` block in
+    /// the summary names the architecture the observed set and the node
+    /// file name, rather than a second one nothing runs on.
+    #[test]
+    fn cr_mirror_folds_the_legacy_arm64_spelling_onto_aarch64() {
+        for arches in [
+            serde_json::json!(["SCMP_ARCH_ARM64"]),
+            serde_json::json!(["SCMP_ARCH_AARCH64"]),
+            serde_json::json!(["SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM64", " SCMP_ARCH_ARM64 "]),
+        ] {
+            let input: CrMirrorInput = serde_json::from_value(serde_json::json!({
+                "spec": {
+                    "defaultAction": "SCMP_ACT_LOG",
+                    "architectures": arches,
+                    "syscalls": [{ "names": ["read"], "action": "SCMP_ACT_ALLOW" }]
+                }
+            }))
+            .unwrap();
+            let m = CrMirror::from_input(input, "prod", "deployment-web");
+            assert_eq!(m.architectures, "SCMP_ARCH_AARCH64", "input {arches}");
+        }
     }
 
     #[test]
@@ -3721,7 +3824,10 @@ spec:
                 },
                 "spec": {
                     "defaultAction": "SCMP_ACT_LOG",
-                    "architectures": ["SCMP_ARCH_ARM64"],
+                    // The libseccomp token: this document is what a user
+                    // applies, and a pod referencing a profile that said
+                    // SCMP_ARCH_ARM64 never started.
+                    "architectures": ["SCMP_ARCH_AARCH64"],
                     "syscalls": [{ "names": ["read"], "action": "SCMP_ACT_ALLOW" }],
                     "workloadRef": { "kind": "Deployment", "name": "web" }
                 }
