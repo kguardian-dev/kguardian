@@ -303,11 +303,18 @@ from 29.7 MB and 124 Go modules to about 71 MB and 817.
 The coordinator (`pkg/match`):
 
 - holds every source's SBOM per digest, up to 2000 digests and an
-  estimated 96 MiB of heap (`GRYPE_SBOM_BUDGET_MIB`), dropping the least
-  recently offered digests first, and matches the union described above.
-  A fat Debian/Python image whose registry SBOM lists every file costs
-  about 3.3 MiB held, so the default keeps about 28 of them; a Trivy
-  SbomReport, which lists no files, about a tenth of that;
+  estimated 96 MiB of heap (`GRYPE_SBOM_BUDGET_MIB`), and matches the
+  union described above. A fat Debian/Python image whose registry SBOM
+  lists every file costs about 3.3 MiB held, so the default keeps about
+  28 of them; a Trivy SbomReport, which lists no files, about a tenth of
+  that. Past the budget it drops the SBOMs of whole groups, least recently
+  offered first, but only groups already matched at the current database
+  (or quarantined) with nothing queued. Their match state is kept: an
+  unchanged re-offer is not matched again, a quarantine still holds, and
+  their findings on the broker stay as they are until a source offers the
+  SBOM again (after a database update too). An SBOM still waiting for its
+  match is never dropped, so the budget can be exceeded until it is
+  matched, for example before the first database loads;
 - matches on one worker, with a time limit per match;
 - re-matches when any input changes (it fingerprints the union);
 - re-matches everything it holds when the sidecar reports a new database
