@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.0...frontend/v1.20.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* name the aarch64 seccomp architecture SCMP_ARCH_AARCH64 so arm64 pods can start ([#1742](https://github.com/kguardian-dev/kguardian/issues/1742)) ([acb1cbd](https://github.com/kguardian-dev/kguardian/commit/acb1cbda8068ede73f37a30acf13787fa2485e01))
+
 ## [1.20.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.19.0...frontend/v1.20.0) (2026-09-27)
 
 
