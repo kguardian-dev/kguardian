@@ -1093,6 +1093,16 @@ const REDACTION_CASES: &[(&str, &str)] = &[
     // part of the token.
     ("unsigned eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0. rejected", "unsigned <redacted> rejected"),
     ("id eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyb2JvdCJ9.c2lnbmF0dXJl: invalid", "id <redacted>: invalid"),
+    // Structural rule: 3 or 5 segments of 10+ characters whose first
+    // decodes to JSON, in any formatting, with padding, after %3D.
+    ("RS256 eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJyb2JvdCIsImlzcyI6Imh0dHBzOi8vYXV0aC5leGFtcGxlIiwiZXhwIjoxNzkwMDAwMDAwfQ.pU3KGCUwux1tEyze1iN7LtkeP3IfyxlxF0SU1kk8nVw0YL4xIB5p_tqg7ui5mX9cfCmZ_a_lkyU81lSvTfrXFCegrrP-6SMvivIhH57kkcWxC-y1Vjv8Hm-TQn7LyP4pVeXNjkbcjtS3wnZNKlpNdncG-F2GkAJK1r2jQBvpyMvMyTX2zR9hImrhUziuGjQATTO6DSRqwEyBsbryPjv57vX3nytJNK-H9VILablLDZguhbtVtnKocmN6zXRm_LYODo_xhGOw5LK6KXA0dPBkrGj3APWwKz3GZvRb3qosyu3NK1FXQQ5N7krys09DCgc0R95jbA6AbJV7poTWQx-16g expired", "RS256 <redacted> expired"),
+    ("ES256 eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJyb2JvdCIsImlzcyI6Imh0dHBzOi8vYXV0aC5leGFtcGxlIiwiZXhwIjoxNzkwMDAwMDAwfQ.10JNCeFdAkxYSPI9H6b3Nh1_YY0VMucOIOKmZo3n9H6EZ-VG1T7I4qEle9slbJs-T7tJgUbvcDDL-VNyUtzOrQ", "ES256 <redacted>"),
+    ("padded eyJhbGciOiJIUzIifQ==.eyJzdWIiOiJyb2JvdDEifQ.7b-IRl8Dre0pqxTCVufYUFZ5GjhDIMQ0lWhy1yyIa8s rejected", "padded <redacted> rejected"),
+    ("GET x?state%3DeyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImsxIn0.eyJzdWIiOiJyb2JvdCIsImlzcyI6Imh0dHBzOi8vYXV0aC5leGFtcGxlIiwiZXhwIjoxNzkwMDAwMDAwfQ.pU3KGCUwux1tEyze1iN7LtkeP3IfyxlxF0SU1kk8nVw0YL4xIB5p_tqg7ui5mX9cfCmZ_a_lkyU81lSvTfrXFCegrrP-6SMvivIhH57kkcWxC-y1Vjv8Hm-TQn7LyP4pVeXNjkbcjtS3wnZNKlpNdncG-F2GkAJK1r2jQBvpyMvMyTX2zR9hImrhUziuGjQATTO6DSRqwEyBsbryPjv57vX3nytJNK-H9VILablLDZguhbtVtnKocmN6zXRm_LYODo_xhGOw5LK6KXA0dPBkrGj3APWwKz3GZvRb3qosyu3NK1FXQQ5N7krys09DCgc0R95jbA6AbJV7poTWQx-16g 401", "GET x?state%3D<redacted> 401"),
+    ("jwe eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkEyNTZHQ00ifQ.jh1d2SWJCC2FKnEihz7oBa3ViUIWejhShhlcZ5-caZTkW4qxCYASBwlh833kNt39yZ1uda9lR8-xG0IHJILcUxwrw5B8lhfrXlCJ5AGGuqilfRGeb7ZdAKvDKvOOZn8CLoctScwVyQuZm3crT8em_UyRShbbRwh1Kw8VRLg1wOcZCX36hwHpIy8h8oEmh3hpduv8wyf1kxdlJ0upgptEBvYf-Ikyb_qUku3u7jxmnyvyCJTqJ-aJxmtrJi5IhrhDjzm6dv74yQxRAfvmz5pI1bDAoT2pAKatyz1kBpSBviHJxye424wYjzQakkx_iN-hYb_bDsxoKRnS5kaS-BlBVw.8dSvkJiChc96mvfJ.PVVSJmr-cOeq5tpHYnwuWa8uo3q8hGcK08TTa8CKrR__jrhAbi-Kfw.xMzk3Z8LQRDZ8voAJcjv5Q bad", "jwe <redacted> bad"),
+    ("jwe dir eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..fzdyT0036isUAEB3.E5tBgN85MiSZYsaFcgAFmuuOoXzzeH4O0p0cC2P_1ymDdNm9dPwRrQ.17nKZQOVImn9Zp9jdu5xhw bad", "jwe dir <redacted> bad"),
+    ("spaced eyAiYWxnIjogIlJTMjU2IiB9.eyAic3ViIjogInJvYm90IiB9.lzf9X3L41RxKyRttDEjUGh5eyeagOShUqGFe7xCfwb-p4lY3ASiPKbPXP2rCtp7dLBnyZL7kYqW68g_Sfs8UwA rejected", "spaced <redacted> rejected"),
+    ("newline ewogICJhbGciOiAiUlMyNTYiCn0.ewogICJzdWIiOiAicm9ib3QiCn0.Ee0gH4NjIK25i6sWhqKNmAEhDHc28-7FgNz8Q_5dBJtNeKej67koZchRftAhEfamUto1JIcrajHX_-RYd0TV6w rejected", "newline <redacted> rejected"),
     // Must pass unchanged.
     (
         "bad_signature: signature for sha256:0123456789abcdef does not match",
@@ -1233,4 +1243,23 @@ async fn live_detail_redaction_through_the_routes() {
 struct StoredDetail {
     #[diesel(sql_type = Text)]
     s: String,
+}
+
+/// The structural JWT rule leaves host names (even with long labels) and
+/// digests alone: they are the host rule's, or kept.
+#[test]
+fn jwt_rule_ignores_hosts_and_digests() {
+    for word in [
+        "averylonglabelone.anotherlonglabel.thirdlonglabelx",
+        "registry-mirror-one.kube-system-namespace.svc-cluster-local.example-domain.internal-zone",
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "ghcr.io/example/api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "v1.2.3",
+    ] {
+        assert_eq!(redact_jwts(word), word, "{word}");
+    }
+    assert_eq!(
+        redact_endpoints("pull averylonglabelone.anotherlonglabel.thirdlonglabelx failed"),
+        "pull <host> failed"
+    );
 }
