@@ -1,0 +1,36 @@
+{
+  "body": {
+    "documents": [
+      {
+        "apiVersion": null,
+        "applyWith": null,
+        "artifact": "admission",
+        "available": false,
+        "content": null,
+        "contentType": null,
+        "fileName": "admission.yaml",
+        "image": null,
+        "kind": null,
+        "mode": "audit",
+        "reason": "no image of this workload has every running digest signed by a verified signer (docker.io/grafana/grafana: a running digest is key_signed)",
+        "refused": null
+      }
+    ],
+    "generatedAt": "2026-09-26T22:20:56.057824525+00:00",
+    "mode": "audit",
+    "profile": {
+      "contentHash": "fnv1a64:9dbff2aeef680af1",
+      "revision": null
+    },
+    "recorded": false,
+    "workload": {
+      "clusterId": "primary",
+      "kind": "Deployment",
+      "name": "grafana",
+      "namespace": "observability"
+    }
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /workloads/observability/Deployment/grafana/export?artifacts=admission&mode=audit&format=zip-manifest",
+  "status": 200
+}

@@ -210,6 +210,14 @@ The tools cover these areas (the compute tools are described in [Compute Gauges]
 
     *"Are we affected by CVE-2024-3094, where does it run, and is any of it reachable from outside its namespace?"*
   </Accordion>
+
+  <Accordion icon="signature" title="Image signatures and ImageTrustPolicy">
+    `get_image_signers` returns one digest's signature verdict (`verified`, `key_signed`, `unsigned`, `invalid`, `unknown`) with the reason, the signers that verified (a keyless issuer and identity, or a configured key) and its signatures and attestations, verified first. `explain_image_trust` returns which ImageTrustPolicies would deny which running workloads and why (`Trusted`, `WouldDeny`, `Unknown` with the reason), with counts over every match; filter by namespace, workload and verdict. Both need `supplychain.signatureDiscovery.enabled`, and `explain_image_trust` needs the evaluator's image trust evaluation.
+
+    `verified` means valid for the signer shown, not trusted: only a policy says a signer is acceptable, and `Trusted` still does not mean safe. `key_signed` was not checked. An unverified signature never shows a signer. `unknown`, a digest never checked, `Unknown` policy results and an unavailable or not-yet-evaluated answer are unknown and never presented as signed, unsigned, trusted or an all-clear. Lists are capped with a `truncated` flag. Results are report-only: kguardian never admits or blocks an image.
+
+    *"Would anything in `shop` be denied if we enforced image signing, and who signed the images that would?"*
+  </Accordion>
 </AccordionGroup>
 
 Pod-specific tools take only `pod_name` — the Broker resolves it cluster-wide, so there is no namespace argument. Cluster-wide tools take an optional `namespace` filter. Profile tools take the workload key: `namespace`, `kind` and `name`.

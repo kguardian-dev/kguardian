@@ -1,6 +1,7 @@
 import apiClient from './api';
 import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { CvePage, Exposure, ImageDetail, ImagePage, ImageVulnsPage, SbomPage, VulnSeverity } from '../types/vulns';
+import type { AdmissionFormat, ExportManifest, RunningSignaturePage } from '../types/attestations';
 
 /**
  * Typed read-only client for the supply-chain reads (#1671) and the image
@@ -82,7 +83,15 @@ export class VulnApi {
     return (apiClient?.baseURL ?? '/api').replace(/\/$/, '');
   }
 
-  private async json<T>(path: string, query: Record<string, string | number | boolean | undefined> = {}, listRoute = false): Promise<T> {
+  private async json<T>(path: string, query: Record<string, string | number | boolean | undefined> = {}, listRoute: boolean | string = false): Promise<T> {
+    return JSON.parse(await this.read(path, query, listRoute, 'application/json')) as T;
+  }
+
+  /**
+   * One read. `listRoute`: a 404 means the Broker lacks the route
+   * (`unsupported`); a string is the message to show for it.
+   */
+  private async read(path: string, query: Record<string, string | number | boolean | undefined>, listRoute: boolean | string, accept: string): Promise<string> {
     const sp = new URLSearchParams();
     for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') sp.set(k, String(v));
     const q = sp.toString();
@@ -90,7 +99,7 @@ export class VulnApi {
     let text: string;
     try {
       res = await this.fetchImpl(`${this.base}${path}${q ? `?${q}` : ''}`, {
-        headers: { Accept: 'application/json' },
+        headers: { Accept: accept },
         credentials: 'same-origin',
         signal: timeoutSignal(this.timeoutMs),
       });
@@ -99,11 +108,11 @@ export class VulnApi {
       if (isTimeout(err)) throw new VulnApiError(0, 'timeout', timeoutMessage(this.timeoutMs));
       throw new VulnApiError(0, 'error', `Could not reach the Broker: ${vulnErrorMessage(err)}`);
     }
-    if (res.ok) return JSON.parse(text) as T;
+    if (res.ok) return text;
     const msg = text.trim() || `request failed with ${res.status}`;
     if (res.status === 404) {
       throw listRoute
-        ? new VulnApiError(404, 'unsupported', 'This Broker does not serve vulnerability data. Upgrade the Broker to a release with the supply-chain endpoints.')
+        ? new VulnApiError(404, 'unsupported', typeof listRoute === 'string' ? listRoute : 'This Broker does not serve vulnerability data. Upgrade the Broker to a release with the supply-chain endpoints.')
         : new VulnApiError(404, 'not_found', msg);
     }
     if (res.status === 401 || res.status === 403) {
@@ -117,6 +126,7 @@ export class VulnApi {
     }
     if (res.status === 503) throw new VulnApiError(503, 'busy', 'The Broker is shedding reads right now (read budget). Try again in a few seconds.');
     if (res.status === 400) throw new VulnApiError(400, 'bad_request', msg);
+    if (res.status === 409 || res.status === 422) throw new VulnApiError(res.status, 'bad_request', msg);
     throw new VulnApiError(res.status, 'error', msg);
   }
 
@@ -162,6 +172,23 @@ export class VulnApi {
   getImageSbom(digest: string, q: { limit?: number; after?: number; source?: string } = {}): Promise<SbomPage> {
     return this.json<SbomPage>(`/images/${seg(digest)}/sbom`, q);
   }
+
+  /** `GET /attestations/running`: running workload containers with their image's verdict (null = not checked). */
+  listRunningSignatures(q: { namespace?: string; limit?: number; after?: string } = {}): Promise<RunningSignaturePage> {
+    return this.json<RunningSignaturePage>('/attestations/running', q, NO_SIGNATURES);
+  }
+
+  /** `GET /attestations/policy`: an audit-mode admission policy (YAML) from the signers verified on running images. */
+  admissionPolicy(q: { format?: AdmissionFormat; namespace?: string } = {}): Promise<string> {
+    return this.read('/attestations/policy', { format: q.format, mode: 'audit', namespace: q.namespace }, NO_SIGNATURES, 'application/yaml');
+  }
+
+  /** The `admission` artifact of a workload's export bundle, in audit mode (`GET …/export`, read-only). */
+  async workloadAdmission(ns: string, kind: string, name: string): Promise<ExportManifest> {
+    return this.json<ExportManifest>(`/workloads/${seg(ns)}/${seg(kind)}/${seg(name)}/export`, { artifacts: 'admission', mode: 'audit', format: 'zip-manifest' });
+  }
 }
+
+const NO_SIGNATURES = 'This Broker does not serve signature results. Upgrade the Broker to a release with signature discovery.';
 
 export const vulnApi = new VulnApi();

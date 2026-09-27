@@ -115,7 +115,11 @@ them `Unknown` at once.
 The evaluator also serves the per-container results at `GET /image-trust`
 on its own port (`?namespace=`, `?verdict=`). It requires the same broker
 READ-scope token as the broker's read API (`Authorization: Bearer ...`);
-with broker auth off it is open, like the broker.
+with broker auth off it is open, like the broker. The broker serves them too,
+bounded and with workload filters, at
+[`GET /image-trust`](/api-reference/endpoints/attestations#get-image-trust);
+that is what [`kubectl kguardian images trust`](/cli/images#images-trust) and
+the assistant's `explain_image_trust` tool read.
 
 ## Generating policies
 

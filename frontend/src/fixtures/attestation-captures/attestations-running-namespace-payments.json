@@ -1,0 +1,90 @@
+{
+  "body": {
+    "items": [
+      {
+        "attestations": [],
+        "checkedAt": "2026-09-26T19:20:55",
+        "container": "reports",
+        "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+        "imageRef": "ghcr.io/example/reports:1.0.3",
+        "namespace": "payments",
+        "reason": null,
+        "repository": "ghcr.io/example/reports",
+        "signers": [],
+        "verdict": "unsigned",
+        "workloadKind": "CronJob",
+        "workloadName": "reports"
+      },
+      {
+        "attestations": [
+          {
+            "format": "sigstore-bundle",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "provenance": {
+              "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+              "builderId": "https://github.com/actions/runner/github-hosted",
+              "sourceCommit": "4f1c2a9e7b3d5f60819a2b3c4d5e6f7081920a1b",
+              "sourceRef": "refs/tags/v4.2.0",
+              "sourceRepo": "https://github.com/example-org/checkout"
+            },
+            "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+            "signerKind": "keyless",
+            "source": "referrers",
+            "verified": true
+          }
+        ],
+        "checkedAt": "2026-09-26T19:20:55",
+        "container": "app",
+        "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+        "imageRef": "ghcr.io/example/checkout:4.2.0",
+        "namespace": "payments",
+        "reason": null,
+        "repository": "ghcr.io/example/checkout",
+        "signers": [
+          {
+            "format": "sigstore-bundle",
+            "integratedTime": "2026-09-23T22:20:55Z",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+            "signerKind": "keyless",
+            "source": "referrers",
+            "tlogIndex": 123456789,
+            "verified": true
+          }
+        ],
+        "verdict": "verified",
+        "workloadKind": "Deployment",
+        "workloadName": "checkout"
+      },
+      {
+        "attestations": [],
+        "checkedAt": "2026-09-26T19:20:55",
+        "container": "ledger",
+        "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+        "imageRef": "ghcr.io/example/ledger:2.3.1",
+        "namespace": "payments",
+        "reason": null,
+        "repository": "ghcr.io/example/ledger",
+        "signers": [
+          {
+            "format": "cosign-legacy",
+            "keyFingerprint": "d4d97426189ec7a3bc8a16cc81bfc8ec314b179c4dad1123ff4e167026fc2c41",
+            "keyName": "payments-release",
+            "keyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIiPD8en3MRzsqzYYBfQXGi+WsFs0\n31/MnG5IODS0jF8L/SRsW+uanwUL+beVkFYHHSWIoLEp9DBmVsw/R64M3w==\n-----END PUBLIC KEY-----\n",
+            "signerKind": "key",
+            "source": "sig-tag",
+            "verified": true
+          }
+        ],
+        "verdict": "verified",
+        "workloadKind": "Deployment",
+        "workloadName": "ledger"
+      }
+    ],
+    "nextAfter": null
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /attestations/running?namespace=payments",
+  "status": 200
+}

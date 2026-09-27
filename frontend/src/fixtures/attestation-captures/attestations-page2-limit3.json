@@ -1,0 +1,48 @@
+{
+  "body": {
+    "items": [
+      {
+        "checkedAt": "2026-09-26T19:20:55",
+        "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+        "reason": null,
+        "repository": "ghcr.io/example/reports",
+        "signedVia": null,
+        "signers": [],
+        "verdict": "unsigned",
+        "verifiedPredicates": []
+      },
+      {
+        "checkedAt": "2026-09-26T19:20:55",
+        "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+        "reason": null,
+        "repository": "ghcr.io/example/checkout",
+        "signedVia": "index",
+        "signers": [
+          {
+            "issuer": "https://token.actions.githubusercontent.com",
+            "kind": "keyless",
+            "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0"
+          }
+        ],
+        "verdict": "verified",
+        "verifiedPredicates": [
+          "https://slsa.dev/provenance/v1"
+        ]
+      },
+      {
+        "checkedAt": "2026-09-26T19:20:55",
+        "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+        "reason": "rate_limited",
+        "repository": "quay.io/prometheus/node-exporter",
+        "signedVia": null,
+        "signers": [],
+        "verdict": "unknown",
+        "verifiedPredicates": []
+      }
+    ],
+    "nextAfter": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa"
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /attestations?limit=3&after=sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+  "status": 200
+}

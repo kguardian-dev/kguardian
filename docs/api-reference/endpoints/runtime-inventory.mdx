@@ -350,14 +350,21 @@ Not counted:
   container process that renames itself `runc:[...]` is still counted): a
   task whose real parent is outside every pod cgroup and that has either
   not exec'd since that parent created it (a runtime forking without exec,
-  until it execs the container's command) or exec'd exactly once and runs
-  the same executable file as that parent or has a parent named `runc*`
-  (runc init: runc execs it from a sealed copy of its own binary, and the
-  parent's name is the host process's). The container's command, and a
-  process started by `exec`, are past that point and counted. runc 1.1
-  re-execs itself once more before setup, so its setup is counted (extra
-  checks, never hidden ones). When unsure, the check is counted. Tested
-  in CI against real runc and crun.
+  until it execs the container's command) or exec'd exactly once, from a
+  sealed copy of its executable (a memfd or unlinked file, or a file on a
+  mount outside its mount namespace), and runs the same executable file as
+  that parent or has a parent named `runc*` (runc init: runc execs it from
+  a sealed copy of its own binary). The container's command is exec'd from
+  its rootfs, never a sealed copy, so another runtime installed as `runc`
+  does not hide it; it and a process started by `exec` are counted. A task
+  that has not exec'd is not setup in the host pid namespace under a parent
+  that adopts orphans (a child subreaper such as the shim, or a pid
+  namespace init): a hostPID container's forked worker that outlived its
+  parent lands there. runc 1.1 (one more re-exec before setup), a
+  foreground crun (a subreaper) and exec into a hostPID container have
+  their setup counted (extra checks, never hidden ones). When unsure, the
+  check is counted. Tested in CI against real runc (overlay and memfd
+  seals) and crun, also installed as `runc`.
 - **Checks the kernel answers without the container's capabilities**: a
   task that moved into a user namespace below the container's own (it
   holds every capability there), and a check against a descendant user

@@ -1,0 +1,6 @@
+{
+  "body": "digest must be sha256:<64 hex> or sha512:<128 hex>",
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /images/latest/attestation",
+  "status": 400
+}

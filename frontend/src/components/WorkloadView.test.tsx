@@ -18,6 +18,7 @@ vi.mock('./Seccomp/SeccompProfileDrawer', () => ({
 import { WorkloadView } from './WorkloadView';
 import { ProfileApi } from '../services/profileApi';
 import { answer, replayApi } from '../fixtures/replay';
+import { replayVulnApi } from '../fixtures/vulns';
 import {
   PROFILE_CAPTURES,
   checkoutProfile,
@@ -43,7 +44,7 @@ const OTEL = { ns: 'observability', kind: 'Deployment', name: 'otel-collector' }
 function renderPage(api: ProfileApi, w: { ns: string; kind: string; name: string } = CHECKOUT, over: Partial<Parameters<typeof WorkloadView>[0]> = {}) {
   const onParamsChange = vi.fn();
   const onBack = vi.fn();
-  const utils = render(<WorkloadView {...w} pods={[]} onBack={onBack} onOpenInMap={() => {}} onParamsChange={onParamsChange} api={api} {...over} />);
+  const utils = render(<WorkloadView {...w} pods={[]} onBack={onBack} onOpenInMap={() => {}} onParamsChange={onParamsChange} api={api} vulnApi={replayVulnApi().api} {...over} />);
   return { ...utils, onParamsChange, onBack };
 }
 

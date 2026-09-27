@@ -2149,6 +2149,92 @@ mod tests {
                 bind80();
                 return;
             }
+            "orphan" => {
+                // Fork a worker and exit; the worker waits to be reparented,
+                // then uses a capability (the host's hostname, granted) and
+                // leaves a marker. No allocation after fork.
+                let done = std::ffi::CString::new(std::env::var("KG_CAP_DONE").unwrap()).unwrap();
+                unsafe {
+                    let me = libc::getpid();
+                    if libc::fork() == 0 {
+                        for _ in 0..1000 {
+                            if libc::getppid() != me {
+                                break;
+                            }
+                            libc::usleep(5_000);
+                        }
+                        libc::sethostname(c"kg-orphan".as_ptr(), 9);
+                        let fd = libc::open(done.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644);
+                        libc::close(fd);
+                        libc::_exit(0);
+                    }
+                }
+                return;
+            }
+            "runcnamed" => {
+                // A runtime that is not runc but is installed as "runc"
+                // (outside the pod), exec'ing the container's command (a
+                // copy of this binary, from a file) into its cgroup.
+                use std::os::unix::process::CommandExt;
+                unsafe { libc::prctl(libc::PR_SET_NAME, c"runc".as_ptr()) };
+                let procs = std::env::var("KG_CAP_CGROUP").unwrap();
+                let status = unsafe {
+                    std::process::Command::new(std::env::var("KG_CAP_WORKLOAD").unwrap())
+                        .args(std::env::args().skip(1))
+                        .env("KG_CAP_HELPER", "setup")
+                        .pre_exec(move || {
+                            std::fs::write(&procs, std::process::id().to_string())?;
+                            Ok(())
+                        })
+                        .stdout(std::process::Stdio::null())
+                        .status()
+                        .expect("spawn")
+                };
+                assert!(status.success());
+                return;
+            }
+            "crunlike" => {
+                // A runtime that forks without exec: a child (single
+                // threaded) makes a new pid namespace and forks its init,
+                // which joins the container's cgroup, sets the hostname and
+                // then execs the container's command.
+                let procs =
+                    std::ffi::CString::new(std::env::var("KG_CAP_CGROUP").unwrap()).unwrap();
+                unsafe {
+                    let child = libc::fork();
+                    if child == 0 {
+                        if libc::unshare(libc::CLONE_NEWPID) != 0 {
+                            libc::_exit(2);
+                        }
+                        let init = libc::fork();
+                        if init == 0 {
+                            let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
+                            if fd < 0 || libc::write(fd, c"0".as_ptr().cast(), 1) != 1 {
+                                libc::_exit(3);
+                            }
+                            libc::close(fd);
+                            libc::sethostname(c"kg-setup".as_ptr(), 8);
+                            let argv = [c"/bin/true".as_ptr(), std::ptr::null()];
+                            libc::execv(c"/bin/true".as_ptr(), argv.as_ptr());
+                            libc::_exit(4);
+                        }
+                        let mut st = 0;
+                        libc::waitpid(init, &mut st, 0);
+                        libc::_exit(if libc::WIFEXITED(st) {
+                            libc::WEXITSTATUS(st)
+                        } else {
+                            5
+                        });
+                    }
+                    let mut st = 0;
+                    libc::waitpid(child, &mut st, 0);
+                    assert!(
+                        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0,
+                        "crun-like setup steps: {st}"
+                    );
+                }
+                return;
+            }
             "hold" => {
                 std::thread::sleep(std::time::Duration::from_secs(4));
                 return;
@@ -2256,16 +2342,22 @@ mod tests {
         const NESTED: &str = "501e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
         const OTHERS: &str = "511e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
         const OWNED: &str = "521e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const SAMEEXE: &str = "531e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const ORPHAN: &str = "541e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const RUNCNAMED: &str = "551e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
         let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
-        let dirs: Vec<String> = [CID, RENAMED, SETUP, REEXEC, NESTED, OTHERS, OWNED]
-            .iter()
-            .map(|c| format!("{pod_dir}/{c}"))
-            .collect();
+        let dirs: Vec<String> = [
+            CID, RENAMED, SETUP, REEXEC, NESTED, OTHERS, OWNED, SAMEEXE, ORPHAN, RUNCNAMED,
+        ]
+        .iter()
+        .map(|c| format!("{pod_dir}/{c}"))
+        .collect();
         for d in &dirs {
             std::fs::create_dir_all(d).unwrap();
         }
         let ino = |d: &str| std::fs::metadata(d).unwrap().ino();
         let (cg_app, cg_renamed, cg_setup) = (ino(&dirs[0]), ino(&dirs[1]), ino(&dirs[2]));
+        let (cg_sameexe, cg_orphan, cg_runcnamed) = (ino(&dirs[7]), ino(&dirs[8]), ino(&dirs[9]));
         let (cg_reexec, cg_nested, cg_others, cg_owned) =
             (ino(&dirs[3]), ino(&dirs[4]), ino(&dirs[5]), ino(&dirs[6]));
 
@@ -2320,7 +2412,7 @@ mod tests {
         } else {
             std::env::temp_dir()
         };
-        let workload_bin = scratch.join(format!("kg-cap-workload-{}", std::process::id()));
+        let workload_bin = scratch.join(unique_name("kg-cap-workload"));
         std::fs::copy(&me, &workload_bin).expect("copy the test binary");
         let workload = |dir: &str, rename: bool| {
             let procs = format!("{dir}/cgroup.procs");
@@ -2348,9 +2440,26 @@ mod tests {
         };
         workload(&dirs[0], false);
         workload(&dirs[1], true);
-        // Runtime setup like runc init: this (host) process exec's its own
-        // binary inside the container's cgroup, which uses a capability.
-        let procs = format!("{}/cgroup.procs", dirs[2]);
+        // Runtime setup like crun: forked by a host process, without exec, in
+        // the container's new pid namespace; it uses a capability before
+        // the exec of the container's command. Not counted.
+        let status = std::process::Command::new(&me)
+            .args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "crunlike")
+            .env("KG_CAP_CGROUP", format!("{}/cgroup.procs", dirs[2]))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn");
+        assert!(status.success(), "crun-like setup");
+        // The host runtime's binary exec'd straight from its file (not a
+        // sealed copy, as runc runs runc init), e.g. from a hostPath mount:
+        // counted.
+        let procs = format!("{}/cgroup.procs", dirs[7]);
         let status = unsafe {
             std::process::Command::new(&me)
                 .args([
@@ -2365,20 +2474,6 @@ mod tests {
                     Ok(())
                 })
                 .stdout(std::process::Stdio::null())
-                .status()
-                .expect("spawn")
-        };
-        assert!(status.success());
-        // And like a runtime that forks without exec (crun): a capability
-        // used before the exec of the container's command.
-        let procs = format!("{}/cgroup.procs", dirs[2]);
-        let status = unsafe {
-            std::process::Command::new("/bin/true")
-                .pre_exec(move || {
-                    std::fs::write(&procs, std::process::id().to_string())?;
-                    libc::sethostname(c"kg-setup".as_ptr(), 8);
-                    Ok(())
-                })
                 .status()
                 .expect("spawn")
         };
@@ -2467,6 +2562,43 @@ mod tests {
         let _ = owned.kill();
         let _ = others.wait();
         let _ = owned.wait();
+        // A container process that forks a worker and exits, as a daemon
+        // does, in the host pid namespace (hostPID): the worker, never
+        // exec'd, is reparented outside the pod and uses a capability.
+        // Counted.
+        let done = std::env::temp_dir().join(unique_name("kg-orphan"));
+        let _ = std::fs::remove_file(&done);
+        run_in(
+            &dirs[8],
+            &workload_bin,
+            "orphan",
+            &[("KG_CAP_DONE", done.display().to_string())],
+        );
+        for _ in 0..500 {
+            if done.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.exists(), "the orphaned worker ran");
+        let _ = std::fs::remove_file(&done);
+        // Another runtime installed as "runc" execs the container's command
+        // from its file: one exec, a parent named runc, but not a sealed
+        // copy. Counted.
+        let status = std::process::Command::new(&me)
+            .args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "runcnamed")
+            .env("KG_CAP_WORKLOAD", &workload_bin)
+            .env("KG_CAP_CGROUP", format!("{}/cgroup.procs", dirs[9]))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn");
+        assert!(status.success(), "runc-named runtime");
 
         for _ in 0..10 {
             rb.poll(std::time::Duration::from_millis(100)).unwrap();
@@ -2495,6 +2627,9 @@ mod tests {
         eprintln!("renamed:   {:?}", of(cg_renamed));
         eprintln!("setup:     {:?}", of(cg_setup));
         eprintln!("reexec:    {:?}", of(cg_reexec));
+        eprintln!("sameexe:   {:?}", of(cg_sameexe));
+        eprintln!("orphan:    {:?}", of(cg_orphan));
+        eprintln!("runcnamed: {:?}", of(cg_runcnamed));
         eprintln!("nested:    {:?}", of(cg_nested));
         eprintln!("others:    {:?}", of(cg_others));
         eprintln!("owned:     {:?}", of(cg_owned));
@@ -2520,9 +2655,25 @@ mod tests {
         }
         assert!(
             !counts.contains_key(&(cg_setup, 21, FLAG_GRANTED)),
-            "runtime setup (the runtime's own binary, or a fork before exec) is not the container's use"
+            "runtime setup forked without exec into the container's pid namespace is not the \
+             container's use"
         );
         eprintln!("asserted: setup excluded");
+        assert!(
+            counts.contains_key(&(cg_sameexe, 21, FLAG_GRANTED)),
+            "the runtime's binary exec'd from its file, not a sealed copy, is counted"
+        );
+        eprintln!("asserted: unsealed runtime binary counted");
+        assert!(
+            counts.contains_key(&(cg_orphan, 21, FLAG_GRANTED)),
+            "a hostPID container's forked worker, reparented outside the pod, is counted"
+        );
+        eprintln!("asserted: hostPID orphaned worker counted");
+        assert!(
+            counts.contains_key(&(cg_runcnamed, 21, FLAG_GRANTED)),
+            "a command exec'd from its file by a non-runc runtime installed as runc is counted"
+        );
+        eprintln!("asserted: command of a runtime named runc (not a sealed copy) counted");
         assert!(
             counts.contains_key(&(cg_reexec, 21, FLAG_GRANTED)),
             "two execs since the host forked it (runc 1.1's re-exec) is counted: the safe direction"
@@ -2565,83 +2716,124 @@ mod tests {
         let _ = std::fs::remove_dir(&pod_dir);
     }
 
-    /// Real container runtimes, on the RUNNING kernel: their setup (runc
-    /// init / crun before the exec of the container's command, and the same
-    /// for `exec`) is not the container's capability use; the container's
-    /// own processes are, including one named "runc:[2:INIT]" and one
-    /// started by `exec`. Runtimes come from KG_RUNC / KG_CRUN (paths to
-    /// the static release binaries, checksum-verified by the caller). Needs
-    /// root and cgroup v2.
-    #[test]
-    #[ignore = "needs root, cgroup v2, a BTF-enabled kernel and KG_RUNC/KG_CRUN; run by the ebpf-kernels CI job"]
-    fn capability_setup_of_real_runtimes_is_not_counted() {
-        use crate::runtime_capabilities::FLAG_GRANTED;
-        use std::os::unix::fs::MetadataExt;
-        use std::path::{Path, PathBuf};
-        use std::process::{Command, Stdio};
+    /// `prefix-<pid>-<nanos>`: unique even across VMs that share the host's
+    /// /tmp (vmtest mounts the host filesystem) and reuse the same pids.
+    fn unique_name(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!("{prefix}-{}-{nanos}", std::process::id())
+    }
 
-        let runtimes: Vec<(&str, PathBuf)> = [("runc", "KG_RUNC"), ("crun", "KG_CRUN")]
-            .into_iter()
-            .filter_map(|(n, var)| std::env::var(var).ok().map(|p| (n, PathBuf::from(p))))
-            .collect();
-        assert!(!runtimes.is_empty(), "set KG_RUNC and/or KG_CRUN");
+    /// Real container runtimes for the VM tests: KG_RUNC / KG_CRUN name the
+    /// static release binaries (checksum-verified by the caller). A tmpfs
+    /// holds the rootfs (this test binary and its libraries), the bundles
+    /// and the runtimes' state; everything is removed on drop.
+    struct RealRuntimes {
+        base: std::path::PathBuf,
+        rootfs: std::path::PathBuf,
+        /// Pod-level cgroup path below /sys/fs/cgroup, e.g. /kubepods/besteffort/pod<uid>.
+        pods: Vec<String>,
+        cgroups: Vec<String>,
+        runtimes: Vec<(&'static str, std::path::PathBuf)>,
+    }
 
-        let mut storage = MaybeUninit::uninit();
-        let (sk, _links, attached) =
-            load_runtime_inventory(&mut storage, false, true).expect("load");
-        assert!(
-            attached.caps,
-            "capability probe off: {:?}",
-            attached.cap_error
-        );
-        eprintln!("capability hook: {:?}", attached.cap_hook);
-        let mut rb = RingBufferBuilder::new();
-        rb.add(&sk.maps.cap_events, |_: &[u8]| 0).unwrap();
-        let rb = rb.build().unwrap();
+    const HELPER_ARGS: [&str; 5] = [
+        "/kg-workload",
+        "--ignored",
+        "--exact",
+        "bpf::tests::cap_helper_child",
+        "--test-threads=1",
+    ];
 
-        // A tmpfs holding the rootfs (this test binary and its libraries),
-        // the bundles and the runtimes' state.
-        let base = PathBuf::from(format!("/tmp/kg-rt-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
-        let c = |p: &Path| std::ffi::CString::new(p.to_str().unwrap()).unwrap();
-        assert_eq!(
-            unsafe {
-                libc::mount(
-                    c"tmpfs".as_ptr(),
-                    c(&base).as_ptr(),
-                    c"tmpfs".as_ptr(),
-                    0,
-                    std::ptr::null(),
-                )
-            },
-            0,
-            "mount tmpfs"
-        );
-        let rootfs = base.join("rootfs");
-        std::fs::create_dir_all(&rootfs).unwrap();
-        let me = std::env::current_exe().unwrap();
-        std::fs::copy(&me, rootfs.join("kg-workload")).unwrap();
-        let ldd = Command::new("ldd").arg(&me).output().expect("ldd");
-        for lib in String::from_utf8_lossy(&ldd.stdout)
-            .split_whitespace()
-            .filter(|w| w.starts_with('/'))
-        {
-            let dst = rootfs.join(lib.trim_start_matches('/'));
-            std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
-            std::fs::copy(lib, &dst).unwrap();
+    impl RealRuntimes {
+        fn new() -> Self {
+            use std::path::PathBuf;
+            let wanted: Vec<(&'static str, PathBuf)> = [("runc", "KG_RUNC"), ("crun", "KG_CRUN")]
+                .into_iter()
+                .filter_map(|(n, var)| std::env::var(var).ok().map(|p| (n, PathBuf::from(p))))
+                .collect();
+            assert!(!wanted.is_empty(), "set KG_RUNC and/or KG_CRUN");
+            let base = PathBuf::from("/tmp").join(unique_name("kg-rt"));
+            std::fs::create_dir_all(&base).unwrap();
+            let c = std::ffi::CString::new(base.to_str().unwrap()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        c.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0,
+                "mount tmpfs"
+            );
+            let rootfs = base.join("rootfs");
+            std::fs::create_dir_all(&rootfs).unwrap();
+            let me = std::env::current_exe().unwrap();
+            std::fs::copy(&me, rootfs.join("kg-workload")).unwrap();
+            let ldd = std::process::Command::new("ldd")
+                .arg(&me)
+                .output()
+                .expect("ldd");
+            for lib in String::from_utf8_lossy(&ldd.stdout)
+                .split_whitespace()
+                .filter(|w| w.starts_with('/'))
+            {
+                let dst = rootfs.join(lib.trim_start_matches('/'));
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                std::fs::copy(lib, &dst).unwrap();
+            }
+            // Named as the runtime: its process name is its file name. crun
+            // is also installed as "runc" (as a runc -> crun symlink or a
+            // shim configured for runc would run it), which must not make
+            // its container's command look like runc init.
+            let mut installs: Vec<(&'static str, &'static str, PathBuf)> = Vec::new();
+            for (name, src) in wanted {
+                installs.push((name, name, src.clone()));
+                if name == "crun" {
+                    installs.push(("crun-as-runc", "runc", src));
+                }
+            }
+            let runtimes = installs
+                .into_iter()
+                .map(|(label, file, src)| {
+                    let bin = base.join(format!("bin-{label}")).join(file);
+                    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+                    std::fs::copy(&src, &bin).unwrap();
+                    (label, bin)
+                })
+                .collect();
+            RealRuntimes {
+                base,
+                rootfs,
+                pods: Vec::new(),
+                cgroups: Vec::new(),
+                runtimes,
+            }
         }
 
-        const UID: &str = "7b3d0a2f-8c5e-4f1b-a02d-1234567890ab";
-        let pod = format!("/kubepods/besteffort/pod{UID}");
-        let helper = [
-            "/kg-workload",
-            "--ignored",
-            "--exact",
-            "bpf::tests::cap_helper_child",
-            "--test-threads=1",
-        ];
-        let bundle = |name: &str, cid: &str, mode: &str| -> PathBuf {
-            let dir = base.join(name);
+        /// A container cgroup `pod`/`cid`, created now so its id is known
+        /// before the runtime (which joins an existing cgroup) removes it.
+        fn cgroup(&mut self, pod: &str, cid: &str) -> u64 {
+            use std::os::unix::fs::MetadataExt;
+            let dir = format!("/sys/fs/cgroup{pod}/{cid}");
+            std::fs::create_dir_all(&dir).unwrap();
+            if !self.pods.iter().any(|p| p == pod) {
+                self.pods.push(pod.to_string());
+            }
+            self.cgroups.push(dir.clone());
+            std::fs::metadata(&dir).unwrap().ino()
+        }
+
+        /// A bundle whose process runs the helper in `mode`, in cgroup
+        /// `pod`/`cid`, sharing this netns, with hostname set (so setup
+        /// calls sethostname) and three capabilities.
+        fn bundle(&self, name: &str, pod: &str, cid: &str, mode: &str) -> std::path::PathBuf {
+            let dir = self.base.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             let caps = ["CAP_NET_BIND_SERVICE", "CAP_KILL", "CAP_AUDIT_WRITE"];
             let config = serde_json::json!({
@@ -2649,13 +2841,13 @@ mod tests {
                 "process": {
                     "terminal": false,
                     "user": {"uid": 0, "gid": 0},
-                    "args": helper,
+                    "args": HELPER_ARGS,
                     "env": ["PATH=/", format!("KG_CAP_HELPER={mode}")],
                     "cwd": "/",
                     "capabilities": {"bounding": caps, "effective": caps, "permitted": caps},
                     "noNewPrivileges": true
                 },
-                "root": {"path": rootfs.to_str().unwrap(), "readonly": false},
+                "root": {"path": self.rootfs.to_str().unwrap(), "readonly": false},
                 "hostname": "kg-setup",
                 "mounts": [
                     {"destination": "/proc", "type": "proc", "source": "proc"},
@@ -2670,57 +2862,161 @@ mod tests {
             });
             std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
             dir
-        };
-        // Created here so its id is known before the runtime (which joins an
-        // existing cgroup) removes it on exit.
-        let cg = |cid: &str| {
-            let dir = format!("/sys/fs/cgroup{pod}/{cid}");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::metadata(&dir).unwrap().ino()
-        };
+        }
 
-        let mut checked = Vec::new();
-        for (i, (name, src)) in runtimes.iter().enumerate() {
-            // Named as the runtime: its process name is its file name.
-            let bin = base.join("bin").join(name);
-            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-            std::fs::copy(src, &bin).unwrap();
-            let state = base.join(format!("state-{name}"));
-            let rt = |args: &[&str]| {
-                let st = Command::new(&bin)
-                    .arg("--root")
-                    .arg(&state)
-                    .args(args)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .status()
-                    .expect("runtime");
-                assert!(st.success(), "{name} {args:?}");
+        fn command(&self, name: &str, args: &[&str]) -> std::process::Command {
+            let bin = &self.runtimes.iter().find(|r| r.0 == name).unwrap().1;
+            let mut cmd = std::process::Command::new(bin);
+            // The runtime's output, and a detached container's (it inherits
+            // the runtime's stdio), go to a log shown when an assertion fails.
+            let log = || {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.base.join(format!("{name}.log")))
+                    .expect("runtime log")
             };
+            cmd.arg("--root")
+                .arg(self.base.join(format!("state-{name}")))
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(log())
+                .stderr(log());
+            cmd
+        }
+
+        /// What runtime `name` and its containers wrote.
+        fn log(&self, name: &str) -> String {
+            std::fs::read_to_string(self.base.join(format!("{name}.log"))).unwrap_or_default()
+        }
+
+        /// Run runtime `name` with `args` (after its --root); must succeed.
+        fn run(&self, name: &str, args: &[&str]) {
+            let st = self.command(name, args).status().expect("runtime");
+            assert!(st.success(), "{name} {args:?}");
+        }
+
+        /// Wait until container `id` has stopped.
+        fn wait_stopped(&self, name: &str, id: &str) {
+            for _ in 0..200 {
+                let out = self
+                    .command(name, &["state", id])
+                    .stdout(std::process::Stdio::piped())
+                    .output()
+                    .expect("state");
+                if String::from_utf8_lossy(&out.stdout).contains("\"stopped\"") {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("{name}: {id} did not stop");
+        }
+
+        /// The way containerd and CRI-O drive a runtime: `create` (the
+        /// runtime sets the container up and exits), `start`, wait for the
+        /// command (the helper in the bundle's mode) to finish, `delete`.
+        fn run_container(&self, name: &str, id: &str, bundle: &std::path::Path) {
+            self.run(name, &["create", "--bundle", bundle.to_str().unwrap(), id]);
+            self.run(name, &["start", id]);
+            self.wait_stopped(name, id);
+            self.run(name, &["delete", "--force", id]);
+        }
+
+        /// Create and start a container that holds (helper "hold"),
+        /// `exec --detach` the helper in `mode` in it (as the CRI does),
+        /// wait for the container to stop, then delete it.
+        fn exec_in_held(&self, name: &str, id: &str, bundle: &std::path::Path, mode: &str) {
+            self.run(name, &["create", "--bundle", bundle.to_str().unwrap(), id]);
+            self.run(name, &["start", id]);
+            let env = format!("KG_CAP_HELPER={mode}");
+            let mut exec = vec!["exec", "--detach", "--env", env.as_str(), id];
+            exec.extend(HELPER_ARGS);
+            self.run(name, &exec);
+            self.wait_stopped(name, id);
+            self.run(name, &["delete", "--force", id]);
+        }
+
+        /// A foreground `run`: the runtime stays the parent of the
+        /// container's command (the helper in the bundle's mode) until it
+        /// exits.
+        fn run_foreground(&self, name: &str, id: &str, bundle: &std::path::Path) {
+            self.run(name, &["run", "--bundle", bundle.to_str().unwrap(), id]);
+        }
+    }
+
+    impl Drop for RealRuntimes {
+        fn drop(&mut self) {
+            if let Ok(c) = std::ffi::CString::new(self.base.to_str().unwrap_or_default()) {
+                unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+            }
+            let _ = std::fs::remove_dir(&self.base);
+            for d in self.cgroups.iter().chain(self.pods.iter()) {
+                let path = if d.starts_with("/sys/") {
+                    d.clone()
+                } else {
+                    format!("/sys/fs/cgroup{d}")
+                };
+                let _ = std::fs::remove_dir(path);
+            }
+        }
+    }
+
+    /// Real container runtimes, on the RUNNING kernel: their setup (runc
+    /// init / crun before the exec of the container's command, and the same
+    /// for `exec`) is not the container's capability use; the container's
+    /// own processes are, including one named "runc:[2:INIT]" and one
+    /// started by `exec`. Needs root, cgroup v2 and KG_RUNC / KG_CRUN.
+    #[test]
+    #[ignore = "needs root, cgroup v2, a BTF-enabled kernel and KG_RUNC/KG_CRUN; run by the ebpf-kernels CI job"]
+    fn capability_setup_of_real_runtimes_is_not_counted() {
+        use crate::runtime_capabilities::FLAG_GRANTED;
+
+        let mut rt = RealRuntimes::new();
+        let mut storage = MaybeUninit::uninit();
+        let (sk, _links, attached) =
+            load_runtime_inventory(&mut storage, false, true).expect("load");
+        assert!(
+            attached.caps,
+            "capability probe off: {:?}",
+            attached.cap_error
+        );
+        eprintln!("capability hook: {:?}", attached.cap_hook);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.cap_events, |_: &[u8]| 0).unwrap();
+        let rb = rb.build().unwrap();
+
+        let pod = "/kubepods/besteffort/pod7b3d0a2f-8c5e-4f1b-a02d-1234567890ab".to_string();
+        let names: Vec<&'static str> = rt.runtimes.iter().map(|r| r.0).collect();
+        let mut checked = Vec::new();
+        let mut fg_case = None;
+        for (i, name) in names.into_iter().enumerate() {
             // The container's command does its own checks.
             let work =
                 format!("6{i}1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
-            let cg_work = cg(&work);
-            let b = bundle(&format!("{name}-work"), &work, "work");
-            rt(&[
-                "run",
-                "--bundle",
-                b.to_str().unwrap(),
-                &format!("kg-{name}-work"),
-            ]);
+            let cg_work = rt.cgroup(&pod, &work);
+            let b = rt.bundle(&format!("{name}-work"), &pod, &work, "work");
+            rt.run_container(name, &format!("kg-{name}-work"), &b);
             // The container's command does nothing; a process started by
             // exec does.
             let held =
                 format!("6{i}2e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
-            let cg_held = cg(&held);
-            let b = bundle(&format!("{name}-held"), &held, "hold");
-            let id = format!("kg-{name}-held");
-            rt(&["run", "--detach", "--bundle", b.to_str().unwrap(), &id]);
-            let mut exec = vec!["exec", "--env", "KG_CAP_HELPER=bind", id.as_str()];
-            exec.extend(helper);
-            rt(&exec);
-            rt(&["delete", "--force", &id]);
-            checked.push((*name, cg_work, cg_held, work, held));
+            let cg_held = rt.cgroup(&pod, &held);
+            let b = rt.bundle(&format!("{name}-held"), &pod, &held, "hold");
+            rt.exec_in_held(name, &format!("kg-{name}-held"), &b, "bind");
+            checked.push((name, cg_work, cg_held));
+            // Another runtime installed as "runc", kept alive as the parent
+            // (a foreground run): the container's command, one exec from a
+            // parent named runc, is still the container's (its exe is not a
+            // sealed copy). Only its own use is asserted: a foreground
+            // runtime is a subreaper, so its setup may be counted.
+            if name == "crun-as-runc" {
+                let fg =
+                    format!("6{i}3e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
+                let cg_fg = rt.cgroup(&pod, &fg);
+                let b = rt.bundle(&format!("{name}-fg"), &pod, &fg, "work");
+                rt.run_foreground(name, &format!("kg-{name}-fg"), &b);
+                fg_case = Some(cg_fg);
+            }
         }
         for _ in 0..10 {
             rb.poll(std::time::Duration::from_millis(100)).unwrap();
@@ -2744,7 +3040,7 @@ mod tests {
                 .map(|(k, v)| ((k.1, k.2), *v))
                 .collect::<Vec<_>>()
         };
-        for (name, cg_work, cg_held, _, _) in &checked {
+        for (name, cg_work, cg_held) in &checked {
             eprintln!("{name} work: {:?}", of(*cg_work));
             eprintln!("{name} held+exec: {:?}", of(*cg_held));
             let n =
@@ -2756,7 +3052,8 @@ mod tests {
             );
             assert!(
                 n(*cg_work, 21, 0) >= 1 && n(*cg_work, 10, FLAG_GRANTED) >= 1,
-                "{name}: the container's command, named runc:[2:INIT], is counted"
+                "{name}: the container's command, named runc:[2:INIT], is counted\n{}",
+                rt.log(name)
             );
             eprintln!("asserted: {name} run: setup excluded, renamed command counted");
             assert_eq!(
@@ -2766,18 +3063,34 @@ mod tests {
             );
             assert!(
                 n(*cg_held, 10, FLAG_GRANTED) >= 1,
-                "{name}: a process started by exec is counted"
+                "{name}: a process started by exec is counted\n{}",
+                rt.log(name)
             );
             eprintln!("asserted: {name} exec: setup excluded, exec'd process counted");
+            let used = |cg: u64| -> Vec<u32> {
+                counts
+                    .keys()
+                    .filter(|k| k.0 == cg && k.2 == FLAG_GRANTED)
+                    .map(|k| k.1)
+                    .collect()
+            };
+            assert_eq!(
+                (used(*cg_work), used(*cg_held)),
+                (vec![10], vec![10]),
+                "{name}: the only capability used is the workload's own NET_BIND_SERVICE; none of \
+                 the runtime's setup (SETGID, SETPCAP, SYS_ADMIN, ...) is counted"
+            );
+            eprintln!("asserted: {name}: used set is exactly the workload's");
+        }
+        if let Some(cg) = fg_case {
+            eprintln!("crun-as-runc foreground run: {:?}", of(cg));
+            assert!(
+                counts.contains_key(&(cg, 10, FLAG_GRANTED)) && counts.contains_key(&(cg, 21, 0)),
+                "the command of another runtime installed as runc, which stays its parent, is counted"
+            );
+            eprintln!("asserted: crun-as-runc foreground run: container command counted");
         }
         drop(rb);
-        unsafe { libc::umount2(c(&base).as_ptr(), libc::MNT_DETACH) };
-        let _ = std::fs::remove_dir(&base);
-        for (_, _, _, work, held) in &checked {
-            let _ = std::fs::remove_dir(format!("/sys/fs/cgroup{pod}/{work}"));
-            let _ = std::fs::remove_dir(format!("/sys/fs/cgroup{pod}/{held}"));
-        }
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup{pod}"));
     }
 
     fn reset_state() {

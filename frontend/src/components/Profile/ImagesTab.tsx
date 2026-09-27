@@ -1,4 +1,13 @@
-import { Box, Bug, FileBadge2, Package } from 'lucide-react';
+import { useState } from 'react';
+import { Box, Bug, FileBadge2, FileSignature, Package } from 'lucide-react';
+import type { VulnApi } from '../../services/vulnApi';
+import type { WorkloadSignatureState } from '../../hooks/useSignatures';
+import { Button } from '../ui/Button';
+import { VulnErrorState } from '../Vulns/parts';
+import { DigestRow } from '../Vulns/SupplyChainTab';
+import { NotTrustedNote } from '../Vulns/SignatureParts';
+import { AdmissionPolicyModal } from '../Vulns/AdmissionPolicyModal';
+import { SectionSkeleton } from './parts';
 import type { ImageContainer, ImageDigestRow, ImagesDimension } from '../../types/profile';
 import { asStatus, formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
 import { digestStateLabel } from '../../utils/profileView';
@@ -70,7 +79,42 @@ function ContainerCard({ c }: { c: ImageContainer }) {
   );
 }
 
-export function ImagesTab({ dim }: { dim: ImagesDimension }) {
+/** Who signed this workload's running images, and its admission policy export. */
+function SupplyChainPanel({ sig, workload, api }: { sig: WorkloadSignatureState; workload: { ns: string; kind: string; name: string }; api: VulnApi }) {
+  const [exporting, setExporting] = useState(false);
+  return (
+    <Panel
+      icon={FileBadge2}
+      title="Supply chain"
+      hint="Signature verdicts from the supplychain component, per running digest"
+      action={
+        <Button variant="secondary" size="sm" leftIcon={FileSignature} onClick={() => setExporting(true)}>
+          Export admission policy
+        </Button>
+      }
+    >
+      {sig.loading && sig.rows.length === 0 ? (
+        <SectionSkeleton rows={2} />
+      ) : sig.error != null && sig.rows.length === 0 ? (
+        <VulnErrorState error={sig.error} unsupportedTitle="Signature results not available" onRetry={() => void sig.reload()} />
+      ) : sig.rows.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-tertiary">
+          {sig.truncated ? 'Not read: the namespace has more running containers than one read covers, so this workload may be among them. Unknown.' : 'No running container of this workload is in the image inventory, so there is nothing to check yet. Unknown, not unsigned.'}
+        </p>
+      ) : (
+        <>
+          <ul className="divide-y divide-hubble-border">
+            {sig.rows.map((r) => <DigestRow key={r.digest} r={r} />)}
+          </ul>
+          <NotTrustedNote className="px-4 py-2.5 border-t border-hubble-border" />
+        </>
+      )}
+      {exporting && <AdmissionPolicyModal api={api} scope={{ kind: 'workload', namespace: workload.ns, workloadKind: workload.kind, name: workload.name }} onClose={() => setExporting(false)} />}
+    </Panel>
+  );
+}
+
+export function ImagesTab({ dim, signatures, workload, api }: { dim: ImagesDimension; signatures?: WorkloadSignatureState; workload?: { ns: string; kind: string; name: string }; api?: VulnApi }) {
   const status = asStatus(dim.status);
   return (
     <div className="space-y-4">
@@ -106,13 +150,13 @@ export function ImagesTab({ dim }: { dim: ImagesDimension }) {
         )}
       </Panel>
 
-      <Panel icon={FileBadge2} title="Supply chain">
-        {dim.supplyChain === null ? (
-          <p className="px-4 py-3 text-xs text-tertiary">Signature and provenance checks are not configured. Unsigned and unchecked are different states; kguardian shows neither until checks run.</p>
-        ) : (
-          <p className="px-4 py-3 text-xs text-secondary">Supply-chain data is available from the Broker.</p>
-        )}
-      </Panel>
+      {signatures && workload && api ? (
+        <SupplyChainPanel sig={signatures} workload={workload} api={api} />
+      ) : (
+        <Panel icon={FileBadge2} title="Supply chain">
+          <p className="px-4 py-3 text-xs text-tertiary">Signature results are not loaded here.</p>
+        </Panel>
+      )}
     </div>
   );
 }

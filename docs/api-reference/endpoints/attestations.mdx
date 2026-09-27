@@ -93,8 +93,8 @@ every running workload container (`namespace`, `workloadKind`,
 `workloadName`, `container`, `digest`, `imageRef`, `repository`) with its
 image's `verdict`, `reason`, verified `signers` and verified
 `attestations`. `verdict` is `null` when the digest has no result yet (not
-checked, which is not the same as unsigned). `?namespace=`, `limit` 1-1000
-(default 500), and an opaque `after` cursor from `nextAfter`.
+checked, which is not the same as unsigned). `?namespace=`, `limit` 1-200
+(default 100), and an opaque `after` cursor from `nextAfter`.
 
 ### `GET /attestations/policy`
 
@@ -112,6 +112,44 @@ At most 5000 running containers are read; beyond that the answer is `422`
 and asks for `namespace`. A generation is charged at its worst case, which
 takes the whole read budget: other reads wait (up to
 `broker.readAcquireWaitMs`) or get `503` while it runs.
+
+### `GET /image-trust`
+
+The evaluator's [ImageTrustPolicy](/concepts/image-trust-policy) results,
+read from the evaluator (`EVALUATOR_URL`) with the broker's own read token
+and bounded. One entry per (policy, running container):
+
+```json
+{
+  "available": true,
+  "evaluatedAt": "2026-09-27T08:28:39.026536084+10:00",
+  "total": 5, "wouldDeny": 5, "unknown": 0, "trusted": 0,
+  "policies": ["cluster/require-provenance", "shop/release-signers"],
+  "results": [
+    {"policy": "shop/release-signers", "namespace": "shop",
+     "workload": "Deployment/cart", "container": "app",
+     "digest": "sha256:f6ab986a...", "image": "ghcr.io/kguardian-dev/kguardian/controller",
+     "verdict": "WouldDeny", "reason": "unsigned"}
+  ],
+  "truncated": true
+}
+```
+
+| Query | |
+|---|---|
+| `namespace` | Only this namespace |
+| `workload_kind`, `workload_name` | Only this workload (`Deployment`, `checkout`); the kind is case-insensitive |
+| `verdict` | `Trusted`, `WouldDeny` or `Unknown` (`400` otherwise) |
+| `limit` | 1-2000, default 200 |
+
+- Results are ordered `WouldDeny`, `Unknown`, `Trusted`. The counts cover
+  every matching result; `truncated` is true when `limit` cut the list.
+- `available: false` with a `reason` when there is nothing to report: no
+  evaluator configured, image trust evaluation off in it (it answers
+  `404`), it refused the broker's read token, it could not be reached, or
+  its answer was larger than 16 MiB (filter by namespace). This is
+  unknown, never "nothing would be denied".
+- `evaluatedAt` is `null` until the evaluator has finished a pass.
 
 All reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.

@@ -1,0 +1,27 @@
+{
+  "request": "GET /images/sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b/attestation",
+  "status": 200,
+  "body": {
+    "digest": "sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b",
+    "repository": "127.0.0.1:45637/fixture/key-legacy",
+    "verdict": "verified",
+    "reason": null,
+    "trustRoot": "custom:6494e21ea73f",
+    "signedVia": "self",
+    "signedDigest": "sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b",
+    "signatures": [
+      {
+        "format": "cosign-legacy",
+        "keyFingerprint": "e2312c28209f4778ffc6c0ca2786638bb86d6027ee8092aba67c5d94d268ee30",
+        "keyName": "fixture",
+        "keyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErBclBIBz28Uo7W6PFzioZ8s5BVr2\nEYJgLPCfyhpM7+6uFQCC2ImZ9FKVx4+CV1qtW4tSBa49kJwn4pedaEd69A==\n-----END PUBLIC KEY-----\n",
+        "signerKind": "key",
+        "source": "sig-tag",
+        "verified": true
+      }
+    ],
+    "attestations": [],
+    "checkedAt": "2026-09-26T22:24:27.837538",
+    "receivedAt": "2026-09-26T22:24:27.842429"
+  }
+}

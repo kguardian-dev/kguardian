@@ -1,0 +1,5 @@
+{
+  "request": "GET /image-trust?verdict=Denied",
+  "status": 400,
+  "body": "verdict must be one of [\"Trusted\", \"WouldDeny\", \"Unknown\"]"
+}

@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -22,9 +25,59 @@ import (
 // output convention (json passes the broker body through re-indented, so
 // fields this CLI build does not know about still reach the operator).
 
+// brokerURLEnv names a broker base URL to use directly instead of a
+// port-forward: an Ingress, a port-forward you run yourself, or a broker on
+// this machine.
+const brokerURLEnv = "KGUARDIAN_BROKER_URL"
+
+// directBrokerURL validates the KGUARDIAN_BROKER_URL value: an http(s) URL
+// with a host and nothing after the path. "" = not set.
+func directBrokerURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("%s must be an http(s) URL such as http://127.0.0.1:9090, got %q", brokerURLEnv, raw)
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+// plainHTTPTokenWarning is the warning for sending the broker token in
+// clear text: an http:// URL whose host is not loopback. "" = no warning.
+func plainHTTPTokenWarning(direct, token string) string {
+	u, err := url.Parse(direct)
+	if err != nil || u.Scheme != "http" || strings.TrimSpace(token) == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	return fmt.Sprintf("%s is plain http to %s: the broker token is sent unencrypted; use https or a port-forward", brokerURLEnv, host)
+}
+
 // connectBroker opens the port-forward to the broker and returns the
-// function that closes it. The broker token was resolved in PersistentPreRun.
+// function that closes it; with KGUARDIAN_BROKER_URL set it uses that URL
+// and opens nothing. The broker token was resolved in PersistentPreRun.
 func connectBroker(cmd *cobra.Command) (func(), error) {
+	direct, err := directBrokerURL(os.Getenv(brokerURLEnv))
+	if err != nil {
+		return nil, err
+	}
+	if direct != "" {
+		log.Debug().Msgf("Using the broker at %s (%s)", direct, brokerURLEnv)
+		if w := plainHTTPTokenWarning(direct, api.BrokerAuthToken); w != "" {
+			log.Warn().Msg(w)
+		}
+		api.BrokerBaseURL = direct
+		return func() {}, nil
+	}
 	config, ok := cmd.Context().Value(k8s.ConfigKey).(*k8s.Config)
 	if !ok || config == nil {
 		return nil, fmt.Errorf("failed to retrieve Kubernetes configuration")

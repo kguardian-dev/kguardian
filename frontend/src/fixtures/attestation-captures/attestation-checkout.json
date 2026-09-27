@@ -1,0 +1,47 @@
+{
+  "body": {
+    "attestations": [
+      {
+        "format": "sigstore-bundle",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "payloadSha256": "9b2c4f6e8a0d1c3e5f7a9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a",
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "provenance": {
+          "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+          "builderId": "https://github.com/actions/runner/github-hosted",
+          "sourceCommit": "4f1c2a9e7b3d5f60819a2b3c4d5e6f7081920a1b",
+          "sourceRef": "refs/tags/v4.2.0",
+          "sourceRepo": "https://github.com/example-org/checkout"
+        },
+        "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+        "signerKind": "keyless",
+        "source": "referrers",
+        "verified": true
+      }
+    ],
+    "checkedAt": "2026-09-26T19:20:55",
+    "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+    "reason": null,
+    "receivedAt": "2026-09-26T22:20:55.925201",
+    "repository": "ghcr.io/example/checkout",
+    "signatures": [
+      {
+        "format": "sigstore-bundle",
+        "integratedTime": "2026-09-23T22:20:55Z",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+        "signerKind": "keyless",
+        "source": "referrers",
+        "tlogIndex": 123456789,
+        "verified": true
+      }
+    ],
+    "signedDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
+    "signedVia": "index",
+    "trustRoot": "public-good",
+    "verdict": "verified"
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/attestation",
+  "status": 200
+}
