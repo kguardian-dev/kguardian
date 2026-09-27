@@ -113,7 +113,13 @@ route below is never cached. Set the TTL to `0` to rebuild on every request.
   `architectures`, and the `localhostProfile` path. `distribution` is
   **broker-computed** from node-status reports: `ready` = nodes reporting the
   path with a hash equal to `cr.hash`, `present` = nodes reporting the path at
-  all, `total` = live nodes. `statusDistribution` is the CR's own
+  all, `total` = live nodes, where a node is live while its last node-status
+  report is younger than `SECCOMP_NODE_STATUS_STALE_SECS` (chart value
+  `broker.seccomp.nodeStatusStaleSeconds`, default 900 s). A node posts once
+  per distribution pass, so the window must be at least three times
+  `seccomp.distributeIntervalSeconds` (default 30, so 900 s is 30 passes) and
+  the chart refuses to render otherwise. A node whose report has gone stale
+  counts towards none of the three. `statusDistribution` is the CR's own
   `status.distribution` as the controllers last mirrored it (`null` if not yet
   written). `drift.missing` = observed but not allowed by the CR,
   `drift.extra` = allowed by the CR but never observed, `inSync` = `missing`
@@ -689,8 +695,10 @@ snapshot, not a delta.
 of the bytes on disk after the pass. Returns `200` with an empty body. A node
 counts towards `cr.distribution.ready` when it reports the CR's path with a
 hash equal to the mirrored `cr.hash`, and towards `present` when it reports
-the path at all. The pre-CRD body shape — `"paths": ["…json"]`, no hashes —
-is still accepted and counts as present-but-unverified.
+the path at all — and towards `total` for as long as its report stays inside
+`SECCOMP_NODE_STATUS_STALE_SECS` (default 900 s). The pre-CRD body shape —
+`"paths": ["…json"]`, no hashes — is still accepted and counts as
+present-but-unverified.
 
 ---
 

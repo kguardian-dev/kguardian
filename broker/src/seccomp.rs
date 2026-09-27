@@ -865,7 +865,9 @@ fn drift(observed: &BTreeSet<String>, cr_allowed: &BTreeSet<String>) -> Drift {
 /// Distribution readiness for one CR: how many live nodes have its file
 /// with the CR's current hash, out of how many. Referencing a profile
 /// before it is `Ready` risks a pod scheduling onto a node that lacks
-/// the file (`CreateContainerError`).
+/// the file (`CreateContainerError`). A node is live while its
+/// `seccomp_node_status` report is younger than the staleness window;
+/// see [`DistributionIndex`].
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct Distribution {
     /// Nodes reporting the path with a matching hash.
@@ -899,6 +901,30 @@ impl Distribution {
 /// Per-file node counts plus the live-node denominator, loaded once per
 /// request so building N summaries is O(nodes + profiles + crs), not a
 /// query per CR.
+///
+/// Numerator and denominator come from the same rows: the
+/// `seccomp_node_status` reports younger than [`node_status_stale_secs`].
+/// The denominator used to be `COUNT(DISTINCT node_name) FROM pod_details
+/// WHERE is_dead = false`, a scan of every pod the cluster has ever run,
+/// and it ran on every `GET /seccomp/profiles/{ns}/{kind}/{name}`. Since
+/// #1632 that route is what every node asks once per CR per resync, so on
+/// a 70-node cluster with eight CRs the count ran ~19 times a second and
+/// was the hottest statement on the database: 1.7 of the ~4 average
+/// active sessions that had the 2-vCPU writer at 99% load, before the
+/// CR mirror upserts (see the controller's `MirrorLedger`) took another
+/// 1.1. `seccomp_node_status` is one row per node and this request reads
+/// it anyway, so the denominator now costs nothing extra.
+///
+/// The two sources disagree at the edges, on purpose. A node counts here
+/// from its first distributor pass rather than its first pod report,
+/// which is at most one resync later. A node that stops reporting drops
+/// out of `total`, `present` and `ready` alike once its row is stale,
+/// where the pod count kept it until its pods were marked dead — so a
+/// departed node no longer holds every CR at `Partial` for good, and a
+/// wedged controller stops being visible here after the window. The CR's
+/// own `status.distribution`, mirrored alongside as `statusDistribution`,
+/// is computed by the controllers against the API server's node list and
+/// still shows that node as not ready.
 struct DistributionIndex {
     /// Nodes reporting `(path, hash)`.
     file_counts: HashMap<(String, String), i64>,
@@ -908,16 +934,21 @@ struct DistributionIndex {
 }
 
 impl DistributionIndex {
-    /// Fold one `(path, hash)` list per node into the index. Duplicates
-    /// within a node count once.
-    fn from_node_files<I, P>(nodes: I, total_nodes: i64) -> Self
+    /// Fold one `(path, hash)` list per node into the index. Every node
+    /// in `nodes` is one of `total_nodes`, files or none: a node that
+    /// reported an empty list is live and has no profiles, which is
+    /// exactly the node a CR is not ready on. Duplicates within a node
+    /// count once.
+    fn from_node_files<I, P>(nodes: I) -> Self
     where
         I: IntoIterator<Item = P>,
         P: IntoIterator<Item = (String, Option<String>)>,
     {
         let mut file_counts: HashMap<(String, String), i64> = HashMap::new();
         let mut path_counts: HashMap<String, i64> = HashMap::new();
+        let mut total_nodes: i64 = 0;
         for node in nodes {
+            total_nodes += 1;
             let files: BTreeSet<(String, Option<String>)> = node.into_iter().collect();
             let paths: BTreeSet<&String> = files.iter().map(|(p, _)| p).collect();
             for p in paths {
@@ -973,26 +1004,77 @@ fn node_files_from_json(v: &serde_json::Value) -> Vec<(String, Option<String>)> 
         .collect()
 }
 
-fn distribution_index(conn: &mut PgConnection) -> Result<DistributionIndex, DbError> {
-    use diesel::sql_query;
-    use diesel::sql_types::BigInt;
+/// Default for `SECCOMP_NODE_STATUS_STALE_SECS`: how long a node's
+/// `seccomp_node_status` row counts it as live. The distributor
+/// re-reports after every pass, every 30 s by default, so this is thirty
+/// missed passes at that cadence and still three at the 300 s cadence
+/// large clusters run — longer than the ten minutes `pod_compute_latest`
+/// gives a gone container or controller, because a wrongly stale fleet
+/// here reads every CR as `Pending`, and short enough that a CR is not
+/// `Partial` for long after a node leaves. The report carries no cadence
+/// for the broker to size the window from per node, as the denial
+/// heartbeat's `intervalSeconds` does, so the chart refuses a
+/// `seccomp.distributeIntervalSeconds` above a third of
+/// `broker.seccomp.nodeStatusStaleSeconds`, and the two defaults agree.
+pub const DEFAULT_NODE_STATUS_STALE_SECS: i64 = 900;
+
+/// The staleness window in force, in seconds, or `None` for no window.
+/// `SECCOMP_NODE_STATUS_STALE_SECS`, read once, default
+/// [`DEFAULT_NODE_STATUS_STALE_SECS`]. `0` counts every row ever
+/// reported, which keeps departed nodes in `total` for good; it exists to
+/// rule the window out while debugging, not to run with. An unparseable
+/// value falls back to the default rather than refusing to start, like
+/// every other broker knob.
+fn node_status_stale_secs() -> Option<i64> {
+    static WINDOW: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        let window = parse_stale_secs(std::env::var("SECCOMP_NODE_STATUS_STALE_SECS").ok());
+        match window {
+            Some(secs) => info!(stale_secs = secs, "seccomp node-status staleness window"),
+            None => info!(
+                "seccomp node-status staleness window disabled (SECCOMP_NODE_STATUS_STALE_SECS=0); \
+                 every node that ever reported counts as live"
+            ),
+        }
+        window
+    })
+}
+
+/// [`node_status_stale_secs`] without the process-wide latch, so the
+/// parsing is testable.
+fn parse_stale_secs(raw: Option<String>) -> Option<i64> {
+    let secs = raw
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&s| s >= 0)
+        .unwrap_or(DEFAULT_NODE_STATUS_STALE_SECS);
+    (secs > 0).then_some(secs)
+}
+
+/// The rows [`DistributionIndex`] is built from: one `paths` blob per node
+/// whose report is inside the staleness window. Filtered in SQL rather
+/// than after the load because the table is never pruned, so on a cluster
+/// with node churn the stale rows can outnumber the live ones, each with a
+/// blob. The cutoff is taken from this process's clock, which is the clock
+/// `post_seccomp_node_status` stamps `updated_at` with.
+fn live_node_status_paths(conn: &mut PgConnection) -> Result<Vec<serde_json::Value>, DbError> {
     use schema::seccomp_node_status::dsl as sns;
+    let rows = match node_status_stale_secs() {
+        Some(secs) => {
+            let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::seconds(secs);
+            sns::seccomp_node_status
+                .filter(sns::updated_at.ge(cutoff))
+                .select(sns::paths)
+                .load(conn)?
+        }
+        None => sns::seccomp_node_status.select(sns::paths).load(conn)?,
+    };
+    Ok(rows)
+}
 
-    #[derive(diesel::QueryableByName)]
-    struct CountRow {
-        #[diesel(sql_type = BigInt)]
-        n: i64,
-    }
-    // Same denominator the version check-in uses for install size.
-    let total_nodes: i64 =
-        sql_query("SELECT COUNT(DISTINCT node_name) AS n FROM pod_details WHERE is_dead = false")
-            .get_result::<CountRow>(conn)?
-            .n;
-
-    let rows: Vec<serde_json::Value> = sns::seccomp_node_status.select(sns::paths).load(conn)?;
+fn distribution_index(conn: &mut PgConnection) -> Result<DistributionIndex, DbError> {
+    let rows = live_node_status_paths(conn)?;
     Ok(DistributionIndex::from_node_files(
         rows.iter().map(node_files_from_json),
-        total_nodes,
     ))
 }
 
@@ -3111,7 +3193,7 @@ mod tests {
     }
 
     fn empty_index() -> DistributionIndex {
-        DistributionIndex::from_node_files(Vec::<Vec<(String, Option<String>)>>::new(), 0)
+        DistributionIndex::from_node_files(Vec::<Vec<(String, Option<String>)>>::new())
     }
 
     #[test]
@@ -3129,16 +3211,15 @@ mod tests {
     #[test]
     fn readiness_requires_path_and_matching_hash() {
         // node-a: current hash. node-b: stale hash. node-c: legacy
-        // hash-less report. node-d: nothing.
-        let index = DistributionIndex::from_node_files(
-            vec![
-                files(&[(PATH, Some(HASH))]),
-                files(&[(PATH, Some("ffffffffffffffff"))]),
-                files(&[(PATH, None)]),
-                files(&[]),
-            ],
-            4,
-        );
+        // hash-less report. node-d: nothing — a live node with no
+        // profiles, which is precisely a node the CR is not ready on, so
+        // it is in `total` like the other three.
+        let index = DistributionIndex::from_node_files(vec![
+            files(&[(PATH, Some(HASH))]),
+            files(&[(PATH, Some("ffffffffffffffff"))]),
+            files(&[(PATH, None)]),
+            files(&[]),
+        ]);
         let d = index.distribution_for(PATH, HASH);
         assert_eq!(d.ready, 1);
         assert_eq!(d.present, 3);
@@ -3150,7 +3231,7 @@ mod tests {
     fn readiness_is_never_ready_for_an_empty_cr_hash() {
         // The controller has not rendered yet (status.hash absent): a
         // node reporting any hash must not count.
-        let index = DistributionIndex::from_node_files(vec![files(&[(PATH, Some(HASH))])], 1);
+        let index = DistributionIndex::from_node_files(vec![files(&[(PATH, Some(HASH))])]);
         let d = index.distribution_for(PATH, "");
         assert_eq!((d.ready, d.present), (0, 1));
         assert_eq!(d.state, "Pending");
@@ -3158,17 +3239,97 @@ mod tests {
 
     #[test]
     fn readiness_counts_a_node_once_despite_duplicates() {
-        let index = DistributionIndex::from_node_files(
-            vec![files(&[
-                (PATH, Some(HASH)),
-                (PATH, Some(HASH)),
-                (PATH, None),
-            ])],
-            1,
-        );
+        let index = DistributionIndex::from_node_files(vec![files(&[
+            (PATH, Some(HASH)),
+            (PATH, Some(HASH)),
+            (PATH, None),
+        ])]);
         let d = index.distribution_for(PATH, HASH);
         assert_eq!((d.ready, d.present), (1, 1));
         assert_eq!(d.state, "Ready");
+    }
+
+    /// The denominator is the nodes reporting inside the window, nothing
+    /// else — no node has reported, no node is live, and a CR is
+    /// `Pending` rather than `n/0`.
+    #[test]
+    fn no_reports_means_no_live_nodes() {
+        let d = empty_index().distribution_for(PATH, HASH);
+        assert_eq!((d.ready, d.present, d.total), (0, 0, 0));
+        assert_eq!(d.state, "Pending");
+    }
+
+    #[test]
+    fn stale_window_parses_defaults_and_treats_zero_as_disabled() {
+        let default = Some(DEFAULT_NODE_STATUS_STALE_SECS);
+        assert_eq!(parse_stale_secs(None), default);
+        // Falls back rather than refusing to start.
+        assert_eq!(parse_stale_secs(Some("ten".into())), default);
+        assert_eq!(parse_stale_secs(Some("-5".into())), default);
+        assert_eq!(parse_stale_secs(Some(" 1800\n".into())), Some(1800));
+        assert_eq!(
+            parse_stale_secs(Some("0".into())),
+            None,
+            "0 is the documented off switch"
+        );
+    }
+
+    // ---- live database ---------------------------------------------------
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    fn live_conn() -> PgConnection {
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+        let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
+            panic!("set KG_TEST_DATABASE_URL to run this test");
+        };
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("apply the shipped migrations");
+        conn.batch_execute("TRUNCATE seccomp_node_status")
+            .expect("reset node status");
+        conn
+    }
+
+    fn report_node(conn: &mut PgConnection, node: &str, hash: &str, age_secs: i64) {
+        use schema::seccomp_node_status::dsl as sns;
+        let paths = serde_json::json!([{ "path": PATH, "hash": hash }]);
+        let at = chrono::Utc::now().naive_utc() - chrono::Duration::seconds(age_secs);
+        diesel::insert_into(sns::seccomp_node_status)
+            .values((
+                sns::node_name.eq(node),
+                sns::paths.eq(&paths),
+                sns::updated_at.eq(at),
+            ))
+            .execute(conn)
+            .expect("insert node status");
+    }
+
+    /// The statement the index is built from, against the shipped schema:
+    /// a node past the window is in neither the numerator nor the
+    /// denominator, and `pod_details` is not consulted at all — the table
+    /// is empty here and `total` is still 2.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_distribution_counts_only_nodes_reporting_inside_the_window() {
+        let mut conn = live_conn();
+        let window = node_status_stale_secs().expect("default window is on");
+        report_node(&mut conn, "fresh-ready", HASH, 0);
+        report_node(
+            &mut conn,
+            "fresh-stale-hash",
+            "0000000000000000",
+            window / 2,
+        );
+        report_node(&mut conn, "departed", HASH, window + 60);
+
+        let d = distribution_index(&mut conn)
+            .expect("index")
+            .distribution_for(PATH, HASH);
+        assert_eq!((d.ready, d.present, d.total), (1, 2, 2));
+        assert_eq!(d.state, "Partial");
     }
 
     #[test]
@@ -3455,13 +3616,10 @@ mod tests {
         cr.dist_state = "Ready".into();
         let older = cr_row("older", Some(("Deployment", "web")), "h0", 100);
         let obs = observed_fixture("read,write", "x86_64", vec![cr, older]);
-        let index = DistributionIndex::from_node_files(
-            vec![
-                files(&[("kguardian/prod/custom-name.json", Some(HASH))]),
-                files(&[("kguardian/prod/custom-name.json", Some("stale"))]),
-            ],
-            2,
-        );
+        let index = DistributionIndex::from_node_files(vec![
+            files(&[("kguardian/prod/custom-name.json", Some(HASH))]),
+            files(&[("kguardian/prod/custom-name.json", Some("stale"))]),
+        ]);
         let v = serde_json::to_value(ProfileSummary::build(&obs, &index, &DenialIndex::empty()))
             .unwrap();
         assert_eq!(v["crCount"], 2);
