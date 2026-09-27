@@ -640,6 +640,18 @@ got="$(sc_gomemlimit --set supplychain.goMemLimit=150MiB)"
 [ "$got" = '"150MiB"' ] || { echo "FAIL [supplychain-gomemlimit]: explicit goMemLimit gave '$got'"; fail=1; }
 got="$(sc_gomemlimit --set supplychain.resources.limits=null)"
 [ -z "$got" ] || { echo "FAIL [supplychain-gomemlimit]: no memory limit must mean no GOMEMLIMIT, got '$got'"; fail=1; }
+# A GOMEMLIMIT already set in supplychain.env is the only one: a duplicate
+# env name breaks server-side apply on upgrade.
+if dep="$(helm template compat "$CHART" "${SC_ON[@]}" --set 'supplychain.env[0].name=GOMEMLIMIT' \
+    --set 'supplychain.env[0].value=100MiB' --show-only templates/supplychain/deployment.yaml 2>/dev/null)"; then
+  sc="$(awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' <<<"$dep")"
+  n="$(grep -c 'name: GOMEMLIMIT' <<<"$sc" || true)"
+  v="$(grep -A1 'name: GOMEMLIMIT' <<<"$sc" | sed -n 's/.*value: //p' || true)"
+  [ "$n" = 1 ] && [ "$v" = 100MiB ] || \
+    { echo "FAIL [supplychain-gomemlimit-user-env]: want one GOMEMLIMIT=100MiB, got $n: $v"; fail=1; }
+else
+  echo "FAIL [supplychain-gomemlimit-user-env]: did not render"; fail=1
+fi
 assert_render_fails "supplychain-gomemlimit-bad-limit" "cannot derive GOMEMLIMIT" \
   "${SC_ON[@]}" --set supplychain.resources.limits.memory=lots
 render "supplychain-grype-pvc" "${SC_ON[@]}" --set supplychain.grype.enabled=true \

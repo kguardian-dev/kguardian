@@ -124,6 +124,14 @@ spec:
                  container holds up to GRYPE_SBOM_BUDGET_MIB of SBOMs, and
                  without a limit the Go heap can reach ~2x that. */}}
             {{- $gml := .Values.supplychain.goMemLimit | default (include "kguardian.goMemLimit" (dig "limits" "memory" "" (.Values.supplychain.resources | default dict))) }}
+            {{- /* A GOMEMLIMIT the user already sets in supplychain.env wins:
+                 a second entry with the same name is rejected by
+                 server-side apply. */}}
+            {{- range .Values.supplychain.env }}
+            {{- if eq (toString .name) "GOMEMLIMIT" }}
+            {{- $gml = "" }}
+            {{- end }}
+            {{- end }}
             {{- if $gml }}
             - name: GOMEMLIMIT
               value: {{ $gml | quote }}

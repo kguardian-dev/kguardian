@@ -314,7 +314,10 @@ The coordinator (`pkg/match`):
   their findings on the broker stay as they are until a source offers the
   SBOM again (after a database update too). An SBOM still waiting for its
   match is never dropped, so the budget can be exceeded until it is
-  matched, for example before the first database loads;
+  matched, for example before the first database loads. If only part of
+  an evicted group is offered again (Trivy's SbomReport, say, before the
+  registry SBOM's daily recheck), that part is matched on its own, and
+  findings only the registry SBOM gave drop until it is offered again;
 - matches on one worker, with a time limit per match;
 - re-matches when any input changes (it fingerprints the union);
 - re-matches everything it holds when the sidecar reports a new database
