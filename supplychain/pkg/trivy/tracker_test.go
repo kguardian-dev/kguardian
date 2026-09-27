@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
@@ -329,5 +330,38 @@ func TestTrackerTagOnlyRaceWithSBOM(t *testing.T) {
 	}
 	if es[0].Vulns.Image.Digest != apiserverDigest {
 		t.Errorf("payload digest %q", es[0].Vulns.Image.Digest)
+	}
+}
+
+// The kernel-headers fan-out through the Trivy path: every finding keeps
+// the broker's 16 paths, taken from one sorted copy per package.
+func TestWithFilePathsCapsEachFinding(t *testing.T) {
+	const purl = "pkg:deb/debian/linux-libc-dev@6.1.180-1"
+	paths := make([]string, 1520)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("usr/include/linux/header-%05d.h", i)
+	}
+	p := &types.ImageVulnerabilities{}
+	for i := 0; i < 2128; i++ {
+		// Trivy's own paths for the finding, on top of the SBOM's.
+		p.Vulnerabilities = append(p.Vulnerabilities, types.Vulnerability{ID: fmt.Sprintf("CVE-%d", i),
+			Package: types.Package{Name: "linux-libc-dev", PURL: purl}, FilePaths: []string{"a/1", "a/2", "a/3", "a/4", "a/5"}})
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := withFilePaths(p, map[string][]string{purl: paths})
+	runtime.ReadMemStats(&after)
+	// Merging the whole list per finding allocated ~200 MiB here.
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+		t.Errorf("allocated %d MiB", alloc>>20)
+	}
+	for _, v := range got.Vulnerabilities {
+		if len(v.FilePaths) != types.MaxFindingFilePaths || v.FilePaths[0] != "a/1" {
+			t.Fatalf("%s: %d paths", v.ID, len(v.FilePaths))
+		}
+	}
+	if len(p.Vulnerabilities[0].FilePaths) != 5 {
+		t.Error("input modified")
 	}
 }

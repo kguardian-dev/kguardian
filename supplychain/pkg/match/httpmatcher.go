@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,8 +31,22 @@ type HTTPMatcher struct {
 	scanner types.Scanner
 }
 
-// maxMatchResponse bounds one /match response.
+// maxMatchResponse bounds one /match response. With findings capped at
+// types.MaxFindings and their file paths at types.MaxFindingFilePaths a
+// real response stays well under it.
 const maxMatchResponse = 64 << 20
+
+// Why a match produced no result. Both are logged and counted by the
+// coordinator; neither is ever a bare JSON error.
+var (
+	// ErrTooLarge: the result for this SBOM is over a limit (the
+	// matcher's 413, the response byte cap, or the findings cap). The
+	// same SBOM against the same database will fail the same way.
+	ErrTooLarge = errors.New("match result too large")
+	// ErrTruncated: the response ended before it was complete (the
+	// matcher went away mid-body).
+	ErrTruncated = errors.New("matcher response truncated")
+)
 
 // NewHTTPMatcher returns a matcher for the sidecar at baseURL, which must
 // be a loopback http URL.
@@ -124,15 +139,126 @@ func (m *HTTPMatcher) Match(ctx context.Context, s *types.ImageSBOM) ([]types.Vu
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("matcher returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+		err := fmt.Errorf("matcher returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+			err = fmt.Errorf("%w: %w", ErrTooLarge, err)
+		}
+		return nil, err
 	}
-	var out struct {
-		DB              wireDB                `json:"db"`
-		Vulnerabilities []types.Vulnerability `json:"vulnerabilities"`
+	db, vulns, err := decodeMatch(resp.Body, maxMatchResponse, types.MaxFindings)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMatchResponse)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("matcher response: %w", err)
+	m.record(db)
+	return vulns, nil
+}
+
+// decodeMatch reads a /match response one finding at a time, so memory is
+// bounded by the findings kept, not by the body. Each finding keeps at
+// most types.MaxFindingFilePaths paths. Over maxBytes, or more than
+// maxFindings findings, is ErrTooLarge; a body that ends early is
+// ErrTruncated.
+func decodeMatch(r io.Reader, maxBytes int64, maxFindings int) (wireDB, []types.Vulnerability, error) {
+	var db wireDB
+	var out []types.Vulnerability
+	cr := &capReader{r: r, left: maxBytes}
+	dec := json.NewDecoder(cr)
+	fail := func(err error) error {
+		switch {
+		case cr.over:
+			return fmt.Errorf("%w: matcher response exceeds %d MiB", ErrTooLarge, maxBytes>>20)
+		case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
+			return fmt.Errorf("%w after %d bytes: connection closed", ErrTruncated, cr.n)
+		}
+		return fmt.Errorf("matcher response: %w", err)
 	}
-	m.record(out.DB)
-	return out.Vulnerabilities, nil
+	delim := func(want json.Delim) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return fail(err)
+		}
+		if d, ok := tok.(json.Delim); !ok || d != want {
+			return fmt.Errorf("matcher response: expected %q, got %v", want, tok)
+		}
+		return nil
+	}
+	if err := delim('{'); err != nil {
+		return db, nil, err
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return db, nil, fail(err)
+		}
+		switch tok {
+		case "db":
+			if err := dec.Decode(&db); err != nil {
+				return db, nil, fail(err)
+			}
+		case "vulnerabilities":
+			tok, err := dec.Token()
+			if err != nil {
+				return db, nil, fail(err)
+			}
+			if tok == nil {
+				continue // null: no findings
+			}
+			if d, ok := tok.(json.Delim); !ok || d != '[' {
+				return db, nil, fmt.Errorf("matcher response: vulnerabilities is %v", tok)
+			}
+			for dec.More() {
+				if len(out) >= maxFindings {
+					return db, nil, fmt.Errorf("%w: more than %d findings", ErrTooLarge, maxFindings)
+				}
+				var v types.Vulnerability
+				if err := dec.Decode(&v); err != nil {
+					return db, nil, fail(err)
+				}
+				v.FilePaths = types.CapFilePaths(v.FilePaths)
+				out = append(out, v)
+			}
+			if err := delim(']'); err != nil {
+				return db, nil, err
+			}
+		default:
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return db, nil, fail(err)
+			}
+		}
+	}
+	if err := delim('}'); err != nil {
+		return db, nil, err
+	}
+	return db, out, nil
+}
+
+// capReader passes at most left bytes through and notices a byte past
+// them: the difference between a body over the cap (over) and one that
+// ended (EOF).
+type capReader struct {
+	r    io.Reader
+	left int64
+	n    int64
+	over bool
+}
+
+var errOverCap = errors.New("over the response cap")
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.over {
+		return 0, errOverCap
+	}
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	if int64(n) > c.left {
+		n = int(c.left)
+		c.over = true
+		err = errOverCap
+	}
+	c.left -= int64(n)
+	c.n += int64(n)
+	return n, err
 }

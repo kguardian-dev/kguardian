@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,7 +216,10 @@ func serve() error {
 		if err != nil {
 			return err
 		}
-		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m}
+		// Crash markers live on the pod's /tmp emptyDir, which survives a
+		// container restart (an OOMKill) but not the pod.
+		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
+			CrashDir: filepath.Join(os.TempDir(), "kguardian-match")}
 		sink = coord.Tee(disp)
 		wg.Add(1)
 		go func() {

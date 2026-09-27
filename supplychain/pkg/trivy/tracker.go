@@ -436,7 +436,10 @@ func workloadsOf(refs map[string]types.WorkloadRef) []types.WorkloadRef {
 }
 
 // withFilePaths returns a copy of p whose vulnerabilities also carry the
-// file paths the SBOM attributes to their package PURL. p is not modified.
+// file paths the SBOM attributes to their package PURL, at most
+// types.MaxFindingFilePaths each (the broker keeps no more). p is not
+// modified. A package's paths are sorted and capped once, not per finding:
+// a kernel-headers package has ~1 000 files and thousands of findings.
 func withFilePaths(p *types.ImageVulnerabilities, byPURL map[string][]string) *types.ImageVulnerabilities {
 	cp := *p
 	cp.Vulnerabilities = make([]types.Vulnerability, len(p.Vulnerabilities))
@@ -444,11 +447,20 @@ func withFilePaths(p *types.ImageVulnerabilities, byPURL map[string][]string) *t
 	if len(byPURL) == 0 {
 		return &cp
 	}
+	capped := map[string][]string{}
 	for i := range cp.Vulnerabilities {
 		v := &cp.Vulnerabilities[i]
-		extra := byPURL[v.Package.PURL]
-		if v.Package.PURL == "" || len(extra) == 0 {
+		if v.Package.PURL == "" || len(byPURL[v.Package.PURL]) == 0 {
 			continue
+		}
+		extra, ok := capped[v.Package.PURL]
+		if !ok {
+			set := map[string]struct{}{}
+			for _, f := range byPURL[v.Package.PURL] {
+				set[f] = struct{}{}
+			}
+			extra = types.CapFilePaths(sortedKeys(set))
+			capped[v.Package.PURL] = extra
 		}
 		set := map[string]struct{}{}
 		for _, f := range v.FilePaths {
@@ -457,7 +469,7 @@ func withFilePaths(p *types.ImageVulnerabilities, byPURL map[string][]string) *t
 		for _, f := range extra {
 			set[f] = struct{}{}
 		}
-		v.FilePaths = sortedKeys(set)
+		v.FilePaths = types.CapFilePaths(sortedKeys(set))
 	}
 	return &cp
 }

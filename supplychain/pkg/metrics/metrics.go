@@ -45,6 +45,10 @@ type Metrics struct {
 	GrypeMatches      prometheus.Counter
 	GrypeMatchSeconds prometheus.Histogram
 	GrypeSBOMsHeld    prometheus.Gauge
+	// GrypeQuarantined is how many digests are not being matched because
+	// they failed repeatedly (or crashed the matcher) with the same SBOM
+	// and database.
+	GrypeQuarantined prometheus.Gauge
 	// GrypeComponentsClamped counts matches whose SBOM union exceeded the
 	// component cap and was truncated.
 	GrypeComponentsClamped prometheus.Counter
@@ -100,7 +104,7 @@ func New() *Metrics {
 		}),
 		GrypeMatchRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kguardian_supplychain_grype_match_runs_total",
-			Help: "SBOM match runs, by result (ok, error).",
+			Help: "SBOM match runs, by result (ok, error, too_large, quarantined).",
 		}, []string{"result"}),
 		GrypeMatches: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "kguardian_supplychain_grype_matches_total",
@@ -110,6 +114,10 @@ func New() *Metrics {
 			Name:    "kguardian_supplychain_grype_match_duration_seconds",
 			Help:    "Time to match one SBOM.",
 			Buckets: prometheus.ExponentialBuckets(0.05, 2, 12),
+		}),
+		GrypeQuarantined: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kguardian_supplychain_grype_quarantined_digests",
+			Help: "Digests not matched again until their SBOM or the Grype database changes, after repeated failures or a crash during matching.",
 		}),
 		GrypeSBOMsHeld: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_grype_sboms_held",
@@ -133,7 +141,7 @@ func New() *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
 		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups,
-		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeComponentsClamped, m.PendingEmissions,
+		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeQuarantined, m.GrypeComponentsClamped, m.PendingEmissions,
 	)
 	return m
 }
