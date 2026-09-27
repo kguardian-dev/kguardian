@@ -1,0 +1,54 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Workflow lint
+
+# Checks every workflow for shell expansion the runner does before the
+# intended shell sees it (.github/scripts/check_vmtest_commands.py):
+# - any `$` in a vmtest `command:` (vmtest's own shell expands it);
+# - user-controlled context (inputs, or github outside a small allowlist of
+#   safe members)
+#   interpolated into a `run:` or `command:`, which must go through env:;
+# - the same in an actions/github-script `script:` (JavaScript).
+# Known limit: values laundered through env.* and then interpolated are not
+# traced.
+# Seconds of CPU; runs only when a workflow or the lint changes (on PRs
+# and on main).
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/scripts/check_vmtest_commands.py'
+      - '.github/scripts/test_check_vmtest_commands.py'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/scripts/check_vmtest_commands.py'
+      - '.github/scripts/test_check_vmtest_commands.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Lint tests
+        run: python3 .github/scripts/test_check_vmtest_commands.py
+
+      - name: No shell expansion or user-controlled context in workflow commands
+        run: python3 .github/scripts/check_vmtest_commands.py .github/workflows/*.y*ml
