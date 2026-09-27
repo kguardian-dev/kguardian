@@ -63,6 +63,46 @@ const DefaultMaxComponents = 50000
 type held struct {
 	sbom     *types.ImageSBOM
 	lastUsed time.Time
+	bytes    int64 // heldBytes(sbom)
+}
+
+// DefaultMaxHeldBytes bounds the SBOMs held for re-matching (see
+// Coordinator.MaxHeldBytes).
+const DefaultMaxHeldBytes = 96 << 20
+
+// heldBytes estimates what sbom keeps alive on the heap: the component
+// structs and every string they reference. A fat Debian image's file
+// lists dominate. It is an estimate for a budget, not an exact count;
+// TestHeldBytesTracksTheHeap checks it against the runtime.
+func heldBytes(sbom *types.ImageSBOM) int64 {
+	const (
+		structOverhead = 1024 // ImageSBOM header, maps and held entry
+		componentSize  = 176  // types.Component: 8 strings + 2 slices
+		stringHeader   = 16
+	)
+	// str is one string allocation: decoded JSON gives every string its
+	// own, rounded up to a 16-byte size class, except that strings under
+	// 16 bytes share tiny-allocator blocks.
+	str := func(s string) int64 {
+		if len(s) < 16 {
+			return int64(len(s))
+		}
+		return int64((len(s) + 15) &^ 15)
+	}
+	n := int64(structOverhead) + int64(cap(sbom.Components))*componentSize
+	for i := range sbom.Components {
+		c := &sbom.Components[i]
+		n += str(c.Name) + str(c.Version) + str(c.PURL) + str(c.Type) + str(c.Class) +
+			str(c.SrcName) + str(c.SrcVersion) + str(c.LayerDigest)
+		n += int64(cap(c.Licenses)+cap(c.FilePaths)) * stringHeader
+		for _, l := range c.Licenses {
+			n += str(l)
+		}
+		for _, f := range c.FilePaths {
+			n += str(f)
+		}
+	}
+	return n
 }
 
 type groupState struct {
@@ -114,6 +154,11 @@ type Coordinator struct {
 	Metrics *metrics.Metrics
 	// MaxDigests bounds the digests whose SBOMs are held. Default 2000.
 	MaxDigests int
+	// MaxHeldBytes bounds the estimated heap the held SBOMs use (see
+	// heldBytes); the least recently offered digests are dropped first.
+	// An SBOM larger than the whole budget is still held, alone. Default
+	// DefaultMaxHeldBytes.
+	MaxHeldBytes int64
 	// MaxComponents caps one match's input after de-duplication.
 	// Default DefaultMaxComponents.
 	MaxComponents int
@@ -143,6 +188,7 @@ type Coordinator struct {
 	// ticker queues them again. unavailable* summarise one pass of them
 	// for a single log line.
 	retry             map[string]struct{}
+	heldBytes         int64 // sum of held.bytes
 	unavailable       int
 	unavailableSample string
 	unavailableErr    error
@@ -159,6 +205,9 @@ func (c *Coordinator) init() {
 	}
 	if c.MaxDigests <= 0 {
 		c.MaxDigests = 2000
+	}
+	if c.MaxHeldBytes <= 0 {
+		c.MaxHeldBytes = DefaultMaxHeldBytes
 	}
 	if c.MaxComponents <= 0 {
 		c.MaxComponents = DefaultMaxComponents
@@ -186,11 +235,17 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.mu.Lock()
 	c.init()
 	d := sbom.Image.Digest
+	h := &held{sbom: sbom, lastUsed: c.now(), bytes: heldBytes(sbom)}
+	if old, ok := c.sboms[d][sbom.Source]; ok {
+		c.heldBytes -= old.bytes
+		delete(c.sboms[d], sbom.Source)
+	}
+	c.evictLocked(d, h.bytes)
 	if _, ok := c.sboms[d]; !ok {
-		c.evictLocked()
 		c.sboms[d] = map[string]*held{}
 	}
-	c.sboms[d][sbom.Source] = &held{sbom: sbom, lastUsed: c.now()}
+	c.sboms[d][sbom.Source] = h
+	c.heldBytes += h.bytes
 	c.queue[c.groupKeyLocked(d)] = struct{}{}
 	c.gaugesLocked()
 	c.mu.Unlock()
@@ -266,11 +321,23 @@ func (c *Coordinator) membersLocked(key string) []*types.ImageSBOM {
 	return out
 }
 
-func (c *Coordinator) evictLocked() {
-	for len(c.sboms) >= c.MaxDigests {
+// evictLocked drops the least recently offered digests, never keep, until
+// one more SBOM of size bytes for keep fits both MaxDigests and
+// MaxHeldBytes.
+func (c *Coordinator) evictLocked(keep string, bytes int64) {
+	for {
+		_, have := c.sboms[keep]
+		tooMany := !have && len(c.sboms) >= c.MaxDigests
+		tooBig := c.heldBytes+bytes > c.MaxHeldBytes
+		if !tooMany && !tooBig {
+			return
+		}
 		var oldest string
 		var t time.Time
 		for d, bySrc := range c.sboms {
+			if d == keep {
+				continue
+			}
 			for _, h := range bySrc {
 				if oldest == "" || h.lastUsed.Before(t) {
 					oldest, t = d, h.lastUsed
@@ -278,11 +345,21 @@ func (c *Coordinator) evictLocked() {
 			}
 		}
 		if oldest == "" {
-			return
+			return // nothing else to drop: keep is held alone
+		}
+		for _, h := range c.sboms[oldest] {
+			c.heldBytes -= h.bytes
 		}
 		delete(c.sboms, oldest)
 		delete(c.groups, oldest)
 		delete(c.queue, oldest)
+		if c.Metrics != nil {
+			reason := "digests"
+			if tooBig {
+				reason = "bytes"
+			}
+			c.Metrics.GrypeSBOMsEvicted.WithLabelValues(reason).Inc()
+		}
 	}
 }
 
@@ -702,6 +779,7 @@ func (c *Coordinator) count(result string) {
 func (c *Coordinator) gaugesLocked() {
 	if c.Metrics != nil {
 		c.Metrics.GrypeSBOMsHeld.Set(float64(len(c.sboms)))
+		c.Metrics.GrypeSBOMBytesHeld.Set(float64(c.heldBytes))
 		q := 0
 		for _, gs := range c.groups {
 			if gs.quarantined != "" {

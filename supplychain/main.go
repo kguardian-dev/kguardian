@@ -102,6 +102,9 @@ type config struct {
 	// match errors waits before one more try (doubling per repeat, at
 	// most 24h).
 	GrypeQuarantineTTL time.Duration
+	// GrypeSBOMBudgetMiB bounds the estimated heap of the SBOMs held for
+	// re-matching.
+	GrypeSBOMBudgetMiB int
 	BrokerURL          string
 	BrokerToken        string
 }
@@ -153,6 +156,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.GrypeQuarantineTTL, err = time.ParseDuration(env("GRYPE_ERROR_QUARANTINE_TTL", "1h")); err != nil || c.GrypeQuarantineTTL < 5*time.Minute {
 		return c, fmt.Errorf("GRYPE_ERROR_QUARANTINE_TTL must be a duration of at least 5m")
+	}
+	if c.GrypeSBOMBudgetMiB, err = strconv.Atoi(env("GRYPE_SBOM_BUDGET_MIB", "96")); err != nil || c.GrypeSBOMBudgetMiB < 16 {
+		return c, fmt.Errorf("GRYPE_SBOM_BUDGET_MIB must be an integer of at least 16")
 	}
 	return c, nil
 }
@@ -226,7 +232,8 @@ func serve() error {
 		// Crash markers live on the pod's /tmp emptyDir, which survives a
 		// container restart (an OOMKill) but not the pod.
 		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
-			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL}
+			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL,
+			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20}
 		sink = coord.Tee(disp)
 		wg.Add(1)
 		go func() {

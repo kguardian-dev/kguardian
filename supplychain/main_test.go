@@ -69,12 +69,13 @@ func TestLoadConfigOverridesAndErrors(t *testing.T) {
 		"BROKER_AUTH_TOKEN":          " tok\n",
 		"TRIVY_RESYNC_PERIOD":        "30s",
 		"GRYPE_ERROR_QUARANTINE_TTL": "30m",
+		"GRYPE_SBOM_BUDGET_MIB":      "200",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":9999" || c.TrivyEnabled || !c.BrokerIngest || c.BrokerToken != "tok" || c.TrivyResync != 30*time.Second ||
-		c.GrypeQuarantineTTL != 30*time.Minute {
+		c.GrypeQuarantineTTL != 30*time.Minute || c.GrypeSBOMBudgetMiB != 200 {
 		t.Errorf("overrides: %+v", c)
 	}
 	cl, err := newBrokerClient(c, nil)
@@ -94,6 +95,8 @@ func TestLoadConfigOverridesAndErrors(t *testing.T) {
 		{"REGISTRY_ALLOW_PRIVATE": "lan"},
 		{"GRYPE_ERROR_QUARANTINE_TTL": "1m"},
 		{"GRYPE_ERROR_QUARANTINE_TTL": "a while"},
+		{"GRYPE_SBOM_BUDGET_MIB": "8"},
+		{"GRYPE_SBOM_BUDGET_MIB": "96Mi"},
 	} {
 		if _, err := loadConfig(envMap(bad)); err == nil {
 			t.Errorf("accepted %v", bad)

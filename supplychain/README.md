@@ -302,8 +302,12 @@ from 29.7 MB and 124 Go modules to about 71 MB and 817.
 
 The coordinator (`pkg/match`):
 
-- holds every source's SBOM per digest, up to 2000 digests, and matches
-  the union described above;
+- holds every source's SBOM per digest, up to 2000 digests and an
+  estimated 96 MiB of heap (`GRYPE_SBOM_BUDGET_MIB`), dropping the least
+  recently offered digests first, and matches the union described above.
+  A fat Debian/Python image whose registry SBOM lists every file costs
+  about 3.3 MiB held, so the default keeps about 28 of them; a Trivy
+  SbomReport, which lists no files, about a tenth of that;
 - matches on one worker, with a time limit per match;
 - re-matches when any input changes (it fingerprints the union);
 - re-matches everything it holds when the sidecar reports a new database
@@ -401,6 +405,7 @@ and no identity.
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `GRYPE_ERROR_QUARANTINE_TTL` | `1h` | How long a digest whose match keeps failing waits before one more try; doubles per repeat, at most 24h. At least `5m`. |
+| `GRYPE_SBOM_BUDGET_MIB` | `96` | Estimated heap, in MiB, for the SBOMs held so everything can be re-matched when the Grype DB changes. Past it the least recently offered digests are dropped (matched again when a source offers them again). At least `16`. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
@@ -444,6 +449,8 @@ auth and the read APIs.
 | `kguardian_supplychain_grype_match_runs_total` | `result` | Match runs: `ok`, `error` (a failure about the input; three on the same SBOM and database quarantine it), `too_large` (over a response limit; quarantines at once), `unavailable` (the matcher could not be reached; retried each minute, never quarantines), `quarantined` (a digest entered quarantine). |
 | `kguardian_supplychain_grype_quarantined_digests` | | Digests not matched until their SBOM or the Grype database changes: too large, crashed the process twice mid-match, or failed repeatedly (retried after `GRYPE_ERROR_QUARANTINE_TTL`, doubling per repeat, at most 24h). |
 | `kguardian_supplychain_grype_matches_total` | | Vulnerabilities returned by match runs. |
+| `kguardian_supplychain_grype_sbom_bytes_held` | | Estimated heap used by the held SBOMs; stays under `GRYPE_SBOM_BUDGET_MIB`. |
+| `kguardian_supplychain_grype_sboms_evicted_total` | `budget` | Digests dropped from the held set, least recently offered first: `digests` (over 2 000) or `bytes` (over the byte budget). |
 | `kguardian_supplychain_grype_match_duration_seconds` | | Time to match one SBOM. |
 | `kguardian_supplychain_grype_sboms_held` | | Digests whose SBOMs are held for re-matching. |
 | `kguardian_supplychain_attestation_results_total` | `verdict`, `reason` | Signature discovery results posted. |
