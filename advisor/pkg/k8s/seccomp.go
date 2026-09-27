@@ -45,9 +45,13 @@ var ValidSeccompActions = []string{"SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_
 // "aarch64". The previous "ARM64" key never matched anything the controller
 // writes, so on ARM/aarch64 nodes the lookup missed and the generated profile
 // had "architectures": null — a structurally invalid, unusable seccomp profile.
+// Values MUST be the OCI runtime-spec (libseccomp) names, which is what runc
+// validates against: aarch64 is SCMP_ARCH_AARCH64. SCMP_ARCH_ARM64 is not an
+// OCI name, and a profile carrying it fails every pod that references it with
+// "string SCMP_ARCH_ARM64 is not a valid arch for seccomp".
 var SeccompArchitectures = map[string][]string{
 	"x86_64":  {"SCMP_ARCH_X86_64"},
-	"aarch64": {"SCMP_ARCH_ARM64"},
+	"aarch64": {"SCMP_ARCH_AARCH64"},
 }
 
 // BuildSeccompProfile constructs a SeccompProfile that allow-lists exactly the
