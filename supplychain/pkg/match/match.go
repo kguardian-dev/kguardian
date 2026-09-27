@@ -487,6 +487,9 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 	vulns, err := c.Matcher.Match(mctx, in.sbom)
 	cancel()
 	c.removeMarker(marker)
+	if err != nil && ctx.Err() != nil {
+		return // our own shutdown: neither a failure nor a retry
+	}
 	if c.Metrics != nil {
 		c.Metrics.GrypeMatchSeconds.Observe(c.now().Sub(start).Seconds())
 	}
@@ -528,10 +531,10 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 // input keeps failing. A too-large result is logged as such (it is not a
 // transient error) and quarantines at once.
 func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
-	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) {
-		// The matcher could not be reached (or we are shutting down): not
-		// the SBOM's fault, so never a step towards quarantine. Retried on
-		// the next tick; drain logs one line per pass for all of them.
+	if errors.Is(err, ErrUnavailable) {
+		// The matcher could not be reached or was not ready: not the
+		// SBOM's fault, so never a step towards quarantine. Retried on the
+		// next tick; drain logs one line per pass for all of them.
 		c.count("unavailable")
 		c.mu.Lock()
 		c.retry[key] = struct{}{}

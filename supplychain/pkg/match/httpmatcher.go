@@ -95,19 +95,35 @@ func (m *HTTPMatcher) record(d wireDB) {
 // DB asks the sidecar for its database status; on error it returns the
 // last known value (zero before the first success).
 func (m *HTTPMatcher) DB() DBInfo {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/db", nil)
-	if resp, err := m.http.Do(req); err == nil {
-		var d wireDB
-		if resp.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&d) == nil {
-			m.record(d)
-		}
-		_ = resp.Body.Close()
+	if d, err := m.probe(context.Background()); err == nil {
+		m.record(d)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.db
+}
+
+// probe asks the sidecar's /db whether it is up with a database loaded.
+func (m *HTTPMatcher) probe(ctx context.Context) (wireDB, error) {
+	var d wireDB
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/db", nil)
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return d, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return d, fmt.Errorf("/db answered %s", resp.Status)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&d); err != nil {
+		return d, fmt.Errorf("/db: %w", err)
+	}
+	if !d.Loaded {
+		return d, errors.New("/db: vulnerability database not loaded")
+	}
+	return d, nil
 }
 
 // Scanner identifies the matcher.
@@ -117,8 +133,17 @@ func (m *HTTPMatcher) Scanner() types.Scanner {
 	return m.scanner
 }
 
-// Match posts the SBOM's components to the sidecar.
+// Match posts the SBOM's components to the sidecar. It first checks the
+// sidecar is up with a database loaded: a failure after that (the matcher
+// died or stalled on this request) is about the input, while a matcher
+// that is down or not ready is ErrUnavailable and the request is not sent.
 func (m *HTTPMatcher) Match(ctx context.Context, s *types.ImageSBOM) ([]types.Vulnerability, error) {
+	if _, err := m.probe(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("matcher: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("%w: not ready: %w", ErrUnavailable, err)
+	}
 	body := struct {
 		Image struct {
 			Digest string `json:"digest"`

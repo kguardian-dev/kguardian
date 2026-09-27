@@ -402,3 +402,67 @@ type dbOverride struct {
 }
 
 func (d *dbOverride) DB() DBInfo { return DBInfo{Built: d.built} }
+
+// A matcher answering 503 (restarting, loading its database) is an outage:
+// nothing is quarantined.
+func TestMatcher503OutageNeverQuarantines(t *testing.T) {
+	m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "vulnerability database not loaded", http.StatusServiceUnavailable)
+	}))
+	c, mt := newCoord(&dbOverride{Matcher: m, built: time.Unix(100, 0)}, "")
+	for i := 0; i < 50; i++ {
+		c.Offer(trivySBOM(fmt.Sprintf("sha256:%02d", i), "openssl"))
+	}
+	pass(c)
+	tick(c)
+	tick(c)
+	if testutil.ToFloat64(mt.GrypeQuarantined) != 0 || testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")) != 0 ||
+		testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")) != 150 {
+		t.Fatalf("quarantined %v, errors %v", testutil.ToFloat64(mt.GrypeQuarantined), testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")))
+	}
+}
+
+// A failure only counts when the matcher was healthy just before: with /db
+// failing, the request is not sent and nothing is counted against the
+// input, even though /match would drop the connection.
+func TestUnhealthyMatcherIsNotCounted(t *testing.T) {
+	var hits atomic.Int64
+	m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/db" {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		diesAfterReading(&hits)(w, r)
+	}))
+	c, mt := newCoord(&dbOverride{Matcher: m, built: time.Unix(100, 0)}, "")
+	c.Offer(trivySBOM("sha256:x", "openssl"))
+	for i := 0; i < 6; i++ {
+		tick(c)
+	}
+	if hits.Load() != 0 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 || testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")) != 0 {
+		t.Fatalf("match hits %d, quarantined %v, errors %v", hits.Load(), testutil.ToFloat64(mt.GrypeQuarantined),
+			testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")))
+	}
+}
+
+// Our own shutdown mid-match is neither a failure nor a retry.
+func TestShutdownIsNotCounted(t *testing.T) {
+	f := &failMatcher{built: time.Unix(100, 0), block: true}
+	c, mt := newCoord(f, "")
+	c.Offer(trivySBOM("sha256:x", "openssl"))
+	c.checkDB()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.drain(ctx) }()
+	waitFor(t, func() bool { return f.n() == 1 })
+	cancel()
+	<-done
+	c.mu.Lock()
+	_, retry := c.retry["sha256:x"]
+	c.mu.Unlock()
+	if retry || testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")) != 0 ||
+		testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")) != 0 {
+		t.Errorf("retry %v, errors %v, unavailable %v", retry, testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("error")),
+			testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")))
+	}
+}
