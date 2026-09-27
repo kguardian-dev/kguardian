@@ -101,7 +101,8 @@ class UserControlledContext(unittest.TestCase):
         for expr in (
             "${{ github.ref_name }}",
             "${{ github.actor }}",
-            "${{ github.ref }}",
+            "${{ github.event_path }}",
+            "${{ github }}",
             "${{ github.triggering_actor }}",
             "${{ github.not_a_real_member }}",
         ):
@@ -111,9 +112,10 @@ class UserControlledContext(unittest.TestCase):
         # The agreed allowlist, spelled out: the lint's own list must not
         # silently grow or shrink.
         allowed = (
-            "workspace", "sha", "repository", "repository_owner", "run_id", "run_number",
-            "run_attempt", "event_name", "server_url", "api_url", "base_ref", "job",
-            "action_path", "token",
+            "workspace", "sha", "repository", "repository_owner", "repository_id", "run_id",
+            "run_number", "run_attempt", "event_name", "server_url", "api_url", "graphql_url",
+            "base_ref", "job", "action_path", "token", "workflow", "ref", "ref_type",
+            "retention_days",
         )
         self.assertEqual(sorted(lint.SAFE_GITHUB), sorted(allowed))
         for member in allowed:

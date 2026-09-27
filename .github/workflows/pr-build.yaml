@@ -198,7 +198,7 @@ jobs:
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/controller:pr-${process.env.PR_NUMBER}
+            ghcr.io/kguardian-dev/kguardian/controller:pr-${Number(process.env.PR_NUMBER)}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -391,7 +391,7 @@ jobs:
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/broker:pr-${process.env.PR_NUMBER}
+            ghcr.io/kguardian-dev/kguardian/broker:pr-${Number(process.env.PR_NUMBER)}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -685,7 +685,7 @@ jobs:
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/frontend:pr-${process.env.PR_NUMBER}
+            ghcr.io/kguardian-dev/kguardian/frontend:pr-${Number(process.env.PR_NUMBER)}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -795,7 +795,7 @@ jobs:
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${process.env.PR_NUMBER}
+            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${Number(process.env.PR_NUMBER)}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -1014,7 +1014,7 @@ jobs:
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${process.env.PR_NUMBER}
+            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${Number(process.env.PR_NUMBER)}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -1271,7 +1271,7 @@ jobs:
         with:
           script: |
             const marker = '✅ Helm chart built and pushed for testing:';
-            const version = process.env.PR_NUMBER;
+            const version = Number(process.env.PR_NUMBER);
             const body = marker + '\n```bash\n# Install PR Helm chart\nhelm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian \\\n  --create-namespace\n\n# Or upgrade existing installation\nhelm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian\n```';
 
             const comments = await github.rest.issues.listComments({
@@ -1330,25 +1330,25 @@ jobs:
               body += '### Built Images\n\n';
 
               if (controller) {
-                body += '✅ **Controller**: `ghcr.io/kguardian-dev/kguardian/controller:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Controller**: `ghcr.io/kguardian-dev/kguardian/controller:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (broker) {
-                body += '✅ **Broker**: `ghcr.io/kguardian-dev/kguardian/broker:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Broker**: `ghcr.io/kguardian-dev/kguardian/broker:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (frontend) {
-                body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (llmBridge) {
-                body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (evaluator) {
-                body += '✅ **Evaluator**: `ghcr.io/kguardian-dev/kguardian/evaluator:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Evaluator**: `ghcr.io/kguardian-dev/kguardian/evaluator:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (supplychain) {
-                body += '✅ **Supplychain**: `ghcr.io/kguardian-dev/kguardian/supplychain:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Supplychain**: `ghcr.io/kguardian-dev/kguardian/supplychain:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
               if (supplychainMatcher) {
-                body += '✅ **Supplychain matcher**: `ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-' + process.env.PR_NUMBER + '`\n';
+                body += '✅ **Supplychain matcher**: `ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-' + Number(process.env.PR_NUMBER) + '`\n';
               }
 
               body += '\n### 🧪 Testing Instructions\n\n';
@@ -1357,7 +1357,7 @@ jobs:
                 body += '**Option 1: Use PR Helm Chart (Recommended)**\n';
                 body += 'A complete Helm chart with all PR changes has been published:\n```bash\n';
                 body += '# Find the exact version\n';
-                body += 'helm search repo oci://ghcr.io/kguardian-dev/charts --versions | grep pr' + process.env.PR_NUMBER + '\n\n';
+                body += 'helm search repo oci://ghcr.io/kguardian-dev/charts --versions | grep pr' + Number(process.env.PR_NUMBER) + '\n\n';
                 body += '# Install with PR chart\n';
                 body += 'helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n';
                 body += '  --version <VERSION-FROM-ABOVE> \\\n';
@@ -1374,21 +1374,21 @@ jobs:
               body += '  --create-namespace \\\n';
 
               if (controller) {
-                body += '  --set controller.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
+                body += '  --set controller.image.tag=pr-' + Number(process.env.PR_NUMBER) + ' \\\n';
               }
               if (broker) {
-                body += '  --set broker.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
+                body += '  --set broker.image.tag=pr-' + Number(process.env.PR_NUMBER) + ' \\\n';
               }
               if (frontend) {
-                body += '  --set frontend.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
+                body += '  --set frontend.image.tag=pr-' + Number(process.env.PR_NUMBER) + ' \\\n';
               }
               if (llmBridge) {
                 body += '  --set llmBridge.enabled=true \\\n';
-                body += '  --set llmBridge.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
+                body += '  --set llmBridge.image.tag=pr-' + Number(process.env.PR_NUMBER) + ' \\\n';
               }
               if (supplychain) {
                 body += '  --set supplychain.enabled=true \\\n';
-                body += '  --set supplychain.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
+                body += '  --set supplychain.image.tag=pr-' + Number(process.env.PR_NUMBER) + ' \\\n';
               }
 
               body += '  --wait\n';
