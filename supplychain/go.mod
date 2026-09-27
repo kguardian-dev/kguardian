@@ -7,7 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/prometheus/client_golang v1.24.1
-	github.com/sigstore/protobuf-specs v0.5.1
+	github.com/sigstore/protobuf-specs v0.5.2
 	github.com/sigstore/sigstore v1.10.8
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/sirupsen/logrus v1.10.2
