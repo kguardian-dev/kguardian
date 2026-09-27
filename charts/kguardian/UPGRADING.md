@@ -1,10 +1,21 @@
 # Upgrading the kguardian Helm chart
 
+## Upgrading to 1.27.0
+
+1.27.0 is a minor release that carries one breaking change for installs with
+`broker.auth.enabled=true`: broker tokens are now scoped. Add the `read` and
+`ingest` keys to the Secret named by `broker.auth.existingSecret` (and
+`supplychain` if you enable the supply-chain component), or set
+`broker.auth.mode=shared` to keep the old single token. Installs with auth
+disabled, the default, need no action. Details in
+[Broker auth now uses scoped tokens](#broker-auth-now-uses-scoped-tokens-and-it-works-end-to-end).
+
 ## ImageTrustPolicy CRDs are now installed as release resources
 
-The `ImageTrustPolicy` and `ClusterImageTrustPolicy` CRDs briefly shipped in
-`crds/`. Helm applies `crds/` on first install only, and Flux skips it on
-upgrade by default, so an existing install upgraded to that chart got an
+On main, before any release, the `ImageTrustPolicy` and
+`ClusterImageTrustPolicy` CRDs shipped in `crds/`; no released chart did.
+Helm applies `crds/` on first install only, and Flux skips it on upgrade by
+default, so an existing install upgraded to that chart would have got an
 evaluator with no `ImageTrustPolicy` CRDs. They are now rendered from
 `templates/crds/imagetrustpolicy.yaml`, like the `SeccompProfile` and
 `ApplicationSecurityProfile` CRDs: installed and updated by `helm upgrade`,
