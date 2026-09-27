@@ -890,10 +890,10 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
   slow or down evaluator makes it unavailable, the rest of the profile is served), cached per namespace
   for 30 s (an unavailable answer for 10 s; at most 128 namespaces and about 16 MiB of results, oldest
   evicted), shared by concurrent requests (one evaluator read per namespace at a time), and charged to
-  the read budget only on a real read (shed: unavailable, not cached). It is read only for a workload
-  that runs an image now (one small query, before anything else), so never for an unknown workload, and
-  while it is read the request holds only that 1 MiB charge: the profile's own read permit is taken after
-  it. `null` in stored versions and
+  the read budget only on a real read (shed: unavailable, not cached). The profile GET starts with one
+  small query (1 KiB charge): an unknown workload is 404 there, and only a workload that runs an image
+  now reads the evaluator. While it is read the request holds only that 1 MiB charge; the profile's own
+  read permit is taken after it. `null` in stored versions and
   exports. Report-only: it never sets posture, a
   dimension status or readiness, and it is not in the snapshot or its hash.
 - Signature findings (v1.8), one per container and kind: `images.signatureInvalid/<c>` high,
