@@ -1,9 +1,16 @@
 package match
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"os"
 	"path/filepath"
 	"sync"
@@ -308,16 +315,90 @@ func TestErrorQuarantineTTLDoublesUpTo24h(t *testing.T) {
 	}
 }
 
-// A match that times out says nothing about the SBOM either.
-func TestMatchDeadlineNeverQuarantines(t *testing.T) {
-	f := &failMatcher{built: time.Unix(100, 0), err: fmt.Errorf("matcher: %w", context.DeadlineExceeded)}
-	c, mt := newCoord(f, "")
-	c.Offer(trivySBOM("sha256:slow", "openssl"))
-	pass(c)
-	for i := 0; i < 5; i++ {
+// A matcher that dies after reading the request (OOMKilled by this SBOM)
+// is not "unavailable": the digest is quarantined after 3, not sent to
+// kill the matcher again every tick.
+func TestMatcherDyingMidRequestIsQuarantined(t *testing.T) {
+	var hits atomic.Int64
+	m := matcherFor(t, diesAfterReading(&hits))
+	c, mt := newCoord(&dbOverride{Matcher: m, built: time.Unix(100, 0)}, "")
+	c.Offer(trivySBOM("sha256:killer", "linux-libc-dev"))
+	for i := 0; i < 10; i++ {
 		tick(c)
 	}
-	if f.n() != 6 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 {
-		t.Fatalf("%d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	if hits.Load() != 3 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 ||
+		testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")) != 0 {
+		t.Fatalf("%d matcher hits, quarantined %v", hits.Load(), testutil.ToFloat64(mt.GrypeQuarantined))
 	}
 }
+
+// A match that outlives its timeout is about the input (a slow match on a
+// huge SBOM), so it is quarantinable too.
+func TestMatchTimeoutIsQuarantined(t *testing.T) {
+	var hits atomic.Int64
+	m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/db" {
+			_, _ = w.Write([]byte(`{"loaded":true}`))
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body) // so the server notices the client going
+		hits.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	c, mt := newCoord(&dbOverride{Matcher: m, built: time.Unix(100, 0)}, "")
+	c.MatchTimeout = 50 * time.Millisecond
+	c.Offer(trivySBOM("sha256:slow", "openssl"))
+	for i := 0; i < 6; i++ {
+		tick(c)
+	}
+	if hits.Load() != 3 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
+		t.Fatalf("%d matcher hits, quarantined %v", hits.Load(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+}
+
+// The real client against a matcher that is not listening: every digest
+// is unavailable, none is quarantined, and each pass logs one line.
+func TestRefusedMatcherNeverQuarantinesAndLogsOncePerPass(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	m, _ := NewHTTPMatcher(url)
+	log, hook := logtest.NewNullLogger()
+	log.SetLevel(logrus.DebugLevel)
+	f := &dbOverride{Matcher: m, built: time.Unix(100, 0)}
+	c, mt := newCoord(f, "")
+	c.Log = log
+	for i := 0; i < 50; i++ {
+		c.Offer(trivySBOM(fmt.Sprintf("sha256:%02d", i), "openssl"))
+	}
+	pass(c)
+	tick(c)
+	tick(c)
+	if testutil.ToFloat64(mt.GrypeQuarantined) != 0 || testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")) != 150 {
+		t.Fatalf("quarantined %v, unavailable %v", testutil.ToFloat64(mt.GrypeQuarantined),
+			testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")))
+	}
+	warns := 0
+	for _, e := range hook.AllEntries() {
+		if e.Level == logrus.WarnLevel {
+			warns++
+			if e.Message != "matcher unavailable; will retry on the next tick" || e.Data["digests"] != 50 {
+				t.Errorf("%s %v", e.Message, e.Data)
+			}
+		}
+	}
+	if warns != 3 {
+		t.Errorf("%d WARN lines for 3 passes", warns)
+	}
+}
+
+// dbOverride reports a loaded database for a matcher that cannot be asked.
+type dbOverride struct {
+	Matcher
+	built time.Time
+}
+
+func (d *dbOverride) DB() DBInfo { return DBInfo{Built: d.built} }

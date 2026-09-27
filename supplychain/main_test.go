@@ -47,7 +47,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":8083" || !c.TrivyEnabled || c.BrokerIngest || c.RegistryLookup || c.RegistryAllowPrivate ||
-		c.TrivyResync != 10*time.Minute || c.TrivyRecheck != 5*time.Minute {
+		c.TrivyResync != 10*time.Minute || c.TrivyRecheck != 5*time.Minute || c.GrypeQuarantineTTL != time.Hour {
 		t.Errorf("defaults: %+v", c)
 	}
 	// Ingest off by default: payloads are logged, never sent.
@@ -62,17 +62,19 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 func TestLoadConfigOverridesAndErrors(t *testing.T) {
 	c, err := loadConfig(envMap(map[string]string{
-		"LISTEN_ADDR":            " :9999 ",
-		"TRIVY_OPERATOR_ENABLED": "false",
-		"BROKER_INGEST_ENABLED":  "true",
-		"BROKER_URL":             "http://broker:9090",
-		"BROKER_AUTH_TOKEN":      " tok\n",
-		"TRIVY_RESYNC_PERIOD":    "30s",
+		"LISTEN_ADDR":                " :9999 ",
+		"TRIVY_OPERATOR_ENABLED":     "false",
+		"BROKER_INGEST_ENABLED":      "true",
+		"BROKER_URL":                 "http://broker:9090",
+		"BROKER_AUTH_TOKEN":          " tok\n",
+		"TRIVY_RESYNC_PERIOD":        "30s",
+		"GRYPE_ERROR_QUARANTINE_TTL": "30m",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddr != ":9999" || c.TrivyEnabled || !c.BrokerIngest || c.BrokerToken != "tok" || c.TrivyResync != 30*time.Second {
+	if c.ListenAddr != ":9999" || c.TrivyEnabled || !c.BrokerIngest || c.BrokerToken != "tok" || c.TrivyResync != 30*time.Second ||
+		c.GrypeQuarantineTTL != 30*time.Minute {
 		t.Errorf("overrides: %+v", c)
 	}
 	cl, err := newBrokerClient(c, nil)
@@ -90,6 +92,8 @@ func TestLoadConfigOverridesAndErrors(t *testing.T) {
 		{"TRIVY_RECHECK_PERIOD": "soon"},
 		{"REGISTRY_LOOKUP_ENABLED": "sometimes"},
 		{"REGISTRY_ALLOW_PRIVATE": "lan"},
+		{"GRYPE_ERROR_QUARANTINE_TTL": "1m"},
+		{"GRYPE_ERROR_QUARANTINE_TTL": "a while"},
 	} {
 		if _, err := loadConfig(envMap(bad)); err == nil {
 			t.Errorf("accepted %v", bad)

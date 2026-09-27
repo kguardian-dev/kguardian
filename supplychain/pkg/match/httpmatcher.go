@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -46,9 +47,12 @@ var (
 	// ErrTruncated: the response ended before it was complete (the
 	// matcher went away mid-body).
 	ErrTruncated = errors.New("matcher response truncated")
-	// ErrUnavailable: the matcher could not be asked or could not answer
-	// (connection refused or reset, DNS, a timeout, or any 5xx such as 503
-	// while it loads its database). Says nothing about the SBOM.
+	// ErrUnavailable: the matcher could not be reached (the connection
+	// could not be made: refused, no route, DNS) or said it cannot serve
+	// (502/503/504; 503 while it loads its database). Says nothing about
+	// the SBOM. Anything after the request was sent (EOF, reset, a 500, a
+	// timeout waiting for the answer) is about the input and counts: a
+	// matcher OOMKilled by one SBOM looks exactly like that.
 	ErrUnavailable = errors.New("matcher unavailable")
 )
 
@@ -138,16 +142,19 @@ func (m *HTTPMatcher) Match(ctx context.Context, s *types.ImageSBOM) ([]types.Vu
 	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := m.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+		if couldNotConnect(err) {
+			return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+		}
+		return nil, fmt.Errorf("matcher: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		err := fmt.Errorf("matcher returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
-		switch {
-		case resp.StatusCode == http.StatusRequestEntityTooLarge:
+		switch resp.StatusCode {
+		case http.StatusRequestEntityTooLarge:
 			err = fmt.Errorf("%w: %w", ErrTooLarge, err)
-		case resp.StatusCode >= 500:
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			err = fmt.Errorf("%w: %w", ErrUnavailable, err)
 		}
 		return nil, err
@@ -158,6 +165,13 @@ func (m *HTTPMatcher) Match(ctx context.Context, s *types.ImageSBOM) ([]types.Vu
 	}
 	m.record(db)
 	return vulns, nil
+}
+
+// couldNotConnect is true when err is a failure to establish the
+// connection (the request never reached the matcher).
+func couldNotConnect(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 // decodeMatch reads a /match response one finding at a time, so memory is

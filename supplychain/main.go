@@ -98,8 +98,12 @@ type config struct {
 	RegistrySBOM         bool
 	RegistrySBOMInterval time.Duration
 	GrypeMatcherURL      string
-	BrokerURL            string
-	BrokerToken          string
+	// GrypeQuarantineTTL is how long a digest quarantined by repeated
+	// match errors waits before one more try (doubling per repeat, at
+	// most 24h).
+	GrypeQuarantineTTL time.Duration
+	BrokerURL          string
+	BrokerToken        string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -146,6 +150,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.TrivyRecheck, err = time.ParseDuration(env("TRIVY_RECHECK_PERIOD", "5m")); err != nil || c.TrivyRecheck <= 0 {
 		return c, fmt.Errorf("TRIVY_RECHECK_PERIOD must be a positive duration")
+	}
+	if c.GrypeQuarantineTTL, err = time.ParseDuration(env("GRYPE_ERROR_QUARANTINE_TTL", "1h")); err != nil || c.GrypeQuarantineTTL < 5*time.Minute {
+		return c, fmt.Errorf("GRYPE_ERROR_QUARANTINE_TTL must be a duration of at least 5m")
 	}
 	return c, nil
 }
@@ -219,7 +226,7 @@ func serve() error {
 		// Crash markers live on the pod's /tmp emptyDir, which survives a
 		// container restart (an OOMKill) but not the pod.
 		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
-			CrashDir: filepath.Join(os.TempDir(), "kguardian-match")}
+			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL}
 		sink = coord.Tee(disp)
 		wg.Add(1)
 		go func() {

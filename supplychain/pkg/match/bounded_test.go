@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -162,7 +163,7 @@ func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
 	if _, err := m.Match(context.Background(), sbomFor("sha256:x")); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("refused: %v", err)
 	}
-	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout, http.StatusInternalServerError} {
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout} {
 		m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "vulnerability database not loaded", code)
 		}))
@@ -170,11 +171,35 @@ func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
 			t.Errorf("%d: %v", code, err)
 		}
 	}
-	// A 4xx other than 413 is about the input: it counts.
-	m400 := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "bad JSON: unexpected end", http.StatusBadRequest)
-	}))
-	if _, err := m400.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTooLarge) {
-		t.Errorf("400 is a failure of this input: %v", err)
+	// Answered, or died after reading the request: about the input.
+	for name, h := range map[string]http.HandlerFunc{
+		"400": func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "bad JSON", http.StatusBadRequest) },
+		"500": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "match failed: boom", http.StatusInternalServerError)
+		},
+		"died mid-request": diesAfterReading(nil),
+	} {
+		m := matcherFor(t, h)
+		if _, err := m.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTooLarge) {
+			t.Errorf("%s is a failure of this input: %v", name, err)
+		}
+	}
+}
+
+// diesAfterReading reads the whole request, then drops the connection with
+// no response: what a matcher OOMKilled by this SBOM looks like. hits, if
+// set, counts requests.
+func diesAfterReading(hits *atomic.Int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/db" {
+			_, _ = w.Write([]byte(`{"loaded":true}`))
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		if hits != nil {
+			hits.Add(1)
+		}
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		_ = conn.Close()
 	}
 }

@@ -140,10 +140,14 @@ type Coordinator struct {
 	groups map[string]*groupState
 	queue  map[string]struct{}
 	// retry holds groups whose match found the matcher unavailable; the
-	// ticker queues them again.
-	retry  map[string]struct{}
-	notify chan struct{}
-	dbSeen time.Time
+	// ticker queues them again. unavailable* summarise one pass of them
+	// for a single log line.
+	retry             map[string]struct{}
+	unavailable       int
+	unavailableSample string
+	unavailableErr    error
+	notify            chan struct{}
+	dbSeen            time.Time
 }
 
 func (c *Coordinator) init() {
@@ -323,6 +327,19 @@ func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 	}
 }
 
+// logUnavailable writes one WARN for the digests a pass could not match
+// because the matcher was unreachable (count plus one example).
+func (c *Coordinator) logUnavailable() {
+	c.mu.Lock()
+	n, sample, err := c.unavailable, c.unavailableSample, c.unavailableErr
+	c.unavailable, c.unavailableSample, c.unavailableErr = 0, "", nil
+	c.mu.Unlock()
+	if n > 0 && c.Log != nil {
+		c.Log.WithError(err).WithFields(logrus.Fields{"digests": n, "example": sample}).
+			Warn("matcher unavailable; will retry on the next tick")
+	}
+}
+
 // requeueLocked queues again the groups a tick should retry: those that
 // found the matcher unavailable, and error quarantines whose TTL is up.
 func (c *Coordinator) requeueLocked() {
@@ -360,6 +377,7 @@ func (c *Coordinator) checkDB() {
 }
 
 func (c *Coordinator) drain(ctx context.Context) {
+	defer c.logUnavailable()
 	for ctx.Err() == nil {
 		c.mu.Lock()
 		if c.dbSeen.IsZero() {
@@ -510,16 +528,20 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 // input keeps failing. A too-large result is logged as such (it is not a
 // transient error) and quarantines at once.
 func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
-	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// The matcher could not be asked or did not answer in time (or we
-		// are shutting down): not the SBOM's fault, so never a step
-		// towards quarantine. Retried on the next tick.
+	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) {
+		// The matcher could not be reached (or we are shutting down): not
+		// the SBOM's fault, so never a step towards quarantine. Retried on
+		// the next tick; drain logs one line per pass for all of them.
 		c.count("unavailable")
 		c.mu.Lock()
 		c.retry[key] = struct{}{}
+		c.unavailable++
+		if c.unavailableSample == "" {
+			c.unavailableSample, c.unavailableErr = key, err
+		}
 		c.mu.Unlock()
 		if c.Log != nil {
-			c.Log.WithError(err).WithField("digest", key).Warn("matcher unavailable; will retry")
+			c.Log.WithError(err).WithField("digest", key).Debug("matcher unavailable; will retry")
 		}
 		return
 	}
@@ -552,6 +574,11 @@ func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
 		threshold = 1
 	}
 	quarantine := gs.quarantined == "" && failures >= threshold
+	if !quarantine && gs.quarantined == "" {
+		// Not yet quarantined: try again on the next tick, so a failing
+		// input reaches its verdict in a few minutes.
+		c.retry[key] = struct{}{}
+	}
 	if quarantine {
 		gs.quarantined = fmt.Sprintf("%s: %v", reason, err)
 		gs.quarantinedAt, gs.expires = c.now(), !tooLarge
