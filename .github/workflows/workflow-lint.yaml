@@ -7,10 +7,20 @@ name: Workflow lint
 # - any `$` in a vmtest `command:` (vmtest's own shell expands it);
 # - user-controlled context (inputs.*, github.event*, github.head_ref)
 #   interpolated into a `run:` or `command:`, which must go through env:.
-# Seconds of CPU; runs only when a workflow or the lint changes.
+# Not traced: values laundered through env.* and then interpolated, and
+# actions/github-script `script:` text.
+# Seconds of CPU; runs only when a workflow or the lint changes (on PRs
+# and on main).
 
 on:
   pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/scripts/check_vmtest_commands.py'
+      - '.github/scripts/test_check_vmtest_commands.py'
+  push:
     branches:
       - main
     paths:
@@ -22,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: workflow-lint-${{ github.event.pull_request.number }}
+  group: workflow-lint-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

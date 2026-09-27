@@ -8,9 +8,11 @@
 2. No `run:` or `command:` may contain an expression that reads
    user-controlled context: `inputs.*`, `github.event*` or
    `github.head_ref`, anywhere in the expression (so `format(...)`,
-   `toJSON(...)` and the like count too). Actions substitutes it into the
-   script text before a shell parses it. Pass it through `env:` (and
-   validate it) instead.
+   `toJSON(...)` and the like count too, as do `github` itself, `github[...]`
+   and any letter case). Actions substitutes it into the script text before
+   a shell parses it. Pass it through `env:` (and validate it) instead.
+   Not traced: a value that reaches `env.*` and is then interpolated as
+   `${{ env.X }}`; nor `actions/github-script` `script:` text.
 
 The whole value is checked, including folded or literal block
 continuation lines.
@@ -23,7 +25,13 @@ import re
 import sys
 
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-UNTRUSTED = re.compile(r"\binputs\.|\bgithub\.event\b|\bgithub\.head_ref\b")
+# `inputs` in any form; `github` itself, indexed (github[...]) or with the
+# event/head_ref members, but not a safe member (github.workspace,
+# github.event_name, github.base_ref, ...). Context names are
+# case-insensitive in expressions.
+UNTRUSTED = re.compile(
+    r"\binputs\b|\bgithub\b(?!\s*\.\s*(?!event\b|head_ref\b)\w)", re.IGNORECASE
+)
 
 
 def blocks(lines, key):

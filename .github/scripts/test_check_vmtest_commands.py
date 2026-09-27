@@ -72,6 +72,20 @@ class UserControlledContext(unittest.TestCase):
         ):
             self.assertTrue(flagged(run_step(f"echo {expr}")), expr)
 
+    def test_whole_context_indexing_and_case(self):
+        for expr in (
+            "${{ toJSON(github) }}",
+            "${{ github['event'].pull_request.title }}",
+            "${{ github['head_ref'] }}",
+            "${{ github [ 'event' ] }}",
+            "${{ GITHUB.EVENT.pull_request.title }}",
+            "${{ Github.Head_Ref }}",
+            "${{ github . event . pull_request . title }}",
+            "${{ INPUTS.x }}",
+            "${{ inputs['x'] }}",
+        ):
+            self.assertTrue(flagged(run_step(f"echo {expr}")), expr)
+
     def test_multiline_run(self):
         self.assertTrue(flagged(run_step("|\n          a=1\n          echo ${{ inputs.x }}")))
 
@@ -83,6 +97,10 @@ class UserControlledContext(unittest.TestCase):
             "${{ steps.it.outputs.iterations }}",
             "${{ github.base_ref }}",
             "${{ secrets.T }}",
+            "${{ github.event_name }}",
+            "${{ Github.Workspace }}",
+            "${{ secrets.GITHUB_TOKEN }}",
+            "${{ github.repository_owner }}",
         ):
             self.assertEqual(flagged(run_step(f"echo {expr}")), [], expr)
 
