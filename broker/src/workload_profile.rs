@@ -595,6 +595,10 @@ pub struct Sources {
     /// (SIGNATURE_DISCOVERY_ENABLED=false, set by the chart). `false`, the
     /// default, means configured: the broker assumes it is on unless told.
     pub signature_discovery_off: bool,
+    /// ImageTrustPolicy results for the workload (contract v1.9), read from
+    /// the evaluator by the async profile handler; `None` where it is not
+    /// read (snapshots, exports), shown as `null`.
+    pub image_trust: Option<crate::image_trust::Answer>,
 }
 
 impl Sources {
@@ -751,6 +755,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         runtime,
         signatures,
         signature_discovery_off: !signature_discovery_configured(),
+        image_trust: None,
     })
 }
 
@@ -1303,6 +1308,12 @@ pub struct SupplyChainView {
     pub signers_omitted: usize,
     pub checked_at: Option<DateTime<Utc>>,
     pub counts: SignatureCounts,
+    /// Which ImageTrustPolicies would deny this workload's containers
+    /// (contract v1.9), from the evaluator. `available: false` (with
+    /// `reason`) is unknown, never "nothing would be denied"; `null` where
+    /// it is not read (stored versions, exports). Report-only, outside
+    /// posture and the snapshot hash.
+    pub image_trust: Option<crate::image_trust::Answer>,
     pub digests: Vec<SignatureView>,
     pub truncated: bool,
 }
@@ -1318,23 +1329,11 @@ fn signature_rank(verdict: Option<&str>) -> u8 {
     }
 }
 
-/// The current (container, digest) pairs: every running digest of each
-/// container, the same pairs the drift checks read
-/// (`runtime_capabilities::current_pairs`). A completed init container or
-/// a stale container is not current. Container order, newest digest first.
-fn current_digests(s: &Sources) -> Vec<(&str, &ContainerDigest)> {
-    s.containers
-        .iter()
-        .flat_map(|c| {
-            c.digests
-                .iter()
-                .map(move |d| (c.container_name.as_str(), d))
-        })
-        .collect()
-}
-
 fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<SupplyChainView> {
-    let current = current_digests(s);
+    // The current (container, digest) pairs, exactly as the drift checks
+    // read them: every running digest of each container. A completed init
+    // container or a stale container is not current.
+    let current = crate::runtime_capabilities::current_pairs(&s.containers);
     if s.signature_discovery_off {
         // Feature off is not missing data: say so, list nothing, gate
         // nothing. Stored results from before it was switched off are not
@@ -1349,6 +1348,7 @@ fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<Supply
             signers_omitted: 0,
             checked_at: None,
             counts: SignatureCounts::default(),
+            image_trust: s.image_trust.clone(),
             digests: Vec::new(),
             truncated: false,
         });
@@ -1356,14 +1356,14 @@ fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<Supply
     let mut seen = BTreeSet::new();
     let views: Vec<SignatureView> = current
         .into_iter()
-        .filter(|(c, d)| seen.insert((c.to_string(), d.digest.clone())))
-        .map(|(c, d)| match s.signatures.get(&d.digest) {
+        .filter(|(c, d)| seen.insert((c.clone(), d.clone())))
+        .map(|(c, d)| match s.signatures.get(&d) {
             // "verified" with no signer identity (no issuer+SAN, no key
             // fingerprint) names no one: unknown, never signed.
             Some(r) if r.verdict == "verified" && !has_signer_identity(&r.signers) => {
                 SignatureView {
-                    container: c.to_string(),
-                    digest: d.digest.clone(),
+                    container: c.clone(),
+                    digest: d.clone(),
                     verdict: Some("unknown".into()),
                     reason: Some("no_signer_identity".into()),
                     signers: json!([]),
@@ -1375,8 +1375,8 @@ fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<Supply
                 let verified = r.verdict == "verified";
                 let shown = r.signers.as_array().map_or(0, Vec::len);
                 SignatureView {
-                    container: c.to_string(),
-                    digest: d.digest.clone(),
+                    container: c.clone(),
+                    digest: d.clone(),
                     verdict: Some(r.verdict.clone()),
                     reason: r.reason.clone(),
                     signers: if verified {
@@ -1395,8 +1395,8 @@ fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<Supply
                 }
             }
             None => SignatureView {
-                container: c.to_string(),
-                digest: d.digest.clone(),
+                container: c.clone(),
+                digest: d.clone(),
                 verdict: None,
                 reason: None,
                 signers: json!([]),
@@ -1479,6 +1479,7 @@ fn build_supply_chain(s: &Sources, findings: &mut Vec<Finding>) -> Option<Supply
         signers_omitted: worst.signers_omitted,
         checked_at: worst.checked_at,
         counts,
+        image_trust: s.image_trust.clone(),
         digests: views
             .into_iter()
             .take(SUPPLY_CHAIN_DIGESTS_LISTED)
@@ -3578,22 +3579,58 @@ pub async fn get_workloads(
 pub async fn get_workload_profile(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
+    audit: Option<web::Data<crate::audit::AuditClient>>,
     path: web::Path<(String, String, String)>,
 ) -> actix_web::Result<impl Responder> {
     let (ns, kind, name) = path.into_inner();
     let Some(key) = Key::parse(ns, kind, name) else {
         return Ok(bad_key());
     };
+    // 1. A cheap gate, without the profile's read permit: does the
+    //    workload run an image now? Unknown workloads (and ones with no
+    //    running image) never reach the evaluator.
+    let gate = match budget.acquire(GATE_CHARGE_KIB).await {
+        Ok(p) => p,
+        Err(shed) => return Ok(shed.into_response()),
+    };
+    let k = key.clone();
+    let pool2 = pool.clone();
+    let running = web::block(move || -> Result<bool, DbError> {
+        let mut conn = pool2.get()?;
+        has_running_image(&mut conn, &k)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    drop(gate);
+    // 2. The evaluator read, holding only its own 1 MiB charge (on a real
+    //    read): async, at most 2 s, shared by concurrent requests and
+    //    cached per namespace.
+    let image_trust = if running {
+        Some(
+            crate::image_trust::for_workload(
+                audit.as_ref().map(|a| a.get_ref()),
+                &budget,
+                &key.namespace,
+                &key.kind,
+                &key.name,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    // 3. Only now the profile's read permit, for the full read and build.
     let _permit = match budget.acquire(profile_charge_kib()).await {
         Ok(p) => p,
         Err(shed) => return Ok(shed.into_response()),
     };
     let out = web::block(move || -> Result<Option<Profile>, DbError> {
         let mut conn = pool.get()?;
-        let s = load_sources(&mut conn, &key)?;
+        let mut s = load_sources(&mut conn, &key)?;
         if s.is_empty() {
             return Ok(None);
         }
+        s.image_trust = image_trust;
         Ok(Some(build(&key, &s, Utc::now())))
     })
     .await?
@@ -3602,6 +3639,35 @@ pub async fn get_workload_profile(
         Some(p) => HttpResponse::Ok().json(p),
         None => not_found_workload(),
     })
+}
+
+/// Read-budget charge of the profile's existence gate: one boolean.
+const GATE_CHARGE_KIB: u32 = 1;
+
+const HAS_RUNNING_SQL: &str = concat!(
+    "SELECT EXISTS (SELECT 1 FROM workload_containers wc \
+     WHERE wc.cluster_id = $1 AND wc.pod_namespace = $2 AND wc.workload_kind = $3 \
+       AND wc.workload_name = $4 AND ",
+    crate::image_inventory::running_sql!("$5"),
+    ") AS b"
+);
+
+/// The workload runs at least one image now: it has a current (container,
+/// digest) pair, by the same running predicate the inventory reads use.
+pub fn has_running_image(conn: &mut PgConnection, key: &Key) -> Result<bool, DbError> {
+    #[derive(QueryableByName)]
+    struct B {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        b: bool,
+    }
+    let r: B = sql_query(HAS_RUNNING_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .bind::<Text, _>(&key.namespace)
+        .bind::<Text, _>(&key.kind)
+        .bind::<Text, _>(&key.name)
+        .bind::<diesel::sql_types::Double, _>(image_inventory::running_window_secs() as f64)
+        .get_result(conn)?;
+    Ok(r.b)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4718,6 +4784,66 @@ mod tests {
         assert_eq!(sc.verdict, "verified");
         assert_eq!(sc.digests.len(), 1);
         assert_eq!(sc.digests[0].container, "app");
+    }
+
+    /// imageTrust (contract v1.9) rides on supplyChain, and like the
+    /// signature results it never changes the snapshot hash or posture.
+    #[test]
+    fn supply_chain_carries_image_trust_outside_the_hash() {
+        let base = two_containers(vec![sig(&digest('a'), "verified", None, keyless())]);
+        let answer = crate::image_trust::shape(
+            Some("2026-09-27T12:00:00Z".into()),
+            vec![crate::image_trust::TrustResult {
+                policy: "shop/p".into(),
+                namespace: "shop".into(),
+                workload: "Deployment/checkout".into(),
+                container: "app".into(),
+                digest: digest('a'),
+                image: "ghcr.io/example/checkout".into(),
+                verdict: "WouldDeny".into(),
+                reason: Some("untrusted-signer".into()),
+            }],
+            None,
+            None,
+            20,
+        );
+        let with = Sources {
+            image_trust: Some(answer),
+            ..base.clone()
+        };
+        let a = build(&key(), &base, now());
+        let b = build(&key(), &with, now());
+        assert!(a
+            .dimensions
+            .images
+            .supply_chain
+            .as_ref()
+            .unwrap()
+            .image_trust
+            .is_none());
+        let it = b
+            .dimensions
+            .images
+            .supply_chain
+            .as_ref()
+            .unwrap()
+            .image_trust
+            .as_ref()
+            .unwrap();
+        assert_eq!(it.would_deny, 1);
+        assert_eq!(a.content_hash, b.content_hash);
+        assert_eq!(a.posture.head.status, b.posture.head.status);
+        assert_eq!(
+            a.dimensions.images.env.status,
+            b.dimensions.images.env.status
+        );
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(
+            v["dimensions"]["images"]["supplyChain"]["imageTrust"]["wouldDeny"],
+            1
+        );
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v["dimensions"]["images"]["supplyChain"]["imageTrust"].is_null());
     }
 
     /// Signature results are re-checked daily; they must not create new
@@ -5869,6 +5995,280 @@ mod live_tests {
             kind: "Deployment".into(),
             name: "checkout".into(),
         }
+    }
+
+    /// Unknown workloads never reach the evaluator: 404 first, no read, no
+    /// budget charge, no cache entry. A workload with no running image has
+    /// no supplyChain and does not read it either.
+    #[actix_web::test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    async fn live_unknown_workloads_never_read_the_evaluator() {
+        use actix_web::{test as atest, App, HttpServer};
+        let ns = "kgtest-profile-noread";
+        {
+            let mut conn = live_conn();
+            reset(&mut conn, ns);
+            seed(&mut conn, ns, '9', "{}");
+            // Only a syscall-less, image-less pod for another workload.
+            conn.batch_execute(&format!(
+                "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) \
+                 VALUES ('noimg-1', '10.0.0.9', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'noimg') \
+                 ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = false, \
+                   workload_kind = 'Deployment', workload_name = 'noimg';"
+            ))
+            .unwrap();
+        }
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        let srv = HttpServer::new(move || {
+            let h = h.clone();
+            App::new().route(
+                "/image-trust",
+                web::get().to(move || {
+                    let h = h.clone();
+                    async move {
+                        h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        HttpResponse::Ok()
+                            .content_type("application/json")
+                            .body(r#"{"evaluatedAt":null,"results":[]}"#)
+                    }
+                }),
+            )
+        })
+        .workers(1)
+        .bind("127.0.0.1:0")
+        .unwrap();
+        let addr = srv.addrs()[0];
+        actix_web::rt::spawn(srv.run());
+        let audit = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("EVALUATOR_URL", format!("http://{addr}"));
+            let a = crate::audit::AuditClient::from_env();
+            std::env::remove_var("EVALUATOR_URL");
+            a
+        };
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(2)
+            .build(ConnectionManager::<PgConnection>::new(
+                std::env::var("KG_TEST_DATABASE_URL").unwrap(),
+            ))
+            .unwrap();
+        let app = atest::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(ReadBudget::with_budget_kib(
+                    512 * 1024,
+                    std::time::Duration::from_millis(0),
+                )))
+                .app_data(web::Data::new(audit))
+                .service(get_workload_profile),
+        )
+        .await;
+        let get = |uri: String| {
+            let app = &app;
+            async move {
+                atest::call_service(app, atest::TestRequest::get().uri(&uri).to_request()).await
+            }
+        };
+        for i in 0..20 {
+            let r = get(format!("/workloads/fake-ns-{i}/Deployment/nothing/profile")).await;
+            assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no read for unknown workloads"
+        );
+        // A known workload with pods but no image inventory: 200, no read.
+        let r = get(format!("/workloads/{ns}/Deployment/noimg/profile")).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: Value = atest::read_body_json(r).await;
+        assert!(v["dimensions"]["images"]["supplyChain"].is_null());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A workload with a running image reads it, once.
+        let r = get(format!("/workloads/{ns}/Deployment/checkout/profile")).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: Value = atest::read_body_json(r).await;
+        assert_eq!(
+            v["dimensions"]["images"]["supplyChain"]["imageTrust"]["available"],
+            true
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        reset(&mut live_conn(), ns);
+    }
+
+    /// While profile GETs wait on a stalled evaluator they hold only the
+    /// shared 1 MiB evaluator charge, never the profile's own permit, so
+    /// the read budget stays free and an unrelated read is not queued.
+    #[actix_web::test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    async fn live_profile_wait_does_not_hold_the_read_budget() {
+        use actix_web::{App, HttpServer};
+        let ns = "kgtest-profile-budget";
+        {
+            let mut conn = live_conn();
+            reset(&mut conn, ns);
+            seed(&mut conn, ns, '6', "{}");
+        }
+        let eval = HttpServer::new(|| {
+            App::new().route(
+                "/image-trust",
+                web::get().to(|| async {
+                    actix_web::rt::time::sleep(std::time::Duration::from_secs(10)).await;
+                    HttpResponse::Ok().body("{}")
+                }),
+            )
+        })
+        .workers(1)
+        .bind("127.0.0.1:0")
+        .unwrap();
+        let eval_addr = eval.addrs()[0];
+        actix_web::rt::spawn(eval.run());
+        let audit = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("EVALUATOR_URL", format!("http://{eval_addr}"));
+            let a = crate::audit::AuditClient::from_env();
+            std::env::remove_var("EVALUATOR_URL");
+            web::Data::new(a)
+        };
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(12)
+            .build(ConnectionManager::<PgConnection>::new(
+                std::env::var("KG_TEST_DATABASE_URL").unwrap(),
+            ))
+            .unwrap();
+        // Room for every request to finish; what is measured is how much
+        // is held while they wait on the evaluator (the old order held ten
+        // profile permits, about 10 x 11 MiB, for the whole wait).
+        let total = profile_charge_kib() * 12;
+        let budget = web::Data::new(ReadBudget::with_budget_kib(
+            total,
+            std::time::Duration::from_millis(0),
+        ));
+        let (b, a, p) = (budget.clone(), audit.clone(), web::Data::new(pool));
+        let srv = HttpServer::new(move || {
+            App::new()
+                .app_data(p.clone())
+                .app_data(b.clone())
+                .app_data(a.clone())
+                .service(get_workload_profile)
+        })
+        .workers(2)
+        .bind("127.0.0.1:0")
+        .unwrap();
+        let addr = srv.addrs()[0];
+        actix_web::rt::spawn(srv.run());
+        let url = format!("http://{addr}/workloads/{ns}/Deployment/checkout/profile");
+        let tasks: Vec<_> = (0..10)
+            .map(|_| {
+                let url = url.clone();
+                actix_web::rt::spawn(
+                    async move { reqwest::get(url).await.unwrap().status().as_u16() },
+                )
+            })
+            .collect();
+        actix_web::rt::time::sleep(std::time::Duration::from_millis(700)).await;
+        let free = budget.available_kib();
+        assert!(
+            free >= total - 1024 - 8,
+            "during the evaluator wait only the shared 1 MiB read is charged: {free} of {total} KiB free"
+        );
+        assert!(
+            budget.acquire(profile_charge_kib()).await.is_ok(),
+            "an unrelated read is admitted at once"
+        );
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), 200);
+        }
+        reset(&mut live_conn(), ns);
+    }
+
+    /// The profile GET with a stalled evaluator: served in about
+    /// PROFILE_TIMEOUT with imageTrust unavailable, everything else intact.
+    #[actix_web::test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    async fn live_profile_is_served_when_the_evaluator_stalls() {
+        use actix_web::{test as atest, App, HttpServer};
+        let ns = "kgtest-profile-stall";
+        {
+            let mut conn = live_conn();
+            reset(&mut conn, ns);
+            seed(&mut conn, ns, '8', "{}");
+        }
+        // An evaluator that never answers in time.
+        let srv = HttpServer::new(|| {
+            App::new().route(
+                "/image-trust",
+                web::get().to(|| async {
+                    actix_web::rt::time::sleep(std::time::Duration::from_secs(10)).await;
+                    HttpResponse::Ok().body("{}")
+                }),
+            )
+        })
+        .workers(1)
+        .bind("127.0.0.1:0")
+        .unwrap();
+        let addr = srv.addrs()[0];
+        actix_web::rt::spawn(srv.run());
+        let audit = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("EVALUATOR_URL", format!("http://{addr}"));
+            let a = crate::audit::AuditClient::from_env();
+            std::env::remove_var("EVALUATOR_URL");
+            a
+        };
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(2)
+            .build(ConnectionManager::<PgConnection>::new(
+                std::env::var("KG_TEST_DATABASE_URL").unwrap(),
+            ))
+            .unwrap();
+        let app = atest::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(ReadBudget::with_budget_kib(
+                    512 * 1024,
+                    std::time::Duration::from_millis(0),
+                )))
+                .app_data(web::Data::new(audit))
+                .service(get_workload_profile),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let req = atest::TestRequest::get()
+            .uri(&format!("/workloads/{ns}/Deployment/checkout/profile"))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        let took = started.elapsed();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: Value = atest::read_body_json(resp).await;
+        let it = &v["dimensions"]["images"]["supplyChain"]["imageTrust"];
+        assert_eq!(it["available"], false, "{it}");
+        assert!(it["reason"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer within 2000 ms"));
+        assert!(v["posture"]["status"].is_string());
+        assert!(v["dimensions"]["podSecurity"]["status"].is_string());
+        assert!(
+            took < crate::image_trust::PROFILE_TIMEOUT + std::time::Duration::from_millis(1_500),
+            "took {took:?}"
+        );
+        // The failure is cached: the next GET does not wait again.
+        let started = std::time::Instant::now();
+        let req = atest::TestRequest::get()
+            .uri(&format!("/workloads/{ns}/Deployment/checkout/profile"))
+            .to_request();
+        assert_eq!(
+            atest::call_service(&app, req).await.status(),
+            StatusCode::OK
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1_500),
+            "{:?}",
+            started.elapsed()
+        );
+        reset(&mut live_conn(), ns);
     }
 
     /// Contract v1.8 against the real schema: signature rows join by
