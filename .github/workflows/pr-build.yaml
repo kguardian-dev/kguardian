@@ -190,13 +190,15 @@ jobs:
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ Controller image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}
+            ghcr.io/kguardian-dev/kguardian/controller:pr-${process.env.PR_NUMBER}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -381,13 +383,15 @@ jobs:
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ Broker image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
+            ghcr.io/kguardian-dev/kguardian/broker:pr-${process.env.PR_NUMBER}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -673,13 +677,15 @@ jobs:
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ Frontend image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
+            ghcr.io/kguardian-dev/kguardian/frontend:pr-${process.env.PR_NUMBER}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -781,13 +787,15 @@ jobs:
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ LLM Bridge image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
+            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${process.env.PR_NUMBER}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -998,13 +1006,15 @@ jobs:
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ Evaluator image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
             const body = `${marker}
             \`\`\`
-            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}
+            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${process.env.PR_NUMBER}
             \`\`\`
             **Digest:** \`${digest}\``;
 
@@ -1256,10 +1266,12 @@ jobs:
       - name: Update or create Helm chart comment
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '✅ Helm chart built and pushed for testing:';
-            const version = '${{ github.event.pull_request.number }}';
+            const version = process.env.PR_NUMBER;
             const body = marker + '\n```bash\n# Install PR Helm chart\nhelm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian \\\n  --create-namespace\n\n# Or upgrade existing installation\nhelm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian\n```';
 
             const comments = await github.rest.issues.listComments({
@@ -1295,6 +1307,8 @@ jobs:
     steps:
       - name: Update or create summary comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const marker = '## 🚀 PR Build Summary';
@@ -1316,25 +1330,25 @@ jobs:
               body += '### Built Images\n\n';
 
               if (controller) {
-                body += '✅ **Controller**: `ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Controller**: `ghcr.io/kguardian-dev/kguardian/controller:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (broker) {
-                body += '✅ **Broker**: `ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Broker**: `ghcr.io/kguardian-dev/kguardian/broker:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (frontend) {
-                body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (llmBridge) {
-                body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (evaluator) {
-                body += '✅ **Evaluator**: `ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Evaluator**: `ghcr.io/kguardian-dev/kguardian/evaluator:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (supplychain) {
-                body += '✅ **Supplychain**: `ghcr.io/kguardian-dev/kguardian/supplychain:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Supplychain**: `ghcr.io/kguardian-dev/kguardian/supplychain:pr-' + process.env.PR_NUMBER + '`\n';
               }
               if (supplychainMatcher) {
-                body += '✅ **Supplychain matcher**: `ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-${{ github.event.pull_request.number }}`\n';
+                body += '✅ **Supplychain matcher**: `ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-' + process.env.PR_NUMBER + '`\n';
               }
 
               body += '\n### 🧪 Testing Instructions\n\n';
@@ -1343,7 +1357,7 @@ jobs:
                 body += '**Option 1: Use PR Helm Chart (Recommended)**\n';
                 body += 'A complete Helm chart with all PR changes has been published:\n```bash\n';
                 body += '# Find the exact version\n';
-                body += 'helm search repo oci://ghcr.io/kguardian-dev/charts --versions | grep pr${{ github.event.pull_request.number }}\n\n';
+                body += 'helm search repo oci://ghcr.io/kguardian-dev/charts --versions | grep pr' + process.env.PR_NUMBER + '\n\n';
                 body += '# Install with PR chart\n';
                 body += 'helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n';
                 body += '  --version <VERSION-FROM-ABOVE> \\\n';
@@ -1360,21 +1374,21 @@ jobs:
               body += '  --create-namespace \\\n';
 
               if (controller) {
-                body += '  --set controller.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+                body += '  --set controller.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
               }
               if (broker) {
-                body += '  --set broker.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+                body += '  --set broker.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
               }
               if (frontend) {
-                body += '  --set frontend.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+                body += '  --set frontend.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
               }
               if (llmBridge) {
                 body += '  --set llmBridge.enabled=true \\\n';
-                body += '  --set llmBridge.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+                body += '  --set llmBridge.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
               }
               if (supplychain) {
                 body += '  --set supplychain.enabled=true \\\n';
-                body += '  --set supplychain.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+                body += '  --set supplychain.image.tag=pr-' + process.env.PR_NUMBER + ' \\\n';
               }
 
               body += '  --wait\n';

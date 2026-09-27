@@ -33,6 +33,17 @@ def run_step(body, env=""):
 """
 
 
+def github_script(script, env=""):
+    return f"""jobs:
+  j:
+    steps:
+      - uses: actions/github-script@x
+{env}        with:
+          script: |
+            {script}
+"""
+
+
 def flagged(text, context=True):
     return lint.findings("wf.yaml", text, context)
 
@@ -85,6 +96,39 @@ class UserControlledContext(unittest.TestCase):
             "${{ inputs['x'] }}",
         ):
             self.assertTrue(flagged(run_step(f"echo {expr}")), expr)
+
+    def test_github_members_outside_the_allowlist(self):
+        for expr in (
+            "${{ github.ref_name }}",
+            "${{ github.actor }}",
+            "${{ github.ref }}",
+            "${{ github.triggering_actor }}",
+            "${{ github.not_a_real_member }}",
+        ):
+            self.assertTrue(flagged(run_step(f"echo {expr}")), expr)
+
+    def test_allowlisted_github_members_pass(self):
+        # The agreed allowlist, spelled out: the lint's own list must not
+        # silently grow or shrink.
+        allowed = (
+            "workspace", "sha", "repository", "repository_owner", "run_id", "run_number",
+            "run_attempt", "event_name", "server_url", "api_url", "base_ref", "job",
+            "action_path", "token",
+        )
+        self.assertEqual(sorted(lint.SAFE_GITHUB), sorted(allowed))
+        for member in allowed:
+            expr = "${{ github." + member + " }}"
+            self.assertEqual(flagged(run_step(f"echo {expr}")), [], expr)
+            self.assertEqual(flagged(run_step(f"echo {expr.upper()}")), [], expr.upper())
+
+    def test_github_script(self):
+        bad = github_script("const n = '${{ github.event.pull_request.number }}';")
+        self.assertTrue(flagged(bad))
+        good = github_script(
+            "const n = process.env.PR_NUMBER;",
+            "        env:\n          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+        )
+        self.assertEqual(flagged(good), [])
 
     def test_multiline_run(self):
         self.assertTrue(flagged(run_step("|\n          a=1\n          echo ${{ inputs.x }}")))

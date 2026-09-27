@@ -5,14 +5,16 @@
    through a shell of its own before the VM sees it, so any `$` there ($h,
    ${h}, $(...)) is expanded on the runner, usually to "". Only workflow
    expressions (${{ ... }}) are allowed.
-2. No `run:` or `command:` may contain an expression that reads
-   user-controlled context: `inputs.*`, `github.event*` or
-   `github.head_ref`, anywhere in the expression (so `format(...)`,
-   `toJSON(...)` and the like count too, as do `github` itself, `github[...]`
-   and any letter case). Actions substitutes it into the script text before
-   a shell parses it. Pass it through `env:` (and validate it) instead.
-   Not traced: a value that reaches `env.*` and is then interpolated as
-   `${{ env.X }}`; nor `actions/github-script` `script:` text.
+2. No `run:`, vmtest `command:` or actions/github-script `script:` may
+   contain an expression that reads user-controlled context: `inputs` in any
+   form, or `github` itself, indexed, or with any member outside a small
+   allowlist of safe ones (SAFE_GITHUB), anywhere in the expression (so
+   `format(...)` and `toJSON(...)` count too), in any letter case. Actions
+   substitutes it into the shell or JavaScript text before it is parsed.
+   Pass it through `env:` (and validate it) instead; github-script reads it
+   as `process.env.X`.
+   Known limit: taint is not traced through `env.*`, so a user-controlled
+   value copied into env and interpolated as `${{ env.X }}` is not caught.
 
 The whole value is checked, including folded or literal block
 continuation lines.
@@ -25,12 +27,19 @@ import re
 import sys
 
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-# `inputs` in any form; `github` itself, indexed (github[...]) or with the
-# event/head_ref members, but not a safe member (github.workspace,
-# github.event_name, github.base_ref, ...). Context names are
-# case-insensitive in expressions.
+# github members that are safe to interpolate: set by GitHub or by
+# repository admins, never by whoever opens a pull request.
+SAFE_GITHUB = (
+    "workspace", "sha", "repository", "repository_owner", "run_id", "run_number",
+    "run_attempt", "event_name", "server_url", "api_url", "base_ref", "job",
+    "action_path", "token",
+)
+# `inputs` in any form; `github` itself, indexed (github[...]) or with any
+# member not in SAFE_GITHUB (event, head_ref, ref_name, actor, ...). Context
+# names are case-insensitive in expressions.
 UNTRUSTED = re.compile(
-    r"\binputs\b|\bgithub\b(?!\s*\.\s*(?!event\b|head_ref\b)\w)", re.IGNORECASE
+    r"\binputs\b|\bgithub\b(?!\s*\.\s*(?:" + "|".join(SAFE_GITHUB) + r")\b)",
+    re.IGNORECASE,
 )
 
 
@@ -62,12 +71,12 @@ def findings(path, text, context):
         if "$" in EXPRESSION.sub("", value):
             out.append(f"{path}:{line}: shell expansion in a vmtest command")
     if context:
-        for key in ("command", "run"):
+        for key in ("command", "run", "script"):
             for line, value in blocks(lines, key):
                 if any(UNTRUSTED.search(e) for e in EXPRESSION.findall(value)):
                     out.append(
                         f"{path}:{line}: {key} interpolates user-controlled context "
-                        "(inputs, github.event, github.head_ref); pass it via env"
+                        "(inputs, or a github member outside SAFE_GITHUB); pass it via env"
                     )
     return out
 
