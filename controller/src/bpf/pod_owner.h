@@ -175,15 +175,15 @@ out:
 // worked out.
 // Cached per cgroup: after the first syscall from a cgroup this is one
 // hash lookup.
-static __always_inline __u32 task_pod_generation(void)
+static __always_inline __u32 task_pod_generation_of(struct task_struct *task)
 {
-    __u64 cgid = bpf_get_current_cgroup_id();
+    struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
+    // The cgroup id bpf_get_current_cgroup_id() returns for the task.
+    __u64 cgid = BPF_CORE_READ(kn, id);
     __u32 *cached = bpf_map_lookup_elem(&cgroup_pod_gen, &cgid);
     if (cached)
         return *cached;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
     __u32 gen = 0;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
     {
@@ -200,6 +200,99 @@ static __always_inline __u32 task_pod_generation(void)
     }
     bpf_map_update_elem(&cgroup_pod_gen, &cgid, &gen, BPF_ANY);
     return gen;
+}
+
+static __always_inline __u32 task_pod_generation(void)
+{
+    return task_pod_generation_of((struct task_struct *)bpf_get_current_task());
+}
+
+// True when `task` runs a sealed copy of its executable, the way runc runs
+// runc init (libcontainer/exeseal): a memfd or O_TMPFILE copy (no links),
+// or a file opened through a private overlay mount that is not in the
+// task's mount namespace. A container's command is exec'd from its own
+// rootfs, a mount in its own namespace, with links.
+static __always_inline bool exe_is_sealed_copy(struct task_struct *task)
+{
+    struct file *f = BPF_CORE_READ(task, mm, exe_file);
+    if (!f)
+        return false;
+    if (BPF_CORE_READ(f, f_inode, i_nlink) == 0)
+        return true;
+    struct vfsmount *vfs = BPF_CORE_READ(f, f_path.mnt);
+    if (!vfs)
+        return false;
+    struct mount *m = (struct mount *)((void *)vfs - bpf_core_field_offset(struct mount, mnt));
+    struct mnt_namespace *exe_ns = BPF_CORE_READ(m, mnt_ns);
+    return exe_ns != BPF_CORE_READ(task, nsproxy, mnt_ns);
+}
+
+// SIGNAL_UNKILLABLE (include/linux/sched/signal.h): set on the init of every
+// pid namespace.
+#define KG_SIGNAL_UNKILLABLE 0x00000040
+
+// True when orphans are reparented to `parent`: a child subreaper
+// (PR_SET_CHILD_SUBREAPER, as containerd-shim sets) or a pid namespace's
+// init. True when unsure, so the caller counts the event.
+static __always_inline bool parent_is_a_reaper(struct task_struct *parent)
+{
+    struct signal_struct *sig = BPF_CORE_READ(parent, signal);
+    if (!sig)
+        return true;
+    if (BPF_CORE_READ_BITFIELD_PROBED(sig, is_child_subreaper))
+        return true;
+    return BPF_CORE_READ(sig, flags) & KG_SIGNAL_UNKILLABLE;
+}
+
+// True when the calling task is the container runtime setting a container
+// up, not the container's own code. Decided by provenance: its real parent
+// is outside every pod cgroup (the runtime on the host), and counting the
+// execs since that parent created it (self_exec_id - parent_exec_id, which
+// CLONE_PARENT and CLONE_THREAD children copy from their creator):
+//  - 0: a runtime that forks without exec (crun), until it execs the
+//    container's command. Except in the host pid namespace (level 0) with
+//    a parent that orphans are reparented to (a child subreaper such as
+//    containerd-shim, or a pid namespace's init): that is a hostPID
+//    container's forked worker or daemon that outlived its parent, the
+//    container's code. A runtime's setup there (a foreground crun, which
+//    makes itself a subreaper, or a hostPID container's exec) is counted
+//    (extra checks, never hidden ones). Outside hostPID the container's
+//    orphans land on its own init, inside the pod.
+//  - 1, running a sealed copy of an executable (exe_is_sealed_copy), and
+//    either the same file as the parent or a parent named "runc*": runc
+//    init, which runc execs from a sealed copy of its own binary (since
+//    1.2; a memfd before), from host runc. The container's command, exec'd
+//    from its rootfs, is never a sealed copy, so another runtime installed
+//    as "runc" (crun, youki) does not hide it; and it is at 2 under runc.
+//  - anything else: counted. runc 1.1 re-execs itself once more, so its
+//    runc init is at 2 and is counted.
+// A container process renaming itself changes none of this; the task's
+// own name is never read. False whenever unsure, so the caller counts the
+// event.
+static __always_inline bool is_runtime_setup(void)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    if (!parent)
+        return false;
+    __u64 execs = BPF_CORE_READ(task, self_exec_id) - BPF_CORE_READ(task, parent_exec_id);
+    if (execs > 1)
+        return false;
+    __u32 owner = task_pod_generation_of(parent);
+    if (owner == KG_OWNER_UNKNOWN || (owner & KG_CG_POD))
+        return false;
+    if (execs == 0)
+        return BPF_CORE_READ(task, thread_pid, level) > 0 || !parent_is_a_reaper(parent);
+    if (!exe_is_sealed_copy(task))
+        return false;
+    struct inode *exe = BPF_CORE_READ(task, mm, exe_file, f_inode);
+    struct inode *parent_exe = BPF_CORE_READ(parent, mm, exe_file, f_inode);
+    if (exe && exe == parent_exe)
+        return true;
+    char comm[4];
+    if (bpf_core_read(comm, sizeof(comm), &parent->comm) != 0)
+        return false;
+    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c';
 }
 
 #endif

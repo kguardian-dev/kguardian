@@ -494,6 +494,8 @@ pub struct Sources {
     /// and the newest stored versions, newest first.
     pub last_export: Option<crate::profile_drift::ExportBaseline>,
     pub recent_versions: Vec<crate::profile_drift::RecentVersion>,
+    /// Capability use and its coverage (contract 2.9).
+    pub capabilities: crate::runtime_capabilities::CapEvidence,
 }
 
 impl Sources {
@@ -594,6 +596,14 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         .optional()?;
 
     let (last_export, recent_versions) = crate::profile_drift::load_baselines(conn, key)?;
+    let capabilities = crate::runtime_capabilities::load_evidence(
+        conn,
+        &key.namespace,
+        &key.kind,
+        &key.name,
+        &crate::runtime_capabilities::current_pairs(&containers),
+        crate::runtime_capabilities::evidence_window_hours(),
+    )?;
 
     Ok(Sources {
         containers,
@@ -611,6 +621,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         stored,
         last_export,
         recent_versions,
+        capabilities,
     })
 }
 
@@ -631,6 +642,10 @@ pub fn profile_charge_kib() -> u32 {
     .saturating_add(cost_kib(COMPUTE_ROWS_MAX + 1, 1_024))
     .saturating_add(cost_kib(AUDIT_POLICIES_MAX, 512))
     .saturating_add(cost_kib(2, SNAPSHOT_COST_BYTES))
+    .saturating_add(cost_kib(
+        crate::runtime_capabilities::CAP_READ_COST_ROWS,
+        512,
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -846,6 +861,7 @@ fn build_pod_security(
     key: &Key,
     s: &Sources,
     now: DateTime<Utc>,
+    caps: &crate::runtime_capabilities::CapabilitiesView,
 ) -> (PodSecurityDim, Vec<Finding>) {
     let mut inputs = Vec::new();
     let mut stale = Vec::new();
@@ -875,6 +891,31 @@ fn build_pod_security(
             source,
             digest: row.digest.clone(),
             security: sec,
+            observed_capabilities: caps
+                .containers
+                .iter()
+                .find(|x| x.container == c.container_name)
+                .and_then(|x| x.recommendation.as_ref())
+                .map(|r| r.add.clone()),
+            probed_capabilities: caps
+                .containers
+                .iter()
+                .find(|x| x.container == c.container_name)
+                .and_then(|x| x.recommendation.as_ref())
+                .map(|r| r.probed_kept.clone())
+                .unwrap_or_default(),
+            probed_omitted: caps
+                .containers
+                .iter()
+                .find(|x| x.container == c.container_name)
+                .and_then(|x| x.recommendation.as_ref())
+                .map(|r| {
+                    r.probed_omitted
+                        .iter()
+                        .map(|o| o.capability.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     let pod = pod.and_then(|(_, p)| p);
@@ -1967,6 +2008,10 @@ pub struct Profile {
     pub exposure: Exposure,
     /// Drift against the last export / previous version (contract 2.8).
     pub drift: crate::profile_drift::DriftView,
+    /// Observed capability use and the evidence-based recommendation
+    /// (contract 2.9). Not part of the snapshot: counts move constantly;
+    /// the recommendation reaches the snapshot through podSecurity.
+    pub capabilities: crate::runtime_capabilities::CapabilitiesView,
     pub dimensions: Dimensions,
     #[serde(skip)]
     pub snapshot: Value,
@@ -2024,7 +2069,8 @@ fn fmt_age(secs: i64) -> String {
 
 /// Build the whole profile from its sources. Pure.
 pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
-    let (pod_security, f_ps) = build_pod_security(key, s, now);
+    let capabilities = crate::runtime_capabilities::build_view(&s.containers, &s.capabilities);
+    let (pod_security, f_ps) = build_pod_security(key, s, now, &capabilities);
     let (images, f_im) = build_images(s, now);
     let (syscalls, f_sc) = build_syscalls(s);
     let (network, f_net) = build_network(s);
@@ -2275,6 +2321,7 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         readiness,
         exposure,
         drift,
+        capabilities,
         dimensions: dims,
         snapshot,
         dimension_hashes,

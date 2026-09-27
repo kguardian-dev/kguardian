@@ -113,6 +113,8 @@ spec:
           # `controller.runtimeInventory`).
           - name: RUNTIME_INVENTORY
             value: {{ $runtimeMode | quote }}
+          - name: RUNTIME_INVENTORY_CAPABILITIES
+            value: {{ (.Values.controller.runtimeInventory | default dict).capabilities | default false | quote }}
           {{- $compute := .Values.compute | default dict }}
           {{- if $compute.enabled }}
           # Compute gauges + noisy-neighbour detection (values.yaml `compute`).

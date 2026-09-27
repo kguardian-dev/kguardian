@@ -256,12 +256,12 @@ volatile bool kg_test_container_unknown = false;
 // False when it could not be worked out (a parse that could not run, or
 // no container cgroup under the pod): the caller must treat the event as
 // lost, not send it without a container.
-static __always_inline bool container_cgroup_name(struct runtime_event *ev)
+static __always_inline bool container_cgroup_name(char *out)
 {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
     struct kernfs_node *below = 0;
-    ev->container[0] = 0;
+    out[0] = 0;
     if (kg_test_container_unknown)
         return false;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
@@ -275,7 +275,7 @@ static __always_inline bool container_cgroup_name(struct runtime_event *ev)
         {
             if (!below)
                 return false;
-            return bpf_probe_read_kernel_str(ev->container, sizeof(ev->container),
+            return bpf_probe_read_kernel_str(out, KG_CONTAINER_NAME,
                                              BPF_CORE_READ(below, name)) > 1;
         }
         below = kn;
@@ -335,7 +335,7 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     ev->fs_magic = fs_magic;
     ev->nlink = nlink;
     ev->upper = upper;
-    if (!container_cgroup_name(ev))
+    if (!container_cgroup_name(ev->container))
     {
         // Whose container it was is unknown: the sighting is lost. Forget
         // it so the file is reported again on its next use, and count it
@@ -387,6 +387,221 @@ int BPF_PROG(trace_runtime_mmap, struct file *file, unsigned long prot, unsigned
     if (exe && exe == BPF_CORE_READ(file, f_inode))
         return 0;
     return report_file(file, KG_RT_LIB);
+}
+
+// ---- Capabilities (#1533 P2-7) -------------------------------------------
+//
+// Every capability check a container's task makes, and whether it was
+// granted, from the commoncap check cap_capable (fexit, for the verdict):
+// it sees every check security_capable does plus those commoncap makes
+// directly (capset's SETPCAP test, xattr and prctl checks), and its
+// verdict is the capability bits alone. security_capable is the fallback
+// where cap_capable cannot be traced (bpf.rs picks; the heartbeat says
+// which, and the broker does not treat the fallback as full evidence).
+// Counted per (container cgroup, capability, verdict, audited) in the
+// kernel; the first sighting of each is also sent as an event (which
+// carries the container identity), later ones only bump the count
+// userspace reads from the map.
+//
+// Classes:
+//  - audited: an ordinary check (capable(), ns_capable()).
+//  - probed: a CAP_OPT_NOAUDIT check (ns_capable_noaudit,
+//    has_capability_noaudit). Often the kernel asking whether a task would
+//    be privileged, but some gate real behaviour (seccomp filters without
+//    no_new_privs, ptrace access to other tasks, the admin memory
+//    reserve), so they are recorded, as their own class, and never
+//    recommended for dropping.
+//
+// Not counted:
+//  - Container runtime setup (is_runtime_setup in pod_owner.h): a task
+//    whose real parent is outside every pod cgroup and runs the same
+//    executable as that parent (runc init, before it execs the container's
+//    command). Decided by provenance, not by name: a container process
+//    that renames itself "runc:[...]" is still counted. When unsure, the
+//    check is counted.
+//  - Checks the kernel decides without the container's capability bits
+//    (not_the_containers_caps): a task that moved into a user namespace
+//    below the container's own (unshare) is checked against the full set
+//    it got by creating that namespace; and a check against a namespace
+//    below the container's own is granted by ownership alone when the
+//    task's euid owns that namespace's top (the child of the container's).
+//    A check against a descendant namespace that the task does NOT own
+//    falls through to the task's own capability bits in the container's
+//    namespace (cap_capable), so it is a real use and is counted. The
+//    container's own user namespace is the owner of its cgroup namespace,
+//    which the runtime creates with the container and a later
+//    unshare(CLONE_NEWUSER) does not change (unless it also unshares the
+//    cgroup namespace).
+
+// include/linux/security.h
+#define KG_CAP_OPT_NOAUDIT (1u << 1)
+// A user namespace's parents are walked at most this far (the kernel
+// allows 32 levels; containers nest one or two).
+#define KG_USERNS_LEVELS 8
+
+struct cap_seen_key
+{
+    __u64 cgroup_id;
+    __u32 cap;
+    // Bit 0: granted. Bit 1: probed (CAP_OPT_NOAUDIT).
+    __u32 flags;
+};
+
+#define KG_CAP_GRANTED 1u
+#define KG_CAP_PROBED 2u
+
+struct cap_seen_val
+{
+    __u64 count;
+};
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct cap_seen_key);
+    __type(value, struct cap_seen_val);
+} cap_seen SEC(".maps");
+
+// Keep in sync with CapEventData in controller/src/runtime_capabilities.rs.
+struct cap_event
+{
+    __u64 cgroup_id;
+    __u32 generation;
+    __u32 cap;
+    __u32 flags;
+    __u32 pid;
+    char container[KG_CONTAINER_NAME];
+};
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 64 * 1024);
+} cap_events SEC(".maps");
+
+// True when `ns` is strictly below `base` (created from it, directly or
+// not). False when unsure.
+static __always_inline bool userns_below(struct user_namespace *ns, struct user_namespace *base)
+{
+    for (int i = 0; i < KG_USERNS_LEVELS; i++)
+    {
+        if (!ns)
+            return false;
+        struct user_namespace *up = BPF_CORE_READ(ns, parent);
+        if (up == base)
+            return true;
+        ns = up;
+    }
+    return false;
+}
+
+// True when the kernel answers this check without the capability bits the
+// container was given in its own user namespace `base`, mirroring
+// cap_capable() (security/commoncap.c):
+//  - the task's credentials live in a namespace below `base`: it has the
+//    full set there from creating it, whatever the container was given;
+//  - the target is below the task's (== `base`) namespace and the
+//    namespace just below `base` on the way to it is owned by the task's
+//    euid: granted by ownership, the bits are never read.
+// Every other check reads the task's bits in `base`, including one
+// against a descendant the task does not own, and is counted. False when
+// unsure, so the check is counted.
+static __always_inline bool not_the_containers_caps(const struct cred *cred,
+                                                    struct user_namespace *target,
+                                                    struct user_namespace *base)
+{
+    struct user_namespace *cred_ns = BPF_CORE_READ(cred, user_ns);
+    if (!base || !cred_ns)
+        return false;
+    if (cred_ns != base)
+        return userns_below(cred_ns, base);
+    struct user_namespace *ns = target;
+    for (int i = 0; i < KG_USERNS_LEVELS; i++)
+    {
+        if (!ns || ns == base)
+            return false;
+        struct user_namespace *up = BPF_CORE_READ(ns, parent);
+        if (up == base)
+            return BPF_CORE_READ(ns, owner.val) == BPF_CORE_READ(cred, euid.val);
+        ns = up;
+    }
+    return false;
+}
+
+static __always_inline int report_capable(const struct cred *cred, struct user_namespace *ns,
+                                          int cap, unsigned int opts, int ret)
+{
+    if (cap < 0 || cap > 63)
+        return 0;
+    __u32 owner = task_pod_generation();
+    if (owner == KG_OWNER_UNKNOWN)
+    {
+        count_drop();
+        return 0;
+    }
+    if (!(owner & KG_CG_POD))
+        return 0;
+    if (is_runtime_setup())
+        return 0;
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (not_the_containers_caps(cred, ns, BPF_CORE_READ(task, nsproxy, cgroup_ns, user_ns)))
+        return 0;
+
+    struct cap_seen_key key = {
+        .cgroup_id = bpf_get_current_cgroup_id(),
+        .cap = (__u32)cap,
+        .flags = (ret == 0 ? KG_CAP_GRANTED : 0) | ((opts & KG_CAP_OPT_NOAUDIT) ? KG_CAP_PROBED : 0),
+    };
+    struct cap_seen_val *seen = bpf_map_lookup_elem(&cap_seen, &key);
+    if (seen)
+    {
+        __sync_fetch_and_add(&seen->count, 1);
+        return 0;
+    }
+    struct cap_seen_val one = {.count = 1};
+    if (bpf_map_update_elem(&cap_seen, &key, &one, BPF_NOEXIST) != 0)
+    {
+        // Another task inserted it first: count this one there.
+        seen = bpf_map_lookup_elem(&cap_seen, &key);
+        if (seen)
+            __sync_fetch_and_add(&seen->count, 1);
+        return 0;
+    }
+
+    // First sighting: send who it was. On the stack, so preemption cannot
+    // mix it with another task's.
+    struct cap_event ev = {
+        .cgroup_id = key.cgroup_id,
+        .generation = owner & KG_CG_GEN_MASK,
+        .cap = key.cap,
+        .flags = key.flags,
+        .pid = bpf_get_current_pid_tgid() >> 32,
+    };
+    if (!container_cgroup_name(ev.container) ||
+        bpf_ringbuf_output(&cap_events, &ev, sizeof(ev), 0) != 0)
+    {
+        // Lost: forget it so the next check is reported, and count it.
+        bpf_map_delete_elem(&cap_seen, &key);
+        count_drop();
+    }
+    return 0;
+}
+
+// Fallback hook (see RUNTIME_CAP_SYMBOLS in bpf.rs).
+SEC("fexit/security_capable")
+int BPF_PROG(trace_runtime_capable, const struct cred *cred, struct user_namespace *ns,
+             int cap, unsigned int opts, int ret)
+{
+    return report_capable(cred, ns, cap, opts, ret);
+}
+
+// Preferred hook.
+SEC("fexit/cap_capable")
+int BPF_PROG(trace_runtime_cap_capable, const struct cred *cred, struct user_namespace *ns,
+             int cap, unsigned int opts, int ret)
+{
+    return report_capable(cred, ns, cap, opts, ret);
 }
 
 char LICENSE[] SEC("license") = "GPL";

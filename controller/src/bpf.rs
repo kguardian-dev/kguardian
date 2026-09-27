@@ -230,26 +230,116 @@ fn open_and_load_syscall(
     open.load().map_err(|e| format!("load: {e}"))
 }
 
-/// Load and attach the runtime inventory probe (exec always, executable
-/// mmaps when `libs`). Every failure is a warning and `None`: the feature
-/// degrades to /proc backfill, capture of everything else is untouched.
-pub(crate) fn load_runtime_inventory(
-    storage: &mut MaybeUninit<OpenObject>,
+/// Open and load the runtime inventory object with the library program
+/// when `libs` and the capability program for `cap_symbol` (if any).
+fn open_runtime<'a>(
+    storage: &'a mut MaybeUninit<OpenObject>,
     libs: bool,
-) -> Option<(RuntimeInventorySkel<'_>, Vec<libbpf_rs::Link>)> {
-    let libs = libs && kernel_can_fentry(RUNTIME_MMAP_SYMBOL);
-    let mut open = match RuntimeInventorySkelBuilder::default().open(storage) {
-        Ok(o) => o,
-        Err(e) => {
-            warn!(error = %e, "runtime inventory probe failed to open; exec/library inventory \
-                   comes from /proc backfill only");
-            return None;
-        }
-    };
+    cap_symbol: Option<&str>,
+) -> std::result::Result<RuntimeInventorySkel<'a>, String> {
+    let mut open = RuntimeInventorySkelBuilder::default()
+        .open(storage)
+        .map_err(|e| format!("open: {e}"))?;
     if !libs {
         open.progs.trace_runtime_mmap.set_autoload(false);
     }
-    let sk = match open.load() {
+    if cap_symbol != Some("security_capable") {
+        open.progs.trace_runtime_capable.set_autoload(false);
+    }
+    if cap_symbol != Some("cap_capable") {
+        open.progs.trace_runtime_cap_capable.set_autoload(false);
+    }
+    open.load().map_err(|e| format!("load: {e}"))
+}
+
+/// Which optional runtime inventory programs attached.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeAttached {
+    /// fentry/security_mmap_file (libraries).
+    pub libs: bool,
+    /// fexit on security_capable or cap_capable (capabilities).
+    pub caps: bool,
+    /// Which capability hook, when `caps`.
+    pub cap_hook: Option<&'static str>,
+    /// Why the capability probe is off when it was asked for: no hook
+    /// symbol, the kernel refused the program (the verifier's message), or
+    /// the attach failed. Logged as a warning; the kernel matrix test fails
+    /// on it instead of skipping.
+    pub cap_error: Option<String>,
+}
+
+/// The capability hooks, in order of preference. cap_capable, the
+/// commoncap check, sees every check security_capable does plus the ones
+/// commoncap makes directly (capset's SETPCAP test, xattr and prctl
+/// checks), which security_capable misses; its verdict is the capability
+/// bits alone, which is what securityContext.capabilities controls.
+/// security_capable is the fallback where cap_capable cannot be traced.
+pub const RUNTIME_CAP_SYMBOLS: [&str; 2] = ["cap_capable", "security_capable"];
+
+/// Load and attach the runtime inventory probe (exec always, executable
+/// mmaps when `libs`, capability checks when `caps`). Every failure is a
+/// warning: the feature degrades (to /proc backfill for files, to no
+/// capability data), capture of everything else is untouched. A kernel
+/// that refuses the capability program costs only that program: the
+/// object is loaded again without it.
+pub(crate) fn load_runtime_inventory(
+    storage: &mut MaybeUninit<OpenObject>,
+    libs: bool,
+    caps: bool,
+) -> Option<(
+    RuntimeInventorySkel<'_>,
+    Vec<libbpf_rs::Link>,
+    RuntimeAttached,
+)> {
+    let libs = libs && kernel_can_fentry(RUNTIME_MMAP_SYMBOL);
+    // RUNTIME_INVENTORY_CAP_HOOK pins one hook (tests exercise the
+    // fallback with it; an operator can use it to steer around a kernel).
+    // Empty means unset. A name that is not a hook is an error, not a
+    // silent "no hook" (an unexpanded shell variable once pinned "" in CI
+    // and the capability test skipped on every kernel).
+    let pinned = std::env::var("RUNTIME_INVENTORY_CAP_HOOK")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let cap_symbol = if caps {
+        RUNTIME_CAP_SYMBOLS
+            .into_iter()
+            .filter(|s| pinned.as_deref().is_none_or(|p| p == *s))
+            .find(|s| kernel_can_fentry(s))
+    } else {
+        None
+    };
+    let mut cap_error = None;
+    if caps && cap_symbol.is_none() {
+        cap_error = Some(match pinned.as_deref() {
+            Some(p) if !RUNTIME_CAP_SYMBOLS.contains(&p) => {
+                format!("RUNTIME_INVENTORY_CAP_HOOK={p:?} is not one of {RUNTIME_CAP_SYMBOLS:?}")
+            }
+            _ => format!(
+                "no traceable capability hook among {RUNTIME_CAP_SYMBOLS:?} (pinned: {pinned:?})"
+            ),
+        });
+        warn!(
+            "no traceable capability hook (security_capable, cap_capable); capability \
+               inventory is off on this node"
+        );
+    }
+    // A trial load with the capability program, in its own storage and
+    // dropped at once: a kernel that refuses it then costs only the
+    // capability inventory, not exec and library capture.
+    let caps_loadable = cap_symbol.is_some() && {
+        let mut trial = MaybeUninit::uninit();
+        let outcome = open_runtime(&mut trial, libs, cap_symbol).map(drop);
+        match outcome {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "the capability program does not load on this kernel; \
+                       no capability inventory on this node");
+                cap_error = Some(format!("{} does not load: {e}", cap_symbol.unwrap_or("")));
+                false
+            }
+        }
+    };
+    let sk = match open_runtime(storage, libs, cap_symbol.filter(|_| caps_loadable)) {
         Ok(sk) => sk,
         Err(e) => {
             warn!(error = %e, "runtime inventory probe failed to load; exec/library inventory \
@@ -257,7 +347,12 @@ pub(crate) fn load_runtime_inventory(
             return None;
         }
     };
+    let caps_loaded = caps_loadable;
     let mut links = Vec::new();
+    let mut attached = RuntimeAttached {
+        cap_error,
+        ..RuntimeAttached::default()
+    };
     match sk.progs.trace_runtime_exec.attach() {
         Ok(l) => links.push(l),
         Err(e) => {
@@ -268,16 +363,40 @@ pub(crate) fn load_runtime_inventory(
     }
     if libs {
         match sk.progs.trace_runtime_mmap.attach() {
-            Ok(l) => links.push(l),
+            Ok(l) => {
+                links.push(l);
+                attached.libs = true;
+            }
             Err(e) => warn!(error = %e, "could not attach fentry/{RUNTIME_MMAP_SYMBOL}; \
                    library inventory comes from /proc backfill only"),
         }
     }
+    if caps_loaded {
+        let prog = match cap_symbol {
+            Some("security_capable") => &sk.progs.trace_runtime_capable,
+            _ => &sk.progs.trace_runtime_cap_capable,
+        };
+        match prog.attach() {
+            Ok(l) => {
+                links.push(l);
+                attached.caps = true;
+                attached.cap_hook = cap_symbol;
+            }
+            Err(e) => {
+                warn!(error = %e, symbol = cap_symbol.unwrap_or(""),
+                    "could not attach the capability probe; no capability inventory on this node");
+                attached.cap_error =
+                    Some(format!("{} does not attach: {e}", cap_symbol.unwrap_or("")));
+            }
+        }
+    }
     info!(
-        libraries = links.len() > 1,
+        libraries = attached.libs,
+        capabilities = attached.caps,
+        capability_hook = cap_symbol.filter(|_| attached.caps).unwrap_or("none"),
         "Runtime inventory eBPF program loaded and attached"
     );
-    Some((sk, links))
+    Some((sk, links, attached))
 }
 
 /// The kernel function the library probe attaches to.
@@ -519,7 +638,7 @@ pub fn ebpf_handle(
     seccomp_denial_maps: Option<oneshot::Sender<DenialMaps>>,
     cgroup_event_sender: Sender<(u64, String)>,
     mut forget_pending: Receiver<u64>,
-    runtime_events: Option<(Sender<RuntimeEventData>, bool)>,
+    runtime_events: Option<crate::runtime_inventory::ProbeConfig>,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -679,16 +798,17 @@ pub fn ebpf_handle(
         // feature is off or this kernel refuses it; the sender is kept
         // alive either way so the consumer keeps running (backfill).
         let mut runtime_storage = MaybeUninit::uninit();
-        let (runtime_sender, runtime_libs) = match runtime_events {
-            Some((tx, libs)) => (Some(tx), libs),
-            None => (None, false),
+        let (runtime_sender, runtime_libs, caps_sender) = match runtime_events {
+            Some(c) => (Some(c.files), c.libs, c.caps),
+            None => (None, false, None),
         };
-        let runtime = runtime_sender
-            .as_ref()
-            .and_then(|_| load_runtime_inventory(&mut runtime_storage, runtime_libs));
-        if let Some((_, links)) = runtime.as_ref() {
-            crate::runtime_inventory::probe_attached(links.len() > 1);
+        let runtime = runtime_sender.as_ref().and_then(|_| {
+            load_runtime_inventory(&mut runtime_storage, runtime_libs, caps_sender.is_some())
+        });
+        if let Some((_, _, attached)) = runtime.as_ref() {
+            crate::runtime_inventory::probe_attached(attached.libs, attached.cap_hook);
         }
+        let caps_sender = caps_sender.filter(|_| runtime.as_ref().is_some_and(|r| r.2.caps));
 
         // Load and attach the seccomp denial probe. `None` here means
         // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
@@ -778,7 +898,28 @@ pub fn ebpf_handle(
             })?;
 
         // Runtime inventory events, when the probe loaded.
-        if let (Some((sk, _links)), Some(tx)) = (runtime.as_ref(), runtime_sender.clone()) {
+        if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), caps_sender.clone()) {
+            ring_buffer_builder
+                .add(&sk.maps.cap_events, move |data: &[u8]| {
+                    use crate::runtime_capabilities::{CapEventData, CapMsg};
+                    if data.len() < std::mem::size_of::<CapEventData>() {
+                        return 0;
+                    }
+                    let ev: CapEventData =
+                        unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CapEventData) };
+                    if let Err(e) = tx.blocking_send(CapMsg::Event(ev)) {
+                        if !RUNTIME_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                            warn!(error = ?e, "capability channel closed; signalling eBPF poll loop to exit");
+                        }
+                        signal_ebpf_shutdown();
+                    }
+                    0
+                })
+                .map_err(|e| {
+                    Error::Custom(format!("Failed to add capability events ring buffer: {}", e))
+                })?;
+        }
+        if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), runtime_sender.clone()) {
             ring_buffer_builder
                 .add(&sk.maps.runtime_events, move |data: &[u8]| {
                     if data.len() < std::mem::size_of::<RuntimeEventData>() {
@@ -837,6 +978,7 @@ pub fn ebpf_handle(
 
         let mut consecutive_poll_errors: u32 = 0;
         let mut last_drop_read = std::time::Instant::now();
+        let mut last_caps_read = std::time::Instant::now();
 
         loop {
             // Honour the shutdown flag before polling so we exit promptly
@@ -881,7 +1023,27 @@ pub fn ebpf_handle(
 
             // Runtime inventory: publish the kernel's drop count for the
             // coverage heartbeat (a few times a minute is plenty).
-            if let Some((sk, _)) = runtime.as_ref() {
+            // Capability counts: a snapshot of the kernel map.
+            if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), caps_sender.as_ref()) {
+                if last_caps_read.elapsed() >= crate::runtime_capabilities::COUNTS_EVERY {
+                    last_caps_read = std::time::Instant::now();
+                    let snapshot: Vec<_> = sk
+                        .maps
+                        .cap_seen
+                        .keys()
+                        .filter_map(|k| {
+                            let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).ok().flatten()?;
+                            let cg = u64::from_ne_bytes(k.get(..8)?.try_into().ok()?);
+                            let cap = u32::from_ne_bytes(k.get(8..12)?.try_into().ok()?);
+                            let flags = u32::from_ne_bytes(k.get(12..16)?.try_into().ok()?);
+                            let count = u64::from_ne_bytes(v.get(..8)?.try_into().ok()?);
+                            Some(((cg, cap, flags), count))
+                        })
+                        .collect();
+                    let _ = tx.try_send(crate::runtime_capabilities::CapMsg::Counts(snapshot));
+                }
+            }
+            if let Some((sk, _, _)) = runtime.as_ref() {
                 if last_drop_read.elapsed() >= std::time::Duration::from_secs(5) {
                     last_drop_read = std::time::Instant::now();
                     if let Ok(Some(per_cpu)) = sk
@@ -1299,16 +1461,17 @@ mod tests {
         // Runtime inventory: exec and, where security_mmap_file can be
         // fentry-attached, the library probe too. Both must load AND attach.
         let mut storage = MaybeUninit::uninit();
-        let (_sk, links) =
-            load_runtime_inventory(&mut storage, true).expect("runtime inventory probe");
+        let (_sk, _links, attached) =
+            load_runtime_inventory(&mut storage, true, true).expect("runtime inventory probe");
         assert_eq!(
-            links.len(),
-            if kernel_can_fentry(RUNTIME_MMAP_SYMBOL) {
-                2
-            } else {
-                1
-            },
-            "runtime inventory programs attached"
+            attached.libs,
+            kernel_can_fentry(RUNTIME_MMAP_SYMBOL),
+            "library program attached where fentry works"
+        );
+        assert_eq!(
+            attached.caps,
+            RUNTIME_CAP_SYMBOLS.iter().any(|s| kernel_can_fentry(s)),
+            "capability program attached where a hook is traceable"
         );
 
         let mut storage = MaybeUninit::uninit();
@@ -1338,8 +1501,9 @@ mod tests {
         std::fs::create_dir_all(&ctr_dir).expect("create a kubepods-shaped cgroup");
 
         let mut storage = MaybeUninit::uninit();
-        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
-        let libs = links.len() > 1;
+        let (sk, links, attached) =
+            load_runtime_inventory(&mut storage, true, false).expect("load");
+        let libs = attached.libs;
 
         let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
         let sink = Arc::clone(&events);
@@ -1703,8 +1867,9 @@ mod tests {
         use std::os::unix::process::CommandExt;
 
         let mut storage = MaybeUninit::uninit();
-        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
-        if links.len() < 2 {
+        let (sk, links, attached) =
+            load_runtime_inventory(&mut storage, true, false).expect("load");
+        if !attached.libs {
             eprintln!("library probe not attachable here; nothing preemptible to test");
             return;
         }
@@ -1819,7 +1984,7 @@ mod tests {
         let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
 
         let mut storage = MaybeUninit::uninit();
-        let (mut sk, _links) = load_runtime_inventory(&mut storage, true).expect("load");
+        let (mut sk, _links, _) = load_runtime_inventory(&mut storage, true, false).expect("load");
         let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
         let sink = Arc::clone(&events);
         let mut rb = RingBufferBuilder::new();
@@ -1908,6 +2073,1024 @@ mod tests {
         );
         let _ = std::fs::remove_dir(&ctr_dir);
         let _ = std::fs::remove_dir(&pod_dir);
+    }
+
+    /// Helper for the capability test: the "container" workload, run as
+    /// an exec'd process (the test binary re-executed into this test with
+    /// KG_CAP_HELPER=1). Does nothing otherwise.
+    #[test]
+    #[ignore = "helper, run by capability_checks_are_counted_per_container_and_setup_is_not"]
+    fn cap_helper_child() {
+        let Ok(mode) = std::env::var("KG_CAP_HELPER") else {
+            return;
+        };
+        let bind80 = || unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            let addr = libc::sockaddr_in {
+                sin_family: libc::AF_INET as u16,
+                sin_port: 80u16.to_be(),
+                sin_addr: libc::in_addr { s_addr: 0 },
+                sin_zero: [0; 8],
+            };
+            libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as u32,
+            );
+            libc::close(fd);
+        };
+        match mode.as_str() {
+            "setup" => {
+                // runc init's shape: the runtime's own binary, exec'd by it.
+                unsafe { libc::sethostname(c"kg-setup".as_ptr(), 8) };
+                return;
+            }
+            "reexec" => {
+                use std::os::unix::process::CommandExt;
+                // runc 1.1's shape: exec'd by the host, then exec'd again
+                // (its memfd copy) before setup. Two execs since the host
+                // forked it: counted, the safe direction.
+                let err = std::process::Command::new("/proc/self/exe")
+                    .args(std::env::args().skip(1))
+                    .env("KG_CAP_HELPER", "setup")
+                    .exec();
+                panic!("re-exec: {err}");
+            }
+            "nested" => {
+                // Container code that moves into a user namespace of its own
+                // and uses the full set it gets there. A fork, since a
+                // multithreaded process (the test harness) cannot unshare
+                // CLONE_NEWUSER.
+                unsafe {
+                    let pid = libc::fork();
+                    if pid == 0 {
+                        let ok = libc::unshare(libc::CLONE_NEWUSER) == 0
+                            && libc::unshare(libc::CLONE_NEWUTS) == 0
+                            && libc::sethostname(c"kg-nested".as_ptr(), 9) == 0;
+                        libc::_exit(if ok { 0 } else { 1 });
+                    }
+                    let mut st = 0;
+                    libc::waitpid(pid, &mut st, 0);
+                    assert!(
+                        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0,
+                        "nested user namespace steps"
+                    );
+                }
+                return;
+            }
+            "ptrace" => {
+                // Look at another task's namespaces: a ptrace-read access
+                // check against that task's user namespace.
+                let pid = std::env::var("KG_CAP_TARGET").unwrap();
+                std::fs::read_link(format!("/proc/{pid}/ns/user")).expect("readlink ns/user");
+                return;
+            }
+            "bind" => {
+                bind80();
+                return;
+            }
+            "orphan" => {
+                // Fork a worker and exit; the worker waits to be reparented,
+                // then uses a capability (the host's hostname, granted) and
+                // leaves a marker. No allocation after fork.
+                let done = std::ffi::CString::new(std::env::var("KG_CAP_DONE").unwrap()).unwrap();
+                unsafe {
+                    let me = libc::getpid();
+                    if libc::fork() == 0 {
+                        for _ in 0..1000 {
+                            if libc::getppid() != me {
+                                break;
+                            }
+                            libc::usleep(5_000);
+                        }
+                        libc::sethostname(c"kg-orphan".as_ptr(), 9);
+                        let fd = libc::open(done.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644);
+                        libc::close(fd);
+                        libc::_exit(0);
+                    }
+                }
+                return;
+            }
+            "runcnamed" => {
+                // A runtime that is not runc but is installed as "runc"
+                // (outside the pod), exec'ing the container's command (a
+                // copy of this binary, from a file) into its cgroup.
+                use std::os::unix::process::CommandExt;
+                unsafe { libc::prctl(libc::PR_SET_NAME, c"runc".as_ptr()) };
+                let procs = std::env::var("KG_CAP_CGROUP").unwrap();
+                let status = unsafe {
+                    std::process::Command::new(std::env::var("KG_CAP_WORKLOAD").unwrap())
+                        .args(std::env::args().skip(1))
+                        .env("KG_CAP_HELPER", "setup")
+                        .pre_exec(move || {
+                            std::fs::write(&procs, std::process::id().to_string())?;
+                            Ok(())
+                        })
+                        .stdout(std::process::Stdio::null())
+                        .status()
+                        .expect("spawn")
+                };
+                assert!(status.success());
+                return;
+            }
+            "crunlike" => {
+                // A runtime that forks without exec: a child (single
+                // threaded) makes a new pid namespace and forks its init,
+                // which joins the container's cgroup, sets the hostname and
+                // then execs the container's command.
+                let procs =
+                    std::ffi::CString::new(std::env::var("KG_CAP_CGROUP").unwrap()).unwrap();
+                unsafe {
+                    let child = libc::fork();
+                    if child == 0 {
+                        if libc::unshare(libc::CLONE_NEWPID) != 0 {
+                            libc::_exit(2);
+                        }
+                        let init = libc::fork();
+                        if init == 0 {
+                            let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
+                            if fd < 0 || libc::write(fd, c"0".as_ptr().cast(), 1) != 1 {
+                                libc::_exit(3);
+                            }
+                            libc::close(fd);
+                            libc::sethostname(c"kg-setup".as_ptr(), 8);
+                            let argv = [c"/bin/true".as_ptr(), std::ptr::null()];
+                            libc::execv(c"/bin/true".as_ptr(), argv.as_ptr());
+                            libc::_exit(4);
+                        }
+                        let mut st = 0;
+                        libc::waitpid(init, &mut st, 0);
+                        libc::_exit(if libc::WIFEXITED(st) {
+                            libc::WEXITSTATUS(st)
+                        } else {
+                            5
+                        });
+                    }
+                    let mut st = 0;
+                    libc::waitpid(child, &mut st, 0);
+                    assert!(
+                        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0,
+                        "crun-like setup steps: {st}"
+                    );
+                }
+                return;
+            }
+            "hold" => {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                return;
+            }
+            "work" => {
+                // A real runtime's container: rename like runc, then a
+                // denied SYS_ADMIN and a used NET_BIND_SERVICE.
+                unsafe {
+                    libc::prctl(libc::PR_SET_NAME, c"runc:[2:INIT]".as_ptr());
+                    libc::sethostname(c"kg".as_ptr(), 2);
+                }
+                bind80();
+                return;
+            }
+            _ => {}
+        }
+        unsafe {
+            if std::env::var("KG_CAP_RENAME").is_ok() {
+                // A container process posing as runc: must still be counted.
+                libc::prctl(libc::PR_SET_NAME, c"runc:[1:CHILD]".as_ptr());
+            }
+            // A seccomp filter without no_new_privs: the kernel's
+            // CAP_OPT_NOAUDIT SYS_ADMIN check (granted: still root here).
+            let allow = [libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: 0x7fff_0000,
+            }];
+            let prog = libc::sock_fprog {
+                len: 1,
+                filter: allow.as_ptr() as *mut _,
+            };
+            libc::prctl(libc::PR_SET_SECCOMP, 2, &prog as *const libc::sock_fprog);
+            #[repr(C)]
+            struct Hdr {
+                version: u32,
+                pid: i32,
+            }
+            #[repr(C)]
+            struct Data {
+                effective: u32,
+                permitted: u32,
+                inheritable: u32,
+            }
+            let hdr = Hdr {
+                version: 0x2008_0522,
+                pid: 0,
+            };
+            let bind_only = 1u32 << 10;
+            let data = [
+                Data {
+                    effective: bind_only,
+                    permitted: bind_only,
+                    inheritable: 0,
+                },
+                Data {
+                    effective: 0,
+                    permitted: 0,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()),
+                0,
+                "capset"
+            );
+            for _ in 0..2 {
+                let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                let addr = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as u16,
+                    sin_port: 80u16.to_be(),
+                    sin_addr: libc::in_addr { s_addr: 0 },
+                    sin_zero: [0; 8],
+                };
+                libc::bind(
+                    fd,
+                    &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                );
+                libc::close(fd);
+            }
+            libc::sethostname(c"kg".as_ptr(), 2);
+        }
+    }
+
+    /// End to end on the RUNNING kernel: capability checks by a
+    /// container's own processes are counted per (container, capability,
+    /// verdict, probed), including by one that renames itself "runc:[...]";
+    /// checks by runtime setup (a host-forked task that has not exec'd yet)
+    /// are not. Needs root and cgroup v2.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn capability_checks_are_counted_per_container_and_setup_is_not() {
+        use crate::runtime_capabilities::{CapEventData, FLAG_GRANTED, FLAG_PROBED};
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+        use std::sync::{Arc, Mutex};
+
+        const UID: &str = "6a2c9a1e-7b4d-4e0a-9f1c-0123456789ab";
+        const CID: &str = "4c1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const RENAMED: &str = "4e1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const SETUP: &str = "4d1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const REEXEC: &str = "4f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const NESTED: &str = "501e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const OTHERS: &str = "511e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const OWNED: &str = "521e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const SAMEEXE: &str = "531e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const ORPHAN: &str = "541e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const RUNCNAMED: &str = "551e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
+        let dirs: Vec<String> = [
+            CID, RENAMED, SETUP, REEXEC, NESTED, OTHERS, OWNED, SAMEEXE, ORPHAN, RUNCNAMED,
+        ]
+        .iter()
+        .map(|c| format!("{pod_dir}/{c}"))
+        .collect();
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let ino = |d: &str| std::fs::metadata(d).unwrap().ino();
+        let (cg_app, cg_renamed, cg_setup) = (ino(&dirs[0]), ino(&dirs[1]), ino(&dirs[2]));
+        let (cg_sameexe, cg_orphan, cg_runcnamed) = (ino(&dirs[7]), ino(&dirs[8]), ino(&dirs[9]));
+        let (cg_reexec, cg_nested, cg_others, cg_owned) =
+            (ino(&dirs[3]), ino(&dirs[4]), ino(&dirs[5]), ino(&dirs[6]));
+
+        let mut storage = MaybeUninit::uninit();
+        let (sk, _links, attached) =
+            load_runtime_inventory(&mut storage, false, true).expect("load");
+        // Skipping is only right when the kernel really has no hook. A hook
+        // that exists (or was pinned) but did not load or attach is a
+        // failure, with the kernel's reason.
+        // A pin (even an empty one: an unexpanded variable) must be the hook
+        // that attached.
+        let pinned = std::env::var("RUNTIME_INVENTORY_CAP_HOOK").ok();
+        if let Some(p) = &pinned {
+            assert_eq!(
+                attached.cap_hook,
+                Some(p.as_str()),
+                "RUNTIME_INVENTORY_CAP_HOOK={p:?} did not attach: {:?}",
+                attached.cap_error
+            );
+        }
+        if !attached.caps {
+            let present: Vec<_> = RUNTIME_CAP_SYMBOLS
+                .into_iter()
+                .filter(|s| kernel_symbol(s).is_some())
+                .collect();
+            assert!(
+                pinned.is_none() && present.is_empty(),
+                "capability probe is off although hooks {present:?} exist (pinned {pinned:?}): {:?}",
+                attached.cap_error
+            );
+            eprintln!("no capability hook symbol on this kernel; skipped");
+            return;
+        }
+        eprintln!("capability hook: {:?}", attached.cap_hook);
+        let events: Arc<Mutex<Vec<CapEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.cap_events, move |data: &[u8]| {
+            let ev: CapEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CapEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+
+        let me = std::env::current_exe().unwrap();
+        // The container's own code is a different executable from its
+        // parent's (an image's entrypoint): run a copy of this binary.
+        let scratch = if std::fs::metadata("/mnt").is_ok_and(|m| m.is_dir()) {
+            std::path::PathBuf::from("/mnt")
+        } else {
+            std::env::temp_dir()
+        };
+        let workload_bin = scratch.join(unique_name("kg-cap-workload"));
+        std::fs::copy(&me, &workload_bin).expect("copy the test binary");
+        let workload = |dir: &str, rename: bool| {
+            let procs = format!("{dir}/cgroup.procs");
+            let mut cmd = std::process::Command::new(&workload_bin);
+            cmd.args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "1");
+            if rename {
+                cmd.env("KG_CAP_RENAME", "1");
+            }
+            let status = unsafe {
+                cmd.pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+            };
+            assert!(status.success(), "helper in {dir}");
+        };
+        workload(&dirs[0], false);
+        workload(&dirs[1], true);
+        // Runtime setup like crun: forked by a host process, without exec, in
+        // the container's new pid namespace; it uses a capability before
+        // the exec of the container's command. Not counted.
+        let status = std::process::Command::new(&me)
+            .args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "crunlike")
+            .env("KG_CAP_CGROUP", format!("{}/cgroup.procs", dirs[2]))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn");
+        assert!(status.success(), "crun-like setup");
+        // The host runtime's binary exec'd straight from its file (not a
+        // sealed copy, as runc runs runc init), e.g. from a hostPath mount:
+        // counted.
+        let procs = format!("{}/cgroup.procs", dirs[7]);
+        let status = unsafe {
+            std::process::Command::new(&me)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "bpf::tests::cap_helper_child",
+                    "--test-threads=1",
+                ])
+                .env("KG_CAP_HELPER", "setup")
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+        };
+        assert!(status.success());
+
+        // Run `bin` in helper `mode` inside the cgroup `dir`.
+        let run_in = |dir: &str, bin: &std::path::Path, mode: &str, env: &[(&str, String)]| {
+            let procs = format!("{dir}/cgroup.procs");
+            let mut cmd = std::process::Command::new(bin);
+            cmd.args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", mode);
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let status = unsafe {
+                cmd.pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+            };
+            assert!(status.success(), "{mode} helper in {dir}");
+        };
+        // runc 1.1's shape (exec'd by the host, then again): counted.
+        run_in(&dirs[3], &me, "reexec", &[]);
+        // Container code in a user namespace of its own: not the container's
+        // capabilities.
+        run_in(&dirs[4], &workload_bin, "nested", &[]);
+        // A check against a descendant user namespace. Owned by another uid:
+        // the kernel reads the task's own bits, a real use. Owned by the
+        // task's euid: granted by ownership, the bits are never read.
+        let holder = |owner_uid: Option<u32>| {
+            let mut cmd = std::process::Command::new("/bin/sleep");
+            cmd.arg("30");
+            unsafe {
+                cmd.pre_exec(move || {
+                    if let Some(u) = owner_uid {
+                        if libc::setgroups(0, std::ptr::null()) != 0
+                            || libc::setresgid(u, u, u) != 0
+                            || libc::setresuid(u, u, u) != 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+                .spawn()
+                .expect("user namespace holder")
+            }
+        };
+        let mut others = holder(Some(1000));
+        let mut owned = holder(None);
+        // Wait until both are in their namespaces (the exec has happened).
+        for _ in 0..50 {
+            let exe = |c: &std::process::Child| std::fs::read_link(format!("/proc/{}/exe", c.id()));
+            if exe(&others).is_ok_and(|p| p.ends_with("sleep"))
+                && exe(&owned).is_ok_and(|p| p.ends_with("sleep"))
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        run_in(
+            &dirs[5],
+            &workload_bin,
+            "ptrace",
+            &[("KG_CAP_TARGET", others.id().to_string())],
+        );
+        run_in(
+            &dirs[6],
+            &workload_bin,
+            "ptrace",
+            &[("KG_CAP_TARGET", owned.id().to_string())],
+        );
+        let _ = others.kill();
+        let _ = owned.kill();
+        let _ = others.wait();
+        let _ = owned.wait();
+        // A container process that forks a worker and exits, as a daemon
+        // does, in the host pid namespace (hostPID): the worker, never
+        // exec'd, is reparented outside the pod and uses a capability.
+        // Counted.
+        let done = std::env::temp_dir().join(unique_name("kg-orphan"));
+        let _ = std::fs::remove_file(&done);
+        run_in(
+            &dirs[8],
+            &workload_bin,
+            "orphan",
+            &[("KG_CAP_DONE", done.display().to_string())],
+        );
+        for _ in 0..500 {
+            if done.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.exists(), "the orphaned worker ran");
+        let _ = std::fs::remove_file(&done);
+        // Another runtime installed as "runc" execs the container's command
+        // from its file: one exec, a parent named runc, but not a sealed
+        // copy. Counted.
+        let status = std::process::Command::new(&me)
+            .args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "runcnamed")
+            .env("KG_CAP_WORKLOAD", &workload_bin)
+            .env("KG_CAP_CGROUP", format!("{}/cgroup.procs", dirs[9]))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn");
+        assert!(status.success(), "runc-named runtime");
+
+        for _ in 0..10 {
+            rb.poll(std::time::Duration::from_millis(100)).unwrap();
+        }
+
+        let mut counts: std::collections::BTreeMap<(u64, u32, u32), u64> = Default::default();
+        for k in sk.maps.cap_seen.keys() {
+            let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).unwrap().unwrap();
+            counts.insert(
+                (
+                    u64::from_ne_bytes(k[..8].try_into().unwrap()),
+                    u32::from_ne_bytes(k[8..12].try_into().unwrap()),
+                    u32::from_ne_bytes(k[12..16].try_into().unwrap()),
+                ),
+                u64::from_ne_bytes(v[..8].try_into().unwrap()),
+            );
+        }
+        let of = |cg: u64| {
+            counts
+                .iter()
+                .filter(|(k, _)| k.0 == cg)
+                .map(|(k, v)| ((k.1, k.2), *v))
+                .collect::<Vec<_>>()
+        };
+        eprintln!("container: {:?}", of(cg_app));
+        eprintln!("renamed:   {:?}", of(cg_renamed));
+        eprintln!("setup:     {:?}", of(cg_setup));
+        eprintln!("reexec:    {:?}", of(cg_reexec));
+        eprintln!("sameexe:   {:?}", of(cg_sameexe));
+        eprintln!("orphan:    {:?}", of(cg_orphan));
+        eprintln!("runcnamed: {:?}", of(cg_runcnamed));
+        eprintln!("nested:    {:?}", of(cg_nested));
+        eprintln!("others:    {:?}", of(cg_others));
+        eprintln!("owned:     {:?}", of(cg_owned));
+        for cg in [cg_app, cg_renamed] {
+            let n = |cap: u32, flags: u32| counts.get(&(cg, cap, flags)).copied().unwrap_or(0);
+            assert!(
+                n(10, FLAG_GRANTED) >= 2,
+                "NET_BIND_SERVICE used twice (cgroup {cg})"
+            );
+            assert!(
+                n(21, 0) >= 1,
+                "SYS_ADMIN asked for and denied (sethostname)"
+            );
+            assert!(
+                n(21, FLAG_GRANTED | FLAG_PROBED) >= 1,
+                "the seccomp filter's non-audited SYS_ADMIN check is recorded as probed"
+            );
+            assert_eq!(
+                n(21, FLAG_GRANTED),
+                0,
+                "SYS_ADMIN was never used as an ordinary check"
+            );
+        }
+        assert!(
+            !counts.contains_key(&(cg_setup, 21, FLAG_GRANTED)),
+            "runtime setup forked without exec into the container's pid namespace is not the \
+             container's use"
+        );
+        eprintln!("asserted: setup excluded");
+        assert!(
+            counts.contains_key(&(cg_sameexe, 21, FLAG_GRANTED)),
+            "the runtime's binary exec'd from its file, not a sealed copy, is counted"
+        );
+        eprintln!("asserted: unsealed runtime binary counted");
+        assert!(
+            counts.contains_key(&(cg_orphan, 21, FLAG_GRANTED)),
+            "a hostPID container's forked worker, reparented outside the pod, is counted"
+        );
+        eprintln!("asserted: hostPID orphaned worker counted");
+        assert!(
+            counts.contains_key(&(cg_runcnamed, 21, FLAG_GRANTED)),
+            "a command exec'd from its file by a non-runc runtime installed as runc is counted"
+        );
+        eprintln!("asserted: command of a runtime named runc (not a sealed copy) counted");
+        assert!(
+            counts.contains_key(&(cg_reexec, 21, FLAG_GRANTED)),
+            "two execs since the host forked it (runc 1.1's re-exec) is counted: the safe direction"
+        );
+        eprintln!("asserted: re-exec'd runtime-shaped task counted");
+        assert!(
+            !counts.contains_key(&(cg_nested, 21, FLAG_GRANTED)),
+            "SYS_ADMIN in a user namespace the container created is not the container's"
+        );
+        eprintln!("asserted: nested-userns SYS_ADMIN skipped");
+        assert!(
+            counts.contains_key(&(cg_others, 19, FLAG_GRANTED)),
+            "SYS_PTRACE against a descendant user namespace another uid owns reads the \
+             container's bits: counted"
+        );
+        eprintln!("asserted: descendant userns owned by another uid counted");
+        assert!(
+            !counts.contains_key(&(cg_owned, 19, FLAG_GRANTED)),
+            "SYS_PTRACE against a descendant user namespace the task's euid owns is granted by \
+             ownership: not counted"
+        );
+        eprintln!("asserted: descendant userns owned by the task's euid skipped");
+        let evs = events.lock().unwrap();
+        let first: Vec<_> = evs.iter().filter(|e| e.cgroup_id == cg_app).collect();
+        assert!(first
+            .iter()
+            .all(|e| e.container_id().as_deref() == Some(CID)));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|e| e.cap == 10 && e.flags == FLAG_GRANTED)
+                .count(),
+            1,
+            "one event per (container, capability, flags); the rest are counts"
+        );
+        let _ = std::fs::remove_file(&workload_bin);
+        for d in &dirs {
+            let _ = std::fs::remove_dir(d);
+        }
+        let _ = std::fs::remove_dir(&pod_dir);
+    }
+
+    /// `prefix-<pid>-<nanos>`: unique even across VMs that share the host's
+    /// /tmp (vmtest mounts the host filesystem) and reuse the same pids.
+    fn unique_name(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!("{prefix}-{}-{nanos}", std::process::id())
+    }
+
+    /// Real container runtimes for the VM tests: KG_RUNC / KG_CRUN name the
+    /// static release binaries (checksum-verified by the caller). A tmpfs
+    /// holds the rootfs (this test binary and its libraries), the bundles
+    /// and the runtimes' state; everything is removed on drop.
+    struct RealRuntimes {
+        base: std::path::PathBuf,
+        rootfs: std::path::PathBuf,
+        /// Pod-level cgroup path below /sys/fs/cgroup, e.g. /kubepods/besteffort/pod<uid>.
+        pods: Vec<String>,
+        cgroups: Vec<String>,
+        runtimes: Vec<(&'static str, std::path::PathBuf)>,
+    }
+
+    const HELPER_ARGS: [&str; 5] = [
+        "/kg-workload",
+        "--ignored",
+        "--exact",
+        "bpf::tests::cap_helper_child",
+        "--test-threads=1",
+    ];
+
+    impl RealRuntimes {
+        fn new() -> Self {
+            use std::path::PathBuf;
+            let wanted: Vec<(&'static str, PathBuf)> = [("runc", "KG_RUNC"), ("crun", "KG_CRUN")]
+                .into_iter()
+                .filter_map(|(n, var)| std::env::var(var).ok().map(|p| (n, PathBuf::from(p))))
+                .collect();
+            assert!(!wanted.is_empty(), "set KG_RUNC and/or KG_CRUN");
+            let base = PathBuf::from("/tmp").join(unique_name("kg-rt"));
+            std::fs::create_dir_all(&base).unwrap();
+            let c = std::ffi::CString::new(base.to_str().unwrap()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        c.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0,
+                "mount tmpfs"
+            );
+            let rootfs = base.join("rootfs");
+            std::fs::create_dir_all(&rootfs).unwrap();
+            let me = std::env::current_exe().unwrap();
+            std::fs::copy(&me, rootfs.join("kg-workload")).unwrap();
+            let ldd = std::process::Command::new("ldd")
+                .arg(&me)
+                .output()
+                .expect("ldd");
+            for lib in String::from_utf8_lossy(&ldd.stdout)
+                .split_whitespace()
+                .filter(|w| w.starts_with('/'))
+            {
+                let dst = rootfs.join(lib.trim_start_matches('/'));
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                std::fs::copy(lib, &dst).unwrap();
+            }
+            // Named as the runtime: its process name is its file name. crun
+            // is also installed as "runc" (as a runc -> crun symlink or a
+            // shim configured for runc would run it), which must not make
+            // its container's command look like runc init.
+            let mut installs: Vec<(&'static str, &'static str, PathBuf)> = Vec::new();
+            for (name, src) in wanted {
+                installs.push((name, name, src.clone()));
+                if name == "crun" {
+                    installs.push(("crun-as-runc", "runc", src));
+                }
+            }
+            let runtimes = installs
+                .into_iter()
+                .map(|(label, file, src)| {
+                    let bin = base.join(format!("bin-{label}")).join(file);
+                    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+                    std::fs::copy(&src, &bin).unwrap();
+                    (label, bin)
+                })
+                .collect();
+            RealRuntimes {
+                base,
+                rootfs,
+                pods: Vec::new(),
+                cgroups: Vec::new(),
+                runtimes,
+            }
+        }
+
+        /// A container cgroup `pod`/`cid`, created now so its id is known
+        /// before the runtime (which joins an existing cgroup) removes it.
+        fn cgroup(&mut self, pod: &str, cid: &str) -> u64 {
+            use std::os::unix::fs::MetadataExt;
+            let dir = format!("/sys/fs/cgroup{pod}/{cid}");
+            std::fs::create_dir_all(&dir).unwrap();
+            if !self.pods.iter().any(|p| p == pod) {
+                self.pods.push(pod.to_string());
+            }
+            self.cgroups.push(dir.clone());
+            std::fs::metadata(&dir).unwrap().ino()
+        }
+
+        /// A bundle whose process runs the helper in `mode`, in cgroup
+        /// `pod`/`cid`, sharing this netns, with hostname set (so setup
+        /// calls sethostname) and three capabilities.
+        fn bundle(&self, name: &str, pod: &str, cid: &str, mode: &str) -> std::path::PathBuf {
+            let dir = self.base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let caps = ["CAP_NET_BIND_SERVICE", "CAP_KILL", "CAP_AUDIT_WRITE"];
+            let config = serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": {
+                    "terminal": false,
+                    "user": {"uid": 0, "gid": 0},
+                    "args": HELPER_ARGS,
+                    "env": ["PATH=/", format!("KG_CAP_HELPER={mode}")],
+                    "cwd": "/",
+                    "capabilities": {"bounding": caps, "effective": caps, "permitted": caps},
+                    "noNewPrivileges": true
+                },
+                "root": {"path": self.rootfs.to_str().unwrap(), "readonly": false},
+                "hostname": "kg-setup",
+                "mounts": [
+                    {"destination": "/proc", "type": "proc", "source": "proc"},
+                    {"destination": "/dev", "type": "tmpfs", "source": "tmpfs",
+                     "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]}
+                ],
+                "linux": {
+                    "cgroupsPath": format!("{pod}/{cid}"),
+                    "namespaces": [{"type": "pid"}, {"type": "ipc"}, {"type": "uts"},
+                                   {"type": "mount"}, {"type": "cgroup"}]
+                }
+            });
+            std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+            dir
+        }
+
+        fn command(&self, name: &str, args: &[&str]) -> std::process::Command {
+            let bin = &self.runtimes.iter().find(|r| r.0 == name).unwrap().1;
+            let mut cmd = std::process::Command::new(bin);
+            // The runtime's output, and a detached container's (it inherits
+            // the runtime's stdio), go to a log shown when an assertion fails.
+            let log = || {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.base.join(format!("{name}.log")))
+                    .expect("runtime log")
+            };
+            cmd.arg("--root")
+                .arg(self.base.join(format!("state-{name}")))
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(log())
+                .stderr(log());
+            cmd
+        }
+
+        /// What runtime `name` and its containers wrote.
+        fn log(&self, name: &str) -> String {
+            std::fs::read_to_string(self.base.join(format!("{name}.log"))).unwrap_or_default()
+        }
+
+        /// Run runtime `name` with `args` (after its --root); must succeed.
+        fn run(&self, name: &str, args: &[&str]) {
+            let st = self.command(name, args).status().expect("runtime");
+            assert!(st.success(), "{name} {args:?}");
+        }
+
+        /// Wait until container `id` has stopped.
+        fn wait_stopped(&self, name: &str, id: &str) {
+            for _ in 0..200 {
+                let out = self
+                    .command(name, &["state", id])
+                    .stdout(std::process::Stdio::piped())
+                    .output()
+                    .expect("state");
+                if String::from_utf8_lossy(&out.stdout).contains("\"stopped\"") {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("{name}: {id} did not stop");
+        }
+
+        /// The way containerd and CRI-O drive a runtime: `create` (the
+        /// runtime sets the container up and exits), `start`, wait for the
+        /// command (the helper in the bundle's mode) to finish, `delete`.
+        fn run_container(&self, name: &str, id: &str, bundle: &std::path::Path) {
+            self.run(name, &["create", "--bundle", bundle.to_str().unwrap(), id]);
+            self.run(name, &["start", id]);
+            self.wait_stopped(name, id);
+            self.run(name, &["delete", "--force", id]);
+        }
+
+        /// Create and start a container that holds (helper "hold"),
+        /// `exec --detach` the helper in `mode` in it (as the CRI does),
+        /// wait for the container to stop, then delete it.
+        fn exec_in_held(&self, name: &str, id: &str, bundle: &std::path::Path, mode: &str) {
+            self.run(name, &["create", "--bundle", bundle.to_str().unwrap(), id]);
+            self.run(name, &["start", id]);
+            let env = format!("KG_CAP_HELPER={mode}");
+            let mut exec = vec!["exec", "--detach", "--env", env.as_str(), id];
+            exec.extend(HELPER_ARGS);
+            self.run(name, &exec);
+            self.wait_stopped(name, id);
+            self.run(name, &["delete", "--force", id]);
+        }
+
+        /// A foreground `run`: the runtime stays the parent of the
+        /// container's command (the helper in the bundle's mode) until it
+        /// exits.
+        fn run_foreground(&self, name: &str, id: &str, bundle: &std::path::Path) {
+            self.run(name, &["run", "--bundle", bundle.to_str().unwrap(), id]);
+        }
+    }
+
+    impl Drop for RealRuntimes {
+        fn drop(&mut self) {
+            if let Ok(c) = std::ffi::CString::new(self.base.to_str().unwrap_or_default()) {
+                unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+            }
+            let _ = std::fs::remove_dir(&self.base);
+            for d in self.cgroups.iter().chain(self.pods.iter()) {
+                let path = if d.starts_with("/sys/") {
+                    d.clone()
+                } else {
+                    format!("/sys/fs/cgroup{d}")
+                };
+                let _ = std::fs::remove_dir(path);
+            }
+        }
+    }
+
+    /// Real container runtimes, on the RUNNING kernel: their setup (runc
+    /// init / crun before the exec of the container's command, and the same
+    /// for `exec`) is not the container's capability use; the container's
+    /// own processes are, including one named "runc:[2:INIT]" and one
+    /// started by `exec`. Needs root, cgroup v2 and KG_RUNC / KG_CRUN.
+    #[test]
+    #[ignore = "needs root, cgroup v2, a BTF-enabled kernel and KG_RUNC/KG_CRUN; run by the ebpf-kernels CI job"]
+    fn capability_setup_of_real_runtimes_is_not_counted() {
+        use crate::runtime_capabilities::FLAG_GRANTED;
+
+        let mut rt = RealRuntimes::new();
+        let mut storage = MaybeUninit::uninit();
+        let (sk, _links, attached) =
+            load_runtime_inventory(&mut storage, false, true).expect("load");
+        assert!(
+            attached.caps,
+            "capability probe off: {:?}",
+            attached.cap_error
+        );
+        eprintln!("capability hook: {:?}", attached.cap_hook);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.cap_events, |_: &[u8]| 0).unwrap();
+        let rb = rb.build().unwrap();
+
+        let pod = "/kubepods/besteffort/pod7b3d0a2f-8c5e-4f1b-a02d-1234567890ab".to_string();
+        let names: Vec<&'static str> = rt.runtimes.iter().map(|r| r.0).collect();
+        let mut checked = Vec::new();
+        let mut fg_case = None;
+        for (i, name) in names.into_iter().enumerate() {
+            // The container's command does its own checks.
+            let work =
+                format!("6{i}1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
+            let cg_work = rt.cgroup(&pod, &work);
+            let b = rt.bundle(&format!("{name}-work"), &pod, &work, "work");
+            rt.run_container(name, &format!("kg-{name}-work"), &b);
+            // The container's command does nothing; a process started by
+            // exec does.
+            let held =
+                format!("6{i}2e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
+            let cg_held = rt.cgroup(&pod, &held);
+            let b = rt.bundle(&format!("{name}-held"), &pod, &held, "hold");
+            rt.exec_in_held(name, &format!("kg-{name}-held"), &b, "bind");
+            checked.push((name, cg_work, cg_held));
+            // Another runtime installed as "runc", kept alive as the parent
+            // (a foreground run): the container's command, one exec from a
+            // parent named runc, is still the container's (its exe is not a
+            // sealed copy). Only its own use is asserted: a foreground
+            // runtime is a subreaper, so its setup may be counted.
+            if name == "crun-as-runc" {
+                let fg =
+                    format!("6{i}3e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0");
+                let cg_fg = rt.cgroup(&pod, &fg);
+                let b = rt.bundle(&format!("{name}-fg"), &pod, &fg, "work");
+                rt.run_foreground(name, &format!("kg-{name}-fg"), &b);
+                fg_case = Some(cg_fg);
+            }
+        }
+        for _ in 0..10 {
+            rb.poll(std::time::Duration::from_millis(100)).unwrap();
+        }
+        let mut counts: std::collections::BTreeMap<(u64, u32, u32), u64> = Default::default();
+        for k in sk.maps.cap_seen.keys() {
+            let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).unwrap().unwrap();
+            counts.insert(
+                (
+                    u64::from_ne_bytes(k[..8].try_into().unwrap()),
+                    u32::from_ne_bytes(k[8..12].try_into().unwrap()),
+                    u32::from_ne_bytes(k[12..16].try_into().unwrap()),
+                ),
+                u64::from_ne_bytes(v[..8].try_into().unwrap()),
+            );
+        }
+        let of = |cg: u64| {
+            counts
+                .iter()
+                .filter(|(k, _)| k.0 == cg)
+                .map(|(k, v)| ((k.1, k.2), *v))
+                .collect::<Vec<_>>()
+        };
+        for (name, cg_work, cg_held) in &checked {
+            eprintln!("{name} work: {:?}", of(*cg_work));
+            eprintln!("{name} held+exec: {:?}", of(*cg_held));
+            let n =
+                |cg: u64, cap: u32, flags: u32| counts.get(&(cg, cap, flags)).copied().unwrap_or(0);
+            assert_eq!(
+                n(*cg_work, 21, FLAG_GRANTED),
+                0,
+                "{name}: its setup's SYS_ADMIN (mounts, hostname) is not the container's"
+            );
+            assert!(
+                n(*cg_work, 21, 0) >= 1 && n(*cg_work, 10, FLAG_GRANTED) >= 1,
+                "{name}: the container's command, named runc:[2:INIT], is counted\n{}",
+                rt.log(name)
+            );
+            eprintln!("asserted: {name} run: setup excluded, renamed command counted");
+            assert_eq!(
+                n(*cg_held, 21, FLAG_GRANTED),
+                0,
+                "{name}: exec's setup (setns) is not the container's"
+            );
+            assert!(
+                n(*cg_held, 10, FLAG_GRANTED) >= 1,
+                "{name}: a process started by exec is counted\n{}",
+                rt.log(name)
+            );
+            eprintln!("asserted: {name} exec: setup excluded, exec'd process counted");
+            let used = |cg: u64| -> Vec<u32> {
+                counts
+                    .keys()
+                    .filter(|k| k.0 == cg && k.2 == FLAG_GRANTED)
+                    .map(|k| k.1)
+                    .collect()
+            };
+            assert_eq!(
+                (used(*cg_work), used(*cg_held)),
+                (vec![10], vec![10]),
+                "{name}: the only capability used is the workload's own NET_BIND_SERVICE; none of \
+                 the runtime's setup (SETGID, SETPCAP, SYS_ADMIN, ...) is counted"
+            );
+            eprintln!("asserted: {name}: used set is exactly the workload's");
+        }
+        if let Some(cg) = fg_case {
+            eprintln!("crun-as-runc foreground run: {:?}", of(cg));
+            assert!(
+                counts.contains_key(&(cg, 10, FLAG_GRANTED)) && counts.contains_key(&(cg, 21, 0)),
+                "the command of another runtime installed as runc, which stays its parent, is counted"
+            );
+            eprintln!("asserted: crun-as-runc foreground run: container command counted");
+        }
+        drop(rb);
     }
 
     fn reset_state() {
