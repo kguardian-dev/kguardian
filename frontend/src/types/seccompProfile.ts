@@ -42,13 +42,18 @@ export const SECCOMP_ACTION_DESCRIPTIONS: Record<SeccompAction, string> = {
   'SCMP_ACT_TRAP': 'Throw a SIGSYS signal',
 };
 
+// The architectures the editor offers: the OCI runtime-spec names, which is
+// what runc validates against. SCMP_ARCH_ARM64 is deliberately not offered.
+// It is not an OCI name, and a profile carrying it fails every pod that
+// references it. `architectures` stays a plain string[] so a profile from an
+// older export that still contains it loads and displays; it just cannot be
+// newly chosen here.
 export const ARCHITECTURES = [
   'SCMP_ARCH_X86_64',
   'SCMP_ARCH_X86',
   'SCMP_ARCH_X32',
   'SCMP_ARCH_ARM',
   'SCMP_ARCH_AARCH64',
-  'SCMP_ARCH_ARM64',
   'SCMP_ARCH_MIPS',
   'SCMP_ARCH_MIPS64',
   'SCMP_ARCH_MIPS64N32',
