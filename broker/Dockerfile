@@ -29,6 +29,14 @@ RUN apt update && apt install -y libpq5 ca-certificates && rm -rf /var/lib/apt/l
 
 COPY --from=build /app/broker/target/release/broker /broker
 
+# Two glibc malloc arenas instead of up to 8 per core. Every read runs on
+# a tokio blocking thread (web::block; the pool grows to hundreds), each
+# thread got its own arena, and each arena kept its high-water mark: ten
+# one-at-a-time SBOM exports left 736 MiB resident, 717 MiB of it in 38
+# arenas of ~64 MiB. With 2 arenas the same run stays at 145 MiB. See the
+# PR that added this for the harness numbers. A pod can still override it.
+ENV MALLOC_ARENA_MAX=2
+
 EXPOSE 9090
 
 CMD ["/broker"]

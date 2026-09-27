@@ -92,8 +92,9 @@ pub use seccomp_denial::{
 };
 pub use seccomp_profiles_cache::{SeccompProfilesCache, DEFAULT_PROFILES_CACHE_TTL_SECS};
 pub use supplychain_read::{
-    get_vulnerabilities, get_vulnerability_exposure, image_sbom_cyclonedx_resource,
-    image_sbom_resource, image_vulnerabilities_resource,
+    cyclonedx_document, get_vulnerabilities, get_vulnerability_exposure,
+    image_sbom_cyclonedx_resource, image_sbom_resource, image_vulnerabilities_resource,
+    ExportComponent, Report as SbomReport, EXPORT_COMPONENT_COST_BYTES,
 };
 
 #[cfg(test)]
