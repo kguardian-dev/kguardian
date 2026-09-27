@@ -67,7 +67,7 @@ jobs:
       # variable there expands to "" before the VM sees it (it once pinned
       # an empty capability hook and the test skipped on every kernel).
       - name: No shell expansion in vmtest commands
-        run: python3 .github/scripts/check_vmtest_commands.py .github/workflows/*.y*ml
+        run: python3 .github/scripts/check_vmtest_commands.py .github/workflows/*.y*ml --context .github/workflows/controller-ebpf-*.yaml
 
       - name: Install system dependencies
         run: |

@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Fail if a vmtest `command:` in a workflow contains shell expansion.
+"""Lint workflow shell commands for expansion the runner's shell would do.
 
-vmtest runs `command` through a shell of its own before the VM sees it, so
-any `$` there ($h, ${h}, $(...)) is expanded on the runner, usually to "".
-Only workflow expressions (${{ ... }}) are allowed. The whole value is
-checked, including folded or literal block continuation lines.
-Usage: check_vmtest_commands.py <workflow.yaml>...
+1. A vmtest `command:` must contain no shell expansion. vmtest runs it
+   through a shell of its own before the VM sees it, so any `$` there ($h,
+   ${h}, $(...)) is expanded on the runner, usually to "". Only workflow
+   expressions (${{ ... }}) are allowed.
+2. No `run:` or `command:` may interpolate user-controlled context
+   (${{ inputs.* }}, ${{ github.event.* }}) directly: Actions substitutes
+   it into the script text before a shell parses it. Pass it through
+   `env:` (and validate it) instead.
+
+The whole value is checked, including folded or literal block
+continuation lines.
+Usage: check_vmtest_commands.py <workflow.yaml>... [--context <workflow.yaml>...]
+Check 1 runs on every file; check 2 on the files after --context (all of
+them when --context is not given).
 """
 import re
 import sys
 
-bad = 0
-for path in sys.argv[1:]:
-    lines = open(path).read().split("\n")
+UNTRUSTED = re.compile(r"\$\{\{\s*(inputs\.|github\.event\.)")
+
+
+def blocks(lines, key):
+    """(line number, value text) for every `key:` and its continuation."""
     i = 0
     while i < len(lines):
-        m = re.match(r"^(\s+)command:\s*(.*)$", lines[i])
+        m = re.match(r"^(\s+)(?:- )?" + key + r":\s*(.*)$", lines[i])
         if not m:
             i += 1
             continue
@@ -27,9 +38,28 @@ for path in sys.argv[1:]:
         ):
             value.append(lines[j])
             j += 1
-        rest = re.sub(r"\$\{\{.*?\}\}", "", "\n".join(value), flags=re.S)
+        yield i + 1, "\n".join(value)
+        i = j
+
+
+args = sys.argv[1:]
+if "--context" in args:
+    k = args.index("--context")
+    files, context = args[:k] + args[k + 1 :], set(args[k + 1 :])
+else:
+    files, context = args, set(args)
+
+bad = 0
+for path in files:
+    lines = open(path).read().split("\n")
+    for line, value in blocks(lines, "command"):
+        rest = re.sub(r"\$\{\{.*?\}\}", "", value, flags=re.S)
         if "$" in rest:
             bad = 1
-            print(f"{path}:{i + 1}: shell expansion in a vmtest command")
-        i = j
+            print(f"{path}:{line}: shell expansion in a vmtest command")
+    for key in ("command", "run") if path in context else ():
+        for line, value in blocks(lines, key):
+            if UNTRUSTED.search(value):
+                bad = 1
+                print(f"{path}:{line}: {key} interpolates inputs/github.event; pass it via env")
 sys.exit(bad)
