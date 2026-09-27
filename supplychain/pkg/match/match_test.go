@@ -376,12 +376,13 @@ func TestClampIsCountedAndBounded(t *testing.T) {
 }
 
 func TestBoundedAndTee(t *testing.T) {
-	m := &mockMatcher{}
+	m := &mockMatcher{built: time.Unix(100, 0)}
 	next := &sink{}
 	c := &Coordinator{Matcher: m, Sink: &sink{}, MaxDigests: 3}
 	tee := c.Tee(next)
 	for _, d := range []string{"a", "b", "c", "d", "e"} {
 		tee.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: d, SBOM: registrySBOM("sha256:"+d, "", "p")})
+		pass(c) // only matched digests are dropped
 	}
 	tee.Enqueue(trivy.Emission{Kind: trivy.KindVulnerabilities, Digest: "z", Vulns: &types.ImageVulnerabilities{}})
 	if c.Held() != 3 {

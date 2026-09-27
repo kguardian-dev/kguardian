@@ -145,3 +145,53 @@ func TestEncodeBounded(t *testing.T) {
 		t.Fatalf("decoded %d sigs %d atts err %v", len(back.Signatures), len(back.Attestations), err)
 	}
 }
+
+type gatedInventory struct {
+	release chan struct{}
+	targets []Target
+}
+
+func (g gatedInventory) RunningImages(ctx context.Context) ([]Target, error) {
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+	}
+	return g.targets, nil
+}
+
+type nopSink struct{}
+
+func (nopSink) Post(context.Context, Result) error { return nil }
+
+// Ready follows the inventory read, not the verifications: a slow
+// registry must not hold readiness through a whole first pass.
+func TestReadyOnceInventoryReadWhileVerifying(t *testing.T) {
+	started, release := make(chan struct{}, 64), make(chan struct{})
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		http.NotFound(w, r)
+	}))
+	defer reg.Close()
+	host := strings.TrimPrefix(reg.URL, "http://")
+	inv := gatedInventory{release: make(chan struct{}), targets: []Target{
+		{Digest: "sha256:" + strings.Repeat("a", 64), Repository: host + "/x", DigestKind: "repo"},
+		{Digest: "sha256:" + strings.Repeat("b", 64), Repository: host + "/y", DigestKind: "repo"},
+	}}
+	r := &Runner{Verifier: newFixtureVerifier(t), Inventory: inv, Sink: nopSink{}}
+	done := make(chan struct{})
+	go func() { defer close(done); r.Pass(context.Background()) }()
+	if r.Ready() {
+		t.Fatal("ready before the inventory answered")
+	}
+	close(inv.release)
+	<-started // a verification is blocked on the registry
+	if !r.Ready() {
+		t.Fatal("not ready while the first pass is still verifying")
+	}
+	close(release)
+	<-done
+}

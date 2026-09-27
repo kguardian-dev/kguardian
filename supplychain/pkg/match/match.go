@@ -63,11 +63,54 @@ const DefaultMaxComponents = 50000
 type held struct {
 	sbom     *types.ImageSBOM
 	lastUsed time.Time
+	bytes    int64 // heldBytes(sbom)
+}
+
+// DefaultMaxHeldBytes bounds the SBOMs held for re-matching (see
+// Coordinator.MaxHeldBytes).
+const DefaultMaxHeldBytes = 96 << 20
+
+// heldBytes estimates what sbom keeps alive on the heap: the component
+// structs and every string they reference. A fat Debian image's file
+// lists dominate. It is an estimate for a budget, not an exact count;
+// TestHeldBytesTracksTheHeap checks it against the runtime.
+func heldBytes(sbom *types.ImageSBOM) int64 {
+	const (
+		structOverhead = 1024 // ImageSBOM header, maps and held entry
+		componentSize  = 176  // types.Component: 8 strings + 2 slices
+		stringHeader   = 16
+	)
+	// str is one string allocation: decoded JSON gives every string its
+	// own, rounded up to a 16-byte size class, except that strings under
+	// 16 bytes share tiny-allocator blocks.
+	str := func(s string) int64 {
+		if len(s) < 16 {
+			return int64(len(s))
+		}
+		return int64((len(s) + 15) &^ 15)
+	}
+	n := int64(structOverhead) + int64(cap(sbom.Components))*componentSize
+	for i := range sbom.Components {
+		c := &sbom.Components[i]
+		n += str(c.Name) + str(c.Version) + str(c.PURL) + str(c.Type) + str(c.Class) +
+			str(c.SrcName) + str(c.SrcVersion) + str(c.LayerDigest)
+		n += int64(cap(c.Licenses)+cap(c.FilePaths)) * stringHeader
+		for _, l := range c.Licenses {
+			n += str(l)
+		}
+		for _, f := range c.FilePaths {
+			n += str(f)
+		}
+	}
+	return n
 }
 
 type groupState struct {
 	fingerprint string
 	matchedDB   time.Time
+	// touched is when an SBOM of the group was last offered; groups whose
+	// SBOMs are no longer held are pruned oldest first past MaxDigests.
+	touched time.Time
 
 	// Failures of the current input (failFP against failDB). Reset when
 	// either changes; at the threshold the group is quarantined: not
@@ -112,8 +155,20 @@ type Coordinator struct {
 	Sink    trivy.Sink
 	Log     *logrus.Logger
 	Metrics *metrics.Metrics
-	// MaxDigests bounds the digests whose SBOMs are held. Default 2000.
+	// MaxDigests bounds the digests whose SBOMs are held, and separately
+	// the groups whose match state (fingerprint, database, quarantine) is
+	// kept. Default 2000.
 	MaxDigests int
+	// MaxHeldBytes bounds the estimated heap the held SBOMs use (see
+	// heldBytes). Past it, and past MaxDigests, whole groups' SBOMs are
+	// dropped, least recently offered first, but only groups that need
+	// nothing more: matched at the current database, or quarantined, and
+	// not queued, retried or in flight. Their match state is kept, so an
+	// unchanged re-offer is not matched again and a quarantine holds. A
+	// group still waiting for its match is never dropped, so the budget
+	// can be exceeded until it is matched (e.g. before the first database
+	// loads). Default DefaultMaxHeldBytes.
+	MaxHeldBytes int64
 	// MaxComponents caps one match's input after de-duplication.
 	// Default DefaultMaxComponents.
 	MaxComponents int
@@ -143,6 +198,8 @@ type Coordinator struct {
 	// ticker queues them again. unavailable* summarise one pass of them
 	// for a single log line.
 	retry             map[string]struct{}
+	heldBytes         int64  // sum of held.bytes
+	inflight          string // the group being matched
 	unavailable       int
 	unavailableSample string
 	unavailableErr    error
@@ -159,6 +216,9 @@ func (c *Coordinator) init() {
 	}
 	if c.MaxDigests <= 0 {
 		c.MaxDigests = 2000
+	}
+	if c.MaxHeldBytes <= 0 {
+		c.MaxHeldBytes = DefaultMaxHeldBytes
 	}
 	if c.MaxComponents <= 0 {
 		c.MaxComponents = DefaultMaxComponents
@@ -186,12 +246,26 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.mu.Lock()
 	c.init()
 	d := sbom.Image.Digest
+	h := &held{sbom: sbom, lastUsed: c.now(), bytes: heldBytes(sbom)}
+	if old, ok := c.sboms[d][sbom.Source]; ok {
+		c.heldBytes -= old.bytes
+		delete(c.sboms[d], sbom.Source)
+	}
+	c.evictLocked(d, h.bytes)
 	if _, ok := c.sboms[d]; !ok {
-		c.evictLocked()
 		c.sboms[d] = map[string]*held{}
 	}
-	c.sboms[d][sbom.Source] = &held{sbom: sbom, lastUsed: c.now()}
-	c.queue[c.groupKeyLocked(d)] = struct{}{}
+	c.sboms[d][sbom.Source] = h
+	c.heldBytes += h.bytes
+	k := c.groupKeyLocked(d)
+	c.queue[k] = struct{}{}
+	gs := c.groups[k]
+	if gs == nil {
+		gs = &groupState{}
+		c.groups[k] = gs
+	}
+	gs.touched = h.lastUsed
+	c.pruneGroupsLocked()
 	c.gaugesLocked()
 	c.mu.Unlock()
 	c.wake()
@@ -266,23 +340,104 @@ func (c *Coordinator) membersLocked(key string) []*types.ImageSBOM {
 	return out
 }
 
-func (c *Coordinator) evictLocked() {
-	for len(c.sboms) >= c.MaxDigests {
-		var oldest string
-		var t time.Time
+// settledLocked reports whether group k needs nothing more from its held
+// SBOMs until something changes: matched at the current database (or
+// quarantined) and not queued, waiting for a retry or being matched.
+func (c *Coordinator) settledLocked(k string) bool {
+	if _, q := c.queue[k]; q {
+		return false
+	}
+	if _, r := c.retry[k]; r {
+		return false
+	}
+	gs := c.groups[k]
+	if k == c.inflight || gs == nil {
+		return false
+	}
+	return gs.quarantined != "" || (!c.dbSeen.IsZero() && gs.matchedDB.Equal(c.dbSeen))
+}
+
+// evictLocked drops held SBOMs, a whole group at a time and least
+// recently offered first, until one more SBOM of size bytes for digest
+// keep (empty: none) fits MaxDigests and MaxHeldBytes. Only settled
+// groups are dropped, and only their SBOMs: groupState and the queue are
+// kept. If nothing is settled it stops over budget.
+func (c *Coordinator) evictLocked(keep string, bytes int64) {
+	keepKey := ""
+	if keep != "" {
+		keepKey = c.groupKeyLocked(keep)
+	}
+	for {
+		_, have := c.sboms[keep]
+		tooMany := keep != "" && !have && len(c.sboms) >= c.MaxDigests
+		tooBig := c.heldBytes+bytes > c.MaxHeldBytes
+		if !tooMany && !tooBig {
+			return
+		}
+		members := map[string][]string{}
+		last := map[string]time.Time{}
 		for d, bySrc := range c.sboms {
+			k := c.groupKeyLocked(d)
+			members[k] = append(members[k], d)
 			for _, h := range bySrc {
-				if oldest == "" || h.lastUsed.Before(t) {
-					oldest, t = d, h.lastUsed
+				if h.lastUsed.After(last[k]) {
+					last[k] = h.lastUsed
 				}
 			}
 		}
-		if oldest == "" {
+		victim := ""
+		for k := range members {
+			if k == keepKey || k == keep || !c.settledLocked(k) {
+				continue
+			}
+			if victim == "" || last[k].Before(last[victim]) || (last[k].Equal(last[victim]) && k < victim) {
+				victim = k
+			}
+		}
+		if victim == "" {
+			return // everything else still needs matching: hold over budget
+		}
+		reason := "digests"
+		if tooBig {
+			reason = "bytes"
+		}
+		for _, d := range members[victim] {
+			for _, h := range c.sboms[d] {
+				c.heldBytes -= h.bytes
+			}
+			delete(c.sboms, d)
+			if c.Metrics != nil {
+				c.Metrics.GrypeSBOMsEvicted.WithLabelValues(reason).Inc()
+			}
+		}
+	}
+}
+
+// pruneGroupsLocked keeps the match state of at most MaxDigests groups,
+// dropping first the least recently offered whose SBOMs are no longer
+// held and that are not queued, retried or in flight.
+func (c *Coordinator) pruneGroupsLocked() {
+	if len(c.groups) <= c.MaxDigests {
+		return
+	}
+	heldKeys := map[string]bool{}
+	for d := range c.sboms {
+		heldKeys[c.groupKeyLocked(d)] = true
+	}
+	var idle []string
+	for k := range c.groups {
+		_, q := c.queue[k]
+		_, r := c.retry[k]
+		if !heldKeys[k] && !q && !r && k != c.inflight {
+			idle = append(idle, k)
+		}
+	}
+	sort.Slice(idle, func(i, j int) bool { return c.groups[idle[i]].touched.Before(c.groups[idle[j]].touched) })
+	for _, k := range idle {
+		if len(c.groups) <= c.MaxDigests {
 			return
 		}
-		delete(c.sboms, oldest)
-		delete(c.groups, oldest)
-		delete(c.queue, oldest)
+		delete(c.groups, k)
 	}
 }
 
@@ -425,10 +580,20 @@ func (c *Coordinator) drain(ctx context.Context) {
 			}
 		}
 		crashes := gs.crashes
+		if !skip {
+			c.inflight = key
+		}
 		c.mu.Unlock()
 		if !skip {
 			c.matchOne(ctx, key, in, db, crashes)
 		}
+		// The group may be settled now: bring what is held back within
+		// budget.
+		c.mu.Lock()
+		c.inflight = ""
+		c.evictLocked("", 0)
+		c.gaugesLocked()
+		c.mu.Unlock()
 	}
 }
 
@@ -702,6 +867,7 @@ func (c *Coordinator) count(result string) {
 func (c *Coordinator) gaugesLocked() {
 	if c.Metrics != nil {
 		c.Metrics.GrypeSBOMsHeld.Set(float64(len(c.sboms)))
+		c.Metrics.GrypeSBOMBytesHeld.Set(float64(c.heldBytes))
 		q := 0
 		for _, gs := range c.groups {
 			if gs.quarantined != "" {

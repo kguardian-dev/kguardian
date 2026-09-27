@@ -2152,14 +2152,24 @@ supplychain:
   # -- Resource requests and limits. Memory grows with the number and size
   # of Trivy reports in the cluster (the reports are cached); raise the
   # limit on large clusters. With grype.enabled this container also holds
-  # up to 2000 images' SBOMs for matching; that footprint has not been
-  # measured yet, so watch its memory when you turn Grype on.
+  # SBOMs for re-matching, up to an estimated 96 MiB (GRYPE_SBOM_BUDGET_MIB;
+  # about 28 fat Debian/Python images whose registry SBOMs list files).
+  # Measured with a 65 MiB baseline and bursts of 40 such SBOMs: peak RSS
+  # 216 MiB with the derived GOMEMLIMIT, 342 MiB without it. SBOMs still
+  # waiting for their first match are never dropped, so a fresh pod
+  # offered many fat images before the Grype DB loads can go over the
+  # budget until they are matched; raise the limit if it is OOMKilled then.
   resources:
     limits:
       memory: 256Mi
     requests:
       cpu: 10m
       memory: 48Mi
+
+  # -- GOMEMLIMIT for the supplychain container. Empty: 80% of
+  # resources.limits.memory (none when there is no memory limit), so the
+  # Go heap stays under the limit instead of growing to ~2x the live heap.
+  goMemLimit: ""
 
   # -- Node labels for supplychain pod assignment
   nodeSelector:

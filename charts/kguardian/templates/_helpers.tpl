@@ -404,3 +404,24 @@ its ClusterRole and the broker NetworkPolicy, so they cannot disagree.
 {{- end -}}
 {{- if $on -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+kguardian.goMemLimit: 80% of a Kubernetes memory quantity ("256Mi",
+"1Gi", "512M", "268435456", "1.5Gi"), in bytes, for GOMEMLIMIT. The Go
+runtime then collects harder as the heap nears the container limit
+instead of letting it reach ~2x the live heap (GOGC=100) and be
+OOMKilled. Empty input renders nothing; an unparseable one fails.
+*/}}
+{{- define "kguardian.goMemLimit" -}}
+{{- $q := toString . | trim -}}
+{{- if $q -}}
+{{- $re := "^([0-9]+(\\.[0-9]+)?)(Ki|Mi|Gi|Ti|k|K|M|G|T)?$" -}}
+{{- if not (regexMatch $re $q) -}}
+{{- fail (printf "cannot derive GOMEMLIMIT from memory limit %q; set supplychain.goMemLimit" $q) -}}
+{{- end -}}
+{{- $units := dict "" 1.0 "Ki" 1024.0 "Mi" 1048576.0 "Gi" 1073741824.0 "Ti" 1099511627776.0 "k" 1000.0 "K" 1000.0 "M" 1000000.0 "G" 1000000000.0 "T" 1000000000000.0 -}}
+{{- $num := regexReplaceAll $re $q "${1}" | float64 -}}
+{{- $unit := regexReplaceAll $re $q "${3}" -}}
+{{- printf "%d" (mulf $num (get $units $unit) 0.8 | floor | int64) -}}
+{{- end -}}
+{{- end -}}

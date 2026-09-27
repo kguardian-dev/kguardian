@@ -618,9 +618,42 @@ if dep="$(helm template compat "$CHART" "${SC_ON[@]}" --set supplychain.grype.en
   sc="$(awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' <<<"$dep")"
   grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' <<<"$sc" || \
     { echo "FAIL [supplychain-grype]: supplychain container lost its projected token"; fail=1; }
+  # It holds up to 96 MiB of SBOMs: GOMEMLIMIT keeps the heap under its
+  # 256Mi limit (80% = 214748364), on the supplychain container itself.
+  grep -A1 'name: GOMEMLIMIT' <<<"$sc" | grep -q 'value: "214748364"' || \
+    { echo "FAIL [supplychain-grype]: supplychain GOMEMLIMIT must default to 80% of 256Mi"; fail=1; }
 else
   echo "FAIL [supplychain-grype]: deployment did not render"; fail=1
 fi
+# supplychain GOMEMLIMIT follows the memory limit, can be set outright, and
+# is left out without a limit; a limit it cannot read refuses to render.
+sc_gomemlimit() {
+  helm template compat "$CHART" "${SC_ON[@]}" "$@" --show-only templates/supplychain/deployment.yaml 2>/dev/null |
+    awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' | grep -A1 'name: GOMEMLIMIT' | sed -n 's/.*value: //p' || true
+}
+for c in '1Gi="858993459"' '512M="409600000"' '1.5Gi="1288490188"' '268435456="214748364"'; do
+  lim="${c%%=*}" want="${c#*=}"
+  got="$(sc_gomemlimit --set supplychain.resources.limits.memory="$lim")"
+  [ "$got" = "$want" ] || { echo "FAIL [supplychain-gomemlimit]: limit $lim gave '$got', want $want"; fail=1; }
+done
+got="$(sc_gomemlimit --set supplychain.goMemLimit=150MiB)"
+[ "$got" = '"150MiB"' ] || { echo "FAIL [supplychain-gomemlimit]: explicit goMemLimit gave '$got'"; fail=1; }
+got="$(sc_gomemlimit --set supplychain.resources.limits=null)"
+[ -z "$got" ] || { echo "FAIL [supplychain-gomemlimit]: no memory limit must mean no GOMEMLIMIT, got '$got'"; fail=1; }
+# A GOMEMLIMIT already set in supplychain.env is the only one: a duplicate
+# env name breaks server-side apply on upgrade.
+if dep="$(helm template compat "$CHART" "${SC_ON[@]}" --set 'supplychain.env[0].name=GOMEMLIMIT' \
+    --set 'supplychain.env[0].value=100MiB' --show-only templates/supplychain/deployment.yaml 2>/dev/null)"; then
+  sc="$(awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' <<<"$dep")"
+  n="$(grep -c 'name: GOMEMLIMIT' <<<"$sc" || true)"
+  v="$(grep -A1 'name: GOMEMLIMIT' <<<"$sc" | sed -n 's/.*value: //p' || true)"
+  [ "$n" = 1 ] && [ "$v" = 100MiB ] || \
+    { echo "FAIL [supplychain-gomemlimit-user-env]: want one GOMEMLIMIT=100MiB, got $n: $v"; fail=1; }
+else
+  echo "FAIL [supplychain-gomemlimit-user-env]: did not render"; fail=1
+fi
+assert_render_fails "supplychain-gomemlimit-bad-limit" "cannot derive GOMEMLIMIT" \
+  "${SC_ON[@]}" --set supplychain.resources.limits.memory=lots
 render "supplychain-grype-pvc" "${SC_ON[@]}" --set supplychain.grype.enabled=true \
   --set supplychain.grype.persistence.enabled=true && {
   assert_has "supplychain-grype-pvc" "name: kguardian-supplychain-grype-db"

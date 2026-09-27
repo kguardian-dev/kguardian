@@ -41,7 +41,10 @@ type Runner struct {
 	ready  bool
 }
 
-// Ready is true once a pass has completed (whatever its outcome).
+// Ready is true once the first inventory read has returned, whatever its
+// outcome. It does not wait for that pass's verifications, which can take
+// minutes on a fresh pod (the registry SBOM source's first pass once held
+// /readyz for 5m, #1729). main.go keeps this source out of /readyz anyway.
 func (r *Runner) Ready() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -68,6 +71,9 @@ func (r *Runner) Run(ctx context.Context) {
 func (r *Runner) Pass(ctx context.Context) {
 	start := time.Now()
 	targets, err := r.Inventory.RunningImages(ctx)
+	r.mu.Lock()
+	r.ready = true
+	r.mu.Unlock()
 	if err != nil && !errors.Is(err, errInventoryTruncated) {
 		r.log().WithError(err).Warn("attestation: could not read the image inventory; retrying next pass")
 		r.finish(0, err, start)
@@ -120,9 +126,6 @@ feed:
 }
 
 func (r *Runner) finish(n int, err error, start time.Time) {
-	r.mu.Lock()
-	r.ready = true
-	r.mu.Unlock()
 	if r.OnPass != nil {
 		r.OnPass(n, err, time.Since(start))
 	}
