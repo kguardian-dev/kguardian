@@ -1,5 +1,45 @@
 # Upgrading the kguardian Helm chart
 
+## ImageTrustPolicy CRDs are now installed as release resources
+
+The `ImageTrustPolicy` and `ClusterImageTrustPolicy` CRDs briefly shipped in
+`crds/`. Helm applies `crds/` on first install only, and Flux skips it on
+upgrade by default, so an existing install upgraded to that chart got an
+evaluator with no `ImageTrustPolicy` CRDs. They are now rendered from
+`templates/crds/imagetrustpolicy.yaml`, like the `SeccompProfile` and
+`ApplicationSecurityProfile` CRDs: installed and updated by `helm upgrade`,
+annotated `helm.sh/resource-policy: keep` so `helm uninstall` leaves them and
+every policy in place, and controlled by `evaluator.imageTrust.installCRDs`
+(default `true`, independent of `evaluator.imageTrust.enabled`).
+
+What to do depends on how the CRDs got into the cluster:
+
+- **They don't exist** (you upgraded from a chart before `ImageTrustPolicy`,
+  or from the `crds/` chart): nothing. The upgrade creates them.
+- **They exist without Helm's ownership metadata** (installed fresh from the
+  `crds/` chart, or applied by hand with plain `kubectl apply`): Helm refuses
+  to take them over and the upgrade fails with
+  `... exists and cannot be imported into the current release: invalid
+  ownership metadata`. Before upgrading, mark them as owned by the release
+  (replace `kguardian` with your release name and namespace):
+
+  ```bash
+  for crd in imagetrustpolicies.kguardian.dev clusterimagetrustpolicies.kguardian.dev; do
+    kubectl label crd "$crd" app.kubernetes.io/managed-by=Helm --overwrite
+    kubectl annotate crd "$crd" meta.helm.sh/release-name=kguardian \
+      meta.helm.sh/release-namespace=kguardian --overwrite
+  done
+  ```
+
+  Existing policies are untouched: the upgrade only updates the CRDs.
+- **You manage CRDs yourself**: set `evaluator.imageTrust.installCRDs: false`
+  and apply `charts/kguardian/files/kguardian.dev_imagetrustpolicies.yaml` and
+  `kguardian.dev_clusterimagetrustpolicies.yaml` with each chart upgrade.
+
+Without the CRDs the evaluator does not fail: it logs once that they are not
+installed, evaluates nothing, and picks them up on the next pass once they
+exist.
+
 ## Seccomp profiles learned before this release should be relearned
 
 Until this release, the controller credited a syscall to a pod whenever it was

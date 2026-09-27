@@ -39,7 +39,11 @@ func TestStatusAgainstARealAPIServer(t *testing.T) {
 		t.Skip("set KUBEBUILDER_ASSETS (setup-envtest) to run against a real API server")
 	}
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "charts", "kguardian", "crds")},
+		// The chart renders these CRDs from files/ (templates/crds), not crds/.
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "..", "charts", "kguardian", "files", "kguardian.dev_imagetrustpolicies.yaml"),
+			filepath.Join("..", "..", "..", "charts", "kguardian", "files", "kguardian.dev_clusterimagetrustpolicies.yaml"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := env.Start()

@@ -20,10 +20,11 @@ changed.
   [Signature endpoints](/api-reference/endpoints/attestations).
 - The evaluator (on by default). `evaluator.imageTrust.enabled` follows
   signature discovery unless set.
-- The CRDs in `charts/kguardian/crds/`. Helm installs that directory on
-  first install only; on an upgrade apply them yourself:
-  `kubectl apply -f charts/kguardian/crds/`. Without them the evaluator
-  logs once and evaluates nothing.
+- The two CRDs. The chart installs and upgrades them as release resources
+  (`evaluator.imageTrust.installCRDs`, default `true`, kept on
+  `helm uninstall`). If they were installed another way, see the chart's
+  UPGRADING.md before upgrading. Without them the evaluator logs once and
+  evaluates nothing.
 
 ## Example
 
