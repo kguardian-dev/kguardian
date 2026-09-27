@@ -758,6 +758,55 @@ for case in "sig-env-default:false" "sig-env-supplychain-only:false" "sig-env-di
   }
 done
 
+# 14. Runtime inventory (#1533 P1-2) and capability counting (P2-7) are
+# opt-in: by default the controller loads neither probe. Each switch flips
+# only its own env var, and neither adds RBAC.
+# env_value <env-name> — the value rendered for that controller env var.
+env_value() { workload DaemonSet kguardian-controller | grep -A1 -- "- name: $1\$" | sed -n 's/^ *value: //p' | head -1; }
+BASE_RBAC="$(helm template compat "$CHART" --show-only templates/clusterrole.yaml 2>/dev/null)"
+render "runtime-inventory-default-off" && {
+  [ "$(env_value RUNTIME_INVENTORY)" = '"off"' ] || \
+    { echo "FAIL [runtime-inventory-default-off]: RUNTIME_INVENTORY must default to \"off\" (got $(env_value RUNTIME_INVENTORY))"; fail=1; }
+  [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"false"' ] || \
+    { echo "FAIL [runtime-inventory-default-off]: RUNTIME_INVENTORY_CAPABILITIES must default to \"false\""; fail=1; }
+}
+for mode in exec full; do
+  render "runtime-inventory-$mode" --set controller.runtimeInventory.mode=$mode && {
+    [ "$(env_value RUNTIME_INVENTORY)" = "\"$mode\"" ] || \
+      { echo "FAIL [runtime-inventory-$mode]: mode=$mode must render RUNTIME_INVENTORY=\"$mode\""; fail=1; }
+    [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"false"' ] || \
+      { echo "FAIL [runtime-inventory-$mode]: setting the mode must not turn capabilities on"; fail=1; }
+  }
+done
+render "runtime-inventory-capabilities" --set controller.runtimeInventory.mode=exec \
+  --set controller.runtimeInventory.capabilities=true && {
+  [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"true"' ] || \
+    { echo "FAIL [runtime-inventory-capabilities]: capabilities=true must render \"true\""; fail=1; }
+  [ "$(env_value RUNTIME_INVENTORY)" = '"exec"' ] || \
+    { echo "FAIL [runtime-inventory-capabilities]: capabilities must not change the mode"; fail=1; }
+}
+if [ "$(helm template compat "$CHART" --set controller.runtimeInventory.mode=full \
+    --set controller.runtimeInventory.capabilities=true \
+    --show-only templates/clusterrole.yaml 2>/dev/null)" != "$BASE_RBAC" ]; then
+  echo "FAIL [runtime-inventory-rbac]: runtime inventory and capabilities must not change the ClusterRole"; fail=1
+fi
+# Capabilities with the inventory off would be silently dropped by the
+# controller, so the chart refuses it (default mode and explicit off).
+CAPS_NEEDS_MODE="controller.runtimeInventory.capabilities requires controller.runtimeInventory.mode exec or full"
+assert_render_fails "runtime-inventory-capabilities-mode-default" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.capabilities=true
+assert_render_fails "runtime-inventory-capabilities-mode-off" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.mode=off --set controller.runtimeInventory.capabilities=true
+assert_render_fails "runtime-inventory-capabilities-mode-off-mixed-case" "$CAPS_NEEDS_MODE" \
+  --set controller.runtimeInventory.mode=Off --set controller.runtimeInventory.capabilities=true
+# ...but an explicit "false" (string or bool) with mode off still renders.
+render "runtime-inventory-capabilities-false-string" --set-string controller.runtimeInventory.capabilities=false && {
+  [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"false"' ] || \
+    { echo "FAIL [runtime-inventory-capabilities-false-string]: capabilities=\"false\" must render \"false\""; fail=1; }
+}
+assert_render_fails "runtime-inventory-bad-mode" "controller.runtimeInventory.mode must be one of off, exec, full" \
+  --set controller.runtimeInventory.mode=on
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

@@ -487,6 +487,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Diesel applies pending migrations in version order, so a new one
+      # dated before the base branch's newest would run BEFORE it on a fresh
+      # database. A new migration directory (present here, absent on the
+      # base) must sort after every migration already on the base.
+      - name: New broker migrations sort after the base's newest
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          base="$(git ls-tree --name-only FETCH_HEAD broker/db/migrations/ | xargs -n1 basename | sort)"
+          max="$(cut -d_ -f1 <<<"$base" | sort | tail -1)"
+          for m in $(comm -13 <(echo "$base") <(ls broker/db/migrations | sort)); do
+            [[ "${m%%_*}" > "$max" ]] || { echo "::error::migration $m must sort after $max (the base's newest)"; exit 1; }
+          done
+
       - name: Install system dependencies
         # diesel-postgres links against libpq at build time; libpq5 in the
         # runtime Dockerfile is not enough for `cargo test`. psql is for the

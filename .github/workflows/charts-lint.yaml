@@ -9,6 +9,7 @@ on:
     paths:
       - '.github/workflows/charts-lint.yaml'
       - 'charts/**'
+      - 'test/helm-values-compat.sh'
 
 jobs:
   lint-test:
@@ -48,8 +49,9 @@ jobs:
       # sets real operators run — legacy per-component AI flags, the ai.enabled
       # umbrella, external DB, broker auth — and assert each still produces the
       # expected workloads. Guards upgrade-compatibility; fast, no cluster.
+      # Not gated on list-changed: that only sees chart changes, and this
+      # must also run when the script itself changes.
       - name: Values-compatibility check (G4)
-        if: steps.list-changed.outputs.changed == 'true'
         run: ./test/helm-values-compat.sh
 
       - name: Create kind cluster
