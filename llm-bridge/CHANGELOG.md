@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.2...llm-bridge/v1.12.0) (2026-09-27)
+
+
+### Features
+
+* **llm-bridge:** add vulnerability, CVE exposure and SBOM tools ([f828601](https://github.com/kguardian-dev/kguardian/commit/f8286011c44fe888a35d0f392a225a656eafb4cf))
+* **llm-bridge:** add workload security profile and image inventory tools ([f9a9efd](https://github.com/kguardian-dev/kguardian/commit/f9a9efd2c22dc9f92bf99bec2e8c27413c8aaa98))
+* **llm-bridge:** adopt profile contract v1.2 (no scores) ([d758d75](https://github.com/kguardian-dev/kguardian/commit/d758d75875c57393df83ec2eedb44a896ee24e36))
+* **llm-bridge:** adopt profile contract v1.3 status rules ([1eb6a53](https://github.com/kguardian-dev/kguardian/commit/1eb6a53bb493285576c1ce49712a6c2d8a60be1b))
+* **llm-bridge:** an unrecognised or unavailable image trust answer is unknown ([0c99281](https://github.com/kguardian-dev/kguardian/commit/0c99281e8c92854a8da029f6b3432095da19924e))
+* **llm-bridge:** get_image_signers and explain_image_trust tools ([2489a33](https://github.com/kguardian-dev/kguardian/commit/2489a3361618e960da2f4b6d4af68d6f95e387fd))
+* **llm-bridge:** keep supplyChain.imageTrust in profiles ([0aceed4](https://github.com/kguardian-dev/kguardian/commit/0aceed49d6a196496f5ad70eb0799f3edfc0f7f9))
+* **llm-bridge:** keep the profile's drift block, with what was not evaluated ([2d54f4b](https://github.com/kguardian-dev/kguardian/commit/2d54f4b2ae24f1b671768bed0465e4f5ff5bb22d))
+* **llm-bridge:** trim and explain images.supplyChain in profiles ([b0cc26d](https://github.com/kguardian-dev/kguardian/commit/b0cc26d71d8c44da1d96a1dff3ee06b8fc5d8d77))
+
+
+### Bug Fixes
+
+* **llm-bridge:** a key fingerprint names a signer only on a key signer ([a456b8d](https://github.com/kguardian-dev/kguardian/commit/a456b8d7dd5eaa5454269616ab0d0e5904f2ced1))
+* **llm-bridge:** a null tier means not computed yet, never low risk ([3709b28](https://github.com/kguardian-dev/kguardian/commit/3709b28f4304f81eb7a886c73683c7fda25f508d))
+* **llm-bridge:** get_image_signers reports a verified result without a signer identity as unknown ([266e6d3](https://github.com/kguardian-dev/kguardian/commit/266e6d3b44a9eb596ce67bf8e5898dc7bc7e478e))
+* **llm-bridge:** mark a KEV filter over a full broker page as a partial scan ([d3a086b](https://github.com/kguardian-dev/kguardian/commit/d3a086b63fc7dab335fba87e4eb4be4b3ed7a927))
+* **llm-bridge:** mark tool strings as untrusted and hard-cap profile size ([97da32c](https://github.com/kguardian-dev/kguardian/commit/97da32cb9a59368509af5bacf32ca7df3426e406))
+* **llm-bridge:** pass vulnerability tiers, in-use detail and filters through ([f99693a](https://github.com/kguardian-dev/kguardian/commit/f99693a76dddea6ca13e8d8b29cd54d96ab4d86c))
+* **llm-bridge:** re-apply every vulnerability filter against an older broker ([ff79bd8](https://github.com/kguardian-dev/kguardian/commit/ff79bd8666fdd2fdaf1dd64a85661995fee4c096))
+* **llm-bridge:** say where vulnerability findings come from ([423adc8](https://github.com/kguardian-dev/kguardian/commit/423adc8a6190e9ff88e9ca44c202a5c947ffc0cf))
+* **llm-bridge:** shrinking a profile keeps drift filesTotal and truncated ([b25484b](https://github.com/kguardian-dev/kguardian/commit/b25484bb1ab643d0425cf5ec7013b37b6c15bfd3))
+
+
+### Documentation
+
+* add the vulns and images vulns/sbom commands and the vulnerability tools ([c5c6118](https://github.com/kguardian-dev/kguardian/commit/c5c6118b5ad760385aa797257174702898c0a646))
+* document the profile and images commands and assistant tools ([1c49ef9](https://github.com/kguardian-dev/kguardian/commit/1c49ef93c6b83461cc6b7b10f040c0536542fb04))
+* **llm-bridge:** BROKER_AUTH_TOKEN carries the broker read token ([285b600](https://github.com/kguardian-dev/kguardian/commit/285b6008633ef2b477b7b9afce072c152ff85e47))
+
 ## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.1...llm-bridge/v1.11.2) (2026-09-23)
 
 
