@@ -151,3 +151,29 @@ func TestFilePathsAreCapped(t *testing.T) {
 		t.Fatal(vs, err)
 	}
 }
+
+// A matcher that cannot be reached, or that says it is not ready, is
+// unavailable, never a failure of the SBOM.
+func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close() // refused from now on
+	m, _ := NewHTTPMatcher(url)
+	if _, err := m.Match(context.Background(), sbomFor("sha256:x")); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("refused: %v", err)
+	}
+	for _, code := range []int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout} {
+		m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "vulnerability database not loaded", code)
+		}))
+		if _, err := m.Match(context.Background(), sbomFor("sha256:x")); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTooLarge) {
+			t.Errorf("%d: %v", code, err)
+		}
+	}
+	m500 := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "match failed: boom", http.StatusInternalServerError)
+	}))
+	if _, err := m500.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) {
+		t.Errorf("500 is a failure of this match: %v", err)
+	}
+}

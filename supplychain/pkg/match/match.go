@@ -77,6 +77,10 @@ type groupState struct {
 	failures    int
 	crashes     int
 	quarantined string // why; empty when not quarantined
+	// quarantinedAt and expires: an error quarantine (not too large, not
+	// a crash) lifts after ErrorQuarantineTTL for one more try.
+	quarantinedAt time.Time
+	expires       bool
 }
 
 // Quarantine thresholds: a match that is too large fails the same way
@@ -99,6 +103,10 @@ type Coordinator struct {
 	MaxComponents int
 	// MatchTimeout bounds one match. Default 2m.
 	MatchTimeout time.Duration
+	// ErrorQuarantineTTL is how long a group quarantined by repeated
+	// errors waits before one more try. Too-large and crash quarantines
+	// wait for an SBOM or database change instead. Default 1h.
+	ErrorQuarantineTTL time.Duration
 	// CrashDir, when set, holds a marker for each match in flight
 	// (written before, removed after). A marker left behind means the
 	// process died mid-match (e.g. OOMKilled); after
@@ -114,6 +122,9 @@ type Coordinator struct {
 	sboms  map[string]map[string]*held // digest -> source -> SBOM
 	groups map[string]*groupState
 	queue  map[string]struct{}
+	// retry holds groups whose match found the matcher unavailable; the
+	// ticker queues them again.
+	retry  map[string]struct{}
 	notify chan struct{}
 	dbSeen time.Time
 }
@@ -133,6 +144,12 @@ func (c *Coordinator) init() {
 	}
 	if c.MatchTimeout <= 0 {
 		c.MatchTimeout = 2 * time.Minute
+	}
+	if c.ErrorQuarantineTTL <= 0 {
+		c.ErrorQuarantineTTL = time.Hour
+	}
+	if c.retry == nil {
+		c.retry = map[string]struct{}{}
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -282,6 +299,24 @@ func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 			return
 		case <-c.notify:
 		case <-t.C:
+			c.mu.Lock()
+			c.requeueLocked()
+			c.mu.Unlock()
+		}
+	}
+}
+
+// requeueLocked queues again the groups a tick should retry: those that
+// found the matcher unavailable, and error quarantines whose TTL is up.
+func (c *Coordinator) requeueLocked() {
+	for k := range c.retry {
+		c.queue[k] = struct{}{}
+		delete(c.retry, k)
+	}
+	now := c.now()
+	for k, gs := range c.groups {
+		if gs.quarantined != "" && gs.expires && !now.Before(gs.quarantinedAt.Add(c.ErrorQuarantineTTL)) {
+			c.queue[k] = struct{}{}
 		}
 	}
 }
@@ -342,7 +377,16 @@ func (c *Coordinator) drain(ctx context.Context) {
 			c.gaugesLocked()
 		}
 		if !skip && gs.quarantined != "" {
-			skip = true
+			if gs.expires && !c.now().Before(gs.quarantinedAt.Add(c.ErrorQuarantineTTL)) {
+				// One more try; a failure re-quarantines at once.
+				gs.quarantined, gs.expires, gs.failures = "", false, quarantineAfterErrors-1
+				c.gaugesLocked()
+				if c.Log != nil {
+					c.Log.WithField("digest", key).Info("retrying a digest quarantined by errors")
+				}
+			} else {
+				skip = true
+			}
 		}
 		crashes := gs.crashes
 		c.mu.Unlock()
@@ -447,6 +491,19 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 // input keeps failing. A too-large result is logged as such (it is not a
 // transient error) and quarantines at once.
 func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
+	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) {
+		// The matcher could not be asked (or we are shutting down): not
+		// the SBOM's fault, so never a step towards quarantine. Retried
+		// on the next tick.
+		c.count("unavailable")
+		c.mu.Lock()
+		c.retry[key] = struct{}{}
+		c.mu.Unlock()
+		if c.Log != nil {
+			c.Log.WithError(err).WithField("digest", key).Warn("matcher unavailable; will retry")
+		}
+		return
+	}
 	tooLarge := errors.Is(err, ErrTooLarge)
 	reason := "error"
 	switch {
@@ -478,6 +535,7 @@ func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
 	quarantine := gs.quarantined == "" && failures >= threshold
 	if quarantine {
 		gs.quarantined = fmt.Sprintf("%s: %v", reason, err)
+		gs.quarantinedAt, gs.expires = c.now(), !tooLarge
 		c.gaugesLocked()
 	}
 	c.mu.Unlock()
@@ -488,8 +546,12 @@ func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
 		}
 		c.Log.WithError(err).WithFields(logrus.Fields{"digest": key, "reason": reason, "failures": failures}).Warn(msg)
 		if quarantine {
+			until := "until its SBOM or the vulnerability database changes"
+			if !tooLarge {
+				until = fmt.Sprintf("for %s, or until its SBOM or the vulnerability database changes", c.ErrorQuarantineTTL)
+			}
 			c.Log.WithFields(logrus.Fields{"digest": key, "reason": reason, "failures": failures}).
-				Warn("digest quarantined: not matched again until its SBOM or the vulnerability database changes")
+				Warn("digest quarantined: not matched again " + until)
 		}
 	}
 	if quarantine {

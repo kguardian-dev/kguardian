@@ -104,7 +104,7 @@ func New() *Metrics {
 		}),
 		GrypeMatchRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kguardian_supplychain_grype_match_runs_total",
-			Help: "SBOM match runs, by result (ok, error, too_large, quarantined).",
+			Help: "SBOM match runs, by result (ok, error, too_large, unavailable, quarantined).",
 		}, []string{"result"}),
 		GrypeMatches: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "kguardian_supplychain_grype_matches_total",

@@ -22,19 +22,25 @@ type failMatcher struct {
 	built  time.Time
 	err    error
 	panics bool
+	block  bool // wait for the match context to end
 	calls  int
 }
 
-func (f *failMatcher) Match(context.Context, *types.ImageSBOM) ([]types.Vulnerability, error) {
+func (f *failMatcher) Match(ctx context.Context, _ *types.ImageSBOM) ([]types.Vulnerability, error) {
 	f.mu.Lock()
 	f.calls++
-	p, err := f.panics, f.err
+	p, err, block := f.panics, f.err, f.block
 	f.mu.Unlock()
 	if p {
 		panic("simulated OOMKill mid-match")
 	}
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return nil, err
 }
+func (f *failMatcher) setErr(err error) { f.mu.Lock(); f.err = err; f.mu.Unlock() }
 func (f *failMatcher) DB() DBInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -91,12 +97,12 @@ func TestErrorsQuarantineAfterThreeUntilTheSBOMChanges(t *testing.T) {
 		c.Offer(s)
 		pass(c)
 	}
-	if f.n() != quarantineAfterErrors || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
+	if f.n() != 3 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
 		t.Fatalf("matched %d times, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
 	}
 	c.Offer(trivySBOM("sha256:flaky", "openssl", "zlib")) // a new SBOM lifts it
 	pass(c)
-	if f.n() != quarantineAfterErrors+1 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 {
+	if f.n() != 4 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 {
 		t.Fatalf("after an SBOM change: %d, %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
 	}
 }
@@ -163,5 +169,125 @@ func TestMarkersArePerGroup(t *testing.T) {
 	}
 	if _, err := os.Stat(b); !os.IsNotExist(err) {
 		t.Error("a loaded marker is removed")
+	}
+}
+
+// tick is what the Run loop does on its ticker, then a pass.
+func tick(c *Coordinator) {
+	c.mu.Lock()
+	c.requeueLocked()
+	c.mu.Unlock()
+	pass(c)
+}
+
+// A matcher outage (restart, rollout, DB load) says nothing about the
+// SBOMs: nothing is quarantined, and once the matcher is back every digest
+// is matched on the next tick, with no SBOM or database change.
+func TestMatcherOutageNeverQuarantines(t *testing.T) {
+	f := &failMatcher{built: time.Unix(100, 0), err: fmt.Errorf("%w: dial tcp 127.0.0.1:8090: connect: connection refused", ErrUnavailable)}
+	c, mt := newCoord(f, "")
+	for i := 0; i < 50; i++ {
+		c.Offer(trivySBOM(fmt.Sprintf("sha256:%02d", i), "openssl"))
+	}
+	pass(c)
+	tick(c)
+	tick(c)
+	if f.n() != 150 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 ||
+		testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("unavailable")) != 150 {
+		t.Fatalf("down: %d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+	f.setErr(nil) // back, same database
+	tick(c)
+	if f.n() != 200 || testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("ok")) != 50 {
+		t.Fatalf("after recovery: %d calls, %v ok", f.n(), testutil.ToFloat64(mt.GrypeMatchRuns.WithLabelValues("ok")))
+	}
+	tick(c)
+	if f.n() != 200 {
+		t.Errorf("matched again with nothing changed: %d", f.n())
+	}
+}
+
+// An error quarantine is not forever: after the TTL the digest is tried
+// once more, and quarantined again at once if it still fails.
+func TestErrorQuarantineLiftsAfterItsTTL(t *testing.T) {
+	now := time.Unix(1000, 0)
+	f := &failMatcher{built: time.Unix(100, 0), err: errors.New("matcher returned 500 Internal Server Error: match failed")}
+	c, mt := newCoord(f, "")
+	c.now = func() time.Time { return now }
+	s := trivySBOM("sha256:bad", "openssl")
+	for i := 0; i < 3; i++ {
+		c.Offer(s)
+		pass(c)
+	}
+	tick(c)
+	if f.n() != 3 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
+		t.Fatalf("%d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+	now = now.Add(time.Hour)
+	tick(c) // TTL up: one more try, which fails and re-quarantines
+	tick(c)
+	if f.n() != 4 || testutil.ToFloat64(mt.GrypeQuarantined) != 1 {
+		t.Fatalf("after the TTL: %d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+	f.setErr(nil)
+	now = now.Add(time.Hour)
+	tick(c)
+	if f.n() != 5 || testutil.ToFloat64(mt.GrypeQuarantined) != 0 {
+		t.Fatalf("recovered: %d calls, quarantined %v", f.n(), testutil.ToFloat64(mt.GrypeQuarantined))
+	}
+}
+
+// A too-large quarantine does not expire: the same input fails the same way.
+func TestTooLargeQuarantineDoesNotExpire(t *testing.T) {
+	now := time.Unix(1000, 0)
+	f := &failMatcher{built: time.Unix(100, 0), err: fmt.Errorf("%w: over the cap", ErrTooLarge)}
+	c, _ := newCoord(f, "")
+	c.now = func() time.Time { return now }
+	c.Offer(trivySBOM("sha256:big", "linux-libc-dev"))
+	pass(c)
+	now = now.Add(48 * time.Hour)
+	tick(c)
+	if f.n() != 1 {
+		t.Fatalf("%d calls", f.n())
+	}
+}
+
+// No marker is left behind by a match that returns, however it returns:
+// a leftover marker would count as a crash on the next graceful restart.
+func TestNoMarkerLeftAfterAMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    *failMatcher
+	}{
+		{"success", &failMatcher{built: time.Unix(100, 0)}},
+		{"failure", &failMatcher{built: time.Unix(100, 0), err: errors.New("boom")}},
+		{"unavailable", &failMatcher{built: time.Unix(100, 0), err: fmt.Errorf("%w: refused", ErrUnavailable)}},
+		{"cancelled", &failMatcher{built: time.Unix(100, 0), block: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c, _ := newCoord(tc.f, dir)
+			c.Offer(trivySBOM("sha256:m", "openssl"))
+			c.checkDB()
+			if tc.f.block {
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan struct{})
+				go func() { defer close(done); c.drain(ctx) }()
+				waitFor(t, func() bool {
+					m, _ := filepath.Glob(filepath.Join(dir, "inflight-*.json"))
+					return tc.f.n() == 1 && len(m) == 1
+				})
+				cancel() // a shutdown mid-match
+				<-done
+			} else {
+				c.drain(context.Background())
+			}
+			if tc.f.n() != 1 {
+				t.Fatalf("%d calls", tc.f.n())
+			}
+			if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 0 {
+				t.Fatalf("left behind: %v", left)
+			}
+		})
 	}
 }

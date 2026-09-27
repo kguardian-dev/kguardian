@@ -46,6 +46,10 @@ var (
 	// ErrTruncated: the response ended before it was complete (the
 	// matcher went away mid-body).
 	ErrTruncated = errors.New("matcher response truncated")
+	// ErrUnavailable: the matcher could not be asked (connection failed,
+	// or it answered 502/503/504, e.g. restarting or loading its
+	// database). Says nothing about the SBOM.
+	ErrUnavailable = errors.New("matcher unavailable")
 )
 
 // NewHTTPMatcher returns a matcher for the sidecar at baseURL, which must
@@ -134,14 +138,20 @@ func (m *HTTPMatcher) Match(ctx context.Context, s *types.ImageSBOM) ([]types.Vu
 	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := m.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("matcher: %w", err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("matcher: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		err := fmt.Errorf("matcher returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
-		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		switch resp.StatusCode {
+		case http.StatusRequestEntityTooLarge:
 			err = fmt.Errorf("%w: %w", ErrTooLarge, err)
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			err = fmt.Errorf("%w: %w", ErrUnavailable, err)
 		}
 		return nil, err
 	}
