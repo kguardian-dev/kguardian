@@ -24,8 +24,9 @@ test("seccompFromBrokerSyscalls: known arch returns a valid, sorted profile", ()
   assert.equal(x86.defaultAction, "SCMP_ACT_ERRNO");
   assert.deepEqual(x86.syscalls[0].names, ["openat", "read", "write"]);
 
+  // The OCI name. SCMP_ARCH_ARM64 is the spelling runc rejects.
   const arm = seccompFromBrokerSyscalls({ syscalls: "read", arch: "aarch64" });
-  assert.deepEqual(arm.architectures, ["SCMP_ARCH_ARM64"]);
+  assert.deepEqual(arm.architectures, ["SCMP_ARCH_AARCH64"]);
 });
 
 test("validateSeccompProfile: mirrors advisor ValidateProfile conditions", () => {
