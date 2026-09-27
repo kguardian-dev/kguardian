@@ -234,14 +234,44 @@ export interface ImageContainer {
   previous: ImageDigestRow[];
 }
 
+/** A verified signer as the profile lists it (only signers with an identity). */
+export interface ProfileSigner {
+  signerKind: 'keyless' | 'key' | string;
+  issuer?: string | null;
+  san?: string | null;
+  keyName?: string | null;
+  keyFingerprint?: string | null;
+}
+
+/** `dimensions.images.supplyChain` (contract v1.8, section 2.6). */
+export interface SupplyChainDimension {
+  /** not_configured: signature discovery is off in the deployment (neither unknown nor not checked). */
+  status?: 'configured' | 'not_configured' | string;
+  /** Worst over the current digests: invalid, unsigned, key_signed, unknown, verified; or not_configured. */
+  verdict: string;
+  /** Of the worst digest: not_checked (never checked), no_signer_identity, a discovery reason, ... */
+  reason: string | null;
+  container: string | null;
+  digest: string | null;
+  checkedAt: string | null;
+  signers: ProfileSigner[];
+  signersOmitted?: number;
+  counts: { verified: number; keySigned: number; unsigned: number; invalid: number; unknown: number; notChecked: number };
+  digests?: Array<{ container: string; digest: string; verdict: string | null; reason: string | null; signers: ProfileSigner[]; signersOmitted?: number; checkedAt: string | null }>;
+  truncated?: boolean;
+}
+
 export interface ImagesDimension extends DimensionEnvelope {
   runningWindowSeconds: number;
   containers: ImageContainer[];
   truncated: boolean;
   /** Always null in v1 = no vulnerability source configured. */
   vulnerabilities: unknown | null;
-  /** null = signatures / provenance not configured. */
-  supplyChain: unknown | null;
+  /**
+   * Signature results of the current digests (contract v1.8). `null` means no
+   * current digest on a v1.8 Broker; an older Broker always sends `null`.
+   */
+  supplyChain: SupplyChainDimension | null;
 }
 
 export interface ComputeDimension extends DimensionEnvelope {

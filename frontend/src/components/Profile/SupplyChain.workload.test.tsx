@@ -23,14 +23,15 @@ const chip = async () => {
   return li;
 };
 
-test('posture chip: a verified image shows its signer, neutral, and is kept out of the rollup', async () => {
+test('posture chip, older Broker (profile supplyChain null while digests run): from the running feed, labelled informational', async () => {
   page({ ns: 'payments', kind: 'Deployment', name: 'checkout' });
   const c = await chip();
   expect(within(c).getByText('Signature verified')).toBeTruthy();
   expect(within(c).getByText('example-org/checkout release.yaml')).toBeTruthy();
   const btn = within(c).getByRole('button');
   expect(btn.getAttribute('title')).toMatch(/valid, not vetted/);
-  expect(btn.getAttribute('title')).toMatch(/Informational: not part of the rollup/);
+  expect(btn.getAttribute('title')).toMatch(/Informational: this Broker's posture does not use signatures\./);
+  expect(btn.getAttribute('data-source')).toBe('feed');
   expect(c.querySelector('[data-signature="verified"]')!.className).not.toMatch(/state-enforcing/);
 });
 

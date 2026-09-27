@@ -1,10 +1,10 @@
 {
   "body": {
     "attestations": [],
-    "checkedAt": "2026-09-26T19:20:55",
+    "checkedAt": "2026-09-26T22:11:49",
     "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
     "reason": null,
-    "receivedAt": "2026-09-26T22:20:55.941460",
+    "receivedAt": "2026-09-27T01:11:50.021793",
     "repository": "ghcr.io/example/reports",
     "signatures": [],
     "signedDigest": null,
@@ -12,7 +12,7 @@
     "trustRoot": "public-good",
     "verdict": "unsigned"
   },
-  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
   "request": "GET /images/sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa/attestation",
   "status": 200
 }

@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import { vulnCapture } from '../fixtures/vulns';
 import type { AttestationPage, ImageAttestation, RunningSignaturePage } from '../types/attestations';
+import type { WorkloadProfile } from '../types/profile';
 import {
   asSignatureState,
   reasonText,
@@ -12,6 +13,7 @@ import {
   signerShort,
   signerText,
   splitHeader,
+  summaryFromProfile,
   workloadSignatureText,
 } from './signatures';
 import { workloadKey } from './workloads';
@@ -122,4 +124,15 @@ test('"verified" with no verified signer is unknown, for the digest and the work
   // An unverified check does not count as a signer either.
   const claimed = running.body.items.map((i) => (i.workloadName === 'checkout' ? { ...i, signers: i.signers.map((c) => ({ ...c, verified: false })) } : i));
   expect(signaturesByDigest(claimed).find((x) => x.repository === 'ghcr.io/example/checkout')!.state).toBe('unknown');
+});
+
+test('profile supplyChain (v1.8): verified with only blank signer identities is unknown, not signed', () => {
+  const sc = vulnCapture<WorkloadProfile>('signature-profile-checkout').body.dimensions.images.supplyChain!;
+  expect(summaryFromProfile(sc)!.worst).toBe('verified');
+  const blank = { ...sc, signers: [{ signerKind: 'keyless', issuer: '  ', san: sc.signers[0].san }, { signerKind: 'key', keyName: 'k', keyFingerprint: '' }] };
+  expect(summaryFromProfile(blank)!.worst).toBe('unknown');
+  expect(summaryFromProfile({ ...sc, status: 'not_configured', verdict: 'not_configured' })).toBeNull();
+  const never = vulnCapture<WorkloadProfile>('signature-profile-ingress-nginx-controller').body.dimensions.images.supplyChain!;
+  expect([never.verdict, never.reason]).toEqual(['unknown', 'not_checked']);
+  expect(summaryFromProfile(never)!.worst).toBe('unchecked');
 });

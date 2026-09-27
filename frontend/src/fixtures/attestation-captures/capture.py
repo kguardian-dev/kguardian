@@ -28,6 +28,11 @@ edits a response. Every verdict the UI draws is covered:
   flux-system/source-controller unknown with a reason code this Broker
                              does not know (stored as unrecognised_reason)
   ingress-nginx/controller   no result: not checked
+
+Workload profiles (contract v1.8, images.supplyChain) are captured as
+signature-profile-<name>. For the not_configured state, start a Broker with
+SIGNATURE_DISCOVERY_ENABLED=false on the same database and run again with
+--not-configured: it only captures signature-profile-not-configured-<name>.
 """
 import datetime as dt
 import json
@@ -37,6 +42,10 @@ import urllib.error
 import urllib.request
 
 BASE, READ, INGEST, SC, SHA = sys.argv[1:6]
+# --not-configured: capture only the workload profiles, from the same database
+# served by a Broker started with SIGNATURE_DISCOVERY_ENABLED=false.
+NOT_CONFIGURED = '--not-configured' in sys.argv[6:]
+SUFFIX = '-not-configured' if NOT_CONFIGURED else ''
 HERE = os.path.dirname(os.path.abspath(__file__))
 NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -97,76 +106,82 @@ PODS = [
     ('ingress-nginx-controller-1a2b3-cdefg', 'ingress-nginx', '10.244.4.10', 'Deployment', 'ingress-nginx-controller', 'controller', 'ingress-nginx', 'running', None, False),
 ]
 
-for name, ns, ip, kind, wl, container, key, state, reason, host in PODS:
-    repo, tag = REPO[key]
-    c = {
-        'name': container, 'kind': 'regular', 'image': f'{repo}:{tag}', 'image_id': f'{repo}@{D[key]}',
-        'digest': D[key], 'digest_kind': 'repo', 'repository': repo, 'tag': tag, 'state': state,
-    }
-    if reason:
-        c['state_reason'] = reason
-    body = {
-        'pod_name': name, 'pod_namespace': ns, 'pod_ip': ip, 'node_name': 'worker-1', 'is_dead': False,
-        'pod_identity': wl, 'workload_selector_labels': {'app.kubernetes.io/name': wl},
-        'workload_kind': kind, 'workload_name': wl, 'host_network': host,
-        'pod_obj': {'metadata': {'name': name, 'namespace': ns, 'labels': {'app.kubernetes.io/name': wl}}, 'spec': {'hostNetwork': host}},
-        'time_stamp': ts(), 'started_at': ts(hours_ago=48), 'containers': [c],
-    }
-    ok(*call('POST', '/pod/spec', INGEST, body), f'pod {name}')
+def seed():
+    for name, ns, ip, kind, wl, container, key, state, reason, host in PODS:
+        repo, tag = REPO[key]
+        c = {
+            'name': container, 'kind': 'regular', 'image': f'{repo}:{tag}', 'image_id': f'{repo}@{D[key]}',
+            'digest': D[key], 'digest_kind': 'repo', 'repository': repo, 'tag': tag, 'state': state,
+        }
+        if reason:
+            c['state_reason'] = reason
+        body = {
+            'pod_name': name, 'pod_namespace': ns, 'pod_ip': ip, 'node_name': 'worker-1', 'is_dead': False,
+            'pod_identity': wl, 'workload_selector_labels': {'app.kubernetes.io/name': wl},
+            'workload_kind': kind, 'workload_name': wl, 'host_network': host,
+            'pod_obj': {'metadata': {'name': name, 'namespace': ns, 'labels': {'app.kubernetes.io/name': wl}}, 'spec': {'hostNetwork': host}},
+            'time_stamp': ts(), 'started_at': ts(hours_ago=48), 'containers': [c],
+        }
+        ok(*call('POST', '/pod/spec', INGEST, body), f'pod {name}')
 
-# ── Signature results, as the supplychain component posts them ─────────
-GHA = 'https://token.actions.githubusercontent.com'
-CHECKOUT_SAN = 'https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0'
-# A throwaway P-256 public key (generated for these captures; no private key kept)
-# and the sha256 of its DER encoding, as the component reports a configured key.
-LEDGER_PEM = (
-    '-----BEGIN PUBLIC KEY-----\n'
-    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIiPD8en3MRzsqzYYBfQXGi+WsFs0\n'
-    '31/MnG5IODS0jF8L/SRsW+uanwUL+beVkFYHHSWIoLEp9DBmVsw/R64M3w==\n'
-    '-----END PUBLIC KEY-----\n'
-)
-LEDGER_FP = 'd4d97426189ec7a3bc8a16cc81bfc8ec314b179c4dad1123ff4e167026fc2c41'
-
-
-def result(key, verdict, signatures=(), attestations=(), reason=None, hours_ago=3, **extra):
-    repo, _ = REPO[key]
-    body = {
-        'schema_version': 1, 'digest': D[key], 'repository': repo, 'checked_at': ts(hours_ago, z=True),
-        'verdict': verdict, 'reason': reason, 'trust_root': 'public-good',
-        'signatures': list(signatures), 'attestations': list(attestations),
-    }
-    body.update(extra)
-    ok(*call('POST', f"/images/{D[key]}/attestation", SC, body), f'attestation {key}')
+    # ── Signature results, as the supplychain component posts them ─────────
+    GHA = 'https://token.actions.githubusercontent.com'
+    CHECKOUT_SAN = 'https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0'
+    # A throwaway P-256 public key (generated for these captures; no private key kept)
+    # and the sha256 of its DER encoding, as the component reports a configured key.
+    LEDGER_PEM = (
+        '-----BEGIN PUBLIC KEY-----\n'
+        'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIiPD8en3MRzsqzYYBfQXGi+WsFs0\n'
+        '31/MnG5IODS0jF8L/SRsW+uanwUL+beVkFYHHSWIoLEp9DBmVsw/R64M3w==\n'
+        '-----END PUBLIC KEY-----\n'
+    )
+    LEDGER_FP = 'd4d97426189ec7a3bc8a16cc81bfc8ec314b179c4dad1123ff4e167026fc2c41'
 
 
-result('checkout', 'verified', signed_via='index', signed_digest=D['checkout-index'], signatures=[{
-    'format': 'sigstore-bundle', 'source': 'referrers', 'verified': True, 'signer_kind': 'keyless',
-    'issuer': GHA, 'san': CHECKOUT_SAN, 'integrated_time': ts(72, z=True), 'tlog_index': 123456789,
-}], attestations=[{
-    'predicate_type': 'https://slsa.dev/provenance/v1', 'format': 'sigstore-bundle', 'source': 'referrers', 'verified': True,
-    'signer_kind': 'keyless', 'issuer': GHA, 'san': CHECKOUT_SAN,
-    'payload_sha256': '9b2c4f6e8a0d1c3e5f7a9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a',
-    'provenance': {
-        'builder_id': 'https://github.com/actions/runner/github-hosted', 'build_type': 'https://actions.github.io/buildtypes/workflow/v1',
-        'source_repo': 'https://github.com/example-org/checkout', 'source_commit': '4f1c2a9e7b3d5f60819a2b3c4d5e6f7081920a1b',
-        'source_ref': 'refs/tags/v4.2.0',
-    },
-}])
-result('ledger', 'verified', signed_via='self', signed_digest=D['ledger'], signatures=[{
-    'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': True, 'signer_kind': 'key',
-    'key_name': 'payments-release', 'key_fingerprint': LEDGER_FP, 'key_pem': LEDGER_PEM,
-}])
-result('reports', 'unsigned')
-result('grafana', 'key_signed', signatures=[{
-    'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': False, 'error': 'untrusted_key',
-    'detail': 'signed with a public key that is not configured', 'key_hint': 'grafana-release',
-}])
-result('prometheus', 'invalid', reason='bad_signature', signatures=[{
-    'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': False, 'error': 'bad_signature',
-    'detail': 'signature does not verify against the certificate',
-}])
-result('node-exporter', 'unknown', reason='rate_limited')
-result('source-controller', 'unknown', reason='oci_referrers_v2_required')  # a code this Broker does not know
+    def result(key, verdict, signatures=(), attestations=(), reason=None, hours_ago=3, **extra):
+        repo, _ = REPO[key]
+        body = {
+            'schema_version': 1, 'digest': D[key], 'repository': repo, 'checked_at': ts(hours_ago, z=True),
+            'verdict': verdict, 'reason': reason, 'trust_root': 'public-good',
+            'signatures': list(signatures), 'attestations': list(attestations),
+        }
+        body.update(extra)
+        ok(*call('POST', f"/images/{D[key]}/attestation", SC, body), f'attestation {key}')
+
+
+    result('checkout', 'verified', signed_via='index', signed_digest=D['checkout-index'], signatures=[{
+        'format': 'sigstore-bundle', 'source': 'referrers', 'verified': True, 'signer_kind': 'keyless',
+        'issuer': GHA, 'san': CHECKOUT_SAN, 'integrated_time': ts(72, z=True), 'tlog_index': 123456789,
+    }], attestations=[{
+        'predicate_type': 'https://slsa.dev/provenance/v1', 'format': 'sigstore-bundle', 'source': 'referrers', 'verified': True,
+        'signer_kind': 'keyless', 'issuer': GHA, 'san': CHECKOUT_SAN,
+        'payload_sha256': '9b2c4f6e8a0d1c3e5f7a9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a',
+        'provenance': {
+            'builder_id': 'https://github.com/actions/runner/github-hosted', 'build_type': 'https://actions.github.io/buildtypes/workflow/v1',
+            'source_repo': 'https://github.com/example-org/checkout', 'source_commit': '4f1c2a9e7b3d5f60819a2b3c4d5e6f7081920a1b',
+            'source_ref': 'refs/tags/v4.2.0',
+        },
+    }])
+    result('ledger', 'verified', signed_via='self', signed_digest=D['ledger'], signatures=[{
+        'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': True, 'signer_kind': 'key',
+        'key_name': 'payments-release', 'key_fingerprint': LEDGER_FP, 'key_pem': LEDGER_PEM,
+    }])
+    result('reports', 'unsigned')
+    result('grafana', 'key_signed', signatures=[{
+        'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': False, 'error': 'untrusted_key',
+        'detail': 'signed with a public key that is not configured', 'key_hint': 'grafana-release',
+    }])
+    result('prometheus', 'invalid', reason='bad_signature', signatures=[{
+        'format': 'cosign-legacy', 'source': 'sig-tag', 'verified': False, 'error': 'bad_signature',
+        'detail': 'signature does not verify against the certificate',
+    }])
+    result('node-exporter', 'unknown', reason='rate_limited')
+    result('source-controller', 'unknown', reason='oci_referrers_v2_required')  # a code this Broker does not know
+
+
+
+if not NOT_CONFIGURED:
+    seed()
 
 # ── Capture ────────────────────────────────────────────────────────────
 PROVENANCE = f'captured from broker {SHA} (frontend/src/fixtures/attestation-captures/capture.py), no edits'
@@ -184,32 +199,47 @@ def capture(name, path, accept='application/json'):
     return body
 
 
-REQUESTS = {
-    'attestations': '/attestations',
-    'attestations-verified': '/attestations?verdict=verified',
-    'attestations-page1-limit3': '/attestations?limit=3',
-    'attestations-running': '/attestations/running',
-    'attestations-running-namespace-payments': '/attestations/running?namespace=payments',
-    'attestations-running-namespace-observability': '/attestations/running?namespace=observability',
-    'attestations-running-namespace-flux-system': '/attestations/running?namespace=flux-system',
-    'attestations-running-namespace-ingress-nginx': '/attestations/running?namespace=ingress-nginx',
-    'attestations-running-namespace-empty': '/attestations/running?namespace=no-such-namespace',
-    'attestation-bad-digest': '/images/latest/attestation',
-}
-for key in ('checkout', 'ledger', 'reports', 'grafana', 'prometheus', 'node-exporter', 'source-controller', 'ingress-nginx'):
-    REQUESTS[f'attestation-{key}'] = f'/images/{D[key]}/attestation'
-for name, path in REQUESTS.items():
-    capture(name, path)
+def capture_attestation_reads():
+    REQUESTS = {
+        'attestations': '/attestations',
+        'attestations-verified': '/attestations?verdict=verified',
+        'attestations-page1-limit3': '/attestations?limit=3',
+        'attestations-running': '/attestations/running',
+        'attestations-running-namespace-payments': '/attestations/running?namespace=payments',
+        'attestations-running-namespace-observability': '/attestations/running?namespace=observability',
+        'attestations-running-namespace-flux-system': '/attestations/running?namespace=flux-system',
+        'attestations-running-namespace-ingress-nginx': '/attestations/running?namespace=ingress-nginx',
+        'attestations-running-namespace-empty': '/attestations/running?namespace=no-such-namespace',
+        'attestation-bad-digest': '/images/latest/attestation',
+    }
+    for key in ('checkout', 'ledger', 'reports', 'grafana', 'prometheus', 'node-exporter', 'source-controller', 'ingress-nginx'):
+        REQUESTS[f'attestation-{key}'] = f'/images/{D[key]}/attestation'
+    for name, path in REQUESTS.items():
+        capture(name, path)
 
-p = json.load(open(os.path.join(HERE, 'attestations-page1-limit3.json')))['body']
-if p.get('nextAfter'):
-    capture('attestations-page2-limit3', f"/attestations?limit=3&after={p['nextAfter']}")
+    p = json.load(open(os.path.join(HERE, 'attestations-page1-limit3.json')))['body']
+    if p.get('nextAfter'):
+        capture('attestations-page2-limit3', f"/attestations?limit=3&after={p['nextAfter']}")
 
-# Admission policies, audit mode only (what the UI offers).
-for fmt in ('kguardian', 'kyverno', 'policy-controller'):
-    capture(f'policy-{fmt}-audit', f'/attestations/policy?format={fmt}&mode=audit', 'application/yaml')
-capture('policy-kguardian-audit-namespace-payments', '/attestations/policy?format=kguardian&mode=audit&namespace=payments', 'application/yaml')
-for ns, kind, wl in (('payments', 'Deployment', 'checkout'), ('payments', 'CronJob', 'reports'), ('observability', 'Deployment', 'grafana')):
-    capture(f'export-admission-{wl}', f'/workloads/{ns}/{kind}/{wl}/export?artifacts=admission&mode=audit&format=zip-manifest')
+    # Admission policies, audit mode only (what the UI offers).
+    for fmt in ('kguardian', 'kyverno', 'policy-controller'):
+        capture(f'policy-{fmt}-audit', f'/attestations/policy?format={fmt}&mode=audit', 'application/yaml')
+    capture('policy-kguardian-audit-namespace-payments', '/attestations/policy?format=kguardian&mode=audit&namespace=payments', 'application/yaml')
+    for ns, kind, wl in (('payments', 'Deployment', 'checkout'), ('payments', 'CronJob', 'reports'), ('observability', 'Deployment', 'grafana')):
+        capture(f'export-admission-{wl}', f'/workloads/{ns}/{kind}/{wl}/export?artifacts=admission&mode=audit&format=zip-manifest')
 
-print('captured', len([f for f in os.listdir(HERE) if f.endswith('.json')]), 'responses from', SHA)
+
+if not NOT_CONFIGURED:
+    capture_attestation_reads()
+
+# Workload profiles (contract v1.8 carries dimensions.images.supplyChain).
+# Named signature-profile-* so they do not collide with the vulnerability
+# world's profile-* captures.
+WORKLOADS = [('payments', 'Deployment', 'checkout'), ('payments', 'Deployment', 'ledger'), ('payments', 'CronJob', 'reports'),
+             ('observability', 'Deployment', 'grafana'), ('observability', 'StatefulSet', 'prometheus'),
+             ('observability', 'DaemonSet', 'node-exporter'), ('flux-system', 'Deployment', 'source-controller'),
+             ('ingress-nginx', 'Deployment', 'ingress-nginx-controller')]
+for ns, kind, wl in WORKLOADS:
+    capture(f'signature-profile{SUFFIX}-{wl}', f'/workloads/{ns}/{kind}/{wl}/profile')
+
+print('captured', len([f for f in os.listdir(HERE) if f.endswith('.json')]), 'responses from', SHA, '(profiles only, signature discovery off)' if NOT_CONFIGURED else '')

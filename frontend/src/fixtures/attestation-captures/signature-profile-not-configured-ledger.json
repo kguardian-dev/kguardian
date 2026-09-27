@@ -1,0 +1,438 @@
+{
+  "body": {
+    "attention": [
+      {
+        "container": "ledger",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.allowPrivilegeEscalation/ledger",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container ledger allows privilege escalation"
+      },
+      {
+        "container": "ledger",
+        "detail": "The runtime's default capability set stays granted.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.capabilitiesNotDropped/ledger",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container ledger does not drop ALL capabilities"
+      }
+    ],
+    "capabilities": {
+      "containers": [
+        {
+          "container": "ledger",
+          "denied": [],
+          "digests": [
+            "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe"
+          ],
+          "evidence": "insufficient",
+          "observedSince": null,
+          "probed": [],
+          "reason": "no_runtime_data",
+          "recommendation": null,
+          "unusedAdded": [],
+          "used": []
+        }
+      ],
+      "windowHours": 168
+    },
+    "contentHash": "fnv1a64:5cbe0737dd3d8ac5",
+    "controls": [
+      {
+        "control": "networkPolicy",
+        "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+        "inSync": null,
+        "state": "unknown"
+      },
+      {
+        "control": "seccompProfile",
+        "detail": "No SeccompProfile CR references this workload",
+        "inSync": null,
+        "state": "none"
+      },
+      {
+        "control": "imageAdmission",
+        "detail": "kguardian does not enforce image admission; signature results are in images.supplyChain and ImageTrustPolicy results are report-only",
+        "inSync": null,
+        "state": null
+      }
+    ],
+    "dimensions": {
+      "compute": {
+        "containers": [],
+        "coverage": {
+          "fraction": null,
+          "level": "none",
+          "note": "no compute samples",
+          "observedSince": null
+        },
+        "reasons": [
+          {
+            "code": "no_compute_data",
+            "message": "No compute samples for this workload's live pods (collection off or no live pods)"
+          }
+        ],
+        "status": "unknown",
+        "truncated": false
+      },
+      "images": {
+        "containers": [
+          {
+            "kind": "regular",
+            "mixedDigests": false,
+            "name": "ledger",
+            "previous": [],
+            "running": [
+              {
+                "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+                "firstSeen": "2026-09-27T01:11:49.960077Z",
+                "imageRef": "ghcr.io/example/ledger:2.3.1",
+                "lastPodName": "ledger-5c6d7-klmno",
+                "lastSeen": "2026-09-27T01:11:49.960077Z",
+                "ranAsInit": false,
+                "state": "running",
+                "stateReason": null
+              }
+            ],
+            "stale": false
+          }
+        ],
+        "coverage": {
+          "fraction": null,
+          "level": "partial",
+          "note": "inventory only (running window 900 s); no vulnerability data",
+          "observedSince": "2026-09-27T01:11:49.960077Z"
+        },
+        "reasons": [
+          {
+            "code": "vulnerabilities_not_configured",
+            "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
+          },
+          {
+            "code": "signatures_not_configured",
+            "message": "image signature discovery is not configured (supplychain.signatureDiscovery.enabled); signatures are not checked"
+          }
+        ],
+        "runningWindowSeconds": 900,
+        "status": "unknown",
+        "supplyChain": {
+          "checkedAt": null,
+          "container": null,
+          "counts": {
+            "invalid": 0,
+            "keySigned": 0,
+            "notChecked": 0,
+            "unknown": 0,
+            "unsigned": 0,
+            "verified": 0
+          },
+          "digest": null,
+          "digests": [],
+          "reason": null,
+          "signers": [],
+          "status": "not_configured",
+          "truncated": false,
+          "verdict": "not_configured"
+        },
+        "truncated": false,
+        "vulnerabilities": null
+      },
+      "network": {
+        "coverage": {
+          "fraction": null,
+          "level": "none",
+          "note": "Flows from the workload's pod(s) (1 live)",
+          "observedSince": null
+        },
+        "peers": [],
+        "policy": {
+          "audit": null,
+          "enforced": null
+        },
+        "reasons": [
+          {
+            "code": "no_flows",
+            "message": "No flows observed for this workload's pods"
+          }
+        ],
+        "status": "unknown",
+        "summary": {
+          "egress": {
+            "external": 0,
+            "peers": 0,
+            "ports": []
+          },
+          "ingress": {
+            "external": 0,
+            "peers": 0,
+            "ports": []
+          }
+        },
+        "truncated": false
+      },
+      "podSecurity": {
+        "containers": [
+          {
+            "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+            "failing": [
+              {
+                "check": "privilegeEscalation",
+                "field": "spec.containers[ledger].securityContext.allowPrivilegeEscalation",
+                "level": "restricted",
+                "message": "allowPrivilegeEscalation must be set to false",
+                "value": null
+              },
+              {
+                "check": "capabilitiesRestricted",
+                "field": "spec.containers[ledger].securityContext.capabilities.drop",
+                "level": "restricted",
+                "message": "capabilities.drop must include ALL",
+                "value": null
+              }
+            ],
+            "kind": "regular",
+            "level": "baseline",
+            "name": "ledger",
+            "securityContext": {
+              "allowPrivilegeEscalation": null,
+              "capabilitiesAdd": null,
+              "capabilitiesDrop": null,
+              "privileged": null,
+              "readOnlyRootFilesystem": null,
+              "runAsGroup": null,
+              "runAsNonRoot": null,
+              "runAsUser": null,
+              "seccompProfileType": null
+            },
+            "source": "running"
+          }
+        ],
+        "coverage": {
+          "fraction": 0.33,
+          "level": "partial",
+          "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
+          "observedSince": "2026-09-27T01:11:49.960077Z"
+        },
+        "level": "baseline",
+        "levelConfidence": "upper_bound",
+        "pod": {
+          "automountServiceAccountToken": null,
+          "failing": [],
+          "hostIPC": null,
+          "hostNetwork": null,
+          "hostPID": null,
+          "hostUsers": null,
+          "known": false,
+          "securityContext": {
+            "fsGroup": null,
+            "runAsGroup": null,
+            "runAsNonRoot": null,
+            "runAsUser": null,
+            "seccompProfileType": null
+          },
+          "serviceAccountName": null
+        },
+        "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+        "reasons": [
+          {
+            "code": "pss_fails_restricted",
+            "message": "At most baseline: ledger (regular) fail(s) a restricted check; unevaluated checks may lower it further"
+          },
+          {
+            "code": "pod_fields_unknown",
+            "message": "The pod-level block (host namespaces, pod securityContext) was not reported; those checks are unevaluated"
+          }
+        ],
+        "recommendation": {
+          "caveats": [
+            "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+            "Capabilities for ledger are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
+            "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
+          ],
+          "format": "strategic-merge-patch",
+          "recommendation": true,
+          "targetLevel": "restricted",
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: ledger\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n"
+        },
+        "staleContainers": [],
+        "status": "warn",
+        "unevaluatedChecks": [
+          "hostProcess",
+          "hostPathVolumes",
+          "hostPorts",
+          "hostProbesLifecycle",
+          "appArmor",
+          "seLinux",
+          "procMount",
+          "sysctls",
+          "volumeTypes",
+          "hostNamespaces",
+          "runAsNonRoot",
+          "seccompRestricted"
+        ]
+      },
+      "syscalls": {
+        "capture": null,
+        "coverage": {
+          "fraction": null,
+          "level": "none",
+          "note": "no syscall aggregate for this workload",
+          "observedSince": null
+        },
+        "cr": null,
+        "denials": null,
+        "observed": null,
+        "reasons": [
+          {
+            "code": "no_observations",
+            "message": "No syscalls have been captured for this workload"
+          }
+        ],
+        "status": "unknown"
+      }
+    },
+    "drift": {
+      "baselines": {
+        "export": null,
+        "securityContext": null
+      },
+      "evaluated": [
+        "tagMoved"
+      ],
+      "items": [],
+      "notEvaluated": [
+        {
+          "container": "ledger",
+          "reason": "no_inventory",
+          "type": "unshippedExecutable"
+        },
+        {
+          "container": null,
+          "reason": "no_export",
+          "type": "imageChangedSinceExport"
+        },
+        {
+          "container": null,
+          "reason": "no_baseline",
+          "type": "securityContextRegression"
+        }
+      ]
+    },
+    "exposure": {
+      "egressExternal": null,
+      "egressPeers": null,
+      "ingressExternal": null,
+      "ingressPeers": null
+    },
+    "findings": [
+      {
+        "container": "ledger",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.allowPrivilegeEscalation/ledger",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container ledger allows privilege escalation"
+      },
+      {
+        "container": "ledger",
+        "detail": "The runtime's default capability set stays granted.",
+        "dimension": "podSecurity",
+        "id": "podSecurity.capabilitiesNotDropped/ledger",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container ledger does not drop ALL capabilities"
+      },
+      {
+        "container": "ledger",
+        "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+        "dimension": "podSecurity",
+        "id": "podSecurity.readOnlyRootFilesystem/ledger",
+        "severity": "low",
+        "tier": null,
+        "title": "Container ledger root filesystem is writable"
+      }
+    ],
+    "generatedAt": "2026-09-27T01:11:53.343653412Z",
+    "posture": {
+      "coverage": 0.25,
+      "reasons": [
+        {
+          "dimension": "network",
+          "message": "No flows observed for this workload's pods",
+          "status": "unknown"
+        },
+        {
+          "dimension": "syscalls",
+          "message": "No syscalls have been captured for this workload",
+          "status": "unknown"
+        },
+        {
+          "dimension": "podSecurity",
+          "message": "At most baseline: ledger (regular) fail(s) a restricted check; unevaluated checks may lower it further",
+          "status": "warn"
+        },
+        {
+          "dimension": "images",
+          "message": "1 running digest(s) across 1 container(s); vulnerability data not configured",
+          "status": "unknown"
+        }
+      ],
+      "status": "warn",
+      "unknownDimensions": [
+        "network",
+        "syscalls",
+        "images"
+      ]
+    },
+    "readiness": [
+      {
+        "id": "trafficObserved24h",
+        "message": "No flows observed",
+        "ok": false
+      },
+      {
+        "id": "syscallCaptureComplete",
+        "message": "No syscall capture for this workload",
+        "ok": null
+      },
+      {
+        "id": "noWouldDeny24h",
+        "message": "No audit policy covers this workload",
+        "ok": null
+      },
+      {
+        "id": "imageSigned",
+        "message": "Image signature discovery is not configured (supplychain.signatureDiscovery.enabled)",
+        "ok": null
+      },
+      {
+        "id": "podSecurityRestricted",
+        "message": "At most baseline",
+        "ok": false
+      }
+    ],
+    "snapshotPending": true,
+    "version": null,
+    "workload": {
+      "clusterId": "primary",
+      "kind": "Deployment",
+      "name": "ledger",
+      "namespace": "payments",
+      "pods": {
+        "live": 1,
+        "names": [
+          "ledger-5c6d7-klmno"
+        ],
+        "truncated": false
+      },
+      "transient": false
+    }
+  },
+  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /workloads/payments/Deployment/ledger/profile",
+  "status": 200
+}
