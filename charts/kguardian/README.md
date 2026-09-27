@@ -447,7 +447,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.grype.image.pullPolicy | string | `"IfNotPresent"` | Matcher image pull policy |
 | supplychain.grype.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain-matcher"` | Matcher image repository |
 | supplychain.grype.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| supplychain.grype.image.tag | string | `"v0.1.0"` | Matcher version tag |
+| supplychain.grype.image.tag | string | `"v0.1.1"` | Matcher version tag |
 | supplychain.grype.matchTimeout | string | `"2m"` | Time limit for matching one SBOM |
 | supplychain.grype.persistence.enabled | bool | `false` | Keep the DB on a PersistentVolumeClaim instead of an emptyDir, so a restart does not re-download it (181 MB; 75-80 s to fetch, verify and unpack on the measuring machine). Recommended for nodes with less than about 40 GB of free ephemeral storage: the emptyDir needs up to about 6.4 GB during a refresh. |
 | supplychain.grype.persistence.existingClaim | string | `""` | Use an existing claim instead of creating one |
