@@ -114,7 +114,7 @@ class UserControlledContext(unittest.TestCase):
         allowed = (
             "workspace", "sha", "repository", "repository_owner", "repository_id", "run_id",
             "run_number", "run_attempt", "event_name", "server_url", "api_url", "graphql_url",
-            "base_ref", "job", "action_path", "token", "workflow", "ref", "ref_type",
+            "base_ref", "job", "action_path", "workflow", "ref", "ref_type",
             "retention_days",
         )
         self.assertEqual(sorted(lint.SAFE_GITHUB), sorted(allowed))
@@ -122,6 +122,13 @@ class UserControlledContext(unittest.TestCase):
             expr = "${{ github." + member + " }}"
             self.assertEqual(flagged(run_step(f"echo {expr}")), [], expr)
             self.assertEqual(flagged(run_step(f"echo {expr.upper()}")), [], expr.upper())
+
+    def test_github_token_only_via_env(self):
+        # A secret: interpolated into a command it can be echoed or logged.
+        self.assertTrue(flagged(run_step('gh api --header "x: ${{ github.token }}" user')))
+        self.assertTrue(flagged(github_script("const t = '${{ github.token }}';")))
+        env = "        env:\n          GH_TOKEN: ${{ github.token }}\n"
+        self.assertEqual(flagged(run_step("gh api user", env)), [])
 
     def test_github_script(self):
         bad = github_script("const n = '${{ github.event.pull_request.number }}';")
