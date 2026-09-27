@@ -3587,21 +3587,25 @@ pub async fn get_workload_profile(
         return Ok(bad_key());
     };
     // 1. A cheap gate, without the profile's read permit: does the
-    //    workload run an image now? Unknown workloads (and ones with no
-    //    running image) never reach the evaluator.
+    //    workload exist (the same test as `Sources::is_empty`), and does it
+    //    run an image now? An unknown workload is 404 here, for one small
+    //    query; only a running one reaches the evaluator.
     let gate = match budget.acquire(GATE_CHARGE_KIB).await {
         Ok(p) => p,
         Err(shed) => return Ok(shed.into_response()),
     };
     let k = key.clone();
     let pool2 = pool.clone();
-    let running = web::block(move || -> Result<bool, DbError> {
+    let (known, running) = web::block(move || -> Result<(bool, bool), DbError> {
         let mut conn = pool2.get()?;
-        has_running_image(&mut conn, &k)
+        workload_gate(&mut conn, &k)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
     drop(gate);
+    if !known {
+        return Ok(not_found_workload());
+    }
     // 2. The evaluator read, holding only its own 1 MiB charge (on a real
     //    read): async, at most 2 s, shared by concurrent requests and
     //    cached per namespace.
@@ -3644,30 +3648,45 @@ pub async fn get_workload_profile(
 /// Read-budget charge of the profile's existence gate: one boolean.
 const GATE_CHARGE_KIB: u32 = 1;
 
-const HAS_RUNNING_SQL: &str = concat!(
-    "SELECT EXISTS (SELECT 1 FROM workload_containers wc \
-     WHERE wc.cluster_id = $1 AND wc.pod_namespace = $2 AND wc.workload_kind = $3 \
+/// `known`: the workload has any of the data a profile is built from, the
+/// same four sources as [`Sources::is_empty`] (inventory rows, a syscall
+/// aggregate, a pod, a stored version). `running`: it has a current
+/// (container, digest) pair, by the inventory's running predicate. Each
+/// is an indexed EXISTS: one bounded row.
+const GATE_SQL: &str = concat!(
+    "SELECT (EXISTS (SELECT 1 FROM workload_containers WHERE pod_namespace = $2 \
+               AND workload_kind = $3 AND workload_name = $4) \
+          OR EXISTS (SELECT 1 FROM workload_syscalls WHERE pod_namespace = $2 \
+               AND workload_kind = $3 AND workload_name = $4) \
+          OR EXISTS (SELECT 1 FROM pod_details WHERE pod_namespace = $2 \
+               AND ((workload_kind = $3 AND workload_name = $4) \
+                    OR ($3 = 'Pod' AND pod_name = $4 AND workload_kind IS NULL))) \
+          OR EXISTS (SELECT 1 FROM workload_profile_versions WHERE cluster_id = $1 \
+               AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4)) AS known, \
+     EXISTS (SELECT 1 FROM workload_containers wc \
+     WHERE wc.pod_namespace = $2 AND wc.workload_kind = $3 \
        AND wc.workload_name = $4 AND ",
     crate::image_inventory::running_sql!("$5"),
-    ") AS b"
+    ") AS running"
 );
 
-/// The workload runs at least one image now: it has a current (container,
-/// digest) pair, by the same running predicate the inventory reads use.
-pub fn has_running_image(conn: &mut PgConnection, key: &Key) -> Result<bool, DbError> {
+/// `(known, running)` for the profile handler's gate; see [`GATE_SQL`].
+pub fn workload_gate(conn: &mut PgConnection, key: &Key) -> Result<(bool, bool), DbError> {
     #[derive(QueryableByName)]
-    struct B {
+    struct G {
         #[diesel(sql_type = diesel::sql_types::Bool)]
-        b: bool,
+        known: bool,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        running: bool,
     }
-    let r: B = sql_query(HAS_RUNNING_SQL)
+    let r: G = sql_query(GATE_SQL)
         .bind::<Text, _>(DEFAULT_CLUSTER_ID)
         .bind::<Text, _>(&key.namespace)
         .bind::<Text, _>(&key.kind)
         .bind::<Text, _>(&key.name)
         .bind::<diesel::sql_types::Double, _>(image_inventory::running_window_secs() as f64)
         .get_result(conn)?;
-    Ok(r.b)
+    Ok((r.known, r.running))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4784,6 +4803,44 @@ mod tests {
         assert_eq!(sc.verdict, "verified");
         assert_eq!(sc.digests.len(), 1);
         assert_eq!(sc.digests[0].container, "app");
+    }
+
+    /// The workload changed between the handler's running-image gate and
+    /// its full load. Pairs gone by the load: no supplyChain, images never
+    /// ok (with or without the fetched imageTrust). Pairs appeared after a
+    /// "not running" gate: supplyChain without imageTrust (null, not read),
+    /// its verdict from the signature results alone (not_checked here).
+    #[test]
+    fn gate_and_load_disagreeing_is_still_correct() {
+        let answer = crate::image_trust::shape(None, vec![], None, None, 20);
+        // Gate said running, load finds only a stale container.
+        let mut stale = container("app", restricted());
+        stale.previous_digests = std::mem::take(&mut stale.digests);
+        stale.previous_digests[0].last_pod_name = None;
+        let gone = Sources {
+            containers: vec![stale],
+            running_window_seconds: 900,
+            image_trust: Some(answer),
+            ..Default::default()
+        };
+        let p = build(&key(), &gone, now());
+        assert!(p.dimensions.images.supply_chain.is_none());
+        assert_ne!(p.dimensions.images.env.status, "ok");
+        assert_eq!(
+            images_status(true, &[], None),
+            "unknown",
+            "no pairs is never ok"
+        );
+        // Gate said not running (no read), load finds a running image.
+        let appeared = two_containers(vec![]);
+        let p = build(&key(), &appeared, now());
+        let sc = p.dimensions.images.supply_chain.as_ref().unwrap();
+        assert!(sc.image_trust.is_none());
+        assert_eq!(
+            (sc.verdict.as_str(), sc.reason.as_deref()),
+            ("unknown", Some("not_checked"))
+        );
+        assert_eq!(images_status(true, &[], Some(sc)), "unknown");
     }
 
     /// imageTrust (contract v1.9) rides on supplyChain, and like the
@@ -5997,6 +6054,83 @@ mod live_tests {
         }
     }
 
+    /// The handler's gate agrees with `Sources::is_empty`: a running
+    /// workload, a pod-only workload, a bare Pod (no owner) and an unknown
+    /// one.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_gate_matches_load_sources() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-gate";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, '5', "{}");
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) \
+             VALUES ('gate-podonly-1', '10.0.0.21', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'podonly'), \
+                    ('gate-bare', '10.0.0.22', '{ns}', timezone('UTC', NOW()), 'n1', false, NULL, NULL) \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = false, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name;"
+        ))
+        .unwrap();
+        // One workload per source, so dropping any source (or adding or
+        // losing a cluster filter) fails an assertion below.
+        let d = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        conn.batch_execute(&format!(
+            "INSERT INTO workload_syscalls (pod_namespace, workload_kind, workload_name, syscalls, arches, hash, updated_at, syscall_count) \
+             VALUES ('{ns}', 'Deployment', 'sysonly', 'exit,read,write', 'x86_64', 'abc', timezone('UTC', NOW()), 3); \
+             INSERT INTO workload_profile_versions (pod_namespace, workload_kind, workload_name, revision, \
+               content_hash, dimension_hashes, snapshot, posture) \
+             VALUES ('{ns}', 'Deployment', 'veronly', 1, 'fnv1a64:x', '{{}}', '{{}}', '{{}}'); \
+             INSERT INTO workload_profile_versions (cluster_id, pod_namespace, workload_kind, workload_name, revision, \
+               content_hash, dimension_hashes, snapshot, posture) \
+             VALUES ('other', '{ns}', 'Deployment', 'veronly-other', 1, 'fnv1a64:x', '{{}}', '{{}}', '{{}}'); \
+             INSERT INTO images (digest, repository, tags, digest_kind) VALUES ('{t}', 'ghcr.io/example/t', '{{1}}', 'repo'), \
+               ('{o}', 'ghcr.io/example/o', '{{1}}', 'repo') ON CONFLICT (digest) DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, image_digest, \
+               container_kind, image_ref, last_pod_name, state, state_reason, last_seen) \
+             VALUES ('{ns}', 'Job', 'termonly', 'app', '{t}', 'regular', 'ghcr.io/example/t:1', 'gone-1', 'terminated', 'Completed', \
+               timezone('UTC', NOW()) - INTERVAL '2 days'); \
+             INSERT INTO workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest, \
+               container_kind, image_ref, last_pod_name, state) \
+             VALUES ('other', '{ns}', 'Deployment', 'elsewhere', 'app', '{o}', 'regular', 'ghcr.io/example/o:1', 'elsewhere-1', 'running');",
+            t = d('3'),
+            o = d('4'),
+        ))
+        .unwrap();
+        let k = |kind: &str, name: &str| Key {
+            namespace: ns.into(),
+            kind: kind.into(),
+            name: name.into(),
+        };
+        for (key, want) in [
+            (k("Deployment", "checkout"), (true, true)),
+            (k("Deployment", "podonly"), (true, false)),
+            (k("Pod", "gate-bare"), (true, false)),
+            (k("Deployment", "sysonly"), (true, false)),
+            (k("Deployment", "veronly"), (true, false)),
+            (k("Deployment", "veronly-other"), (false, false)),
+            (k("Job", "termonly"), (true, false)),
+            (k("Deployment", "elsewhere"), (true, true)),
+            (k("Deployment", "nothing"), (false, false)),
+        ] {
+            let got = workload_gate(&mut conn, &key).unwrap();
+            assert_eq!(got, want, "{key:?}");
+            let s = load_sources(&mut conn, &key).unwrap();
+            assert_eq!(got.0, !s.is_empty(), "gate vs load_sources for {key:?}");
+            assert_eq!(
+                got.1,
+                !crate::runtime_capabilities::current_pairs(&s.containers).is_empty(),
+                "running vs current pairs for {key:?}"
+            );
+        }
+        conn.batch_execute(&format!(
+            "DELETE FROM pod_details WHERE pod_name IN ('gate-podonly-1', 'gate-bare'); \
+             DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}';"
+        ))
+        .unwrap();
+        reset(&mut conn, ns);
+    }
+
     /// Unknown workloads never reach the evaluator: 404 first, no read, no
     /// budget charge, no cache entry. A workload with no running image has
     /// no supplyChain and does not read it either.
@@ -6110,12 +6244,19 @@ mod live_tests {
             reset(&mut conn, ns);
             seed(&mut conn, ns, '6', "{}");
         }
-        let eval = HttpServer::new(|| {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        let eval = HttpServer::new(move || {
+            let h = h.clone();
             App::new().route(
                 "/image-trust",
-                web::get().to(|| async {
-                    actix_web::rt::time::sleep(std::time::Duration::from_secs(10)).await;
-                    HttpResponse::Ok().body("{}")
+                web::get().to(move || {
+                    let h = h.clone();
+                    async move {
+                        h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        actix_web::rt::time::sleep(std::time::Duration::from_secs(10)).await;
+                        HttpResponse::Ok().body("{}")
+                    }
                 }),
             )
         })
@@ -6132,15 +6273,16 @@ mod live_tests {
             web::Data::new(a)
         };
         let pool: DbPool = r2d2::Pool::builder()
-            .max_size(12)
+            .max_size(40)
             .build(ConnectionManager::<PgConnection>::new(
                 std::env::var("KG_TEST_DATABASE_URL").unwrap(),
             ))
             .unwrap();
         // Room for every request to finish; what is measured is how much
-        // is held while they wait on the evaluator (the old order held ten
-        // profile permits, about 10 x 11 MiB, for the whole wait).
-        let total = profile_charge_kib() * 12;
+        // is held while they wait on the evaluator (the old order held one
+        // profile permit per request, about N x 11 MiB, for the whole wait).
+        const N: u32 = 30;
+        let total = profile_charge_kib() * (N + 2);
         let budget = web::Data::new(ReadBudget::with_budget_kib(
             total,
             std::time::Duration::from_millis(0),
@@ -6152,14 +6294,15 @@ mod live_tests {
                 .app_data(b.clone())
                 .app_data(a.clone())
                 .service(get_workload_profile)
+                .service(crate::image_inventory::get_images)
         })
-        .workers(2)
+        .workers(4)
         .bind("127.0.0.1:0")
         .unwrap();
         let addr = srv.addrs()[0];
         actix_web::rt::spawn(srv.run());
         let url = format!("http://{addr}/workloads/{ns}/Deployment/checkout/profile");
-        let tasks: Vec<_> = (0..10)
+        let tasks: Vec<_> = (0..N)
             .map(|_| {
                 let url = url.clone();
                 actix_web::rt::spawn(
@@ -6167,7 +6310,17 @@ mod live_tests {
                 )
             })
             .collect();
-        actix_web::rt::time::sleep(std::time::Duration::from_millis(700)).await;
+        // Sample while the requests are waiting on the evaluator: after its
+        // first request arrived, well inside the 2 s wait.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while hits.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the evaluator was never read"
+            );
+            actix_web::rt::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        actix_web::rt::time::sleep(std::time::Duration::from_millis(300)).await;
         let free = budget.available_kib();
         assert!(
             free >= total - 1024 - 8,
@@ -6176,6 +6329,17 @@ mod live_tests {
         assert!(
             budget.acquire(profile_charge_kib()).await.is_ok(),
             "an unrelated read is admitted at once"
+        );
+        // A real unrelated read over HTTP during the stall: fast, not shed.
+        let started = std::time::Instant::now();
+        let r = reqwest::get(format!("http://{addr}/images?limit=10"))
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200, "unrelated read during the stall");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "unrelated read took {:?}",
+            started.elapsed()
         );
         for t in tasks {
             assert_eq!(t.await.unwrap(), 200);
