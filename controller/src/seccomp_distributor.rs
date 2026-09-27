@@ -34,9 +34,12 @@
 //! Per CR, every pass:
 //!  1. render the file from spec, write it atomically only when the bytes
 //!     on disk differ;
-//!  2. server-side-apply this node's `status.nodes[name=<node>]` entry
-//!     (field manager `kguardian-controller/<node>`);
-//!  3. compute the summary (`distribution`, `Ready`, and — from the
+//!  2. drop the `status.nodes` entries of nodes that have left the
+//!     cluster — one merge patch for all of them, sent only when there
+//!     are any (`prune_departed`) — then server-side-apply this node's
+//!     own entry (field manager `kguardian-controller/<node>`);
+//!  3. compute the summary (`distribution` over the nodes the list
+//!     returned, `Ready`, and — from the
 //!     broker's observations — `CaptureComplete`, `Drift`, and
 //!     `DenialsObserved` with its `denials` block) and apply it under the
 //!     shared manager `kguardian-summary`. Both applies are skipped when
@@ -193,7 +196,7 @@ pub async fn run() -> Result<(), Error> {
         store,
         cluster: None,
         fetch: |key| Box::pin(fetch_workload(key)),
-        last_total_nodes: 0,
+        last_nodes: BTreeSet::new(),
     };
 
     let mut ticker = tokio::time::interval(rec.cfg.interval);
@@ -307,17 +310,32 @@ fn cr_id(cr: &SeccompProfile) -> String {
     format!("{}/{}", cr.namespace().unwrap_or_default(), cr.name_any())
 }
 
-/// Cluster-wide inputs refreshed once per pass: how many nodes exist
-/// (the `total` in `distribution`) and what the broker has said about
-/// each workload a CR references (for `CaptureComplete` / `Drift` /
-/// `DenialsObserved`). Held only while there is a CR to spend them on —
-/// `None` after a pass over an empty store — so the first CR to arrive
-/// after a quiet spell gets a node count taken now, not one from
-/// whenever CRs last existed (or, if that list fails, the last count a
-/// list did return; see `Reconciler::last_total_nodes`).
+/// Cluster-wide inputs refreshed once per pass: which nodes exist (the
+/// `total` in `distribution`, and the set a `status.nodes` entry must
+/// be in to count) and what the broker has said about each workload a
+/// CR references (for `CaptureComplete` / `Drift` / `DenialsObserved`).
+/// Held only while there is a CR to spend them on — `None` after a pass
+/// over an empty store — so the first CR to arrive after a quiet spell
+/// gets a node list taken now, not one from whenever CRs last existed
+/// (or, if that list fails, the last one a list did return; see
+/// `Reconciler::last_nodes`).
 struct ClusterData {
-    total_nodes: u32,
+    nodes: NodeList,
     readings: BrokerReadings,
+}
+
+/// The nodes a pass counts against and prunes against.
+struct NodeList {
+    /// Every node the list returned, by name.
+    names: BTreeSet<String>,
+    /// Whether `names` is this pass's own list. A failed list falls back
+    /// to the last one that succeeded (`Reconciler::last_nodes`), which
+    /// is good enough to count against — a list one pass old beats
+    /// `0/0` — but not to prune from: a node that joined in between
+    /// would have its entry dropped by every node the list failed on,
+    /// and would put it back a pass later, for as long as the outage
+    /// lasted. Nothing is pruned from a borrowed list.
+    fresh: bool,
 }
 
 /// `(namespace, kind, name)` of a CR's workload: the key the broker's
@@ -505,13 +523,13 @@ struct Reconciler {
     store: Store<SeccompProfile>,
     cluster: Option<ClusterData>,
     fetch: WorkloadFetch,
-    /// The last node count a list returned, standing in when the next
-    /// list fails. Kept here rather than read back from `ClusterData`
-    /// because that is dropped after a pass over an empty store, and a
-    /// failed list on the pass after would otherwise fall back to zero:
-    /// `distribution` reading `n/0` and `Ready` flipping to `False` for
-    /// a pass, both mirrored to the broker.
-    last_total_nodes: u32,
+    /// The names the last successful node list returned, standing in
+    /// when the next list fails. Kept here rather than read back from
+    /// `ClusterData` because that is dropped after a pass over an empty
+    /// store, and a failed list on the pass after would otherwise fall
+    /// back to no nodes at all: `distribution` reading `0/0` and `Ready`
+    /// flipping to `False` for a pass, both mirrored to the broker.
+    last_nodes: BTreeSet<String>,
 }
 
 /// One row of the broker's `GET /seccomp/profiles`, which is also the
@@ -611,24 +629,34 @@ pub struct BrokerDrift {
 }
 
 impl Reconciler {
-    /// Take a fresh node count and forget this pass's broker readings.
+    /// Take a fresh node list and forget this pass's broker readings.
     /// The readings are not fetched here: `reconcile_cr` asks for each
     /// CR's workload as it gets to it, so a pass reads exactly the
     /// workloads its CRs name, and nothing when they name none.
     async fn refresh_cluster(&mut self) {
         let nodes: Api<Node> = Api::all(self.client.clone());
-        let total_nodes = match nodes.list_metadata(&ListParams::default()).await {
+        let nodes = match nodes.list_metadata(&ListParams::default()).await {
             Ok(list) => {
-                self.last_total_nodes = list.items.len() as u32;
-                self.last_total_nodes
+                self.last_nodes = list
+                    .items
+                    .iter()
+                    .filter_map(|n| n.metadata.name.clone())
+                    .collect();
+                NodeList {
+                    names: self.last_nodes.clone(),
+                    fresh: true,
+                }
             }
             Err(e) => {
                 warn!("cannot list nodes for seccomp distribution totals: {e}");
-                self.last_total_nodes
+                NodeList {
+                    names: self.last_nodes.clone(),
+                    fresh: false,
+                }
             }
         };
         self.cluster = Some(ClusterData {
-            total_nodes,
+            nodes,
             readings: BrokerReadings::default(),
         });
     }
@@ -707,7 +735,31 @@ impl Reconciler {
             info!(dest = %dest.display(), hash = %hash, "wrote seccomp profile from SeccompProfile CR");
         }
 
-        // 2. This node's status entry (only when it changed).
+        // 2a. The entries of nodes that have left the cluster. Only
+        // against a list this pass took itself (see `NodeList::fresh`),
+        // and only when there is one to drop, so a settled cluster pays
+        // no request for this. It goes before this node's own apply
+        // because the patch is conditioned on the object's version and
+        // that apply would move it. Best-effort like the mirror: the
+        // summary below discounts departed entries whether or not they
+        // are gone from the object, so a failed prune changes nothing an
+        // operator reads, and the next pass tries again.
+        let prune = match (
+            self.cluster.as_ref(),
+            cr.metadata.resource_version.as_deref(),
+        ) {
+            (Some(c), Some(rv)) if c.nodes.fresh => {
+                prune_nodes_patch(rv, &status.nodes, &c.nodes.names, &self.cfg.node_name)
+            }
+            _ => None,
+        };
+        if let Some(patch) = prune {
+            if let Err(e) = self.prune_departed(&ns, &name, patch).await {
+                warn!(cr = %cr_id(cr), "pruning departed nodes from status.nodes failed (will retry): {e}");
+            }
+        }
+
+        // 2b. This node's status entry (only when it changed).
         let mut nodes_view = status.nodes.clone();
         if !self.cfg.node_name.is_empty() {
             let desired = NodeStatus {
@@ -727,27 +779,25 @@ impl Reconciler {
         // CR naming a workload pays for the read and the rest of the pass
         // reuses it. Without a `workloadRef` there is nothing to ask and
         // `observation_conditions` says so on its own; without cluster
-        // inputs at all — not a path either caller takes — the broker
-        // counts as unreachable and the conditions carry forward.
-        let total = self.cluster.as_ref().map(|c| c.total_nodes).unwrap_or(0);
+        // inputs at all — not a path either caller takes — there are no
+        // nodes to count and the broker counts as unreachable, so the
+        // conditions carry forward.
         let fetch = self.fetch;
-        let summaries = match (cr.spec.workload_ref.as_ref(), self.cluster.as_mut()) {
-            (Some(wr), Some(cluster)) => cluster
-                .readings
-                .get_or_fetch(workload_key(&ns, wr), fetch)
-                .await
-                .summaries(),
-            _ => None,
+        let no_nodes = BTreeSet::new();
+        let (live, summaries) = match self.cluster.as_mut() {
+            Some(ClusterData { nodes, readings }) => {
+                let summaries = match cr.spec.workload_ref.as_ref() {
+                    Some(wr) => readings
+                        .get_or_fetch(workload_key(&ns, wr), fetch)
+                        .await
+                        .summaries(),
+                    None => None,
+                };
+                (&nodes.names, summaries)
+            }
+            None => (&no_nodes, None),
         };
-        let desired = desired_summary(
-            cr,
-            &status,
-            &nodes_view,
-            &hash,
-            &localhost,
-            total,
-            summaries,
-        );
+        let desired = desired_summary(cr, &status, &nodes_view, &hash, &localhost, live, summaries);
         if !summary_equal(&status, &desired) {
             self.apply_summary(&ns, &name, &desired).await?;
         }
@@ -796,6 +846,59 @@ impl Reconciler {
         .await?;
         debug!(cr = %format!("{ns}/{name}"), "applied status summary");
         Ok(())
+    }
+
+    /// Rewrite `status.nodes` without the departed entries: a JSON merge
+    /// patch, conditioned on the CR's `resourceVersion`.
+    ///
+    /// Not server-side apply, though every other status write here is.
+    /// An entry belongs to the field manager of the node that applied
+    /// it, and an apply from any other manager cannot remove a field it
+    /// does not own. The apply-native way out is to apply an empty
+    /// document *as* the departed node's manager, and that is correct —
+    /// but it is one status write per departed node, and every write of
+    /// this object fans the whole of it out to every node's watch. The
+    /// CRs this fixes carried 126 and 740 departed entries: 740 writes
+    /// of a tens-of-kilobytes object to 70 watchers, for one cleanup. It
+    /// also reaches only entries written under the manager name this
+    /// code uses.
+    ///
+    /// A merge patch replaces the list in one write, whoever wrote the
+    /// entries. What makes it safe beside seventy concurrent appliers is
+    /// the `resourceVersion` precondition: the patch names the version
+    /// the reflector saw, and the apiserver refuses it (409) if anything
+    /// landed in between — another node's entry, another node's summary,
+    /// or this node's own entry, which is why the prune runs before that
+    /// apply. So the kept entries are always byte-identical to what the
+    /// server holds, no live entry is ever rewritten, and their managers
+    /// keep them: an update takes ownership only of fields it changes,
+    /// and removing a field records nothing. A conflict is not worth a
+    /// warning; the next pass reads the newer object and tries again.
+    async fn prune_departed(
+        &self,
+        ns: &str,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), Error> {
+        let api: Api<SeccompProfile> = Api::namespaced(self.client.clone(), ns);
+        let params = PatchParams {
+            field_manager: Some(MANAGER_SUMMARY.into()),
+            ..PatchParams::default()
+        };
+        match api.patch_status(name, &params, &Patch::Merge(patch)).await {
+            Ok(_) => {
+                debug!(cr = %format!("{ns}/{name}"), "pruned departed nodes from status.nodes");
+                Ok(())
+            }
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                debug!(
+                    cr = %format!("{ns}/{name}"),
+                    "status.nodes prune lost a race (will retry next pass)"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The user deleted the CR: remove its file and the broker mirror.
@@ -921,11 +1024,65 @@ pub fn summary_patch(ns: &str, name: &str, s: &SeccompProfileStatus) -> serde_js
     })
 }
 
-/// `distribution` from the per-node entries: a node is ready when its
-/// entry carries the current hash.
-pub fn compute_distribution(nodes: &[NodeStatus], hash: &str, total: u32) -> Distribution {
-    let ready = nodes.iter().filter(|n| n.hash == hash).count() as u32;
-    let ready = ready.min(total.max(ready));
+/// JSON merge patch that rewrites `status.nodes` without the entries of
+/// departed nodes, to land only while the CR is still at
+/// `resource_version` — see `Reconciler::prune_departed` for why a merge
+/// patch and why the precondition. `None` when nothing is departed, so
+/// a settled cluster sends nothing.
+///
+/// A node is departed when `live` does not name it, with two exceptions.
+/// This node's own entry stays whatever the list says: its Node object
+/// can be gone while this pod runs out its last passes, and dropping an
+/// entry the next step puts straight back is a flap for nothing — the
+/// other nodes prune it once this pod is gone. And an empty `live`
+/// prunes nothing: a cluster with no nodes has nowhere to run this, so
+/// an empty list is a list that said nothing, not a cluster that
+/// emptied.
+pub fn prune_nodes_patch(
+    resource_version: &str,
+    nodes: &[NodeStatus],
+    live: &BTreeSet<String>,
+    own: &str,
+) -> Option<serde_json::Value> {
+    if live.is_empty() {
+        return None;
+    }
+    let kept: Vec<&NodeStatus> = nodes
+        .iter()
+        .filter(|n| n.name == own || live.contains(&n.name))
+        .collect();
+    if kept.len() == nodes.len() {
+        return None;
+    }
+    Some(json!({
+        "metadata": { "resourceVersion": resource_version },
+        "status": { "nodes": kept },
+    }))
+}
+
+/// `distribution` from the per-node entries: a node is ready when the
+/// list returned it and its entry carries the current hash, and `total`
+/// is the list. An entry for a node that has left the cluster counts for
+/// nothing. It used to count in full: nothing removed such entries and
+/// nothing discounted them, so `ready` climbed past `total` for as long
+/// as the cluster kept replacing nodes — `196/70` on a 70-node cluster
+/// that had autoscaled through 196 — and `Ready` still read `AllNodes`,
+/// only because `ready >= total` held all the more surely. The `min` is
+/// belt and braces: `nodes` is a map-list keyed on `name`, so the filter
+/// already bounds `ready` by `total`, but the invariant is worth pinning
+/// where the numbers are made rather than trusting to a list type
+/// declared elsewhere.
+pub fn compute_distribution(
+    nodes: &[NodeStatus],
+    hash: &str,
+    live: &BTreeSet<String>,
+) -> Distribution {
+    let total = live.len() as u32;
+    let ready = nodes
+        .iter()
+        .filter(|n| n.hash == hash && live.contains(&n.name))
+        .count() as u32;
+    let ready = ready.min(total);
     let state = if total > 0 && ready >= total {
         DistributionState::Ready
     } else if ready > 0 {
@@ -1459,7 +1616,8 @@ pub fn merge_conditions(existing: &[Condition], desired: &[Desired], now: &str) 
 }
 
 /// The summary this node wants `status` to carry. `nodes` is the CR's
-/// current entries with this node's own entry already updated.
+/// current entries with this node's own entry already updated; `live`
+/// is the node list the pass took (`NodeList::names`).
 #[allow(clippy::too_many_arguments)]
 pub fn desired_summary(
     cr: &SeccompProfile,
@@ -1467,10 +1625,10 @@ pub fn desired_summary(
     nodes: &[NodeStatus],
     hash: &str,
     localhost: &str,
-    total_nodes: u32,
+    live: &BTreeSet<String>,
     summaries: Option<&[BrokerSummary]>,
 ) -> SeccompProfileStatus {
-    let distribution = compute_distribution(nodes, hash, total_nodes);
+    let distribution = compute_distribution(nodes, hash, live);
     let ready = ready_condition(&distribution);
     let now = now_rfc3339();
 
@@ -1635,6 +1793,11 @@ mod tests {
         }
     }
 
+    /// The node list a pass took, as the summary functions want it.
+    fn live(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
     fn cr(ns: &str, name: &str, workload: Option<&str>) -> SeccompProfile {
         let mut c = SeccompProfile::new(
             name,
@@ -1789,7 +1952,7 @@ mod tests {
             store,
             cluster: None,
             fetch,
-            last_total_nodes: 0,
+            last_nodes: BTreeSet::new(),
         };
         (rec, writer)
     }
@@ -1808,36 +1971,82 @@ mod tests {
     #[test]
     fn distribution_ready_partial_pending() {
         let h = "aaaa";
-        let d = compute_distribution(&[node("a", h), node("b", h)], h, 2);
+        let d = compute_distribution(&[node("a", h), node("b", h)], h, &live(&["a", "b"]));
         assert_eq!(d.state, DistributionState::Ready);
         assert_eq!((d.ready, d.total), (2, 2));
         assert_eq!(d.summary.as_deref(), Some("2/2"));
 
-        let d = compute_distribution(&[node("a", h), node("b", "stale")], h, 3);
+        let d = compute_distribution(
+            &[node("a", h), node("b", "stale")],
+            h,
+            &live(&["a", "b", "c"]),
+        );
         assert_eq!(d.state, DistributionState::Partial);
         assert_eq!((d.ready, d.total), (1, 3));
 
-        let d = compute_distribution(&[node("a", "stale")], h, 3);
+        let d = compute_distribution(&[node("a", "stale")], h, &live(&["a", "b", "c"]));
         assert_eq!(d.state, DistributionState::Pending);
         assert_eq!((d.ready, d.total), (0, 3));
 
         // No nodes known at all is never "Ready".
-        let d = compute_distribution(&[], h, 0);
+        let d = compute_distribution(&[], h, &live(&[]));
         assert_eq!(d.state, DistributionState::Pending);
 
         // Ready condition follows the state.
         assert_eq!(
-            ready_condition(&compute_distribution(&[node("a", h)], h, 1)).reason,
+            ready_condition(&compute_distribution(&[node("a", h)], h, &live(&["a"]))).reason,
             "AllNodes"
         );
         assert_eq!(
-            ready_condition(&compute_distribution(&[node("a", h)], h, 2)).reason,
+            ready_condition(&compute_distribution(
+                &[node("a", h)],
+                h,
+                &live(&["a", "b"])
+            ))
+            .reason,
             "SomeNodes"
         );
         assert_eq!(
-            ready_condition(&compute_distribution(&[], h, 2)).reason,
+            ready_condition(&compute_distribution(&[], h, &live(&["a", "b"]))).reason,
             "NoNodes"
         );
+    }
+
+    /// The bug as it was found: a 70-node autoscaled cluster whose CR
+    /// had collected 196 entries, 126 of them for nodes long gone, read
+    /// `196/70` and `Ready`/`AllNodes`. Only entries the node list
+    /// vouches for may count, and `total` is that list.
+    #[test]
+    fn departed_nodes_count_for_nothing_and_ready_never_exceeds_total() {
+        let h = "aaaa";
+        let mut nodes: Vec<NodeStatus> = (0..70).map(|i| node(&format!("live-{i}"), h)).collect();
+        nodes.extend((0..126).map(|i| node(&format!("gone-{i}"), h)));
+        let l: BTreeSet<String> = (0..70).map(|i| format!("live-{i}")).collect();
+        let d = compute_distribution(&nodes, h, &l);
+        assert_eq!((d.ready, d.total), (70, 70));
+        assert_eq!(d.state, DistributionState::Ready);
+        assert_eq!(d.summary.as_deref(), Some("70/70"));
+
+        // A departed node's entry cannot stand in for a live node that
+        // has not caught up: the cluster is Pending, not Ready.
+        let d = compute_distribution(
+            &[node("gone", h), node("live", "stale")],
+            h,
+            &live(&["live"]),
+        );
+        assert_eq!((d.ready, d.total), (0, 1));
+        assert_eq!(d.state, DistributionState::Pending);
+
+        // The cap holds even for a list the map-list type did not
+        // deduplicate.
+        let d = compute_distribution(&[node("a", h), node("a", h)], h, &live(&["a"]));
+        assert_eq!((d.ready, d.total), (1, 1));
+
+        // No list at all (a first pass whose list failed): 0/0 and never
+        // Ready, whatever the entries say.
+        let d = compute_distribution(&[node("a", h)], h, &live(&[]));
+        assert_eq!((d.ready, d.total), (0, 0));
+        assert_eq!(d.state, DistributionState::Pending);
     }
 
     #[test]
@@ -1981,7 +2190,7 @@ mod tests {
                 &nodes,
                 "h1",
                 path,
-                1,
+                &live(&["a"]),
                 Some(rows),
             )
         };
@@ -2092,7 +2301,7 @@ mod tests {
         ];
         let mut status = SeccompProfileStatus::default();
         for (rows, what) in cases {
-            status = desired_summary(&c, &status, &nodes, "h1", path, 1, Some(&rows));
+            status = desired_summary(&c, &status, &nodes, "h1", path, &live(&["a"]), Some(&rows));
             let decided = status
                 .conditions
                 .iter()
@@ -2114,10 +2323,10 @@ mod tests {
             &nodes,
             "h1",
             path,
-            1,
+            &live(&["a"]),
             Some(&[row(Some(denials(17, &["ptrace"])))]),
         );
-        let outage = desired_summary(&c, &seen, &nodes, "h1", path, 1, None);
+        let outage = desired_summary(&c, &seen, &nodes, "h1", path, &live(&["a"]), None);
         assert!(outage.denials.is_some());
         assert_eq!(
             outage
@@ -2276,13 +2485,13 @@ mod tests {
             &nodes,
             "h1",
             path,
-            1,
+            &live(&["a"]),
             Some(&rows),
         );
         assert_eq!(first.denials.as_ref().unwrap().observed, 17);
         assert_eq!(cond(&first).status, "True");
 
-        let during = desired_summary(&c, &first, &nodes, "h1", path, 1, None);
+        let during = desired_summary(&c, &first, &nodes, "h1", path, &live(&["a"]), None);
         assert!(
             summary_equal(&first, &during),
             "an outage changes nothing, so nothing is applied"
@@ -2385,7 +2594,7 @@ mod tests {
             &nodes,
             "h1",
             path,
-            1,
+            &live(&["a"]),
             Some(&pass(0)),
         );
         assert_eq!(first.observed_generation, Some(3));
@@ -2406,7 +2615,15 @@ mod tests {
         // a write.
         let mut status = first.clone();
         for n in 1..=20 {
-            let next = desired_summary(&c, &status, &nodes, "h1", path, 1, Some(&pass(n)));
+            let next = desired_summary(
+                &c,
+                &status,
+                &nodes,
+                "h1",
+                path,
+                &live(&["a"]),
+                Some(&pass(n)),
+            );
             assert!(
                 summary_equal(&status, &next),
                 "pass {n} re-applies the CR: {:?} then {:?}",
@@ -2417,11 +2634,19 @@ mod tests {
         }
 
         // Broker outage keeps CaptureComplete/Drift exactly as they were.
-        let outage = desired_summary(&c, &status, &nodes, "h1", path, 1, None);
+        let outage = desired_summary(&c, &status, &nodes, "h1", path, &live(&["a"]), None);
         assert!(summary_equal(&status, &outage));
 
         // A new hash flips Ready and changes the summary.
-        let rehashed = desired_summary(&c, &status, &nodes, "h2", path, 1, Some(&pass(21)));
+        let rehashed = desired_summary(
+            &c,
+            &status,
+            &nodes,
+            "h2",
+            path,
+            &live(&["a"]),
+            Some(&pass(21)),
+        );
         assert!(!summary_equal(&status, &rehashed));
         assert_eq!(
             rehashed.distribution.as_ref().unwrap().state,
@@ -2479,11 +2704,11 @@ mod tests {
             &nodes,
             "h1",
             path,
-            1,
+            &live(&["a"]),
             Some(&rows(400, &["ptrace"], 0)),
         );
         let step = |prev: &SeccompProfileStatus, rows: &[BrokerSummary]| {
-            desired_summary(&c, prev, &nodes, "h1", path, 1, Some(rows))
+            desired_summary(&c, prev, &nodes, "h1", path, &live(&["a"]), Some(rows))
         };
 
         // A denial a second for four minutes: same syscall, same order
@@ -2626,7 +2851,15 @@ mod tests {
             let mut writes = 0usize;
             for pass in 0..20 {
                 let rows = if pass % 2 == 0 { first } else { second };
-                let next = desired_summary(&c, &status, &nodes, "h1", path, 2, Some(rows));
+                let next = desired_summary(
+                    &c,
+                    &status,
+                    &nodes,
+                    "h1",
+                    path,
+                    &live(&["a", "b"]),
+                    Some(rows),
+                );
                 if !summary_equal(&status, &next) {
                     writes += 1;
                     status = next;
@@ -2895,7 +3128,7 @@ mod tests {
             &[],
             "h1",
             "kguardian/prod/deployment-web.json",
-            2,
+            &live(&["a", "b"]),
             None,
         );
         let p = summary_patch("prod", "deployment-web", &s);
@@ -2935,9 +3168,51 @@ mod tests {
     }
 
     #[test]
+    fn prune_patch_drops_departed_entries_and_nothing_else() {
+        let nodes = [
+            node("live-a", "h1"),
+            node("gone", "h0"),
+            node("me", "h1"),
+            node("live-b", "h1"),
+        ];
+        let l = live(&["live-a", "live-b"]);
+
+        let p = prune_nodes_patch("4711", &nodes, &l, "me").expect("gone has departed");
+        // The optimistic-concurrency guard: the version the list was read at.
+        assert_eq!(p["metadata"]["resourceVersion"], "4711");
+        let kept: Vec<&str> = p["status"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Order kept, entries verbatim, and this node's own entry kept
+        // though the list does not name it.
+        assert_eq!(kept, ["live-a", "me", "live-b"]);
+        assert_eq!(p["status"]["nodes"][0]["hash"], "h1");
+        assert_eq!(
+            p["status"]["nodes"][0]["lastWritten"],
+            "2026-09-03T00:00:00Z"
+        );
+        // Only the list and the guard: the summary fields are the apply
+        // manager's, and a merge patch that named them would overwrite
+        // them.
+        assert_eq!(p["status"].as_object().unwrap().len(), 1);
+        assert_eq!(p.as_object().unwrap().len(), 2);
+
+        // Nothing departed ⇒ no patch, so a settled cluster sends nothing.
+        assert!(prune_nodes_patch("4711", &nodes[..1], &l, "me").is_none());
+        assert!(prune_nodes_patch("4711", &[], &l, "me").is_none());
+        // Only this node's entry, unlisted ⇒ still nothing.
+        assert!(prune_nodes_patch("4711", &nodes[2..3], &l, "me").is_none());
+        // An empty list says nothing about the cluster and prunes nothing.
+        assert!(prune_nodes_patch("4711", &nodes, &live(&[]), "me").is_none());
+    }
+
+    #[test]
     fn mirror_body_carries_spec_hash_and_distribution() {
         let c = cr("prod", "deployment-web", Some("web"));
-        let d = compute_distribution(&[node("a", "h1")], "h1", 1);
+        let d = compute_distribution(&[node("a", "h1")], "h1", &live(&["a"]));
         let b = mirror_body(&c.spec, "h1", Some(&d));
         assert_eq!(b["hash"], "h1");
         assert_eq!(b["status"]["distribution"]["ready"], 1);
@@ -3105,10 +3380,18 @@ mod tests {
             &nodes,
             "h1",
             path,
-            1,
+            &live(&["a"]),
             Some(&rows),
         );
-        let during = desired_summary(&c, &first, &nodes, "h1", path, 1, down.summaries());
+        let during = desired_summary(
+            &c,
+            &first,
+            &nodes,
+            "h1",
+            path,
+            &live(&["a"]),
+            down.summaries(),
+        );
         assert!(
             summary_equal(&first, &during),
             "an outage changes nothing, so nothing is applied"
@@ -3272,7 +3555,7 @@ mod tests {
     /// cluster-wide profile list each time — the list the broker OOMKilled
     /// on — for CRs that did not exist. Now it takes no cluster inputs at
     /// all: `cluster` stays `None`, which it could not if the node list
-    /// had run, because even a failed list records a count.
+    /// had run, because even a failed list records a list.
     #[tokio::test]
     async fn an_empty_store_takes_no_cluster_inputs() {
         let root = test_root("empty-store");
@@ -3285,6 +3568,31 @@ mod tests {
             rec.cluster.is_none(),
             "an empty store must not list nodes or read the broker"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `refresh_cluster` against an API server that is not there: the
+    /// pass keeps the list the last successful pass took — never "no
+    /// nodes" — and marks it borrowed, so nothing is pruned against it.
+    #[tokio::test]
+    async fn a_failed_node_list_falls_back_to_the_last_one_and_is_not_pruned_against() {
+        let root = test_root("stale-list");
+        let (mut rec, _writer) =
+            offline_reconciler(root.clone(), |_| Box::pin(async { Ok(None) })).await;
+        rec.last_nodes = live(&["a", "b"]);
+        rec.refresh_cluster().await;
+        let nodes = &rec
+            .cluster
+            .as_ref()
+            .expect("a refresh always records a list")
+            .nodes;
+        assert_eq!(nodes.names, live(&["a", "b"]));
+        assert!(
+            !nodes.fresh,
+            "a list that failed must not be pruned against"
+        );
+        // And the fallback itself is untouched for the pass after.
+        assert_eq!(rec.last_nodes, live(&["a", "b"]));
         let _ = std::fs::remove_dir_all(&root);
     }
 

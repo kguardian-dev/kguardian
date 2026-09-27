@@ -103,10 +103,10 @@ status:
 | `observedGeneration` | The `metadata.generation` the summary was computed for. |
 | `hash` | FNV-1a-64 of the rendered file bytes — what a node should have on disk. |
 | `localhostProfile` | The value to put in `securityContext.seccompProfile.localhostProfile`. |
-| `distribution` | `ready` nodes whose entry in `nodes` carries the current `hash`, out of `total` live nodes; `state` is `Ready` (`ready == total > 0`), `Partial`, or `Pending` (`ready == 0`). `summary` is the `ready/total` string the printer column shows. |
+| `distribution` | `ready` live nodes whose entry in `nodes` carries the current `hash`, out of `total` live nodes; `state` is `Ready` (`ready == total > 0`), `Partial`, or `Pending` (`ready == 0`). `summary` is the `ready/total` string the printer column shows. |
 | `drift` | Mirror of the `Drift` condition's status (`True`/`False`/`Unknown`) for the printer column — printer columns take simple JSON paths, not condition filters. |
 | `denials` | Present whenever the Broker has an answer for `workloadRef`'s workload, **including when that answer is zero**. `observed` is the total across every syscall and action — it is the `DENIALS` printer column; `actions` is the distinct verdicts the kernel returned (`SCMP_ACT_LOG` in audit mode; an enforcing action after promotion), sorted; `syscalls` is the distinct names, sorted; `lastSeen` is the most recent denial and `refreshedAt` the last time the controller re-read the answer from the Broker, both RFC 3339. `observed: 0` means checked and clean; the block being **absent** means not known. |
-| `nodes[]` | One entry per node, keyed by `name` (`x-kubernetes-list-type: map`). Each controller server-side-applies only its own entry, with field manager `kguardian-controller/<node>`. |
+| `nodes[]` | One entry per node, keyed by `name` (`x-kubernetes-list-type: map`). Each controller server-side-applies only its own entry, with field manager `kguardian-controller/<node>`. Entries for nodes that have left the cluster are removed on the next pass, so the list tracks the nodes the cluster has, not every node it has ever had. |
 | `conditions[]` | Standard `metav1.Condition` list, below. |
 
 ### Conditions
