@@ -9,6 +9,7 @@ on:
     paths:
       - '.github/workflows/charts-lint.yaml'
       - 'charts/**'
+      - 'test/helm-values-compat.sh'
 
 jobs:
   lint-test:
