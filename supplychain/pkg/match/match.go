@@ -24,6 +24,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -64,7 +68,43 @@ type held struct {
 type groupState struct {
 	fingerprint string
 	matchedDB   time.Time
+
+	// Failures of the current input (failFP against failDB). Reset when
+	// either changes; at the threshold the group is quarantined: not
+	// matched again until its SBOM or the database changes.
+	failFP      string
+	failDB      time.Time
+	failures    int
+	crashes     int
+	quarantined string // why; empty when not quarantined
+	// quarantinedAt and expires: an error quarantine (not too large, not
+	// a crash) lifts after its TTL for one more try; errorQuarantines
+	// counts them for this input, doubling the TTL each time.
+	quarantinedAt    time.Time
+	expires          bool
+	errorQuarantines int
 }
+
+// maxErrorQuarantineTTL caps the doubling of ErrorQuarantineTTL.
+const maxErrorQuarantineTTL = 24 * time.Hour
+
+// ttlLocked is how long gs's current error quarantine lasts:
+// ErrorQuarantineTTL, doubled for every earlier quarantine of the same
+// input, at most maxErrorQuarantineTTL.
+func (c *Coordinator) ttlLocked(gs *groupState) time.Duration {
+	ttl := c.ErrorQuarantineTTL
+	for i := 1; i < gs.errorQuarantines && ttl < maxErrorQuarantineTTL; i++ {
+		ttl *= 2
+	}
+	return min(ttl, maxErrorQuarantineTTL)
+}
+
+// Quarantine thresholds: a match that is too large fails the same way
+// every time, so once is enough; other errors may be transient.
+const (
+	quarantineAfterErrors  = 3
+	quarantineAfterCrashes = 2
+)
 
 // Coordinator holds SBOMs and schedules matching on one worker.
 type Coordinator struct {
@@ -79,14 +119,35 @@ type Coordinator struct {
 	MaxComponents int
 	// MatchTimeout bounds one match. Default 2m.
 	MatchTimeout time.Duration
+	// ErrorQuarantineTTL is how long a group quarantined by repeated
+	// errors waits before one more try, doubling each time the same input
+	// is quarantined again (at most 24h). Too-large and crash quarantines
+	// wait for an SBOM or database change instead. Default 1h.
+	ErrorQuarantineTTL time.Duration
+	// CrashDir, when set, holds a marker for each match in flight
+	// (written before, removed after). A marker left behind means the
+	// process died mid-match (e.g. OOMKilled); after
+	// quarantineAfterCrashes such deaths for the same input the group is
+	// quarantined, so one digest cannot crash every pass. It must survive
+	// a container restart (the chart's /tmp emptyDir does). Markers are
+	// per group key and written atomically, so concurrent matches of
+	// different groups cannot collide; a replica has its own emptyDir.
+	CrashDir string
 
 	now    func() time.Time
 	mu     sync.Mutex
 	sboms  map[string]map[string]*held // digest -> source -> SBOM
 	groups map[string]*groupState
 	queue  map[string]struct{}
-	notify chan struct{}
-	dbSeen time.Time
+	// retry holds groups whose match found the matcher unavailable; the
+	// ticker queues them again. unavailable* summarise one pass of them
+	// for a single log line.
+	retry             map[string]struct{}
+	unavailable       int
+	unavailableSample string
+	unavailableErr    error
+	notify            chan struct{}
+	dbSeen            time.Time
 }
 
 func (c *Coordinator) init() {
@@ -104,6 +165,12 @@ func (c *Coordinator) init() {
 	}
 	if c.MatchTimeout <= 0 {
 		c.MatchTimeout = 2 * time.Minute
+	}
+	if c.ErrorQuarantineTTL <= 0 {
+		c.ErrorQuarantineTTL = time.Hour
+	}
+	if c.retry == nil {
+		c.retry = map[string]struct{}{}
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -238,6 +305,7 @@ func (c *Coordinator) Held() int {
 func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 	c.mu.Lock()
 	c.init()
+	c.loadCrashesLocked()
 	c.mu.Unlock()
 	if dbPoll <= 0 {
 		dbPoll = time.Minute
@@ -252,6 +320,37 @@ func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 			return
 		case <-c.notify:
 		case <-t.C:
+			c.mu.Lock()
+			c.requeueLocked()
+			c.mu.Unlock()
+		}
+	}
+}
+
+// logUnavailable writes one WARN for the digests a pass could not match
+// because the matcher was unreachable (count plus one example).
+func (c *Coordinator) logUnavailable() {
+	c.mu.Lock()
+	n, sample, err := c.unavailable, c.unavailableSample, c.unavailableErr
+	c.unavailable, c.unavailableSample, c.unavailableErr = 0, "", nil
+	c.mu.Unlock()
+	if n > 0 && c.Log != nil {
+		c.Log.WithError(err).WithFields(logrus.Fields{"digests": n, "example": sample}).
+			Warn("matcher unavailable; will retry on the next tick")
+	}
+}
+
+// requeueLocked queues again the groups a tick should retry: those that
+// found the matcher unavailable, and error quarantines whose TTL is up.
+func (c *Coordinator) requeueLocked() {
+	for k := range c.retry {
+		c.queue[k] = struct{}{}
+		delete(c.retry, k)
+	}
+	now := c.now()
+	for k, gs := range c.groups {
+		if gs.quarantined != "" && gs.expires && !now.Before(gs.quarantinedAt.Add(c.ttlLocked(gs))) {
+			c.queue[k] = struct{}{}
 		}
 	}
 }
@@ -278,6 +377,7 @@ func (c *Coordinator) checkDB() {
 }
 
 func (c *Coordinator) drain(ctx context.Context) {
+	defer c.logUnavailable()
 	for ctx.Err() == nil {
 		c.mu.Lock()
 		if c.dbSeen.IsZero() {
@@ -306,9 +406,28 @@ func (c *Coordinator) drain(ctx context.Context) {
 		}
 		db := c.dbSeen
 		skip := in == nil || (gs.fingerprint == in.fingerprint && gs.matchedDB.Equal(db))
+		if !skip && (gs.failFP != in.fingerprint || !gs.failDB.Equal(db)) {
+			// A new SBOM or database: start over, quarantine lifted.
+			gs.failFP, gs.failDB, gs.failures, gs.crashes, gs.quarantined = "", time.Time{}, 0, 0, ""
+			gs.errorQuarantines = 0
+			c.gaugesLocked()
+		}
+		if !skip && gs.quarantined != "" {
+			if gs.expires && !c.now().Before(gs.quarantinedAt.Add(c.ttlLocked(gs))) {
+				// One more try; a failure re-quarantines at once.
+				gs.quarantined, gs.expires, gs.failures = "", false, quarantineAfterErrors-1
+				c.gaugesLocked()
+				if c.Log != nil {
+					c.Log.WithField("digest", key).Info("retrying a digest quarantined by errors")
+				}
+			} else {
+				skip = true
+			}
+		}
+		crashes := gs.crashes
 		c.mu.Unlock()
 		if !skip {
-			c.matchOne(ctx, key, in, db)
+			c.matchOne(ctx, key, in, db, crashes)
 		}
 	}
 }
@@ -360,26 +479,29 @@ func (c *Coordinator) unionLocked(key string) *union {
 	return u
 }
 
-func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db time.Time) {
+func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db time.Time, crashes int) {
+	// Not deferred: a marker must outlive a process that dies mid-match.
+	marker := c.writeMarker(key, in.fingerprint, db, crashes)
 	mctx, cancel := context.WithTimeout(ctx, c.MatchTimeout)
 	start := c.now()
 	vulns, err := c.Matcher.Match(mctx, in.sbom)
 	cancel()
+	c.removeMarker(marker)
 	if c.Metrics != nil {
 		c.Metrics.GrypeMatchSeconds.Observe(c.now().Sub(start).Seconds())
 	}
 	if err != nil {
-		c.count("error")
-		if c.Log != nil {
-			c.Log.WithError(err).WithField("digest", key).Warn("matching failed")
-		}
+		c.failed(key, in.fingerprint, db, err)
 		return
 	}
 	c.count("ok")
 	c.mu.Lock()
 	if gs := c.groups[key]; gs != nil {
 		gs.fingerprint, gs.matchedDB = in.fingerprint, db
+		gs.failFP, gs.failDB, gs.failures, gs.crashes, gs.quarantined = "", time.Time{}, 0, 0, ""
+		gs.errorQuarantines = 0
 	}
+	c.gaugesLocked()
 	c.mu.Unlock()
 	if vulns == nil {
 		vulns = []types.Vulnerability{}
@@ -402,6 +524,172 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 	}
 }
 
+// failed records a failed match and quarantines the group when the same
+// input keeps failing. A too-large result is logged as such (it is not a
+// transient error) and quarantines at once.
+func (c *Coordinator) failed(key, fp string, db time.Time, err error) {
+	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) {
+		// The matcher could not be reached (or we are shutting down): not
+		// the SBOM's fault, so never a step towards quarantine. Retried on
+		// the next tick; drain logs one line per pass for all of them.
+		c.count("unavailable")
+		c.mu.Lock()
+		c.retry[key] = struct{}{}
+		c.unavailable++
+		if c.unavailableSample == "" {
+			c.unavailableSample, c.unavailableErr = key, err
+		}
+		c.mu.Unlock()
+		if c.Log != nil {
+			c.Log.WithError(err).WithField("digest", key).Debug("matcher unavailable; will retry")
+		}
+		return
+	}
+	tooLarge := errors.Is(err, ErrTooLarge)
+	reason := "error"
+	switch {
+	case tooLarge:
+		reason = "too_large"
+	case errors.Is(err, ErrTruncated):
+		reason = "truncated"
+	}
+	if tooLarge {
+		c.count("too_large")
+	} else {
+		c.count("error")
+	}
+	c.mu.Lock()
+	gs := c.groups[key]
+	if gs == nil {
+		gs = &groupState{}
+		c.groups[key] = gs
+	}
+	if gs.failFP != fp || !gs.failDB.Equal(db) {
+		gs.failFP, gs.failDB, gs.failures, gs.crashes, gs.errorQuarantines = fp, db, 0, 0, 0
+	}
+	gs.failures++
+	failures := gs.failures
+	threshold := quarantineAfterErrors
+	if tooLarge {
+		threshold = 1
+	}
+	quarantine := gs.quarantined == "" && failures >= threshold
+	if !quarantine && gs.quarantined == "" {
+		// Not yet quarantined: try again on the next tick, so a failing
+		// input reaches its verdict in a few minutes.
+		c.retry[key] = struct{}{}
+	}
+	if quarantine {
+		gs.quarantined = fmt.Sprintf("%s: %v", reason, err)
+		gs.quarantinedAt, gs.expires = c.now(), !tooLarge
+		if !tooLarge {
+			gs.errorQuarantines++
+		}
+		c.gaugesLocked()
+	}
+	c.mu.Unlock()
+	if c.Log != nil {
+		msg := "matching failed"
+		if tooLarge {
+			msg = "match result too large"
+		}
+		c.Log.WithError(err).WithFields(logrus.Fields{"digest": key, "reason": reason, "failures": failures}).Warn(msg)
+		if quarantine {
+			until := "until its SBOM or the vulnerability database changes"
+			if !tooLarge {
+				c.mu.Lock()
+				ttl := c.ttlLocked(gs)
+				c.mu.Unlock()
+				until = fmt.Sprintf("for %s, or until its SBOM or the vulnerability database changes", ttl)
+			}
+			c.Log.WithFields(logrus.Fields{"digest": key, "reason": reason, "failures": failures}).
+				Warn("digest quarantined: not matched again " + until)
+		}
+	}
+	if quarantine {
+		c.count("quarantined")
+	}
+}
+
+// crashMarker is what writeMarker leaves for the duration of one match.
+type crashMarker struct {
+	Key         string    `json:"key"`
+	Fingerprint string    `json:"fingerprint"`
+	DB          time.Time `json:"db"`
+	// Crashes before this attempt (from earlier markers).
+	Crashes int `json:"crashes"`
+}
+
+func (c *Coordinator) markerPath(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(c.CrashDir, "inflight-"+hex.EncodeToString(sum[:])+".json")
+}
+
+// writeMarker records the match about to run; "" when crash tracking is
+// off or the marker cannot be written (matching goes ahead regardless).
+func (c *Coordinator) writeMarker(key, fp string, db time.Time, crashes int) string {
+	if c.CrashDir == "" {
+		return ""
+	}
+	b, _ := json.Marshal(crashMarker{Key: key, Fingerprint: fp, DB: db, Crashes: crashes})
+	path := c.markerPath(key)
+	if err := os.MkdirAll(c.CrashDir, 0o700); err == nil {
+		tmp, err := os.CreateTemp(c.CrashDir, ".marker-*")
+		if err == nil {
+			_, werr := tmp.Write(b)
+			cerr := tmp.Close()
+			if werr == nil && cerr == nil && os.Rename(tmp.Name(), path) == nil {
+				return path
+			}
+			_ = os.Remove(tmp.Name())
+		}
+	}
+	if c.Log != nil {
+		c.Log.WithField("dir", c.CrashDir).Warn("cannot write the in-flight match marker; crash quarantine is off for this match")
+	}
+	return ""
+}
+
+func (c *Coordinator) removeMarker(path string) {
+	if path != "" {
+		_ = os.Remove(path)
+	}
+}
+
+// loadCrashesLocked turns markers left by a process that died mid-match
+// into crash counts, quarantining a group whose same input has now
+// crashed quarantineAfterCrashes times, and removes them.
+func (c *Coordinator) loadCrashesLocked() {
+	if c.CrashDir == "" {
+		return
+	}
+	paths, _ := filepath.Glob(filepath.Join(c.CrashDir, "inflight-*.json"))
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		_ = os.Remove(p)
+		var m crashMarker
+		if err != nil || json.Unmarshal(b, &m) != nil || m.Key == "" || p != c.markerPath(m.Key) {
+			continue
+		}
+		crashes := m.Crashes + 1
+		gs := &groupState{failFP: m.Fingerprint, failDB: m.DB, failures: crashes, crashes: crashes}
+		if crashes >= quarantineAfterCrashes {
+			gs.quarantined = fmt.Sprintf("crashed during match (%d times)", crashes)
+			c.count("quarantined")
+		}
+		c.groups[m.Key] = gs
+		if c.Log != nil {
+			e := c.Log.WithFields(logrus.Fields{"digest": m.Key, "crashes": crashes})
+			if gs.quarantined != "" {
+				e.Warn("digest quarantined: the process died while matching it; not matched again until its SBOM or the vulnerability database changes")
+			} else {
+				e.Warn("the previous run died while matching this digest; it will be tried once more")
+			}
+		}
+	}
+	c.gaugesLocked()
+}
+
 func (c *Coordinator) count(result string) {
 	if c.Metrics != nil {
 		c.Metrics.GrypeMatchRuns.WithLabelValues(result).Inc()
@@ -411,6 +699,13 @@ func (c *Coordinator) count(result string) {
 func (c *Coordinator) gaugesLocked() {
 	if c.Metrics != nil {
 		c.Metrics.GrypeSBOMsHeld.Set(float64(len(c.sboms)))
+		q := 0
+		for _, gs := range c.groups {
+			if gs.quarantined != "" {
+				q++
+			}
+		}
+		c.Metrics.GrypeQuarantined.Set(float64(q))
 	}
 }
 

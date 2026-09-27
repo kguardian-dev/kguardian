@@ -394,6 +394,7 @@ and no identity.
 | `REGISTRY_SBOM_ENABLED` | `false` | Fetch registry-attached SBOMs for running digests (opt-in; egress to image registries). Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
+| `GRYPE_ERROR_QUARANTINE_TTL` | `1h` | How long a digest whose match keeps failing waits before one more try; doubles per repeat, at most 24h. At least `5m`. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
@@ -434,7 +435,8 @@ auth and the read APIs.
 | `kguardian_supplychain_registry_sbom_lookups_total` | `result` | Registry SBOM lookups per digest: `found`, `found_source_only`, `none`, `error`, `skipped_<reason>`, `rejected_empty`, `rejected_subject_mismatch`, `rejected_subject_missing`, `list_error`. |
 | `kguardian_supplychain_grype_components_clamped_total` | | Matches whose SBOM union exceeded 50 000 components and was truncated. |
 | `kguardian_supplychain_grype_db_built_timestamp_seconds` | | Build time of the loaded Grype DB; DB age is `time() - this`. |
-| `kguardian_supplychain_grype_match_runs_total` | `result` | Match runs (`ok`, `error`). |
+| `kguardian_supplychain_grype_match_runs_total` | `result` | Match runs: `ok`, `error` (a failure about the input; three on the same SBOM and database quarantine it), `too_large` (over a response limit; quarantines at once), `unavailable` (the matcher could not be reached; retried each minute, never quarantines), `quarantined` (a digest entered quarantine). |
+| `kguardian_supplychain_grype_quarantined_digests` | | Digests not matched until their SBOM or the Grype database changes: too large, crashed the process twice mid-match, or failed repeatedly (retried after `GRYPE_ERROR_QUARANTINE_TTL`, doubling per repeat, at most 24h). |
 | `kguardian_supplychain_grype_matches_total` | | Vulnerabilities returned by match runs. |
 | `kguardian_supplychain_grype_match_duration_seconds` | | Time to match one SBOM. |
 | `kguardian_supplychain_grype_sboms_held` | | Digests whose SBOMs are held for re-matching. |
