@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
-                "firstSeen": "2026-09-27T01:11:49.960077Z",
+                "firstSeen": "2026-09-27T01:56:01.749690Z",
                 "imageRef": "ghcr.io/example/ledger:2.3.1",
                 "lastPodName": "ledger-5c6d7-klmno",
-                "lastSeen": "2026-09-27T01:11:49.960077Z",
+                "lastSeen": "2026-09-27T01:56:01.749690Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:11:49.960077Z"
+          "observedSince": "2026-09-27T01:56:01.749690Z"
         },
         "reasons": [
           {
@@ -131,6 +131,40 @@
           },
           "digest": null,
           "digests": [],
+          "imageTrust": {
+            "available": true,
+            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
+            "policies": [
+              "cluster/example-org-releases",
+              "payments/payments-release-signers"
+            ],
+            "results": [
+              {
+                "container": "ledger",
+                "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+                "image": "ghcr.io/example/ledger",
+                "namespace": "payments",
+                "policy": "cluster/example-org-releases",
+                "reason": "untrusted-signer",
+                "verdict": "WouldDeny",
+                "workload": "Deployment/ledger"
+              },
+              {
+                "container": "ledger",
+                "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
+                "image": "ghcr.io/example/ledger",
+                "namespace": "payments",
+                "policy": "payments/payments-release-signers",
+                "verdict": "Trusted",
+                "workload": "Deployment/ledger"
+              }
+            ],
+            "total": 2,
+            "truncated": false,
+            "trusted": 1,
+            "unknown": 0,
+            "wouldDeny": 1
+          },
           "reason": null,
           "signers": [],
           "status": "not_configured",
@@ -214,7 +248,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:11:49.960077Z"
+          "observedSince": "2026-09-27T01:56:01.749690Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -356,7 +390,7 @@
         "title": "Container ledger root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:11:53.343653412Z",
+    "generatedAt": "2026-09-27T01:56:10.369862249Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -432,7 +466,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/payments/Deployment/ledger/profile",
   "status": 200
 }

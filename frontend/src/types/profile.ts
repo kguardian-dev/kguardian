@@ -259,6 +259,41 @@ export interface SupplyChainDimension {
   counts: { verified: number; keySigned: number; unsigned: number; invalid: number; unknown: number; notChecked: number };
   digests?: Array<{ container: string; digest: string; verdict: string | null; reason: string | null; signers: ProfileSigner[]; signersOmitted?: number; checkedAt: string | null }>;
   truncated?: boolean;
+  /**
+   * The evaluator's ImageTrustPolicy results for this workload (contract v1.9).
+   * Absent from an older Broker; `null` where not read. `available: false` or
+   * `evaluatedAt: null` is unknown, never "nothing would be denied".
+   */
+  imageTrust?: ImageTrust | null;
+}
+
+export interface ImageTrustResult {
+  /** "namespace/name" or "cluster/name". */
+  policy: string;
+  namespace: string;
+  /** "<kind>/<name>". */
+  workload: string;
+  container: string;
+  digest: string;
+  image: string;
+  /** Trusted | WouldDeny | Unknown (a verdict the UI does not know reads as Unknown). */
+  verdict: string;
+  reason?: string | null;
+}
+
+/** `supplyChain.imageTrust` (v1.9). Report-only: never sets posture, status or readiness. */
+export interface ImageTrust {
+  available: boolean;
+  reason?: string | null;
+  evaluatedAt: string | null;
+  total: number;
+  wouldDeny: number;
+  unknown: number;
+  trusted: number;
+  policies: string[];
+  /** WouldDeny first, at most 20; the counts cover all. */
+  results: ImageTrustResult[];
+  truncated: boolean;
 }
 
 export interface ImagesDimension extends DimensionEnvelope {

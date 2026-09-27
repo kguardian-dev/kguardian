@@ -2,31 +2,31 @@
   "body": {
     "attention": [
       {
-        "container": "reports",
+        "container": "grafana",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/reports",
+        "id": "podSecurity.allowPrivilegeEscalation/grafana",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports allows privilege escalation"
+        "title": "Container grafana allows privilege escalation"
       },
       {
-        "container": "reports",
+        "container": "grafana",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/reports",
+        "id": "podSecurity.capabilitiesNotDropped/grafana",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports does not drop ALL capabilities"
+        "title": "Container grafana does not drop ALL capabilities"
       }
     ],
     "capabilities": {
       "containers": [
         {
-          "container": "reports",
+          "container": "grafana",
           "denied": [],
           "digests": [
-            "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa"
+            "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c"
           ],
           "evidence": "insufficient",
           "observedSince": null,
@@ -39,7 +39,7 @@
       ],
       "windowHours": 168
     },
-    "contentHash": "fnv1a64:d529c30c060a9d90",
+    "contentHash": "fnv1a64:9dbff2aeef680af1",
     "controls": [
       {
         "control": "networkPolicy",
@@ -83,15 +83,15 @@
           {
             "kind": "regular",
             "mixedDigests": false,
-            "name": "reports",
+            "name": "grafana",
             "previous": [],
             "running": [
               {
-                "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "firstSeen": "2026-09-27T01:56:01.757027Z",
-                "imageRef": "ghcr.io/example/reports:1.0.3",
-                "lastPodName": "reports-29012345-pqrst",
-                "lastSeen": "2026-09-27T01:56:01.757027Z",
+                "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+                "firstSeen": "2026-09-27T01:56:01.763974Z",
+                "imageRef": "docker.io/grafana/grafana:11.2.0",
+                "lastPodName": "grafana-6f7a8-uvwxy",
+                "lastSeen": "2026-09-27T01:56:01.763974Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T01:56:01.763974Z"
         },
         "reasons": [
           {
@@ -113,62 +113,50 @@
           },
           {
             "code": "signatures",
-            "message": "1 current digest(s): 1 unsigned"
+            "message": "1 current digest(s): 1 key-signed (not checked)"
           }
         ],
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
           "checkedAt": "2026-09-26T22:56:02Z",
-          "container": "reports",
+          "container": "grafana",
           "counts": {
             "invalid": 0,
-            "keySigned": 0,
+            "keySigned": 1,
             "notChecked": 0,
             "unknown": 0,
-            "unsigned": 1,
+            "unsigned": 0,
             "verified": 0
           },
-          "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+          "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
           "digests": [
             {
               "checkedAt": "2026-09-26T22:56:02Z",
-              "container": "reports",
-              "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+              "container": "grafana",
+              "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
               "reason": null,
               "signers": [],
-              "verdict": "unsigned"
+              "verdict": "key_signed"
             }
           ],
           "imageTrust": {
-            "available": true,
-            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
-            "policies": [
-              "payments/payments-release-signers"
-            ],
-            "results": [
-              {
-                "container": "reports",
-                "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "image": "ghcr.io/example/reports",
-                "namespace": "payments",
-                "policy": "payments/payments-release-signers",
-                "reason": "unsigned",
-                "verdict": "WouldDeny",
-                "workload": "CronJob/reports"
-              }
-            ],
-            "total": 1,
+            "available": false,
+            "evaluatedAt": null,
+            "policies": [],
+            "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56431/image-trust?namespace=observability)",
+            "results": [],
+            "total": 0,
             "truncated": false,
             "trusted": 0,
             "unknown": 0,
-            "wouldDeny": 1
+            "wouldDeny": 0
           },
           "reason": null,
           "signers": [],
           "status": "configured",
           "truncated": false,
-          "verdict": "unsigned"
+          "verdict": "key_signed"
         },
         "truncated": false,
         "vulnerabilities": null
@@ -209,18 +197,18 @@
       "podSecurity": {
         "containers": [
           {
-            "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+            "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
             "failing": [
               {
                 "check": "privilegeEscalation",
-                "field": "spec.containers[reports].securityContext.allowPrivilegeEscalation",
+                "field": "spec.containers[grafana].securityContext.allowPrivilegeEscalation",
                 "level": "restricted",
                 "message": "allowPrivilegeEscalation must be set to false",
                 "value": null
               },
               {
                 "check": "capabilitiesRestricted",
-                "field": "spec.containers[reports].securityContext.capabilities.drop",
+                "field": "spec.containers[grafana].securityContext.capabilities.drop",
                 "level": "restricted",
                 "message": "capabilities.drop must include ALL",
                 "value": null
@@ -228,7 +216,7 @@
             ],
             "kind": "regular",
             "level": "baseline",
-            "name": "reports",
+            "name": "grafana",
             "securityContext": {
               "allowPrivilegeEscalation": null,
               "capabilitiesAdd": null,
@@ -247,7 +235,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T01:56:01.763974Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -272,7 +260,7 @@
         "reasons": [
           {
             "code": "pss_fails_restricted",
-            "message": "At most baseline: reports (regular) fail(s) a restricted check; unevaluated checks may lower it further"
+            "message": "At most baseline: grafana (regular) fail(s) a restricted check; unevaluated checks may lower it further"
           },
           {
             "code": "pod_fields_unknown",
@@ -282,13 +270,13 @@
         "recommendation": {
           "caveats": [
             "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
-            "Capabilities for reports are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
+            "Capabilities for grafana are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
             "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
           ],
           "format": "strategic-merge-patch",
           "recommendation": true,
           "targetLevel": "restricted",
-          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n          - name: reports\n            securityContext:\n              allowPrivilegeEscalation: false\n              capabilities:\n                drop: [\"ALL\"]\n"
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: grafana\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n"
         },
         "staleContainers": [],
         "status": "warn",
@@ -338,7 +326,7 @@
       "items": [],
       "notEvaluated": [
         {
-          "container": "reports",
+          "container": "grafana",
           "reason": "no_inventory",
           "type": "unshippedExecutable"
         },
@@ -362,43 +350,43 @@
     },
     "findings": [
       {
-        "container": "reports",
+        "container": "grafana",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/reports",
+        "id": "podSecurity.allowPrivilegeEscalation/grafana",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports allows privilege escalation"
+        "title": "Container grafana allows privilege escalation"
       },
       {
-        "container": "reports",
+        "container": "grafana",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/reports",
+        "id": "podSecurity.capabilitiesNotDropped/grafana",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports does not drop ALL capabilities"
+        "title": "Container grafana does not drop ALL capabilities"
       },
       {
-        "container": "reports",
-        "detail": "No signature was found for sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa.",
+        "container": "grafana",
+        "detail": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c carries a key signature that was not checked; give the supplychain component the public key.",
         "dimension": "images",
-        "id": "images.unsigned/reports",
+        "id": "images.signatureNotVerified/grafana",
         "severity": "low",
         "tier": null,
-        "title": "Container reports runs an unsigned image"
+        "title": "Container grafana runs an image signed with a key kguardian was not given"
       },
       {
-        "container": "reports",
+        "container": "grafana",
         "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
         "dimension": "podSecurity",
-        "id": "podSecurity.readOnlyRootFilesystem/reports",
+        "id": "podSecurity.readOnlyRootFilesystem/grafana",
         "severity": "low",
         "tier": null,
-        "title": "Container reports root filesystem is writable"
+        "title": "Container grafana root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:03.166705045Z",
+    "generatedAt": "2026-09-27T01:56:06.426471694Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -414,7 +402,7 @@
         },
         {
           "dimension": "podSecurity",
-          "message": "At most baseline: reports (regular) fail(s) a restricted check; unevaluated checks may lower it further",
+          "message": "At most baseline: grafana (regular) fail(s) a restricted check; unevaluated checks may lower it further",
           "status": "warn"
         },
         {
@@ -448,7 +436,7 @@
       },
       {
         "id": "imageSigned",
-        "message": "1 current digest(s): 1 unsigned",
+        "message": "1 current digest(s): 1 key-signed (not checked)",
         "ok": false
       },
       {
@@ -461,20 +449,20 @@
     "version": null,
     "workload": {
       "clusterId": "primary",
-      "kind": "CronJob",
-      "name": "reports",
-      "namespace": "payments",
+      "kind": "Deployment",
+      "name": "grafana",
+      "namespace": "observability",
       "pods": {
         "live": 1,
         "names": [
-          "reports-29012345-pqrst"
+          "grafana-6f7a8-uvwxy"
         ],
         "truncated": false
       },
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
-  "request": "GET /workloads/payments/CronJob/reports/profile",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
+  "request": "GET /workloads/observability/Deployment/grafana/profile",
   "status": 200
 }

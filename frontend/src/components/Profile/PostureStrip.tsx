@@ -5,6 +5,7 @@ import { StatusPill } from './parts';
 import type { WorkloadSignatureState } from '../../hooks/useSignatures';
 import { SIGNATURE_LABEL, signerShort, signerText, stateCounts, summaryFromProfile, workloadSignatureText, type SignatureState } from '../../utils/signatures';
 import { SignatureBadge } from '../Vulns/SignatureParts';
+import { trustState, trustSummary } from '../../utils/imageTrust';
 
 const ORDER: DimensionName[] = ['network', 'syscalls', 'podSecurity', 'images', 'compute'];
 
@@ -181,7 +182,7 @@ function SupplyChainChip({ profile, sig, onOpen }: { profile: WorkloadProfile; s
   }
   const name = notConfigured ? 'not configured' : s ? `${SIGNATURE_LABEL[s.worst]}${s.worst === 'verified' && s.signers.length ? `, signed by ${s.signers.map(signerText).join('; ')}` : ''}` : 'no data';
   return (
-    <button type="button" onClick={onOpen} title={effect ? `${title}\n${effect}` : title} aria-label={`Supply chain: ${name}`} data-source={fromProfile ? 'profile' : 'feed'} className={cls}>
+    <button type="button" onClick={onOpen} title={[title, effect, fromProfile && !notConfigured ? trustSummary(trustState(sc)) : ''].filter(Boolean).join('\n')} aria-label={`Supply chain: ${name}`} data-source={fromProfile ? 'profile' : 'feed'} className={cls}>
       <span className="text-secondary">Supply chain</span>
       {body}
     </button>

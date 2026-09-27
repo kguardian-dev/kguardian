@@ -2,31 +2,31 @@
   "body": {
     "attention": [
       {
-        "container": "reports",
+        "container": "app",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/reports",
+        "id": "podSecurity.allowPrivilegeEscalation/app",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports allows privilege escalation"
+        "title": "Container app allows privilege escalation"
       },
       {
-        "container": "reports",
+        "container": "app",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/reports",
+        "id": "podSecurity.capabilitiesNotDropped/app",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports does not drop ALL capabilities"
+        "title": "Container app does not drop ALL capabilities"
       }
     ],
     "capabilities": {
       "containers": [
         {
-          "container": "reports",
+          "container": "app",
           "denied": [],
           "digests": [
-            "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa"
+            "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235"
           ],
           "evidence": "insufficient",
           "observedSince": null,
@@ -39,7 +39,7 @@
       ],
       "windowHours": 168
     },
-    "contentHash": "fnv1a64:d529c30c060a9d90",
+    "contentHash": "fnv1a64:f325212fa98a4eac",
     "controls": [
       {
         "control": "networkPolicy",
@@ -83,15 +83,15 @@
           {
             "kind": "regular",
             "mixedDigests": false,
-            "name": "reports",
+            "name": "app",
             "previous": [],
             "running": [
               {
-                "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "firstSeen": "2026-09-27T01:56:01.757027Z",
-                "imageRef": "ghcr.io/example/reports:1.0.3",
-                "lastPodName": "reports-29012345-pqrst",
-                "lastSeen": "2026-09-27T01:56:01.757027Z",
+                "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+                "firstSeen": "2026-09-27T01:56:01.733651Z",
+                "imageRef": "ghcr.io/example/checkout:4.2.0",
+                "lastPodName": "checkout-7d9f8-abcde",
+                "lastSeen": "2026-09-27T01:56:01.733651Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T01:56:01.733651Z"
         },
         "reasons": [
           {
@@ -113,62 +113,62 @@
           },
           {
             "code": "signatures",
-            "message": "1 current digest(s): 1 unsigned"
+            "message": "1 current digest(s): 1 verified"
           }
         ],
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
           "checkedAt": "2026-09-26T22:56:02Z",
-          "container": "reports",
+          "container": "app",
           "counts": {
             "invalid": 0,
             "keySigned": 0,
             "notChecked": 0,
             "unknown": 0,
-            "unsigned": 1,
-            "verified": 0
+            "unsigned": 0,
+            "verified": 1
           },
-          "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+          "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
           "digests": [
             {
               "checkedAt": "2026-09-26T22:56:02Z",
-              "container": "reports",
-              "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+              "container": "app",
+              "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
               "reason": null,
-              "signers": [],
-              "verdict": "unsigned"
+              "signers": [
+                {
+                  "issuer": "https://token.actions.githubusercontent.com",
+                  "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+                  "signerKind": "keyless"
+                }
+              ],
+              "verdict": "verified"
             }
           ],
           "imageTrust": {
-            "available": true,
-            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
-            "policies": [
-              "payments/payments-release-signers"
-            ],
-            "results": [
-              {
-                "container": "reports",
-                "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "image": "ghcr.io/example/reports",
-                "namespace": "payments",
-                "policy": "payments/payments-release-signers",
-                "reason": "unsigned",
-                "verdict": "WouldDeny",
-                "workload": "CronJob/reports"
-              }
-            ],
-            "total": 1,
+            "available": false,
+            "evaluatedAt": null,
+            "policies": [],
+            "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56431/image-trust?namespace=payments)",
+            "results": [],
+            "total": 0,
             "truncated": false,
             "trusted": 0,
             "unknown": 0,
-            "wouldDeny": 1
+            "wouldDeny": 0
           },
           "reason": null,
-          "signers": [],
+          "signers": [
+            {
+              "issuer": "https://token.actions.githubusercontent.com",
+              "san": "https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0",
+              "signerKind": "keyless"
+            }
+          ],
           "status": "configured",
           "truncated": false,
-          "verdict": "unsigned"
+          "verdict": "verified"
         },
         "truncated": false,
         "vulnerabilities": null
@@ -177,7 +177,7 @@
         "coverage": {
           "fraction": null,
           "level": "none",
-          "note": "Flows from the workload's pod(s) (1 live)",
+          "note": "Flows from the workload's pod(s) (2 live)",
           "observedSince": null
         },
         "peers": [],
@@ -209,18 +209,18 @@
       "podSecurity": {
         "containers": [
           {
-            "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+            "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
             "failing": [
               {
                 "check": "privilegeEscalation",
-                "field": "spec.containers[reports].securityContext.allowPrivilegeEscalation",
+                "field": "spec.containers[app].securityContext.allowPrivilegeEscalation",
                 "level": "restricted",
                 "message": "allowPrivilegeEscalation must be set to false",
                 "value": null
               },
               {
                 "check": "capabilitiesRestricted",
-                "field": "spec.containers[reports].securityContext.capabilities.drop",
+                "field": "spec.containers[app].securityContext.capabilities.drop",
                 "level": "restricted",
                 "message": "capabilities.drop must include ALL",
                 "value": null
@@ -228,7 +228,7 @@
             ],
             "kind": "regular",
             "level": "baseline",
-            "name": "reports",
+            "name": "app",
             "securityContext": {
               "allowPrivilegeEscalation": null,
               "capabilitiesAdd": null,
@@ -247,7 +247,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:56:01.757027Z"
+          "observedSince": "2026-09-27T01:56:01.733651Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -272,7 +272,7 @@
         "reasons": [
           {
             "code": "pss_fails_restricted",
-            "message": "At most baseline: reports (regular) fail(s) a restricted check; unevaluated checks may lower it further"
+            "message": "At most baseline: app (regular) fail(s) a restricted check; unevaluated checks may lower it further"
           },
           {
             "code": "pod_fields_unknown",
@@ -282,13 +282,13 @@
         "recommendation": {
           "caveats": [
             "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
-            "Capabilities for reports are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
+            "Capabilities for app are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
             "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
           ],
           "format": "strategic-merge-patch",
           "recommendation": true,
           "targetLevel": "restricted",
-          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n          - name: reports\n            securityContext:\n              allowPrivilegeEscalation: false\n              capabilities:\n                drop: [\"ALL\"]\n"
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      containers:\n      - name: app\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n"
         },
         "staleContainers": [],
         "status": "warn",
@@ -338,7 +338,7 @@
       "items": [],
       "notEvaluated": [
         {
-          "container": "reports",
+          "container": "app",
           "reason": "no_inventory",
           "type": "unshippedExecutable"
         },
@@ -362,43 +362,34 @@
     },
     "findings": [
       {
-        "container": "reports",
+        "container": "app",
         "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
         "dimension": "podSecurity",
-        "id": "podSecurity.allowPrivilegeEscalation/reports",
+        "id": "podSecurity.allowPrivilegeEscalation/app",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports allows privilege escalation"
+        "title": "Container app allows privilege escalation"
       },
       {
-        "container": "reports",
+        "container": "app",
         "detail": "The runtime's default capability set stays granted.",
         "dimension": "podSecurity",
-        "id": "podSecurity.capabilitiesNotDropped/reports",
+        "id": "podSecurity.capabilitiesNotDropped/app",
         "severity": "medium",
         "tier": "P2",
-        "title": "Container reports does not drop ALL capabilities"
+        "title": "Container app does not drop ALL capabilities"
       },
       {
-        "container": "reports",
-        "detail": "No signature was found for sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa.",
-        "dimension": "images",
-        "id": "images.unsigned/reports",
-        "severity": "low",
-        "tier": null,
-        "title": "Container reports runs an unsigned image"
-      },
-      {
-        "container": "reports",
+        "container": "app",
         "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
         "dimension": "podSecurity",
-        "id": "podSecurity.readOnlyRootFilesystem/reports",
+        "id": "podSecurity.readOnlyRootFilesystem/app",
         "severity": "low",
         "tier": null,
-        "title": "Container reports root filesystem is writable"
+        "title": "Container app root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:03.166705045Z",
+    "generatedAt": "2026-09-27T01:56:06.372205610Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -414,7 +405,7 @@
         },
         {
           "dimension": "podSecurity",
-          "message": "At most baseline: reports (regular) fail(s) a restricted check; unevaluated checks may lower it further",
+          "message": "At most baseline: app (regular) fail(s) a restricted check; unevaluated checks may lower it further",
           "status": "warn"
         },
         {
@@ -448,8 +439,8 @@
       },
       {
         "id": "imageSigned",
-        "message": "1 current digest(s): 1 unsigned",
-        "ok": false
+        "message": "1 current digest(s): 1 verified; verified means valid for its signer, not trusted",
+        "ok": true
       },
       {
         "id": "podSecurityRestricted",
@@ -461,20 +452,21 @@
     "version": null,
     "workload": {
       "clusterId": "primary",
-      "kind": "CronJob",
-      "name": "reports",
+      "kind": "Deployment",
+      "name": "checkout",
       "namespace": "payments",
       "pods": {
-        "live": 1,
+        "live": 2,
         "names": [
-          "reports-29012345-pqrst"
+          "checkout-7d9f8-abcde",
+          "checkout-7d9f8-fghij"
         ],
         "truncated": false
       },
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
-  "request": "GET /workloads/payments/CronJob/reports/profile",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
+  "request": "GET /workloads/payments/Deployment/checkout/profile",
   "status": 200
 }

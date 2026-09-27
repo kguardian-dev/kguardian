@@ -16,7 +16,7 @@
         "refused": null
       }
     ],
-    "generatedAt": "2026-09-27T01:11:50.145141385+00:00",
+    "generatedAt": "2026-09-27T01:56:03.109709395+00:00",
     "mode": "audit",
     "profile": {
       "contentHash": "fnv1a64:9dbff2aeef680af1",
@@ -30,7 +30,7 @@
       "namespace": "observability"
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/observability/Deployment/grafana/export?artifacts=admission&mode=audit&format=zip-manifest",
   "status": 200
 }

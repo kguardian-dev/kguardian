@@ -141,28 +141,16 @@
             }
           ],
           "imageTrust": {
-            "available": true,
-            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
-            "policies": [
-              "payments/payments-release-signers"
-            ],
-            "results": [
-              {
-                "container": "reports",
-                "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
-                "image": "ghcr.io/example/reports",
-                "namespace": "payments",
-                "policy": "payments/payments-release-signers",
-                "reason": "unsigned",
-                "verdict": "WouldDeny",
-                "workload": "CronJob/reports"
-              }
-            ],
-            "total": 1,
+            "available": false,
+            "evaluatedAt": null,
+            "policies": [],
+            "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56431/image-trust?namespace=payments)",
+            "results": [],
+            "total": 0,
             "truncated": false,
             "trusted": 0,
             "unknown": 0,
-            "wouldDeny": 1
+            "wouldDeny": 0
           },
           "reason": null,
           "signers": [],
@@ -398,7 +386,7 @@
         "title": "Container reports root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:56:03.166705045Z",
+    "generatedAt": "2026-09-27T01:56:06.406995281Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -474,7 +462,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; EVALUATOR_URL pointed at a closed port",
   "request": "GET /workloads/payments/CronJob/reports/profile",
   "status": 200
 }

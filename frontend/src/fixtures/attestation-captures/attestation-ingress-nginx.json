@@ -1,6 +1,6 @@
 {
   "body": "No data found",
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /images/sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4/attestation",
   "status": 404
 }

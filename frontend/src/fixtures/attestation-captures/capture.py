@@ -33,6 +33,22 @@ Workload profiles (contract v1.8, images.supplyChain) are captured as
 signature-profile-<name>. For the not_configured state, start a Broker with
 SIGNATURE_DISCOVERY_ENABLED=false on the same database and run again with
 --not-configured: it only captures signature-profile-not-configured-<name>.
+
+Image trust (contract v1.9, images.supplyChain.imageTrust) needs an
+evaluator, and the real one needs a Kubernetes API for its policy CRDs. The
+seeded Broker is evaluated by ./evaluator-standin instead: the evaluator's own
+imagetrust Runner and Handler, with its three policies in the in-memory fake
+dynamic client its tests use (no envtest, no cluster):
+
+    evaluator-standin/build.sh /tmp/evaluator-standin   # offline, from the module cache
+    /tmp/evaluator-standin -listen 127.0.0.1:<eport> -broker http://127.0.0.1:<port> -token <r>
+
+Start the Broker with EVALUATOR_URL=http://127.0.0.1:<eport> and pass
+--evaluator-standin. It reads /attestations/running, so seed first: run this
+script with --seed-only, start the stand-in, then run it again with
+--evaluator-standin (seeding again is harmless: newer results replace older).
+For the unavailable state, restart the Broker with EVALUATOR_URL at a
+closed port and run with --evaluator-down (captures signature-profile-evaluator-down-<name>).
 """
 import datetime as dt
 import json
@@ -45,7 +61,16 @@ BASE, READ, INGEST, SC, SHA = sys.argv[1:6]
 # --not-configured: capture only the workload profiles, from the same database
 # served by a Broker started with SIGNATURE_DISCOVERY_ENABLED=false.
 NOT_CONFIGURED = '--not-configured' in sys.argv[6:]
-SUFFIX = '-not-configured' if NOT_CONFIGURED else ''
+# --evaluator-down: capture only the workload profiles, from the same database
+# served by a Broker whose EVALUATOR_URL points at a closed port.
+EVALUATOR_DOWN = '--evaluator-down' in sys.argv[6:]
+# --evaluator-standin: the Broker's EVALUATOR_URL is ./evaluator-standin (the
+# evaluator's own imagetrust code with a fake Kubernetes API); the provenance says so.
+STANDIN = '--evaluator-standin' in sys.argv[6:]
+PROFILES_ONLY = NOT_CONFIGURED or EVALUATOR_DOWN
+# --seed-only: post the world and exit (the evaluator stand-in reads it next).
+SEED_ONLY = '--seed-only' in sys.argv[6:]
+SUFFIX = '-not-configured' if NOT_CONFIGURED else '-evaluator-down' if EVALUATOR_DOWN else ''
 HERE = os.path.dirname(os.path.abspath(__file__))
 NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -180,11 +205,18 @@ def seed():
 
 
 
-if not NOT_CONFIGURED:
+if not PROFILES_ONLY:
     seed()
+if SEED_ONLY:
+    print('seeded; start ./evaluator-standin, then run again with --evaluator-standin')
+    sys.exit(0)
 
 # ── Capture ────────────────────────────────────────────────────────────
 PROVENANCE = f'captured from broker {SHA} (frontend/src/fixtures/attestation-captures/capture.py), no edits'
+if STANDIN:
+    PROVENANCE += "; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)"
+if EVALUATOR_DOWN:
+    PROVENANCE += '; EVALUATOR_URL pointed at a closed port'
 
 
 def capture(name, path, accept='application/json'):
@@ -229,7 +261,7 @@ def capture_attestation_reads():
         capture(f'export-admission-{wl}', f'/workloads/{ns}/{kind}/{wl}/export?artifacts=admission&mode=audit&format=zip-manifest')
 
 
-if not NOT_CONFIGURED:
+if not PROFILES_ONLY:
     capture_attestation_reads()
 
 # Workload profiles (contract v1.8 carries dimensions.images.supplyChain).
@@ -242,4 +274,4 @@ WORKLOADS = [('payments', 'Deployment', 'checkout'), ('payments', 'Deployment', 
 for ns, kind, wl in WORKLOADS:
     capture(f'signature-profile{SUFFIX}-{wl}', f'/workloads/{ns}/{kind}/{wl}/profile')
 
-print('captured', len([f for f in os.listdir(HERE) if f.endswith('.json')]), 'responses from', SHA, '(profiles only, signature discovery off)' if NOT_CONFIGURED else '')
+print('captured', len([f for f in os.listdir(HERE) if f.endswith('.json')]), 'responses from', SHA, '(profiles only, signature discovery off)' if NOT_CONFIGURED else '(profiles only, evaluator down)' if EVALUATOR_DOWN else '')

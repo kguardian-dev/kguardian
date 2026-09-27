@@ -88,10 +88,10 @@
             "running": [
               {
                 "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
-                "firstSeen": "2026-09-27T01:11:49.943939Z",
+                "firstSeen": "2026-09-27T01:56:01.733651Z",
                 "imageRef": "ghcr.io/example/checkout:4.2.0",
                 "lastPodName": "checkout-7d9f8-abcde",
-                "lastSeen": "2026-09-27T01:11:49.943939Z",
+                "lastSeen": "2026-09-27T01:56:01.733651Z",
                 "ranAsInit": false,
                 "state": "running",
                 "stateReason": null
@@ -104,7 +104,7 @@
           "fraction": null,
           "level": "partial",
           "note": "inventory only (running window 900 s); no vulnerability data",
-          "observedSince": "2026-09-27T01:11:49.943939Z"
+          "observedSince": "2026-09-27T01:56:01.733651Z"
         },
         "reasons": [
           {
@@ -119,7 +119,7 @@
         "runningWindowSeconds": 900,
         "status": "unknown",
         "supplyChain": {
-          "checkedAt": "2026-09-26T22:11:49Z",
+          "checkedAt": "2026-09-26T22:56:02Z",
           "container": "app",
           "counts": {
             "invalid": 0,
@@ -132,7 +132,7 @@
           "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
           "digests": [
             {
-              "checkedAt": "2026-09-26T22:11:49Z",
+              "checkedAt": "2026-09-26T22:56:02Z",
               "container": "app",
               "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
               "reason": null,
@@ -146,6 +146,39 @@
               "verdict": "verified"
             }
           ],
+          "imageTrust": {
+            "available": true,
+            "evaluatedAt": "2026-09-27T11:56:01.866581923+10:00",
+            "policies": [
+              "cluster/example-org-releases",
+              "payments/payments-release-signers"
+            ],
+            "results": [
+              {
+                "container": "app",
+                "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+                "image": "ghcr.io/example/checkout",
+                "namespace": "payments",
+                "policy": "cluster/example-org-releases",
+                "verdict": "Trusted",
+                "workload": "Deployment/checkout"
+              },
+              {
+                "container": "app",
+                "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+                "image": "ghcr.io/example/checkout",
+                "namespace": "payments",
+                "policy": "payments/payments-release-signers",
+                "verdict": "Trusted",
+                "workload": "Deployment/checkout"
+              }
+            ],
+            "total": 2,
+            "truncated": false,
+            "trusted": 2,
+            "unknown": 0,
+            "wouldDeny": 0
+          },
           "reason": null,
           "signers": [
             {
@@ -235,7 +268,7 @@
           "fraction": 0.33,
           "level": "partial",
           "note": "6 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
-          "observedSince": "2026-09-27T01:11:49.943939Z"
+          "observedSince": "2026-09-27T01:56:01.733651Z"
         },
         "level": "baseline",
         "levelConfidence": "upper_bound",
@@ -377,7 +410,7 @@
         "title": "Container app root filesystem is writable"
       }
     ],
-    "generatedAt": "2026-09-27T01:11:50.154499839Z",
+    "generatedAt": "2026-09-27T01:56:03.146310829Z",
     "posture": {
       "coverage": 0.25,
       "reasons": [
@@ -454,7 +487,7 @@
       "transient": false
     }
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /workloads/payments/Deployment/checkout/profile",
   "status": 200
 }

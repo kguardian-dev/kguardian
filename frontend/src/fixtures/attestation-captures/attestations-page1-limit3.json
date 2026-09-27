@@ -2,7 +2,7 @@
   "body": {
     "items": [
       {
-        "checkedAt": "2026-09-26T22:11:49",
+        "checkedAt": "2026-09-26T22:56:02",
         "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
         "reason": null,
         "repository": "docker.io/grafana/grafana",
@@ -12,7 +12,7 @@
         "verifiedPredicates": []
       },
       {
-        "checkedAt": "2026-09-26T22:11:49",
+        "checkedAt": "2026-09-26T22:56:02",
         "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
         "reason": "bad_signature",
         "repository": "quay.io/prometheus/prometheus",
@@ -22,7 +22,7 @@
         "verifiedPredicates": []
       },
       {
-        "checkedAt": "2026-09-26T22:11:49",
+        "checkedAt": "2026-09-26T22:56:02",
         "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
         "reason": "unrecognised_reason",
         "repository": "ghcr.io/fluxcd/source-controller",
@@ -34,7 +34,7 @@
     ],
     "nextAfter": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a"
   },
-  "provenance": "captured from broker 940d22244 (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "provenance": "captured from broker 130eda7cb (frontend/src/fixtures/attestation-captures/capture.py), no edits; image trust results from ./evaluator-standin (the evaluator's own imagetrust Runner and Handler over the real Broker, Kubernetes API replaced by the in-memory fake client; no cluster)",
   "request": "GET /attestations?limit=3",
   "status": 200
 }
