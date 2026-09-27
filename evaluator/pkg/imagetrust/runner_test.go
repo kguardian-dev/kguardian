@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -221,7 +223,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := ck.t
-	feed.err = errors.New("dial tcp: connection refused")
+	feed.err = &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
 
 	// In the window: an error, and nothing rewritten.
 	before := ap.count
@@ -244,7 +246,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 		t.Fatalf("state %q, condition %+v", st.Evaluation.State, c)
 	}
 	if noCounts(st) != "" || len(st.Evaluation.Findings) != 5 ||
-		!strings.Contains(st.Message, "connection refused") || !strings.Contains(st.Message, good.Format(time.RFC3339)) ||
+		!strings.Contains(st.Message, "(connection failed)") || strings.Contains(st.Message, "dial tcp") || !strings.Contains(st.Message, good.Format(time.RFC3339)) ||
 		!st.Evaluation.LastEvaluated.Time.Equal(good) || st.Evaluation.Findings[0].Reason != ReasonBrokerUnavailable {
 		t.Fatalf("past window = %+v", st)
 	}
@@ -388,4 +390,103 @@ func noCounts(st v1alpha1.ImageTrustPolicyStatus) string {
 		return fmt.Sprintf("counts present: %v %v %v %v", e.Containers, e.Trusted, e.WouldDeny, e.Unknown)
 	}
 	return ""
+}
+
+// assertUserSafe: text shown in a policy's status never carries the
+// broker's address or an HTTP client's error text.
+func assertUserSafe(t *testing.T, what, text string) {
+	t.Helper()
+	low := strings.ToLower(text)
+	for _, bad := range []string{"http", "://", "127.0.0.1", "localhost", "dial tcp", "get \"", "/attestations/running", "limit=", "secret"} {
+		if strings.Contains(low, bad) {
+			t.Errorf("%s: %q contains %q", what, text, bad)
+		}
+	}
+	// host:port with a dotted host or an IP (a timestamp's 12:35:00 is
+	// not one).
+	if hostPort.MatchString(text) {
+		t.Errorf("%s: %q contains a host:port", what, text)
+	}
+}
+
+var hostPort = regexp.MustCompile(`[A-Za-z0-9-]+\.[A-Za-z0-9.-]+:[0-9]{1,5}\b|\[[0-9a-fA-F:]+\]:[0-9]{1,5}\b`)
+
+// Every class of feed failure, produced by the real BrokerFeed, gets a
+// coarse cause with no address, body or client text in it.
+func TestFeedCauseIsUserSafe(t *testing.T) {
+	leaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error at http://secret.internal:9090/db"))
+	}))
+	defer leaky.Close()
+	junk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("<html>not json")) }))
+	defer junk.Close()
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[],"pad":"` + strings.Repeat("x", 4096) + `"}`))
+	}))
+	defer big.Close()
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(3 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	for _, c := range []struct {
+		name string
+		feed *BrokerFeed
+		want string
+	}{
+		{"closed port", &BrokerFeed{BaseURL: "http://127.0.0.1:1"}, "connection failed"},
+		{"leaky 500", &BrokerFeed{BaseURL: leaky.URL}, "status 500"},
+		{"not json", &BrokerFeed{BaseURL: junk.URL}, "invalid response"},
+		{"too large", &BrokerFeed{BaseURL: big.URL, MaxPageBytes: 1024}, "response too large"},
+		{"timeout", &BrokerFeed{BaseURL: slow.URL, HTTP: &http.Client{Timeout: 200 * time.Millisecond}}, "timed out"},
+	} {
+		_, err := c.feed.Running(context.Background())
+		if err == nil {
+			t.Fatalf("%s: no error", c.name)
+		}
+		got := FeedCause(err)
+		if got != c.want {
+			t.Errorf("%s: cause %q, want %q (error %v)", c.name, got, c.want, err)
+		}
+		assertUserSafe(t, c.name, got)
+	}
+	for err, want := range map[error]string{
+		&net.DNSError{Name: "broker.internal", Err: "no such host"}: "name lookup failed",
+		ErrTruncated: "too many running containers to read",
+		&FeedError{StatusCode: 401, Message: "x"}: "status 401",
+		errors.New("GET http://x:1/y: boom"):      "request failed",
+	} {
+		if got := FeedCause(err); got != want {
+			t.Errorf("FeedCause(%v) = %q, want %q", err, got, want)
+		}
+	}
+}
+
+// The status a pass writes (message and BrokerRead condition) with a real
+// BrokerFeed at a closed port: the cause, never the broker's address.
+func TestRunnerStatusHidesTheBrokerAddress(t *testing.T) {
+	r, ap, _ := setup(t, &BrokerFeed{BaseURL: "http://127.0.0.1:1"}, toUnstructured(t, nsPolicy(), "ImageTrustPolicy"))
+	_ = r.Pass(context.Background())
+	st := ap.byKey["shop/signed"]
+	if !strings.Contains(st.Message, "cannot read running images from the broker (connection failed)") {
+		t.Fatalf("message = %q", st.Message)
+	}
+	assertUserSafe(t, "status.message", st.Message)
+	c := meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead)
+	if c == nil {
+		t.Fatal("no BrokerRead condition")
+	}
+	assertUserSafe(t, "BrokerRead condition", c.Message)
+	// A rejected token: the status code only, not the broker's body.
+	feed := &switchFeed{err: &FeedError{StatusCode: 403, Message: "forbidden by http://secret.internal:9090"}}
+	r2, ap2, _ := setup(t, feed, toUnstructured(t, nsPolicy(), "ImageTrustPolicy"))
+	_ = r2.Pass(context.Background())
+	st2 := ap2.byKey["shop/signed"]
+	if !strings.Contains(st2.Message, "(status 403)") {
+		t.Fatalf("message = %q", st2.Message)
+	}
+	assertUserSafe(t, "unauthorized status.message", st2.Message)
 }
