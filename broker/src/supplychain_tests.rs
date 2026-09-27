@@ -1123,7 +1123,12 @@ fn live_database_reads_filter_page_and_group() {
         ["c"]
     );
     let report = p.report.unwrap();
-    let doc = crate::supplychain_read::cyclonedx_document(&d(1), &report, &p.items);
+    let doc = serde_json::to_value(crate::supplychain_read::cyclonedx_document(
+        &d(1),
+        &report,
+        p.items.iter().map(Into::into).collect(),
+    ))
+    .unwrap();
     assert_eq!(doc["bomFormat"], "CycloneDX");
     assert_eq!(doc["components"][0]["purl"], "pkg:deb/debian/a@1");
     assert_eq!(
@@ -1739,7 +1744,12 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
     assert_eq!(att["verified"], json!(false));
     assert_eq!(att["artifact_digest"], json!(d(77)));
     assert_eq!(r.items[0].name, "registry-pkg");
-    let doc = crate::supplychain_read::cyclonedx_document(&d(1), &report, &r.items);
+    let doc = serde_json::to_value(crate::supplychain_read::cyclonedx_document(
+        &d(1),
+        &report,
+        r.items.iter().map(Into::into).collect(),
+    ))
+    .unwrap();
     assert!(doc["metadata"]["properties"]
         .as_array()
         .unwrap()

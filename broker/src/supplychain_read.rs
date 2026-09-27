@@ -49,9 +49,13 @@ pub const VULNS_MAX_LIMIT: i64 = 500;
 pub const VULN_ROW_COST_BYTES: u64 = 20 * 1024;
 /// Per component row: at most 8 licences and 16 paths, as above.
 pub const COMPONENT_ROW_COST_BYTES: u64 = 20 * 1024;
-/// Per CycloneDX component (no file paths in the export): bounded
-/// name/version/purl/licences, ~2.5 KiB worst case, charged at 4 KiB.
-pub const EXPORT_COMPONENT_COST_BYTES: u64 = 4 * 1024;
+/// Per CycloneDX component, measured by `tests/sbom_export_memory.rs`
+/// (rows, document and JSON body alive together, plus libpq's copy of the
+/// row): 19 487 B when every field is at its ingest cap and made of
+/// characters JSON escapes, ~2.8 KiB for a typical package. Charged at the
+/// worst case so a hostile SBOM cannot outrun the budget; an export larger
+/// than the whole budget is clamped to it and runs alone.
+pub const EXPORT_COMPONENT_COST_BYTES: u64 = 20 * 1024;
 /// Per grouped CVE row: id, a few counts, up to 5 package names.
 pub const CVE_ROW_COST_BYTES: u64 = 2 * 1024;
 /// Images and workloads listed in one exposure answer.
@@ -879,6 +883,71 @@ fn load_components(
         .load(conn)
 }
 
+/// The columns the CycloneDX export emits. `file_paths` (up to 16 paths
+/// of 1 KiB per row) is not read: the export never carries it.
+const EXPORT_COMPONENTS_SQL: &str = "\
+SELECT id, name, version, purl, type AS comp_type, class, src_name, src_version, licenses, \
+    layer_digest \
+FROM image_sbom_components WHERE digest = $1 AND source = $2 AND id > $3 \
+ORDER BY id LIMIT $4";
+
+/// One component as the CycloneDX export reads it: [`Component`] without
+/// `file_paths`.
+#[derive(Debug, Clone, QueryableByName)]
+pub struct ExportComponent {
+    #[diesel(sql_type = BigInt)]
+    pub id: i64,
+    #[diesel(sql_type = Text)]
+    pub name: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub version: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub purl: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub comp_type: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub class: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub src_name: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub src_version: Option<String>,
+    #[diesel(sql_type = Array<Text>)]
+    pub licenses: Vec<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub layer_digest: Option<String>,
+}
+
+impl From<&Component> for ExportComponent {
+    fn from(c: &Component) -> Self {
+        ExportComponent {
+            id: c.id,
+            name: c.name.clone(),
+            version: c.version.clone(),
+            purl: c.purl.clone(),
+            comp_type: c.comp_type.clone(),
+            class: c.class.clone(),
+            src_name: c.src_name.clone(),
+            src_version: c.src_version.clone(),
+            licenses: c.licenses.clone(),
+            layer_digest: c.layer_digest.clone(),
+        }
+    }
+}
+
+fn load_export_components(
+    conn: &mut PgConnection,
+    report: &Report,
+    after: i64,
+    limit: i64,
+) -> QueryResult<Vec<ExportComponent>> {
+    sql_query(EXPORT_COMPONENTS_SQL)
+        .bind::<Text, _>(&report.report_digest)
+        .bind::<Text, _>(&report.source)
+        .bind::<BigInt, _>(after)
+        .bind::<BigInt, _>(limit)
+        .load(conn)
+}
+
 /// Every source's SBOM for `digest`, and the one to show: `source`'s,
 /// else by source preference (a registry SBOM is unverified evidence and
 /// never displaces a scanner's), then best join, then newest.
@@ -991,89 +1060,185 @@ const EXPORT_CHUNK: i64 = 5_000;
 
 /// CycloneDX 1.5 JSON from stored components. Deterministic for a given
 /// SBOM (no serial number or timestamp), so exports diff cleanly.
-pub fn cyclonedx_document(digest: &str, report: &Report, comps: &[Component]) -> serde_json::Value {
-    use serde_json::json;
-    let components: Vec<serde_json::Value> = comps
-        .iter()
+///
+/// Typed structs rather than `serde_json::Value`: a `Value` tree costs
+/// several times the text it holds, and the export can be 50 000
+/// components. Fields are declared in alphabetical order, which is the
+/// order the `Value` version serialised in (its map is sorted), so the
+/// bytes are unchanged. Consumes `comps` so their strings move into the
+/// document instead of being copied.
+pub fn cyclonedx_document(
+    digest: &str,
+    report: &Report,
+    comps: Vec<ExportComponent>,
+) -> CycloneDxDocument {
+    let components = comps
+        .into_iter()
         .enumerate()
         .map(|(i, c)| {
-            let mut o = serde_json::Map::new();
-            o.insert("bom-ref".into(), json!(format!("c{i}")));
-            o.insert(
-                "type".into(),
-                json!(if c.comp_type.as_deref() == Some("operating-system") {
-                    "operating-system"
-                } else {
-                    "library"
-                }),
-            );
-            o.insert("name".into(), json!(c.name));
-            if let Some(v) = &c.version {
-                o.insert("version".into(), json!(v));
+            let kind = if c.comp_type.as_deref() == Some("operating-system") {
+                "operating-system"
+            } else {
+                "library"
+            };
+            let properties = [
+                ("aquasecurity:trivy:PkgType", c.comp_type),
+                ("aquasecurity:trivy:Class", c.class),
+                ("aquasecurity:trivy:SrcName", c.src_name),
+                ("aquasecurity:trivy:SrcVersion", c.src_version),
+                ("aquasecurity:trivy:LayerDigest", c.layer_digest),
+            ]
+            .into_iter()
+            .filter_map(|(name, v)| v.map(|value| CdxProperty { name, value }))
+            .collect();
+            CdxComponent {
+                bom_ref: format!("c{i}"),
+                licenses: c
+                    .licenses
+                    .into_iter()
+                    .map(|name| CdxLicenseChoice {
+                        license: CdxLicense { name },
+                    })
+                    .collect(),
+                name: c.name,
+                properties,
+                purl: c.purl,
+                kind,
+                version: c.version,
             }
-            if let Some(p) = &c.purl {
-                o.insert("purl".into(), json!(p));
-            }
-            if !c.licenses.is_empty() {
-                o.insert(
-                    "licenses".into(),
-                    json!(c
-                        .licenses
-                        .iter()
-                        .map(|l| json!({"license": {"name": l}}))
-                        .collect::<Vec<_>>()),
-                );
-            }
-            let mut props = Vec::new();
-            for (k, v) in [
-                ("aquasecurity:trivy:PkgType", &c.comp_type),
-                ("aquasecurity:trivy:Class", &c.class),
-                ("aquasecurity:trivy:SrcName", &c.src_name),
-                ("aquasecurity:trivy:SrcVersion", &c.src_version),
-                ("aquasecurity:trivy:LayerDigest", &c.layer_digest),
-            ] {
-                if let Some(v) = v {
-                    props.push(json!({"name": k, "value": v}));
-                }
-            }
-            if !props.is_empty() {
-                o.insert("properties".into(), json!(props));
-            }
-            serde_json::Value::Object(o)
         })
         .collect();
-    json!({
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.5",
-        "version": 1,
-        "metadata": {
-            "tools": {"components": [{
-                "type": "application",
-                "name": report.scanner_name.clone().unwrap_or_else(|| report.source.clone()),
-                "version": report.scanner_version,
-            }]},
-            "component": {
-                "type": "container",
-                "bom-ref": digest,
-                "name": report.image_ref.clone().unwrap_or_else(|| digest.to_string()),
-                "version": digest,
+    CycloneDxDocument {
+        bom_format: "CycloneDX",
+        components,
+        metadata: CdxMetadata {
+            component: CdxMetaComponent {
+                bom_ref: digest.to_string(),
+                name: report
+                    .image_ref
+                    .clone()
+                    .unwrap_or_else(|| digest.to_string()),
+                kind: "container",
+                version: digest.to_string(),
             },
-            "properties": [
-                {"name": "kguardian:source", "value": report.source},
-                {"name": "kguardian:reportDigest", "value": report.report_digest},
-                {"name": "kguardian:join", "value": report.join},
-                {"name": "kguardian:sbomTrust", "value": report.sbom_trust.clone().unwrap_or_else(|| "n/a".into())},
-                {"name": "kguardian:scannedAt", "value": report.scanned_at.and_utc().to_rfc3339()},
+            properties: vec![
+                CdxProperty {
+                    name: "kguardian:source",
+                    value: report.source.clone(),
+                },
+                CdxProperty {
+                    name: "kguardian:reportDigest",
+                    value: report.report_digest.clone(),
+                },
+                CdxProperty {
+                    name: "kguardian:join",
+                    value: report.join.clone(),
+                },
+                CdxProperty {
+                    name: "kguardian:sbomTrust",
+                    value: report.sbom_trust.clone().unwrap_or_else(|| "n/a".into()),
+                },
+                CdxProperty {
+                    name: "kguardian:scannedAt",
+                    value: report.scanned_at.and_utc().to_rfc3339(),
+                },
             ],
+            tools: CdxTools {
+                components: vec![CdxTool {
+                    name: report
+                        .scanner_name
+                        .clone()
+                        .unwrap_or_else(|| report.source.clone()),
+                    kind: "application",
+                    version: report.scanner_version.clone(),
+                }],
+            },
         },
-        "components": components,
-    })
+        spec_version: "1.5",
+        version: 1,
+    }
+}
+
+/// A CycloneDX 1.5 document ([`cyclonedx_document`]). Every struct below
+/// declares its fields in alphabetical order of their JSON names.
+#[derive(Debug, Serialize)]
+pub struct CycloneDxDocument {
+    #[serde(rename = "bomFormat")]
+    bom_format: &'static str,
+    pub components: Vec<CdxComponent>,
+    pub metadata: CdxMetadata,
+    #[serde(rename = "specVersion")]
+    spec_version: &'static str,
+    version: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxComponent {
+    #[serde(rename = "bom-ref")]
+    pub bom_ref: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub licenses: Vec<CdxLicenseChoice>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<CdxProperty>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purl: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxLicenseChoice {
+    pub license: CdxLicense,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxLicense {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxProperty {
+    pub name: &'static str,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxMetadata {
+    pub component: CdxMetaComponent,
+    pub properties: Vec<CdxProperty>,
+    pub tools: CdxTools,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxMetaComponent {
+    #[serde(rename = "bom-ref")]
+    pub bom_ref: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxTools {
+    pub components: Vec<CdxTool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CdxTool {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub version: Option<String>,
 }
 
 enum Export {
     None,
     TooLarge(i32),
-    Doc(serde_json::Value),
+    Doc(CycloneDxDocument),
 }
 
 /// Every component of `report`'s SBOM, in id order, read in chunks, and
@@ -1085,7 +1250,7 @@ fn load_all_components(
     conn: &mut PgConnection,
     report: &Report,
     max: i64,
-) -> QueryResult<Vec<Component>> {
+) -> QueryResult<Vec<ExportComponent>> {
     let max = max.max(0);
     let mut comps = Vec::with_capacity(
         report
@@ -1098,7 +1263,7 @@ fn load_all_components(
         if want <= 0 {
             break;
         }
-        let chunk = load_components(conn, report, after, want)?;
+        let chunk = load_export_components(conn, report, after, want)?;
         let n = chunk.len() as i64;
         if let Some(last) = chunk.last() {
             after = last.id;
@@ -1121,7 +1286,7 @@ pub(crate) enum CycloneDx {
     TooLarge(Report),
     /// The document, its report header, and the components actually
     /// loaded (the header's `item_count` can be stale).
-    Doc(serde_json::Value, Report, i64),
+    Doc(CycloneDxDocument, Box<Report>, i64),
 }
 
 /// Components in the SBOM [`cyclonedx_for`] would choose for `digest`
@@ -1156,8 +1321,8 @@ pub(crate) fn cyclonedx_for(
     // What was loaded, not the header (which may be stale).
     let loaded = comps.len() as i64;
     Ok(CycloneDx::Doc(
-        cyclonedx_document(digest, &report, &comps),
-        report,
+        cyclonedx_document(digest, &report, comps),
+        Box::new(report),
         loaded,
     ))
 }
@@ -1207,7 +1372,7 @@ pub async fn get_image_sbom_cyclonedx(
         if comps.is_empty() && report.item_count > 0 {
             return Ok(Export::None);
         }
-        Ok(Export::Doc(cyclonedx_document(&d3, &report, &comps)))
+        Ok(Export::Doc(cyclonedx_document(&d3, &report, comps)))
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
