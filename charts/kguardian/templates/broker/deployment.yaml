@@ -191,6 +191,27 @@ spec:
               value: {{ $seccomp.profilesCacheTtlSeconds | quote }}
             {{- end }}
             {{/*
+              Live-node window for the Broker-computed distribution
+              (values.yaml `broker.seccomp.nodeStatusStaleSeconds`). hasKey
+              for the same reason: 0 is the documented "no window" value.
+              A node posts once per distribution pass, so a window under
+              three passes reads a healthy fleet as stale and every profile
+              as Pending; refuse that combination here, where both values
+              are known, rather than let the Broker discover it. The
+              interval falls back to the controller default the same way
+              the DaemonSet does, and 0 disables the window, so there is
+              nothing to check.
+            */}}
+            {{- $staleSecs := ternary (int $seccomp.nodeStatusStaleSeconds) 900 (hasKey $seccomp "nodeStatusStaleSeconds") }}
+            {{- $passSecs := int (.Values.seccomp.distributeIntervalSeconds | default 30) }}
+            {{- if and .Values.seccomp.distribute (gt $staleSecs 0) (gt (mul $passSecs 3) $staleSecs) }}
+            {{- fail (printf "broker.seccomp.nodeStatusStaleSeconds (%d) must be at least 3x seccomp.distributeIntervalSeconds (%d, so %d): a node posts its seccomp node-status once per pass, and a window shorter than three passes reads every healthy node as stale and every SeccompProfile as Pending. Raise nodeStatusStaleSeconds or lower distributeIntervalSeconds." $staleSecs $passSecs (mul $passSecs 3)) }}
+            {{- end }}
+            {{- if hasKey $seccomp "nodeStatusStaleSeconds" }}
+            - name: SECCOMP_NODE_STATUS_STALE_SECS
+              value: {{ $seccomp.nodeStatusStaleSeconds | quote }}
+            {{- end }}
+            {{/*
               Image inventory retention (values.yaml
               `broker.imageInventory.retention`). Same hasKey reasoning as
               AUDIT_VERDICTS_RETENTION_DAYS: 0 is the documented "disable"

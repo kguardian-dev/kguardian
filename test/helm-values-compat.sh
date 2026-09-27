@@ -868,6 +868,47 @@ render "runtime-inventory-capabilities-false-string" --set-string controller.run
 assert_render_fails "runtime-inventory-bad-mode" "controller.runtimeInventory.mode must be one of off, exec, full" \
   --set controller.runtimeInventory.mode=on
 
+# ---------------------------------------------------------------------------
+# Seccomp distribution live-node window. A node posts its node-status once
+# per distribution pass, so `broker.seccomp.nodeStatusStaleSeconds` under
+# three passes reads a healthy fleet as stale and every SeccompProfile as
+# Pending; the chart refuses that at template time, where both values are
+# known. The interval falls back to the controller default (30) when unset,
+# 0 disables the window and with it the check, and a fleet without
+# distribution posts nothing, so nothing is checked either.
+# ---------------------------------------------------------------------------
+broker_env_value() { workload Deployment kguardian-broker | grep -A1 -- "- name: $1\$" | sed -n 's/^ *value: //p' | head -1; }
+STALE_RULE="must be at least 3x seccomp.distributeIntervalSeconds"
+render "seccomp-stale-window-default" --set seccomp.distribute=true && {
+  [ "$(broker_env_value SECCOMP_NODE_STATUS_STALE_SECS)" = '"900"' ] || \
+    { echo "FAIL [seccomp-stale-window-default]: expected the 900 default rendered as SECCOMP_NODE_STATUS_STALE_SECS"; fail=1; }
+}
+# The boundary: 900 is exactly three 300 s passes, the cadence large
+# clusters run, and it renders.
+render "seccomp-stale-window-three-passes" --set seccomp.distribute=true \
+  --set seccomp.distributeIntervalSeconds=300
+# A string interval (an old values file quoting it) is read as a number.
+render "seccomp-stale-window-string-interval" --set seccomp.distribute=true \
+  --set-string seccomp.distributeIntervalSeconds=300
+assert_render_fails "seccomp-stale-window-under-three-passes" "$STALE_RULE" \
+  --set seccomp.distribute=true --set seccomp.distributeIntervalSeconds=301
+assert_render_fails "seccomp-stale-window-lowered" "$STALE_RULE" \
+  --set seccomp.distribute=true --set seccomp.distributeIntervalSeconds=300 \
+  --set broker.seccomp.nodeStatusStaleSeconds=600
+# The message names both values and the rule, so the fix is in the error.
+assert_render_fails "seccomp-stale-window-message" "nodeStatusStaleSeconds (600) must be at least 3x seccomp.distributeIntervalSeconds (300, so 900)" \
+  --set seccomp.distribute=true --set seccomp.distributeIntervalSeconds=300 \
+  --set broker.seccomp.nodeStatusStaleSeconds=600
+# 0 is the documented "no window": nothing to be shorter than, and it still
+# reaches the Broker (hasKey, not `with`).
+render "seccomp-stale-window-disabled" --set seccomp.distribute=true \
+  --set seccomp.distributeIntervalSeconds=3600 --set broker.seccomp.nodeStatusStaleSeconds=0 && {
+  [ "$(broker_env_value SECCOMP_NODE_STATUS_STALE_SECS)" = '"0"' ] || \
+    { echo "FAIL [seccomp-stale-window-disabled]: 0 must render as SECCOMP_NODE_STATUS_STALE_SECS"; fail=1; }
+}
+# Without distribution no node ever posts, so the interval is not checked.
+render "seccomp-stale-window-no-distribution" --set seccomp.distributeIntervalSeconds=3600
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

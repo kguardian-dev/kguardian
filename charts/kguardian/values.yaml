@@ -699,6 +699,19 @@ broker:
     # `GET /seccomp/profiles/{ns}/{kind}/{name}` route is never cached).
     # Broker default is 10 if unset. Set 0 to rebuild on every request.
     profilesCacheTtlSeconds: 10
+    # -- Seconds a node's last `POST /seccomp/node-status` keeps it counted as
+    # live in the Broker-computed `distribution` (`ready/total`) of every
+    # `SeccompProfile`. Each Controller posts once per distribution pass
+    # (`seccomp.distributeIntervalSeconds`, default 30), so this is how many
+    # missed passes a node survives before it drops out of `total`, `ready`
+    # and `present` alike: 30 at the default cadence. The chart refuses a
+    # cadence above a third of this window, because a healthy fleet that
+    # posts less often than that reads as stale and every profile as
+    # `Pending`; raise the two together. It is not the CR's own
+    # `status.distribution`, which the Controllers compute from the API
+    # server's node list. Broker default is 900 if unset. Set 0 to count
+    # every node that has ever reported, departed ones included.
+    nodeStatusStaleSeconds: 900
     denials:
       # -- Retention for the `seccomp_denials` table — the kernel-verdict
       # rows the broker ingests from `POST /seccomp/denials` (fed by the
