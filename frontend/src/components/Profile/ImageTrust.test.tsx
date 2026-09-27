@@ -163,6 +163,7 @@ test.each([
   ['a string count', { trusted: 'x' }],
   ['a non-integer total', { total: 2.5 }],
   ['a NaN count', { unknown: Number.NaN }],
+  ['a total past the safe-integer range', { total: 2 ** 53 }],
 ] as const)('counts that are not whole non-negative numbers (%s) are unknown as a whole, never rendered', async (_, patch) => {
   page('ledger', withTrust('ledger', { ...ledgerTrust(), ...(patch as unknown as Partial<ImageTrust>) }));
   const b = await block();
