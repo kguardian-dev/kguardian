@@ -101,7 +101,7 @@ func TestOOMShapedResponseIsTooLargeWithBoundedHeap(t *testing.T) {
 }
 
 func TestMatcher413IsTooLarge(t *testing.T) {
-	m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	m := matcherFor(t, healthy(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "too many findings: 20001 (max 20000)", http.StatusRequestEntityTooLarge)
 	}))
 	_, err := m.Match(context.Background(), sbomFor("sha256:x"))
@@ -120,7 +120,7 @@ func TestTooManyFindingsInAResponseIsTooLarge(t *testing.T) {
 
 // A body that ends early is named as such, with how far it got.
 func TestTruncatedResponseIsNamed(t *testing.T) {
-	m := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	m := matcherFor(t, healthy(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "100000")
 		_, _ = w.Write([]byte(`{"db":{"loaded":true},"vulnerabilities":[{"id":"CVE-1","package":{"name":"a"},"severity":"HIGH"},{"id":"CVE-`))
 		conn, _, _ := w.(http.Hijacker).Hijack()
@@ -145,7 +145,7 @@ func TestFilePathsAreCapped(t *testing.T) {
 			t.Errorf("%s: %d paths (cap %d)", v.ID, len(v.FilePaths), cap(v.FilePaths))
 		}
 	}
-	empty := matcherFor(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	empty := matcherFor(t, healthy(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"db":{"loaded":true},"vulnerabilities":null,"extra":{"x":[1,2]}}`))
 	}))
 	if vs, err := empty.Match(context.Background(), sbomFor("sha256:x")); err != nil || len(vs) != 0 {
@@ -179,7 +179,7 @@ func TestUnreachableOrNotReadyIsUnavailable(t *testing.T) {
 		},
 		"died mid-request": diesAfterReading(nil),
 	} {
-		m := matcherFor(t, h)
+		m := matcherFor(t, healthy(h))
 		if _, err := m.Match(context.Background(), sbomFor("sha256:x")); err == nil || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTooLarge) {
 			t.Errorf("%s is a failure of this input: %v", name, err)
 		}
@@ -201,5 +201,17 @@ func diesAfterReading(hits *atomic.Int64) http.HandlerFunc {
 		}
 		conn, _, _ := w.(http.Hijacker).Hijack()
 		_ = conn.Close()
+	}
+}
+
+// healthy answers /db as a matcher with its database loaded and hands
+// every other request to h.
+func healthy(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/db" {
+			_, _ = w.Write([]byte(`{"loaded":true,"built":"2026-09-26T06:29:14Z"}`))
+			return
+		}
+		h(w, r)
 	}
 }
