@@ -66,7 +66,8 @@ The stored result for one digest, or `404`.
   verifier's error text with endpoints and secrets removed, at ingest and
   again when served for rows stored earlier: URLs become `<url>`; host
   names, IP addresses and `host:port`, with anything after them, become
-  `<host>` or `<host>/…` (an image reference with a registry keeps only
+  `<host>` or `<host>/…`, also when glued to a key such as `addr=` or
+  `host:`, which is kept (an image reference with a registry keeps only
   its `@sha256:` digest); userinfo becomes `<credentials>@`; and token,
   password or signature values, JWTs, and the word after `Bearer`, become
   `<redacted>`. Digests, reason codes and version numbers are kept. The

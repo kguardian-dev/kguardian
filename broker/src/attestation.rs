@@ -177,8 +177,42 @@ pub fn redact_endpoints(text: &str) -> String {
     out
 }
 
-/// One whitespace/quote-delimited word of [`redact_endpoints`].
+/// One whitespace/quote-delimited word of [`redact_endpoints`]. When the
+/// whole word matches no rule, a `key=` or `key:` prefix is split off and
+/// the rest tried again, so a host glued to a key (`addr=reg.internal:443`,
+/// `host:reg.internal:443`) is redacted and the key kept. At most
+/// [`MAX_KEY_PREFIXES`] keys deep, so a run of `=` stays linear.
 fn redact_word(word: &str) -> String {
+    redact_word_keyed(word, MAX_KEY_PREFIXES)
+}
+
+/// `a=b=host:port` needs two; three leaves room without letting a word of
+/// thousands of `=` rescan itself once per character.
+const MAX_KEY_PREFIXES: usize = 3;
+
+fn redact_word_keyed(word: &str, depth: usize) -> String {
+    let whole = redact_word_whole(word);
+    if whole != word || depth == 0 {
+        return whole;
+    }
+    if let Some(i) = word.find(['=', ':']) {
+        let (key, rest) = (&word[..i], &word[i + 1..]);
+        let key_ok = !key.is_empty()
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+        if key_ok && !rest.is_empty() {
+            let r = redact_word_keyed(rest, depth - 1);
+            if r != rest {
+                return format!("{key}{}{r}", &word[i..=i]);
+            }
+        }
+    }
+    whole
+}
+
+/// [`redact_word`]'s rules for the word as a whole.
+fn redact_word_whole(word: &str) -> String {
     // A JWT is a secret wherever it sits (alone, after `key=`, in a
     // query): `<redacted>`, not mistaken for a dotted host name.
     let jwt_free = redact_jwts(word);
