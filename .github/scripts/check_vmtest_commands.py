@@ -28,17 +28,16 @@ import sys
 
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 # github members that are safe to interpolate: set by GitHub or by
-# repository admins, never by whoever opens a pull request.
+# repository admins, never by whoever opens a pull request, and not secret
+# (github.token is left out: pass it through env:, never into command text).
 SAFE_GITHUB = (
     "workspace", "sha", "repository", "repository_owner", "repository_id", "run_id",
     "run_number", "run_attempt", "event_name", "server_url", "api_url", "graphql_url",
-    "base_ref", "job", "action_path", "token", "workflow", "ref", "ref_type",
-    "retention_days",
+    "base_ref", "job", "action_path", "workflow", "ref", "ref_type", "retention_days",
 )
 # `inputs` in any form; `github` itself, indexed (github[...]) or with any
 # member not in SAFE_GITHUB (event, head_ref, ref_name, actor, event_path,
-# ...). Context
-# names are case-insensitive in expressions.
+# token, ...). Context names are case-insensitive in expressions.
 UNTRUSTED = re.compile(
     r"\binputs\b|\bgithub\b(?!\s*\.\s*(?:" + "|".join(SAFE_GITHUB) + r")\b)",
     re.IGNORECASE,
