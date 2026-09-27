@@ -799,6 +799,11 @@ assert_render_fails "runtime-inventory-capabilities-mode-off" "$CAPS_NEEDS_MODE"
   --set controller.runtimeInventory.mode=off --set controller.runtimeInventory.capabilities=true
 assert_render_fails "runtime-inventory-capabilities-mode-off-mixed-case" "$CAPS_NEEDS_MODE" \
   --set controller.runtimeInventory.mode=Off --set controller.runtimeInventory.capabilities=true
+# "On" is the controller's reading: case-insensitive and trimmed.
+assert_render_fails "runtime-inventory-capabilities-upper-string" "$CAPS_NEEDS_MODE" \
+  --set-string controller.runtimeInventory.capabilities=TRUE
+assert_render_fails "runtime-inventory-capabilities-padded-on" "$CAPS_NEEDS_MODE" \
+  --set-string "controller.runtimeInventory.capabilities= On "
 # ...but an explicit "false" (string or bool) with mode off still renders.
 render "runtime-inventory-capabilities-false-string" --set-string controller.runtimeInventory.capabilities=false && {
   [ "$(env_value RUNTIME_INVENTORY_CAPABILITIES)" = '"false"' ] || \
