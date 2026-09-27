@@ -2008,7 +2008,7 @@ supplychain:
       # -- Matcher image pull policy
       pullPolicy: IfNotPresent
       # -- Matcher version tag
-      tag: "v0.1.0"
+      tag: "v0.1.1"
       # -- Overrides the image tag using SHA digest
       sha: ""
     # -- Loopback port the matcher listens on inside the pod
