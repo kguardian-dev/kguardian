@@ -292,3 +292,34 @@ test("explain_image_trust: an unrecognised verdict is Unknown, never Trusted", (
   assert.equal(ok.unrecognisedVerdicts, undefined);
   assert.equal(ok.unknown, base.unknown);
 });
+
+test("get_image_signers: verified without a signer identity is unknown, never signed", () => {
+  const base = capture("attestation-storefront").body;
+  for (const sig of [
+    { format: "cosign-bundle", source: "referrers", verified: true },
+    { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless" },
+    { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless", issuer: "https://token.actions.githubusercontent.com" },
+    { format: "cosign-legacy", source: "sig-tag", verified: true, signerKind: "key", keyName: "release" },
+    // Whitespace-only identity fields are missing.
+    { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless", issuer: "https://token.actions.githubusercontent.com", san: "   " },
+    { format: "cosign-bundle", source: "referrers", verified: true, signerKind: "keyless", issuer: " ", san: "https://github.com/example/app" },
+    { format: "cosign-legacy", source: "sig-tag", verified: true, signerKind: "key", keyName: "release", keyFingerprint: "  " },
+  ]) {
+    const got = trimSigners({ ...base, signatures: [sig], attestations: [{ predicateType: "https://slsa.dev/provenance/v1", verified: true }] }) as any;
+    assert.equal(got.verdict, "unknown", JSON.stringify(sig));
+    assert.equal(got.reason, "no_signer_identity");
+    assert.equal(got.brokerVerdict, "verified");
+    assert.deepEqual(got.signers, []);
+    assert.equal(got.signatures[0].verified, false);
+    assert.equal(got.signatures[0].error, "no_signer_identity");
+    assert.equal(got.attestations[0].verified, false);
+    assert.match(got.verdictMeaning, /never a pass/);
+    assert.match(got.reasonMeaning, /not counted as signed/);
+  }
+  // One named signer keeps the verdict; the anonymous one is shown unverified.
+  const mixed = trimSigners({ ...base, signatures: [{ format: "x", source: "y", verified: true }, ...base.signatures] }) as any;
+  assert.equal(mixed.verdict, "verified");
+  assert.equal(mixed.signers.length, 1);
+  assert.equal(mixed.brokerVerdict, undefined);
+  assert.ok(mixed.signatures.some((s: any) => s.error === "no_signer_identity" && s.verified === false));
+});

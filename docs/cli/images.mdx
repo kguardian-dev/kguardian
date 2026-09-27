@@ -268,13 +268,14 @@ Exit code by verdict and level:
 | `unsigned` | 0 | 1 | 1 |
 | `invalid` | 1 | 1 | 1 |
 | `unknown`, or no result | 3 | 3 | 3 |
+| `verified`, but no signature names its signer | 3 | 3 | 3 |
 
 | Exit | Meaning |
 |------|---------|
 | `0` | The verdict passes the level |
 | `1` | The verdict fails it |
 | `2` | The check could not run: the broker is unreachable, the port-forward or token failed, the broker returned an error, or a flag was invalid |
-| `3` | The signature could not be verified: the digest has no result, its verdict is `unknown` (or one this CLI does not know), or it is `key_signed` (a key kguardian was not given) below `unverified`. Never a pass. |
+| `3` | The signature could not be verified: the digest has no result, its verdict is `unknown` (or one this CLI does not know), it is `key_signed` (a key kguardian was not given) below `unverified`, or it is `verified` but no signature names its signer (`no_signer_identity`, stored by an older broker). Never a pass. |
 
 A pass only says a valid signature exists. To gate on who signed, use
 `images trust --fail-on would-deny` with a policy.
@@ -339,7 +340,8 @@ policy would reject the image. kguardian never blocks anything.
 | `namespace-unknown` | The namespace's labels could not be read (`Unknown`) |
 | `broker-unavailable`, `broker-unauthorized` | The evaluator could not read signature results (`Unknown`) |
 
-`Unknown` can also carry a discovery reason such as `registry_auth`.
+`Unknown` can also carry a discovery reason such as `registry_auth`, or
+`no_signer_identity` (the result says verified but names no signer).
 
 ```
 $ kubectl kguardian images trust -n shop

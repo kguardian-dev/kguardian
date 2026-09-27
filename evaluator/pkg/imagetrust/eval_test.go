@@ -85,6 +85,76 @@ func TestUnknownIsNeverTrusted(t *testing.T) {
 	want(t, p, container(str("something-new")), v1alpha1.ImageUnknown, ReasonNotChecked)
 }
 
+// A "verified" result that names no signer cannot match any authority:
+// Unknown (no_signer_identity), not a WouldDeny by an untrusted signer.
+func TestVerifiedWithoutASignerIdentityIsUnknown(t *testing.T) {
+	p := policy(t, both())
+	for name, signers := range map[string][]Signer{
+		"no signers":      nil,
+		"kind only":       {{Kind: "keyless"}},
+		"issuer only":     {{Kind: "keyless", Issuer: k8sIssuer}},
+		"blank san":       {{Kind: "keyless", Issuer: k8sIssuer, SAN: "  "}},
+		"key without fp":  {{Kind: "key"}},
+		"blank fp":        {{Kind: "key", KeyFingerprint: "   "}},
+		"blank issuer":    {{Kind: "keyless", Issuer: " ", SAN: k8sSAN}},
+		"no kind, no ids": {{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want(t, p, container(str("verified"), signers...), v1alpha1.ImageUnknown, ReasonNoSignerIdentity)
+		})
+	}
+	// One named signer among anonymous ones is evaluated normally.
+	want(t, p, container(str("verified"), Signer{Kind: "keyless"}, Signer{Kind: "keyless", Issuer: k8sIssuer, SAN: k8sSAN}),
+		v1alpha1.ImageTrusted, "")
+}
+
+// A legacy row: a blank-SAN signer next to a named one, under a
+// permissive policy (any subject from our issuer). The blank signer must
+// never make it Trusted; the named one is not ours, so WouldDeny.
+func TestBlankSignerNeverMatchesAPermissivePolicy(t *testing.T) {
+	const ours = "https://ours.example"
+	p := policy(t, v1alpha1.ImageTrustPolicySpec{Authorities: []v1alpha1.Authority{
+		{Keyless: &v1alpha1.KeylessAuthority{Issuer: ours, SubjectRegExp: ".*"}},
+	}})
+	other := Signer{Kind: "keyless", Issuer: k8sIssuer, SAN: k8sSAN}
+	for name, blank := range map[string]Signer{
+		"san spaces":    {Kind: "keyless", Issuer: ours, SAN: "   "},
+		"san empty":     {Kind: "keyless", Issuer: ours, SAN: ""},
+		"issuer padded": {Kind: "keyless", Issuer: " " + ours, SAN: "x"},
+		"no kind":       {Issuer: ours, SAN: " "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want(t, p, container(str("verified"), blank, other), v1alpha1.ImageWouldDeny, ReasonUntrustedSigner)
+		})
+	}
+	// Only the named other signer: the same answer.
+	want(t, p, container(str("verified"), other), v1alpha1.ImageWouldDeny, ReasonUntrustedSigner)
+	// A real signer of ours is Trusted.
+	want(t, p, container(str("verified"), Signer{Kind: "keyless", Issuer: ours, SAN: "https://github.com/ours/app"}), v1alpha1.ImageTrusted, "")
+	// Key authority: a padded or blank fingerprint never matches.
+	k := policy(t, v1alpha1.ImageTrustPolicySpec{Authorities: both().Authorities[1:]})
+	for _, fp := range []string{"  ", " " + fixtureFP, fixtureFP + " "} {
+		want(t, k, container(str("verified"), Signer{Kind: "key", KeyFingerprint: fp}, other), v1alpha1.ImageWouldDeny, ReasonUntrustedSigner)
+	}
+}
+
+// The attestation path shares trusts(): an attestation "signed" by a blank
+// signer never satisfies a requirement.
+func TestBlankAttestationSignerNeverSatisfiesARequirement(t *testing.T) {
+	const ours = "https://ours.example"
+	spec := v1alpha1.ImageTrustPolicySpec{
+		Authorities:  []v1alpha1.Authority{{Keyless: &v1alpha1.KeylessAuthority{Issuer: ours, SubjectRegExp: ".*"}}},
+		Attestations: []v1alpha1.AttestationRequirement{{PredicateType: "https://slsa.dev/provenance/v1"}},
+	}
+	p := policy(t, spec)
+	named := Signer{Kind: "keyless", Issuer: ours, SAN: "https://github.com/ours/app"}
+	c := container(str("verified"), named)
+	c.Attestations = []Signed{{PredicateType: "https://slsa.dev/provenance/v1", Signer: Signer{Kind: "keyless", Issuer: ours, SAN: "  "}}}
+	want(t, p, c, v1alpha1.ImageWouldDeny, ReasonAttestationMissing)
+	c.Attestations = []Signed{{PredicateType: "https://slsa.dev/provenance/v1", Signer: named}}
+	want(t, p, c, v1alpha1.ImageTrusted, "")
+}
+
 // A key signature supplychain could not check: if the policy trusts a key
 // the likely fix is giving supplychain the key.
 func TestKeySigned(t *testing.T) {
@@ -108,7 +178,8 @@ func TestRegexpsAreAnchored(t *testing.T) {
 	want(t, p, evil, v1alpha1.ImageWouldDeny, ReasonUntrustedSigner)
 	// A key signer never matches a keyless authority, even with an
 	// issuer-shaped field.
-	fake := container(str("verified"), Signer{Kind: "key", Issuer: "https://token.actions.githubusercontent.com", SAN: good.Signers[0].SAN})
+	fake := container(str("verified"), Signer{Kind: "key", KeyFingerprint: fixtureFP,
+		Issuer: "https://token.actions.githubusercontent.com", SAN: good.Signers[0].SAN})
 	want(t, p, fake, v1alpha1.ImageWouldDeny, ReasonUntrustedSigner)
 }
 

@@ -121,16 +121,23 @@ pub fn authority_of(s: &Value) -> Option<Authority> {
         .get("signerKind")
         .and_then(Value::as_str)
         .unwrap_or("keyless");
+    // An empty identity names no one: never an authority.
+    let field = |k: &str| {
+        s.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
     if kind == "key" {
-        let fp = s.get("keyFingerprint")?.as_str()?.to_string();
-        let pem = s.get("keyPem")?.as_str()?.trim().to_string();
+        let fp = field("keyFingerprint")?.to_string();
+        let pem = field("keyPem")?.to_string();
         return Some(Authority::Key {
             fingerprint: fp,
             pem,
         });
     }
-    let issuer = s.get("issuer")?.as_str()?.to_string();
-    let san = s.get("san")?.as_str()?.to_string();
+    let issuer = field("issuer")?.to_string();
+    let san = field("san")?.to_string();
     if issuer == GITHUB_ISSUER {
         // https://github.com/<owner>/<repo>/<path>@refs/tags/<tag>
         if let Some((wf, tag)) = san.split_once("@refs/tags/") {
@@ -231,9 +238,22 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
             let mine: Vec<Authority> = signers.iter().filter_map(authority_of).collect();
             seen.extend(mine.iter().map(|a| (a.clone(), digest.clone())));
             if mine.is_empty() {
+                // A key signer with a fingerprint but no public key, or a
+                // verified result that names no signer at all.
+                let key_without_pem = signers.iter().any(|s| {
+                    s.get("signerKind").and_then(Value::as_str) == Some("key")
+                        && s.get("keyFingerprint")
+                            .and_then(Value::as_str)
+                            .is_some_and(|f| !f.trim().is_empty())
+                });
                 out.uncovered.insert(
                     repo.clone(),
-                    "signed only by a key whose public key kguardian was not given".into(),
+                    if key_without_pem {
+                        "signed only by a key whose public key kguardian was not given".into()
+                    } else {
+                        "a running digest's verified signatures name no signer (no_signer_identity)"
+                            .into()
+                    },
                 );
                 continue 'repo;
             }
