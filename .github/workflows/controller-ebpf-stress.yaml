@@ -33,6 +33,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      # The input goes into a vmtest command, which a shell parses on the
+      # runner: validate it through the environment first and use only the
+      # validated output there.
+      - name: Validate iterations
+        id: it
+        env:
+          ITER: ${{ inputs.iterations }}
+        run: |
+          [[ "$ITER" =~ ^[0-9]+$ ]] && [ "$ITER" -ge 1 ] && [ "$ITER" -le 500 ] || { echo "::error::iterations must be 1-500"; exit 1; }
+          echo "iterations=$ITER" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -123,4 +134,4 @@ jobs:
           name: stress-6.18
           kernel: kernels/vmlinuz-6.18
           kernel_args: preempt=full
-          command: /bin/bash ${{ github.workspace }}/.github/scripts/ebpf-runtime-stress.sh ${{ github.workspace }} ${{ inputs.iterations }}
+          command: /bin/bash ${{ github.workspace }}/.github/scripts/ebpf-runtime-stress.sh ${{ github.workspace }} ${{ steps.it.outputs.iterations }}

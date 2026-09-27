@@ -44,6 +44,8 @@ on:
       - 'controller/Cargo.lock'
       - '.github/workflows/controller-ebpf-kernels.yaml'
       - '.github/scripts/check_vmtest_commands.py'
+      - '.github/workflows/controller-ebpf-stress.yaml'
+      - '.github/scripts/ebpf-runtime-stress.sh'
   workflow_dispatch:
 
 permissions:
