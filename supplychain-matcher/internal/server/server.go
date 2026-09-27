@@ -136,11 +136,20 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := writeMatch(w, s.Engine.DB(), vulns)
-	if err != nil {
+	switch {
+	case errors.Is(err, errEncode):
+		// Our bug, not the client: the body is cut short where it failed.
+		s.Log.WithError(err).WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "written": n}).
+			Error("match response not delivered: encoding failed")
+	case err != nil:
 		s.Log.WithError(err).WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "written": n}).
 			Warn(fmt.Sprintf("match response not delivered: client closed after %d bytes", n))
 	}
 }
+
+// errEncode marks a writeMatch failure to encode the response, as opposed
+// to a write the client did not take.
+var errEncode = errors.New("encoding match response")
 
 // writeMatch streams a wire.MatchResponse one finding at a time, so the
 // whole body is never held in memory, and returns the bytes written and
@@ -151,7 +160,7 @@ func writeMatch(w http.ResponseWriter, db wire.DB, vulns []wire.Vulnerability) (
 	bw := bufio.NewWriterSize(cw, 64<<10)
 	dbJSON, err := json.Marshal(db)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: db: %w", errEncode, err)
 	}
 	_, _ = bw.WriteString(`{"db":`)
 	_, _ = bw.Write(dbJSON)
@@ -162,7 +171,7 @@ func writeMatch(w http.ResponseWriter, db wire.DB, vulns []wire.Vulnerability) (
 		}
 		b, err := json.Marshal(&vulns[i])
 		if err != nil {
-			return cw.n, err
+			return cw.n, fmt.Errorf("%w: finding %d (%s): %w", errEncode, i, vulns[i].ID, err)
 		}
 		if _, err := bw.Write(b); err != nil {
 			return cw.n, err

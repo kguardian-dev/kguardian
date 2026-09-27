@@ -244,10 +244,11 @@ func pathIndex(cs []wire.Component) func(purl, name, version string) []string {
 		if len(c.FilePaths) == 0 {
 			continue
 		}
+		fp := firstDistinct(c.FilePaths, wire.MaxFilePaths)
 		if c.PURL != "" {
-			byPURL[c.PURL] = c.FilePaths
+			byPURL[c.PURL] = fp
 		}
-		byNV[c.Name+"\x00"+c.Version] = c.FilePaths
+		byNV[c.Name+"\x00"+c.Version] = fp
 	}
 	return func(purl, name, version string) []string {
 		if p, ok := byPURL[purl]; ok {
@@ -255,4 +256,23 @@ func pathIndex(cs []wire.Component) func(purl, name, version string) []string {
 		}
 		return byNV[name+"\x00"+version]
 	}
+}
+
+// firstDistinct returns up to n distinct non-empty entries of p in order,
+// so a list with repeats still fills the per-finding cap with different
+// paths instead of copies of the same one.
+func firstDistinct(p []string, n int) []string {
+	out := make([]string, 0, min(len(p), n))
+	seen := make(map[string]struct{}, min(len(p), n))
+	for _, s := range p {
+		if len(out) == n {
+			break
+		}
+		if _, dup := seen[s]; dup || s == "" {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

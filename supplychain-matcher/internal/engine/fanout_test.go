@@ -74,3 +74,34 @@ func TestCapPathsLeavesShortListsAlone(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+// Repeated paths do not use up the per-finding cap: it is filled with
+// distinct ones, in the order the SBOM gave them.
+func TestFilePathsAreDistinctBeforeTheCap(t *testing.T) {
+	ms, cs := kernelHeadersFanOut(3, 0)
+	var p []string
+	for range 20 {
+		p = append(p, "usr/include/linux/dup.h", "")
+	}
+	for i := range 20 {
+		p = append(p, fmt.Sprintf("usr/include/linux/h%02d.h", i))
+	}
+	cs[0].FilePaths = p
+	out := convert(ms, pathIndex(cs))
+	for _, v := range out {
+		seen := map[string]bool{}
+		for _, f := range v.FilePaths {
+			if seen[f] || f == "" {
+				t.Fatalf("%s: repeated or empty path %q in %v", v.ID, f, v.FilePaths)
+			}
+			seen[f] = true
+		}
+		if len(v.FilePaths) != wire.MaxFilePaths || v.FilePaths[0] != "usr/include/linux/dup.h" ||
+			v.FilePaths[1] != "usr/include/linux/h00.h" {
+			t.Fatalf("%s: %v", v.ID, v.FilePaths)
+		}
+	}
+	if got := firstDistinct([]string{"a", "a", "b"}, 16); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("%v", got)
+	}
+}

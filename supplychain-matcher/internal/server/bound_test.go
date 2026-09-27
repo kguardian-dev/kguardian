@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"runtime"
@@ -157,4 +158,32 @@ func TestClientGoneIsLogged(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("no write-error log: %+v", hook.AllEntries())
+}
+
+// A finding that cannot be encoded is our failure, logged as such, never
+// as a client that went away.
+func TestEncodeFailureIsLoggedApart(t *testing.T) {
+	log, hook := test.NewNullLogger()
+	vulns := findings(3, 2)
+	nan := math.NaN()
+	vulns[1].Score = &nan // json: unsupported value: NaN
+	resp := post(t, serve(t, &Server{Engine: fixedEngine{vulns}, Log: log}))
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	for i := 0; i < 500; i++ {
+		for _, e := range hook.AllEntries() {
+			if strings.HasPrefix(e.Message, "match response not delivered: client closed") {
+				t.Fatalf("encode failure logged as a client close: %+v", e)
+			}
+			if e.Message == "match response not delivered: encoding failed" {
+				if e.Level != logrus.ErrorLevel || e.Data["digest"] != "sha256:fan" ||
+					!strings.Contains(e.Data[logrus.ErrorKey].(error).Error(), "finding 1 (CVE-2024-00001)") {
+					t.Fatalf("%+v", e)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no encode-failure log: %+v", hook.AllEntries())
 }
