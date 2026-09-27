@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.16.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.0...controller/v1.16.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **controller:** prune departed nodes from SeccompProfile status ([#1743](https://github.com/kguardian-dev/kguardian/issues/1743)) ([df0d475](https://github.com/kguardian-dev/kguardian/commit/df0d4752c40052eaf798740a7ce667e4a258ad69))
+* name the aarch64 seccomp architecture SCMP_ARCH_AARCH64 so arm64 pods can start ([#1742](https://github.com/kguardian-dev/kguardian/issues/1742)) ([acb1cbd](https://github.com/kguardian-dev/kguardian/commit/acb1cbda8068ede73f37a30acf13787fa2485e01))
+* stop seccomp distribution scaling database load with nodes times CRs ([#1744](https://github.com/kguardian-dev/kguardian/issues/1744)) ([ea9b6e8](https://github.com/kguardian-dev/kguardian/commit/ea9b6e899fe2bf1dc9500d254629d642a15c16f7))
+
 ## [1.16.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.15.1...controller/v1.16.0) (2026-09-27)
 
 
