@@ -123,3 +123,35 @@ test('the posture chip tooltip carries the image trust line from the profile', a
   const chip = within(strip.querySelector('[data-dimension="supplyChain"]') as HTMLElement).getByRole('button');
   expect(chip.getAttribute('title')).toMatch(/\nImage trust policies: 1 would deny, 0 unknown, 0 trusted \(1 result over 1 policy\)\.$/);
 });
+
+// Test-local: count shapes no captured Broker run produced, built on the captured ledger answer.
+const ledgerTrust = () => JSON.parse(JSON.stringify(answered('ledger').body.dimensions.images.supplyChain!.imageTrust!)) as ImageTrust;
+
+test('a total the counts do not account for: the gap is unknown, never silently dropped (page and chip)', async () => {
+  const t = { ...ledgerTrust(), total: 7 }; // counts: 1 would deny + 0 unknown + 1 trusted
+  page('ledger', withTrust('ledger', t));
+  const b = await block();
+  expect(within(b).getByTestId('trust-summary').textContent).toBe('Image trust policies: 1 would deny, 5 unknown (5 not accounted for), 1 trusted (7 results over 2 policies).');
+  const strip = await screen.findByRole('list', { name: 'Posture by dimension' });
+  const chip = within(strip.querySelector('[data-dimension="supplyChain"]') as HTMLElement).getByRole('button');
+  expect(chip.getAttribute('title')).toMatch(/5 unknown \(5 not accounted for\)/);
+});
+
+test('counts that add up to more than the total are unknown as a whole, not an answer', async () => {
+  page('ledger', withTrust('ledger', { ...ledgerTrust(), total: 1 }));
+  const b = await block();
+  expect(b.getAttribute('data-trust-state')).toBe('unavailable');
+  expect(within(b).getByTestId('trust-summary').textContent).toBe("Image trust policies: unknown, the Broker's counts do not add up (2 counted, total 1).");
+  expect(b.textContent).not.toMatch(ALL_CLEAR);
+});
+
+test('truncated: the counts come from the Broker summary, not from the results listed', async () => {
+  // The Broker lists at most 20; here only the Trusted row is listed while the summary counts both.
+  const t = ledgerTrust();
+  const listed = { ...t, truncated: true, results: t.results.filter((r) => r.verdict === 'Trusted') };
+  page('ledger', withTrust('ledger', listed));
+  const b = await block();
+  expect(within(b).getByTestId('trust-summary').textContent).toBe('Image trust policies: 1 would deny, 0 unknown, 1 trusted (2 results over 2 policies).');
+  expect(within(b).getAllByRole('listitem').map((r) => r.getAttribute('data-trust-verdict'))).toEqual(['Trusted']);
+  expect(within(b).getByText('More results than listed; the counts above cover all of them.')).toBeTruthy();
+});

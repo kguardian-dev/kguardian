@@ -60,6 +60,8 @@ export function trustState(sc: SupplyChainDimension | null | undefined): TrustSt
   if (t === null) return { kind: 'not_read' };
   if (!t.available) return { kind: 'unavailable', reason: t.reason?.trim() || 'no reason given' };
   if (t.evaluatedAt === null) return { kind: 'pending' };
+  // Counts that add up to more than the total are not an answer anyone can read.
+  if (t.wouldDeny + t.unknown + t.trusted > t.total) return { kind: 'unavailable', reason: `the Broker's counts do not add up (${t.wouldDeny + t.unknown + t.trusted} counted, total ${t.total})` };
   if (t.total === 0) return { kind: 'none_apply' };
   return { kind: 'answer', trust: t };
 }
@@ -78,8 +80,13 @@ export function trustSummary(s: TrustState): string {
     case 'none_apply':
       return 'Image trust policies: no policy selects these containers, so none was evaluated (not the same as allowed).';
     case 'answer': {
+      // The Broker's summary counts, never recounted from the listed results
+      // (at most 20 are listed). Results the counts do not account for are
+      // unknown, and say so.
       const t = s.trust;
-      const parts = [`${t.wouldDeny} would deny`, `${t.unknown} unknown`, `${t.trusted} trusted`];
+      const gap = t.total - (t.wouldDeny + t.unknown + t.trusted);
+      const unknown = gap > 0 ? `${t.unknown + gap} unknown (${gap} not accounted for)` : `${t.unknown} unknown`;
+      const parts = [`${t.wouldDeny} would deny`, unknown, `${t.trusted} trusted`];
       return `Image trust policies: ${parts.join(', ')} (${t.total} result${t.total === 1 ? '' : 's'} over ${t.policies.length} polic${t.policies.length === 1 ? 'y' : 'ies'}).`;
     }
   }
