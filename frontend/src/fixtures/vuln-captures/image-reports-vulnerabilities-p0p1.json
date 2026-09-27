@@ -66,19 +66,19 @@
         "osEosl": false,
         "osFamily": "alpine",
         "osName": "3.20.3",
-        "receivedAt": "2026-09-26T09:31:43.604541",
+        "receivedAt": "2026-09-27T01:27:37.031920",
         "reportDigest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
         "sbomFormat": null,
         "sbomSources": [],
         "sbomTrust": "scanned",
-        "scannedAt": "2026-09-26T03:31:41",
+        "scannedAt": "2026-09-26T19:27:36",
         "scannerName": "Trivy",
         "scannerVersion": "0.58.1",
         "source": "trivy-operator"
       }
     ]
   },
-  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa/vulnerabilities?tier=P0,P1",
   "status": 200
 }

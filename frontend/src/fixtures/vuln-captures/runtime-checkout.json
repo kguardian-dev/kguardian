@@ -1,0 +1,87 @@
+{
+  "body": {
+    "containers": [
+      {
+        "containerName": "app",
+        "entries": [
+          {
+            "firstSeen": "2026-09-25T19:27:36",
+            "kind": "exec",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/usr/bin/openssl",
+            "pathComplete": true,
+            "source": "ebpf"
+          },
+          {
+            "firstSeen": "2026-09-18T18:27:36",
+            "kind": "exec",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/usr/local/bin/node",
+            "pathComplete": true,
+            "source": "ebpf"
+          },
+          {
+            "firstSeen": "2026-09-18T18:27:36",
+            "kind": "lib",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/lib/ld-musl-x86_64.so.1",
+            "pathComplete": true,
+            "source": "ebpf"
+          },
+          {
+            "firstSeen": "2026-09-18T18:27:36",
+            "kind": "lib",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/usr/lib/libcrypto.so.3",
+            "pathComplete": true,
+            "source": "ebpf"
+          },
+          {
+            "firstSeen": "2026-09-18T18:27:36",
+            "kind": "lib",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/usr/lib/libssl.so.3",
+            "pathComplete": true,
+            "source": "ebpf"
+          },
+          {
+            "firstSeen": "2026-09-18T18:27:36",
+            "kind": "lib",
+            "lastSeen": "2026-09-27T01:21:36",
+            "origin": "image",
+            "path": "/usr/lib/libz.so.1.3.1",
+            "pathComplete": true,
+            "source": "ebpf"
+          }
+        ],
+        "imageDigest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235"
+      }
+    ],
+    "coverage": [
+      {
+        "containerName": "app",
+        "covered": true,
+        "imageDigest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+        "instances": 2,
+        "lastHeartbeat": "2026-09-27T01:27:36",
+        "librariesTracked": true,
+        "mode": "full",
+        "observedSince": "2026-09-18T17:27:36",
+        "reason": null,
+        "windowHours": 24
+      }
+    ],
+    "kind": "Deployment",
+    "name": "checkout",
+    "namespace": "payments",
+    "truncated": false
+  },
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /workloads/payments/Deployment/checkout/runtime",
+  "status": 200
+}

@@ -1,5 +1,6 @@
 import { FileCode, ShieldCheck, UserCog } from 'lucide-react';
-import type { FailingCheck, PodSecurityDimension } from '../../types/profile';
+import { CapabilitiesPanel } from './CapabilitiesPanel';
+import type { FailingCheck, PodSecurityDimension, ProfileCapabilities } from '../../types/profile';
 import { asStatus, fieldValue, formatAgo, formatTimestamp, pssLevelText, shortDigest } from '../../utils/posture';
 import { CopyButton } from '../ui/CopyButton';
 import { EmptyState } from '../ui/EmptyState';
@@ -35,7 +36,7 @@ function FailingList({ failing }: { failing: FailingCheck[] }) {
   );
 }
 
-export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
+export function PodSecurityTab({ dim, capabilities }: { dim: PodSecurityDimension; capabilities?: ProfileCapabilities }) {
   const status = asStatus(dim.status);
   if (dim.level === null && dim.containers.length === 0) {
     return (
@@ -159,6 +160,7 @@ export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
           <p className="px-4 py-3 text-xs text-secondary">No patch: every evaluated check already passes restricted. Checks kguardian cannot see may still fail.</p>
         )}
       </Panel>
+      <CapabilitiesPanel caps={capabilities} />
     </div>
   );
 }

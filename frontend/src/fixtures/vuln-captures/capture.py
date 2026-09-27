@@ -17,7 +17,23 @@ then:
 
 Set CAPTURE_INTERVAL_SECS if the Broker runs a longer interval (default
 60). It posts pods (with `containers[]`), traffic, vulnerability reports
-and SBOMs, waits for a rebuild and then one more (so every link and the
+and SBOMs, then the controller's runtime posts: executed and loaded files
+(`/runtime/executables`), coverage heartbeats (`/runtime/coverage`) and
+capability checks (`/runtime/capabilities`), so in-use states, capability
+evidence and runtime drift come from the Broker itself:
+
+  checkout      watched from its start in full mode on both pods (covered):
+                openssl executed, zlib loaded, busybox never run
+                (installed_not_observed); capabilities NET_BIND_SERVICE and
+                CHOWN used, SYS_ADMIN probed only, NET_RAW denied
+  ledger        exec mode only (libraries_not_tracked), capability probe off
+  grafana       running before the probe attached (backfill); a plugin
+                binary ran from the writable layer (unshippedExecutable)
+  prometheus    coverage began 2 h ago (capture_gap)
+  source-controller  lost events (events_dropped)
+  node-exporter no heartbeat (no runtime data); reports: not running
+
+It waits for a rebuild and then one more (so every link and the
 exposure view are current; a few minutes in all), then writes one `{provenance,
 request, status, body}` JSON per read into this directory. Nothing here
 edits a response.
@@ -88,6 +104,11 @@ REPO = {
     'ingress-nginx': ('registry.k8s.io/ingress-nginx/controller', 'v1.11.2'),
 }
 
+# Pods started, and the controller began tracking them, this long ago:
+# longer than the capability evidence window (168 h), so a container
+# watched from its start is covered for it.
+TRACKED_H = 200
+
 # ── Pods: (name, namespace, ip, kind, workload, container, image key, state, reason, host_network)
 PODS = [
     ('checkout-7d9f8-abcde', 'payments', '10.244.1.10', 'Deployment', 'checkout', 'app', 'checkout', 'running', None, False),
@@ -114,7 +135,7 @@ for name, ns, ip, kind, wl, container, key, state, reason, host in PODS:
         'pod_identity': wl, 'workload_selector_labels': {'app.kubernetes.io/name': wl},
         'workload_kind': kind, 'workload_name': wl, 'host_network': host,
         'pod_obj': {'metadata': {'name': name, 'namespace': ns, 'labels': {'app.kubernetes.io/name': wl}}, 'spec': {'hostNetwork': host}},
-        'time_stamp': ts(), 'started_at': ts(hours_ago=48), 'containers': [c],
+        'time_stamp': ts(), 'started_at': ts(hours_ago=TRACKED_H), 'containers': [c],
     }
     ok(*call('POST', '/pod/spec', INGEST, body), f'pod {name}')
 
@@ -208,8 +229,19 @@ post_vulns('prometheus', 'trivy-operator', items('prometheus', 'trivy-operator')
            [{'namespace': 'observability', 'kind': 'StatefulSet', 'name': 'prometheus', 'container': 'prometheus'}])
 
 
-def component(c):
+# The checkout image's Alpine package files, as its SBOM lists them: the
+# runtime inventory is joined to packages on these paths.
+PKG_FILES = {
+    'openssl': ['/usr/bin/openssl', '/usr/lib/libssl.so.3', '/usr/lib/libcrypto.so.3'],
+    'zlib': ['/usr/lib/libz.so.1.3.1'],
+    'busybox': ['/bin/busybox'],
+}
+
+
+def component(c, files=False):
     out = {k: c[k] for k in ('name', 'version', 'purl', 'type') if c.get(k) is not None}
+    if files and c['name'] in PKG_FILES:
+        out['file_paths'] = PKG_FILES[c['name']]
     if c.get('licenses'):
         out['licenses'] = c['licenses']
     return out
@@ -220,7 +252,7 @@ def post_sbom(key, source, img, comps, hours_ago, trust, attestation=None):
         'schema_version': 1, 'image': img, 'source': source, 'scanned_at': ts(hours_ago, z=True),
         'scanner': TRIVY if source == 'trivy-operator' else {'name': 'registry', 'vendor': attestation['mechanism']},
         'format': 'CycloneDX', 'spec_version': '1.5', 'observed_in': [], 'sbom_trust': trust,
-        'components': [component(c) for c in comps],
+        'components': [component(c, files=key == 'checkout') for c in comps],
     }
     if attestation:
         body['attestation'] = attestation
@@ -232,6 +264,84 @@ for key, trust in (('grafana', 'attached-unbound'), ('source-controller', 'verif
     s = old(f'image-{key}-sbom')
     att = dict(s['reports'][0]['attestation'])
     post_sbom(key, 'registry', image(key), s['items'], 8, trust, att)
+
+# ── Runtime inventory, coverage and capabilities, as the controller posts them ─
+POD_OF = {p[0]: p for p in PODS}
+
+
+def rt(pod, kind, path, origin='image', hours_ago=TRACKED_H - 1):
+    name, ns, _, wkind, wl, container, key, *_ = POD_OF[pod]
+    return {
+        'pod_namespace': ns, 'pod_name': name, 'workload_kind': wkind, 'workload_name': wl,
+        'container_name': container, 'image_digest': D[key], 'kind': kind, 'path': path,
+        'path_complete': True, 'source': 'ebpf', 'origin': origin,
+        'first_seen': ts(hours_ago), 'last_seen': ts(0.1),
+    }
+
+
+RUNTIME = [
+    # checkout: openssl executed (and its libraries loaded), zlib loaded, busybox never run.
+    *[e for pod in ('checkout-7d9f8-abcde', 'checkout-7d9f8-fghij') for e in (
+        rt(pod, 'exec', '/usr/local/bin/node'),
+        rt(pod, 'lib', '/lib/ld-musl-x86_64.so.1'),
+        rt(pod, 'lib', '/usr/lib/libssl.so.3'),
+        rt(pod, 'lib', '/usr/lib/libcrypto.so.3'),
+        rt(pod, 'lib', '/usr/lib/libz.so.1.3.1'),
+    )],
+    rt('checkout-7d9f8-abcde', 'exec', '/usr/bin/openssl', hours_ago=30),
+    rt('ledger-5c6d7-klmno', 'exec', '/usr/local/bin/ledger'),
+    rt('grafana-6f7a8-uvwxy', 'exec', '/usr/share/grafana/bin/grafana'),
+    # A plugin binary written after start and run from the writable layer: drift.
+    rt('grafana-6f7a8-uvwxy', 'exec', '/var/lib/grafana/plugins/example-panel/gpx_example-panel_linux_amd64', 'writableLayer', 20),
+    rt('prometheus-0', 'exec', '/bin/prometheus', hours_ago=2),
+    rt('source-controller-8b9c0-abcde', 'exec', '/usr/local/bin/source-controller'),
+]
+ok(*call('POST', '/runtime/executables', INGEST, RUNTIME), 'runtime inventory')
+
+
+def beat(pod, cid, mode='full', start_mode='start', tracked_h=TRACKED_H, dropped=0, cap_probe=True):
+    name, ns, _, wkind, wl, container, key, *_ = POD_OF[pod]
+    return {
+        'pod_namespace': ns, 'pod_name': name, 'workload_kind': wkind, 'workload_name': wl,
+        'container_name': container, 'image_digest': D[key], 'container_id': cid, 'node_name': 'worker-1',
+        'mode': mode, 'exec_probe': True, 'lib_probe': mode == 'full', 'start_mode': start_mode,
+        'tracking_since': ts(tracked_h), 'events_dropped': dropped, 'unsent': 0, 'incomplete': False,
+        'cap_probe': cap_probe, 'cap_hook': 'cap_capable' if cap_probe else None,
+        'probe_attached_at': ts(TRACKED_H + 10), 'ended': False, 'heartbeat_at': ts(), 'heartbeat_secs': 300,
+    }
+
+
+COVERAGE = [
+    beat('checkout-7d9f8-abcde', 'c0a1'),  # watched from start, full mode: covered
+    beat('checkout-7d9f8-fghij', 'c0a2'),
+    beat('ledger-5c6d7-klmno', 'c0b1', mode='exec', cap_probe=False),  # libraries not tracked
+    beat('grafana-6f7a8-uvwxy', 'c0c1', start_mode='backfill'),  # running before the probe attached
+    beat('prometheus-0', 'c0d1', tracked_h=2),  # coverage began inside the window: capture gap
+    beat('source-controller-8b9c0-abcde', 'c0e1', dropped=3),  # lost events
+    # node-exporter: no heartbeat (the feature is off on its node); reports: not running.
+]
+ok(*call('POST', '/runtime/coverage', INGEST, COVERAGE), 'coverage heartbeats')
+
+
+def cap(pod, capability, granted, probed, count, first_h, last_h=0.5):
+    name, ns, _, wkind, wl, container, key, *_ = POD_OF[pod]
+    return {
+        'pod_namespace': ns, 'pod_name': name, 'workload_kind': wkind, 'workload_name': wl,
+        'container_name': container, 'image_digest': D[key], 'capability': capability,
+        'granted': granted, 'probed': probed, 'count': count, 'first_seen': ts(first_h), 'last_seen': ts(last_h),
+    }
+
+
+CAPS = [
+    cap('checkout-7d9f8-abcde', 'NET_BIND_SERVICE', True, False, 4, TRACKED_H - 1),
+    cap('checkout-7d9f8-fghij', 'NET_BIND_SERVICE', True, False, 4, TRACKED_H - 1),
+    cap('checkout-7d9f8-abcde', 'CHOWN', True, False, 1, TRACKED_H - 1, TRACKED_H - 1),
+    cap('checkout-7d9f8-abcde', 'SYS_ADMIN', True, True, 18, TRACKED_H - 1),  # the memory admin-reserve check
+    cap('checkout-7d9f8-abcde', 'NET_RAW', False, False, 2, 50, 49),  # asked for without holding it
+    cap('grafana-6f7a8-uvwxy', 'SETUID', True, False, 1, TRACKED_H - 1, TRACKED_H - 1),
+]
+ok(*call('POST', '/runtime/capabilities', INGEST, CAPS), 'capabilities')
+
 
 # ── Wait for the summary rebuild and the link refresh ─────────────────
 INTERVAL = max(60, int(os.environ.get('CAPTURE_INTERVAL_SECS', '60')))
@@ -258,7 +368,22 @@ def wait_for(pred, secs, what):
 # The first pass may have run before the seed finished, so wait for a
 # rebuild with findings, then for the pass after it.
 first = wait_for(computed_at, 45 + INTERVAL + 60, 'the CVE summary never rebuilt')
-wait_for(lambda: (c := computed_at()) and c != first, INTERVAL + 60, 'no second supply-chain pass')
+
+
+def in_use_computed():
+    # The Broker derives in-use evidence from the runtime posts in its
+    # supply-chain pass: wait for its own answer for checkout (covered from
+    # its start) rather than assume which pass has it.
+    st, text = call('GET', f"/images/{D['checkout']}/vulnerabilities", READ)
+    if st != 200:
+        return None
+    items = json.loads(text).get('items', [])
+    return any((f.get('inUseDetail') or {}).get('reason') != 'no_runtime_data' for f in items) or None
+
+
+wait_for(in_use_computed, 4 * INTERVAL + 60, 'the in-use evidence was never computed from the runtime posts')
+settled = computed_at()
+wait_for(lambda: (c := computed_at()) and c != settled, INTERVAL + 60, 'no supply-chain pass after the in-use evidence')
 
 # ── Capture ────────────────────────────────────────────────────────────
 PROVENANCE = f'captured from broker {SHA} (frontend/src/fixtures/vuln-captures/capture.py), no edits'
@@ -288,6 +413,17 @@ for n, d in NAMES.items():
     REQUESTS[f'image-{n}-sbom'] = f'/images/{d}/sbom'
 for i in range(1, 8):
     REQUESTS[f'exposure-CVE-2099-000{i}'] = f'/vulnerabilities/CVE-2099-000{i}/exposure'
+WORKLOADS = {
+    'checkout': ('payments', 'Deployment'), 'ledger': ('payments', 'Deployment'), 'reports': ('payments', 'CronJob'),
+    'grafana': ('observability', 'Deployment'), 'prometheus': ('observability', 'StatefulSet'),
+    'node-exporter': ('observability', 'DaemonSet'), 'source-controller': ('flux-system', 'Deployment'),
+}
+for wl, (ns, kind) in WORKLOADS.items():
+    REQUESTS[f'profile-{wl}'] = f'/workloads/{ns}/{kind}/{wl}/profile'
+for wl in ('checkout', 'ledger', 'grafana', 'node-exporter'):
+    ns, kind = WORKLOADS[wl]
+    REQUESTS[f'capabilities-{wl}'] = f'/workloads/{ns}/{kind}/{wl}/capabilities'
+REQUESTS['runtime-checkout'] = '/workloads/payments/Deployment/checkout/runtime'
 
 
 def capture(name, path):

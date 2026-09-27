@@ -1,3 +1,4 @@
+import { runtimeCoverageText } from './capabilities';
 import type { DimensionName, FindingSeverity, PostureStatus, PssLevel, LevelConfidence, ProfileDrift, DriftNotEvaluated } from '../types/profile';
 import type { Severity } from './severity';
 
@@ -76,7 +77,7 @@ export function driftNotEvaluatedText(reason: string): string {
     case 'not_reported':
       return 'not evaluated (this broker does not say why)';
     default:
-      return `runtime capture gap (${reason})`;
+      return runtimeCoverageText(reason) ?? `runtime capture gap (${reason})`;
   }
 }
 

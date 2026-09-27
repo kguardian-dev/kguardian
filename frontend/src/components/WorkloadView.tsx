@@ -114,7 +114,7 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
           {tab === 'network' && <NetworkTab dim={d.network} />}
           {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={d.syscalls.observed ? () => setDrawerOpen(true) : undefined} />}
           {tab === 'images' && <ImagesTab dim={d.images} signatures={signatures} workload={{ ns, kind, name }} api={vulnApi} />}
-          {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} />}
+          {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} capabilities={profile.capabilities} />}
           {tab === 'versions' && (
             <VersionsTab
               ns={ns}

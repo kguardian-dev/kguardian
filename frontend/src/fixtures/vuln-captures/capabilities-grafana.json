@@ -1,0 +1,31 @@
+{
+  "body": {
+    "containers": [
+      {
+        "container": "grafana",
+        "denied": [],
+        "digests": [
+          "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c"
+        ],
+        "evidence": "insufficient",
+        "observedSince": "2026-09-18T17:27:36",
+        "probed": [],
+        "reason": "capabilities_not_seen_since_start",
+        "recommendation": null,
+        "unusedAdded": [],
+        "used": [
+          {
+            "capability": "SETUID",
+            "count": 1,
+            "firstSeen": "2026-09-18T18:27:36",
+            "lastSeen": "2026-09-18T18:27:36"
+          }
+        ]
+      }
+    ],
+    "windowHours": 168
+  },
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /workloads/observability/Deployment/grafana/capabilities",
+  "status": 200
+}

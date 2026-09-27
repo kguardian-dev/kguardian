@@ -1,0 +1,24 @@
+{
+  "body": {
+    "containers": [
+      {
+        "container": "node-exporter",
+        "denied": [],
+        "digests": [
+          "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa"
+        ],
+        "evidence": "insufficient",
+        "observedSince": null,
+        "probed": [],
+        "reason": "no_runtime_data",
+        "recommendation": null,
+        "unusedAdded": [],
+        "used": []
+      }
+    ],
+    "windowHours": 168
+  },
+  "provenance": "captured from broker 7dc403cc3 (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /workloads/observability/DaemonSet/node-exporter/capabilities",
+  "status": 200
+}

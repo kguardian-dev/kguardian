@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ChevronRight, ClipboardCheck, Package, Radar, ShieldCheck, SlidersHorizontal, Lock } from 'lucide-react';
 import type { Control, DimensionName, Finding, WorkloadProfile } from '../../types/profile';
 import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
+import { DriftPanel } from './DriftPanel';
 import { DIMENSION_LABEL, driftGapsOf, driftNotEvaluatedText, findingDimensionLabel, findingSeverity } from '../../utils/posture';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
@@ -292,6 +293,7 @@ export function OverviewTab({ profile, onOpenTab }: { profile: WorkloadProfile; 
       <div className="space-y-4 min-w-0">
         <NeedsAttention profile={profile} onOpenTab={onOpenTab} />
         <Controls profile={profile} onOpenTab={onOpenTab} />
+        <DriftPanel drift={profile.drift} />
         <ImageSummary profile={profile} onOpenTab={onOpenTab} />
       </div>
       <div className="space-y-4 min-w-0">
