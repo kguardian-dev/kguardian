@@ -63,6 +63,10 @@ const (
 	ReasonNamespaceUnknown   = "namespace-unknown"
 	ReasonBrokerUnavailable  = "broker-unavailable"
 	ReasonBrokerUnauthorized = "broker-unauthorized"
+	// ReasonNoSignerIdentity: the result says verified but no signer is
+	// named (keyless without issuer and SAN, key without fingerprint), so
+	// no authority can be matched. The discovery reason, unchanged.
+	ReasonNoSignerIdentity = "no_signer_identity"
 )
 
 // Discovery verdicts (supplychain attest.Verdict*).
@@ -264,6 +268,12 @@ func (p *Policy) Selects(c Container) bool {
 }
 
 func (p *Policy) trusts(s Signer) bool {
+	// Only a self-identifying signer can match: a blank or padded issuer,
+	// SAN or fingerprint (a row stored before the broker's ingest rule)
+	// must never match a permissive policy such as subjectRegExp ".*".
+	if !selfIdentifying(s) {
+		return false
+	}
 	for _, a := range p.auths {
 		if a.fingerprint != "" {
 			if s.Kind == "key" && strings.EqualFold(s.KeyFingerprint, a.fingerprint) {
@@ -321,6 +331,11 @@ func (p *Policy) Evaluate(c Container) (string, string) {
 	default:
 		return v1alpha1.ImageUnknown, ReasonNotChecked
 	}
+	if !namesASigner(c.Signers) {
+		// Nothing to match an authority against: unknown, not a denial
+		// by a signer the policy does not trust.
+		return v1alpha1.ImageUnknown, ReasonNoSignerIdentity
+	}
 	trusted := false
 	for _, s := range c.Signers {
 		if p.trusts(s) {
@@ -337,6 +352,28 @@ func (p *Policy) Evaluate(c Container) (string, string) {
 		}
 	}
 	return v1alpha1.ImageTrusted, ""
+}
+
+// selfIdentifying: the signer names itself: a key signer by its
+// fingerprint, any other by its issuer AND SAN. Each value must be
+// non-blank and carry no surrounding whitespace (a padded value is not the
+// identity a policy was written for).
+func selfIdentifying(s Signer) bool {
+	named := func(v string) bool { return v != "" && strings.TrimSpace(v) == v }
+	if s.Kind == "key" {
+		return named(s.KeyFingerprint)
+	}
+	return named(s.Issuer) && named(s.SAN)
+}
+
+// namesASigner: some verified signer is self-identifying.
+func namesASigner(signers []Signer) bool {
+	for _, s := range signers {
+		if selfIdentifying(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Policy) attested(c Container, r attReq) bool {

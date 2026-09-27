@@ -174,6 +174,13 @@ POST /images/{digest}/attestation
   verified, `unsigned` with signatures, ...), or a verified signer's
   identity or provenance longer than the limits: those are stored whole or
   refused, never truncated, because trust policies match them.
+- A signature or attestation sent as verified must name its signer: a
+  keyless issuer AND SAN, or a key fingerprint. One that names no one is
+  stored as unverified with error `no_signer_identity`, and if that leaves
+  a `verified` verdict with no verified signature, the verdict is derived
+  again (tamper → `invalid`, an unchecked key signature → `key_signed`,
+  else `unknown` with reason `no_signer_identity`). The result is kept, so
+  the digest does not read as never checked.
 - A well-formed reason code this broker does not know (a newer
   supplychain) is stored as `unrecognised_reason`, logged once per code and
   counted in `kguardian_attestation_unrecognised_reason_total`; it never

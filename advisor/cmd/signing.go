@@ -197,8 +197,41 @@ func fetchAndRenderSigners(digest, level, output string, w, errw io.Writer) erro
 	return signerGate(res, level, errw)
 }
 
+// namesSigner: a signer identity names someone (a keyless issuer and SAN,
+// or a key fingerprint). With no kind, either form counts.
+func namesSigner(s api.SignerIdentity) bool {
+	set := func(v string) bool { return strings.TrimSpace(v) != "" }
+	keyless := set(s.Issuer) && set(s.SAN)
+	switch s.SignerKind {
+	case "key":
+		return set(s.KeyFingerprint)
+	case "":
+		return keyless || set(s.KeyFingerprint)
+	default:
+		return keyless
+	}
+}
+
+// anonymousVerified: the result says verified but no verified signature
+// names its signer (an older broker stored it before the ingest rule).
+// It is treated as unknown, never as signed.
+func anonymousVerified(r *api.SignatureResult) bool {
+	if r.Verdict != "verified" {
+		return false
+	}
+	for _, s := range r.Signatures {
+		if s.Verified && namesSigner(s.SignerIdentity) {
+			return false
+		}
+	}
+	return true
+}
+
 func signerGate(res *api.SignatureResult, level string, errw io.Writer) error {
 	v := res.Verdict
+	if anonymousVerified(res) {
+		return &gateError{code: exitGateUnknown, msg: fmt.Sprintf("gate: %s is verified but no signature names its signer (no_signer_identity); unknown is not a pass (exit %d)", res.Digest, exitGateUnknown)}
+	}
 	if _, known := verdictMeaning[v]; !known || v == "unknown" {
 		why := derefStr(res.Reason)
 		if why == "" {
@@ -219,6 +252,9 @@ func signerGate(res *api.SignatureResult, level string, errw io.Writer) error {
 }
 
 func signerLabel(s api.SignerIdentity) string {
+	if !namesSigner(s) {
+		return "- (no signer identity)"
+	}
 	if s.SignerKind == "key" {
 		name := dashIfEmpty(s.KeyName)
 		if s.KeyFingerprint != "" {
@@ -229,9 +265,6 @@ func signerLabel(s api.SignerIdentity) string {
 			name += " (sha256 " + termSafe(fp) + ")"
 		}
 		return name
-	}
-	if s.Issuer == "" && s.SAN == "" {
-		return "-"
 	}
 	return dashIfEmpty(s.SAN) + " via " + dashIfEmpty(s.Issuer)
 }
@@ -249,6 +282,9 @@ func renderSignersTable(w io.Writer, r *api.SignatureResult) error {
 	meaning := verdictMeaning[r.Verdict]
 	if meaning == "" {
 		meaning = "not a verdict this CLI knows: treat as unknown"
+	}
+	if anonymousVerified(r) {
+		meaning = "but no signature names its signer (no_signer_identity): treat as unknown, not signed"
 	}
 	_, _ = fmt.Fprintf(tw, "DIGEST\t%s\n", termSafe(r.Digest))
 	_, _ = fmt.Fprintf(tw, "REPOSITORY\t%s\n", dashIfEmpty(r.Repository))

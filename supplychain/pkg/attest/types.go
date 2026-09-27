@@ -68,6 +68,7 @@ var Reasons = []string{
 	ReasonRegistryAuth, ReasonRateLimited, ReasonNetwork, ReasonTimeout, ReasonNoRepoDigest,
 	ReasonTrustRootUnavailable, ReasonUnsupportedFormat, ReasonTooLarge, ReasonRegistryError,
 	ReasonDigestMismatch, ReasonBadSignature, ReasonMalformed, ReasonUntrustedKey, ReasonUntrustedRoot,
+	ReasonNoSignerIdentity,
 	registry.ReasonBlockedAddress, registry.ReasonPrivateAddress, registry.ReasonLocalHostname, registry.ReasonBlockedRealm,
 }
 
@@ -105,6 +106,11 @@ const (
 	// staging Sigstore). It cannot be checked, which is unknown, not
 	// invalid. Never read as verified.
 	ReasonUntrustedRoot = "untrusted_root"
+	// ReasonNoSignerIdentity: a signature that verified but names no
+	// signer (keyless without issuer and SAN, key without fingerprint). It
+	// is never counted as verified; the broker applies the same rule to
+	// what it is sent.
+	ReasonNoSignerIdentity = "no_signer_identity"
 )
 
 // Signature formats and sources.
