@@ -1103,6 +1103,7 @@ const REDACTION_CASES: &[(&str, &str)] = &[
     ("jwe dir eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..fzdyT0036isUAEB3.E5tBgN85MiSZYsaFcgAFmuuOoXzzeH4O0p0cC2P_1ymDdNm9dPwRrQ.17nKZQOVImn9Zp9jdu5xhw bad", "jwe dir <redacted> bad"),
     ("spaced eyAiYWxnIjogIlJTMjU2IiB9.eyAic3ViIjogInJvYm90IiB9.lzf9X3L41RxKyRttDEjUGh5eyeagOShUqGFe7xCfwb-p4lY3ASiPKbPXP2rCtp7dLBnyZL7kYqW68g_Sfs8UwA rejected", "spaced <redacted> rejected"),
     ("newline ewogICJhbGciOiAiUlMyNTYiCn0.ewogICJzdWIiOiAicm9ib3QiCn0.Ee0gH4NjIK25i6sWhqKNmAEhDHc28-7FgNz8Q_5dBJtNeKej67koZchRftAhEfamUto1JIcrajHX_-RYd0TV6w rejected", "newline <redacted> rejected"),
+    ("spaced dir eyAiYWxnIjogImRpciIsICJlbmMiOiAiQTI1NkdDTSIgfQ..5-7nYV7zXzDkm0gu.FcrnUAcgHhJhew_tp-Fkd5b_AivqjtAqgqF1kw8jN803lMUiCABtaw.GvDAy9YlZYqsLJ-qB9E8RA bad", "spaced dir <redacted> bad"),
     // Must pass unchanged.
     (
         "bad_signature: signature for sha256:0123456789abcdef does not match",
@@ -1262,4 +1263,34 @@ fn jwt_rule_ignores_hosts_and_digests() {
         redact_endpoints("pull averylonglabelone.anotherlonglabel.thirdlonglabelx failed"),
         "pull <host> failed"
     );
+}
+
+/// Redaction runs on the detail before it is capped, on the actix worker:
+/// it must stay linear. Bounds the bytes jwt_end scans (not wall time, so
+/// no timing flakes) on inputs that made it quadratic: runs of `=`, where
+/// every position is a token boundary.
+#[test]
+fn jwt_redaction_stays_linear() {
+    let n = 256 * 1024;
+    let cases = [
+        "=".repeat(n),
+        ".=".repeat(n / 2),
+        "a=".repeat(n / 2),
+        format!("a{}.", "=".repeat(n)),
+        "=.a".repeat(n / 3),
+        "abcdefghij.".repeat(n / 11),
+        "eyJhbGciOiJub25lIn0.".repeat(n / 20),
+        format!("x%3D{}", "%3D=".repeat(n / 4)),
+    ];
+    for input in cases {
+        JWT_SCANNED.with(|c| c.set(0));
+        let _ = redact_endpoints(&input);
+        let scanned = JWT_SCANNED.with(|c| c.get());
+        assert!(
+            scanned <= 8 * input.len(),
+            "{} bytes starting {:?}: jwt_end scanned {scanned}",
+            input.len(),
+            &input[..12]
+        );
+    }
 }

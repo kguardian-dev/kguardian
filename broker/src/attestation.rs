@@ -226,8 +226,9 @@ fn redact_word(word: &str) -> String {
 /// Two rules, either suffices:
 ///
 /// - structural: 3 (JWS) or 5 (JWE) segments of at least 10 characters
-///   each, the first decoding to text whose first non-whitespace character
-///   is `{` (a JSON header in any formatting: `eyJ`, `eyAi`, `ewog`, ...);
+///   each (a JWE's second may be empty: direct key), the first decoding to
+///   text whose first non-whitespace character is `{` (a JSON header in any
+///   formatting: `eyJ`, `eyAi`, `ewog`, ...);
 /// - `eyJ` prefix: a header and at least one more non-empty segment, taking
 ///   every segment up to five, even empty ones (alg `none` ends in a dot; a
 ///   direct-key JWE has an empty second segment).
@@ -242,7 +243,10 @@ fn redact_jwts(word: &str) -> String {
         let boundary = i == 0
             || !is_b64url(bytes[i - 1])
             || (i >= 3 && bytes[i - 3..i].eq_ignore_ascii_case(b"%3d"));
-        if boundary {
+        // Only where a token can start: trying at every position of a run
+        // of `=` (each one a boundary) rescans the run from each, which is
+        // quadratic in a detail that is redacted before it is capped.
+        if boundary && is_b64url(bytes[i]) {
             if let Some(end) = jwt_end(bytes, i) {
                 out.push_str("<redacted>");
                 i = end;
@@ -254,6 +258,13 @@ fn redact_jwts(word: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+// Bytes jwt_end has scanned on this thread: the tests bound it to prove
+// redaction stays linear.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static JWT_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn is_b64url(c: u8) -> bool {
@@ -281,9 +292,15 @@ fn jwt_end(b: &[u8], i: usize) -> Option<usize> {
             break;
         }
     }
+    #[cfg(test)]
+    JWT_SCANNED.with(|c| c.set(c.get() + (j - i)));
+    // A direct-key JWE (alg dir) has an empty second segment.
     let structural = |k: usize| {
         segs.len() >= k
-            && segs[..k].iter().all(|&(s, e, _)| e - s >= 10)
+            && segs[..k]
+                .iter()
+                .enumerate()
+                .all(|(n, &(s, e, _))| e - s >= 10 || (k == 5 && n == 1 && e == s))
             && decodes_to_json(&b[segs[0].0..segs[0].1])
     };
     if structural(5) {
