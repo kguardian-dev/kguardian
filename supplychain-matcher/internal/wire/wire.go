@@ -8,6 +8,20 @@ package wire
 
 import "time"
 
+// Limits the broker applies to a vulnerabilities payload
+// (broker/src/supplychain.rs MAX_FILE_PATHS and MAX_VULNERABILITIES; a test
+// keeps them equal). The matcher applies them before answering, so a
+// response never carries what the broker would throw away.
+const (
+	// MaxFilePaths is how many of a package's file paths one finding
+	// carries. The broker keeps this many per finding; the full list stays
+	// in the SBOM, which is what the runtime in-use join reads.
+	MaxFilePaths = 16
+	// MaxFindings is the most findings one response may carry; more is an
+	// explicit 413, never a truncated body.
+	MaxFindings = 20000
+)
+
 // Component is one package of the SBOM to match.
 type Component struct {
 	Name       string   `json:"name"`

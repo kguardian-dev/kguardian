@@ -11,10 +11,12 @@
 package server
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -126,10 +128,63 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "match failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if vulns == nil {
-		vulns = []wire.Vulnerability{}
+	if len(vulns) > wire.MaxFindings {
+		s.Log.WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "max": wire.MaxFindings}).
+			Warn("match result too large: answering 413")
+		http.Error(w, fmt.Sprintf("too many findings: %d (max %d)", len(vulns), wire.MaxFindings),
+			http.StatusRequestEntityTooLarge)
+		return
 	}
-	writeJSON(w, wire.MatchResponse{DB: s.Engine.DB(), Vulnerabilities: vulns})
+	n, err := writeMatch(w, s.Engine.DB(), vulns)
+	if err != nil {
+		s.Log.WithError(err).WithFields(logrus.Fields{"digest": req.Image.Digest, "findings": len(vulns), "written": n}).
+			Warn(fmt.Sprintf("match response not delivered: client closed after %d bytes", n))
+	}
+}
+
+// writeMatch streams a wire.MatchResponse one finding at a time, so the
+// whole body is never held in memory, and returns the bytes written and
+// the first write error (the client went away).
+func writeMatch(w http.ResponseWriter, db wire.DB, vulns []wire.Vulnerability) (int64, error) {
+	w.Header().Set("Content-Type", "application/json")
+	cw := &countingWriter{w: w}
+	bw := bufio.NewWriterSize(cw, 64<<10)
+	dbJSON, err := json.Marshal(db)
+	if err != nil {
+		return 0, err
+	}
+	_, _ = bw.WriteString(`{"db":`)
+	_, _ = bw.Write(dbJSON)
+	_, _ = bw.WriteString(`,"vulnerabilities":[`)
+	for i := range vulns {
+		if i > 0 {
+			_ = bw.WriteByte(',')
+		}
+		b, err := json.Marshal(&vulns[i])
+		if err != nil {
+			return cw.n, err
+		}
+		if _, err := bw.Write(b); err != nil {
+			return cw.n, err
+		}
+	}
+	_, _ = bw.WriteString("]}\n")
+	if err := bw.Flush(); err != nil {
+		return cw.n, err
+	}
+	return cw.n, nil
+}
+
+// countingWriter counts the bytes that reached the client.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

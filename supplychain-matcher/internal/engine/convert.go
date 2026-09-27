@@ -12,6 +12,10 @@ import (
 // convert maps Grype matches onto kguardian's vulnerability shape.
 // paths returns the in-image file paths kguardian knows for a matched
 // package (from the original SBOM), since Grype's packages here carry none.
+// Each finding carries at most wire.MaxFilePaths of them: a package's
+// whole file list repeated on every one of its findings is what made a
+// kernel-headers package (thousands of CVEs x ~1 000 files) a ~100 MiB
+// response.
 func convert(ms []match.Match, paths func(purl, name, version string) []string) []wire.Vulnerability {
 	out := make([]wire.Vulnerability, 0, len(ms))
 	seen := map[string]bool{}
@@ -31,7 +35,7 @@ func convert(ms []match.Match, paths func(purl, name, version string) []string) 
 			Severity:  "UNKNOWN",
 			Target:    v.Namespace,
 			Class:     classOf(m),
-			FilePaths: paths(stripUpstream(m.Package.PURL), m.Package.Name, m.Package.Version),
+			FilePaths: capPaths(paths(stripUpstream(m.Package.PURL), m.Package.Name, m.Package.Version)),
 		}
 		if v.Fix.State == vulnerability.FixStateFixed && len(v.Fix.Versions) > 0 {
 			w.FixedVersion = strings.Join(v.Fix.Versions, ", ")
@@ -70,6 +74,15 @@ func convert(ms []match.Match, paths func(purl, name, version string) []string) 
 		return a.Package.Version < b.Package.Version
 	})
 	return out
+}
+
+// capPaths returns at most wire.MaxFilePaths of p, sharing p's storage
+// (capacity clipped, so nothing can append into the shared list).
+func capPaths(p []string) []string {
+	if len(p) > wire.MaxFilePaths {
+		return p[:wire.MaxFilePaths:wire.MaxFilePaths]
+	}
+	return p
 }
 
 func severity(s string) string {
