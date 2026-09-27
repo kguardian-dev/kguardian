@@ -145,6 +145,34 @@ type Profile struct {
 	Findings        []ProfileFinding           `json:"findings"`
 	Readiness       []ProfileReadiness         `json:"readiness"`
 	Dimensions      map[string]json.RawMessage `json:"dimensions"`
+	// Drift is nil from a broker without the drift block.
+	Drift *ProfileDrift `json:"drift"`
+}
+
+// ProfileDrift is the profile's drift block (contract section 2.8). A
+// check missing from Evaluated, or listed in NotEvaluated, was not
+// evaluated: no item for it never means "no drift".
+type ProfileDrift struct {
+	Evaluated    []string            `json:"evaluated"`
+	NotEvaluated []DriftNotEvaluated `json:"notEvaluated"`
+	Items        []DriftItem         `json:"items"`
+}
+
+// DriftNotEvaluated says why a drift check could not run for a container
+// (Container nil = the whole workload).
+type DriftNotEvaluated struct {
+	Type      string  `json:"type"`
+	Container *string `json:"container"`
+	Reason    string  `json:"reason"`
+}
+
+// DriftItem is one drift item; the detail stays raw.
+type DriftItem struct {
+	Type      string          `json:"type"`
+	FindingID string          `json:"findingId"`
+	Severity  string          `json:"severity"`
+	Container *string         `json:"container"`
+	Detail    json.RawMessage `json:"detail"`
 }
 
 // DimensionEnvelope decodes the common envelope of one dimension; ok is
