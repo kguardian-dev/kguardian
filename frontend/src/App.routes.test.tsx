@@ -1,6 +1,25 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+
+// The real provider registers one cluster on purpose, so a cluster switch
+// cannot happen in the UI; this stand-in registers two and lets a test flip
+// the active one to exercise App's cluster-switch effect.
+const clusterSwitch = vi.hoisted(() => ({ setId: (() => {}) as (id: string) => void }));
+vi.mock('./contexts/ClusterContext', async () => {
+  const React = await import('react');
+  const clusters = [{ id: 'primary', name: 'Primary' }, { id: 'edge', name: 'Edge' }];
+  const Ctx = React.createContext<unknown>(null);
+  return {
+    ClusterProvider: ({ children }: { children: React.ReactNode }) => {
+      const [id, setId] = React.useState('primary');
+      clusterSwitch.setId = setId;
+      const value = React.useMemo(() => ({ clusters, activeCluster: clusters.find((c) => c.id === id) ?? clusters[0], setActiveClusterId: setId, isMultiCluster: true }), [id]);
+      return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+    },
+    useCluster: () => React.useContext(Ctx),
+  };
+});
 
 // The route layer end to end through App: old links redirect in place,
 // the nav and header name the new views, and the scope chip says what a
@@ -22,6 +41,13 @@ vi.mock('./components/WorkloadView', () => ({
       <div data-testid="workload" data-tab={p.tab ?? ''} data-to={p.to ?? ''}>{`${p.ns}/${p.kind}/${p.name}`}</div>
       <button onClick={p.onBack}>back</button>
       <button onClick={() => p.onParamsChange({ tab: 'versions', to: '2' })}>versions</button>
+    </div>
+  ),
+}));
+vi.mock('./components/ImagesView', () => ({
+  default: (p: { namespace: string; allNamespaces: boolean; digest?: string; onParamsChange: (x: Record<string, string | undefined>) => void }) => (
+    <div data-testid="images" data-all={String(p.allNamespaces)} data-ns={p.namespace} data-digest={p.digest ?? ''}>
+      <button onClick={() => p.onParamsChange({ digest: undefined })}>close drawer</button>
     </div>
   ),
 }));
@@ -101,14 +127,42 @@ test('#/seccomp redirects to the Workloads seccomp columns', async () => {
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.control).toBe('seccomp'));
 });
 
-test('Workloads is cluster-wide by default; the chip says so, and picking a namespace narrows it', async () => {
-  renderAt('#/workloads?ns=payments');
+test('Workloads is cluster-wide by default, the chip says so, and the URL is not given a namespace it is not showing', async () => {
+  renderAt('#/workloads');
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
+  expect(screen.getByTestId('scope-chip').textContent).toBe('All namespaces');
+  // The namespace list has loaded (the selector offers it) and the URL still carries no ns.
+  await screen.findByLabelText('Namespace:');
+  expect(window.location.hash).toBe('#/workloads');
+});
+
+test('IMG-08: a link that names a namespace on Workloads or Images shows that namespace', async () => {
+  renderAt('#/workloads?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
+  expect(screen.getByTestId('scope-chip').textContent).toContain('payments');
+  cleanup();
+  window.history.replaceState(null, '', window.location.pathname);
+  renderAt('#/images?ns=observability');
+  await waitFor(() => expect(screen.getByTestId('images').dataset.all).toBe('false'));
+  expect(screen.getByTestId('images').dataset.ns).toBe('observability');
+  expect(screen.getByTestId('scope-chip').textContent).toContain('observability');
+});
+
+test('IMG-08: an unscoped Images link stays unscoped: no ns is written into it, and closing a drawer does not add one', async () => {
+  renderAt('#/images?tab=images&digest=sha256:abc');
+  await waitFor(() => expect(screen.getByTestId('images').dataset.all).toBe('true'));
+  expect(screen.getByTestId('images').dataset.digest).toBe('sha256:abc');
+  // The namespace list has loaded (the selector offers it): the repair effect had its chance and wrote nothing.
+  await screen.findByLabelText('Namespace:');
+  expect(window.location.hash).toBe('#/images?tab=images&digest=sha256:abc');
+  fireEvent.click(screen.getByText('close drawer'));
+  await waitFor(() => expect(screen.getByTestId('images').dataset.digest).toBe(''));
+  expect(window.location.hash).toBe('#/images?tab=images');
   expect(screen.getByTestId('scope-chip').textContent).toBe('All namespaces');
 });
 
 test('on Workloads the namespace selector offers All namespaces and narrows on pick', async () => {
-  renderAt('#/workloads?ns=payments');
+  renderAt('#/workloads');
   const select = (await screen.findByLabelText('Namespace:')) as HTMLSelectElement;
   expect(select.value).toBe('');
   fireEvent.change(select, { target: { value: 'observability' } });
@@ -117,15 +171,54 @@ test('on Workloads the namespace selector offers All namespaces and narrows on p
   expect(hashParams().get('scope')).toBe('ns');
   fireEvent.change(select, { target: { value: '' } });
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
+  expect(hashParams().get('ns')).toBeNull();
 });
 
-test('a narrowed Workloads view can be widened from the chip', async () => {
+test('a narrowed Workloads view can be widened from the chip, which drops the namespace from the URL', async () => {
   renderAt('#/workloads?ns=payments&scope=ns');
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
   expect(screen.getByTestId('scope-chip').textContent).toContain('payments');
   fireEvent.click(screen.getByRole('button', { name: 'Show all namespaces' }));
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
   expect(hashParams().get('scope')).toBeNull();
+  expect(hashParams().get('ns')).toBeNull();
+});
+
+test('leaving the map for Images opens all namespaces without the map namespace in the URL; back on the map it is remembered', async () => {
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Network Map' })).not.toBeNull());
+  fireEvent.click(screen.getAllByText('Images')[0]);
+  await waitFor(() => expect(screen.getByTestId('images').dataset.all).toBe('true'));
+  expect(window.location.hash).toBe('#/images');
+  fireEvent.click(screen.getAllByText('Network Map')[0]);
+  await waitFor(() => expect(window.location.hash.startsWith('#/map')).toBe(true));
+  await waitFor(() => expect(hashParams().get('ns')).toBe('payments'));
+});
+
+test('a cluster switch from a workload page lands on the cluster-wide Workloads list; from a narrowed list it keeps the new cluster memory, from a cluster-wide one it writes no ns', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=api&scope=ns');
+  await waitFor(() => expect(screen.getByTestId('workload')).not.toBeNull());
+  act(() => clusterSwitch.setId('edge'));
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads'));
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
+  cleanup();
+  window.history.replaceState(null, '', window.location.pathname);
+  // A fresh provider starts on primary again; switch it to edge with nothing remembered there.
+  renderAt('#/images?tab=supply');
+  await waitFor(() => expect(screen.getByTestId('images').dataset.all).toBe('true'));
+  act(() => clusterSwitch.setId('edge'));
+  await waitFor(() => expect(window.location.hash).toBe('#/images'));
+  await screen.findByLabelText('Namespace:');
+  expect(window.location.hash).toBe('#/images');
+  expect(screen.getByTestId('images').dataset.all).toBe('true');
+});
+
+test('Back from a workload opened off a cluster-wide list returns to the cluster-wide list', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=api');
+  await waitFor(() => expect(screen.getByTestId('workload')).not.toBeNull());
+  fireEvent.click(screen.getByText('back'));
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads'));
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
 });
 
 test('the workload route passes its ns/kind/name through, even for a namespace with no live pods', async () => {
