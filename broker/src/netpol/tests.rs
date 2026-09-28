@@ -843,7 +843,9 @@ fn default_deny_without_traffic() {
     let cil = run(PolicyKind::Cilium, &default_deny());
     assert_eq!(spec(&cil)["enableDefaultDeny"]["ingress"], true);
     assert_eq!(spec(&cil)["enableDefaultDeny"]["egress"], true);
-    assert!(spec(&cil).get("ingress").is_none() && spec(&cil).get("egress").is_none());
+    // One empty rule per direction: the CRD's spec anyOf needs a section.
+    assert_eq!(spec(&cil)["ingress"], serde_json::json!([{}]));
+    assert_eq!(spec(&cil)["egress"], serde_json::json!([{}]));
 
     // Traffic that yields no usable rule at all also falls back to deny-all.
     let s = Scenario {
@@ -858,6 +860,165 @@ fn default_deny_without_traffic() {
         run(PolicyKind::Cilium, &s).policy["metadata"]["name"],
         "idle-cilium-policy-deny-all"
     );
+}
+
+// The cilium.io/v2 CiliumNetworkPolicy CRD (Cilium 1.17; datree CRDs-catalog
+// cilium.io/ciliumnetworkpolicy_v2.json) constrains spec with anyOf over these
+// keys; a spec carrying none of them is rejected by the API server.
+const CILIUM_SPEC_ANY_OF: [&str; 4] = ["ingress", "ingressDeny", "egress", "egressDeny"];
+
+struct CrdCase {
+    name: &'static str,
+    scenario: Scenario,
+    /// Sections the spec must carry; every other anyOf key must be absent.
+    sections: &'static [&'static str],
+    deny_all: bool,
+}
+
+fn crd_case(
+    name: &'static str,
+    scenario: Scenario,
+    sections: &'static [&'static str],
+    deny_all: bool,
+) -> CrdCase {
+    CrdCase {
+        name,
+        scenario,
+        sections,
+        deny_all,
+    }
+}
+
+fn cilium_crd_cases() -> Vec<CrdCase> {
+    let web = |traffic: Vec<PodTraffic>| Scenario {
+        stub: Stub::default(),
+        target: pod("web", "prod", "10.0.0.1", &[("app", "web")]),
+        traffic,
+    };
+    vec![
+        crd_case(
+            "deny-all without traffic",
+            default_deny(),
+            &["ingress", "egress"],
+            true,
+        ),
+        crd_case(
+            "deny-all when every rule is dropped",
+            Scenario {
+                traffic: vec![egress("10.0.0.2", "10.0.0.2", "80")],
+                ..default_deny()
+            },
+            &["ingress", "egress"],
+            true,
+        ),
+        crd_case(
+            "ingress only",
+            web(vec![ingress("10.0.0.1", "8080", "10.0.0.7")]),
+            &["ingress"],
+            false,
+        ),
+        crd_case(
+            "egress only",
+            web(vec![egress("10.0.0.1", "10.96.0.10", "5432")]),
+            &["egress"],
+            false,
+        ),
+        crd_case(
+            "egress only after every ingress peer is dropped",
+            web(vec![
+                ingress("10.0.0.1", "8080", "10.0.0.1"),
+                egress("10.0.0.1", "10.96.0.10", "5432"),
+            ]),
+            &["egress"],
+            false,
+        ),
+        crd_case(
+            "both directions",
+            with_traffic(),
+            &["ingress", "egress"],
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn cilium_spec_satisfies_crd_any_of() {
+    for c in cilium_crd_cases() {
+        let cil = run(PolicyKind::Cilium, &c.scenario);
+        let sp = parse_yaml(&cil.yaml)["spec"].clone();
+        let present: Vec<&str> = CILIUM_SPEC_ANY_OF
+            .iter()
+            .copied()
+            .filter(|k| sp.get(k).is_some())
+            .collect();
+        assert!(
+            !present.is_empty(),
+            "{}: spec has none of {CILIUM_SPEC_ANY_OF:?}; the CRD rejects it:\n{}",
+            c.name,
+            cil.yaml
+        );
+        assert_eq!(present, c.sections, "{}:\n{}", c.name, cil.yaml);
+        assert_eq!(
+            sp.get("enableDefaultDeny").is_some(),
+            c.deny_all,
+            "{}:\n{}",
+            c.name,
+            cil.yaml
+        );
+        if c.deny_all {
+            for k in ["ingress", "egress"] {
+                assert_eq!(sp[k], serde_json::json!([{}]), "{}: spec.{k}", c.name);
+            }
+        }
+    }
+}
+
+/// Full CRD validation with kubeconform over every generated Cilium document
+/// and every committed cilium_* golden. Returns early with a note when the
+/// binary is not installed; KUBECONFORM names it and
+/// KUBECONFORM_SCHEMA_LOCATION overrides the datree catalog.
+#[test]
+fn cilium_output_validates_against_crd_with_kubeconform() {
+    let bin = std::env::var("KUBECONFORM").unwrap_or_else(|_| "kubeconform".into());
+    let dir = std::env::temp_dir().join(format!("kg-netpol-crd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let mut files = Vec::new();
+    for c in cilium_crd_cases() {
+        let f = dir.join(format!("{}.yaml", c.name.replace(' ', "_")));
+        std::fs::write(&f, run(PolicyKind::Cilium, &c.scenario).yaml).expect("write");
+        files.push(f);
+    }
+    for (name, kind, _) in GOLDENS {
+        if *kind == PolicyKind::Cilium {
+            files.push(golden_dir().join(format!("{name}.golden.yaml")));
+        }
+    }
+    let location = std::env::var("KUBECONFORM_SCHEMA_LOCATION").unwrap_or_else(|_| {
+        "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+            .into()
+    });
+    let cache = std::env::temp_dir().join("kguardian-kubeconform-cache");
+    std::fs::create_dir_all(&cache).expect("cache dir");
+    let out = std::process::Command::new(&bin)
+        .args(["-strict", "-summary", "-cache"])
+        .arg(&cache)
+        .arg("-schema-location")
+        .arg(&location)
+        .args(&files)
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    match out {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipped: {bin} not installed ({e}); install kubeconform or set KUBECONFORM");
+        }
+        Err(e) => panic!("run {bin}: {e}"),
+        Ok(o) => assert!(
+            o.status.success(),
+            "kubeconform failed:\n{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+    }
 }
 
 fn has_pod_selector(v: &Value) -> bool {

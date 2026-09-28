@@ -130,7 +130,10 @@ func (g *CiliumPolicyGenerator) generateDefaultDenyPolicy(podDetail *api.PodDeta
 		Spec: &CiliumRule{
 			EndpointSelector: g.createEndpointSelector(podDetail.Pod.Labels),
 			Description:      fmt.Sprintf("Default-deny Cilium network policy for pod %s", podDetail.Name),
-			// Cilium default-deny behavior: empty ingress/egress rules with EnableDefaultDeny
+			// The CRD requires an ingress or egress section (spec anyOf); one
+			// empty rule per direction is Cilium's "deny everything" form.
+			Ingress: []CiliumIngressRule{{}},
+			Egress:  []CiliumEgressRule{{}},
 			EnableDefaultDeny: &CiliumDefaultDeny{
 				Ingress: &truePtr,
 				Egress:  &truePtr,

@@ -28,6 +28,8 @@ func TestCiliumPolicyGenerator_Generate_NoTraffic(t *testing.T) {
 	assert.NotNil(t, policy.Spec.EnableDefaultDeny.Egress)
 	assert.True(t, *policy.Spec.EnableDefaultDeny.Ingress)
 	assert.True(t, *policy.Spec.EnableDefaultDeny.Egress)
+	assert.Equal(t, []CiliumIngressRule{{}}, policy.Spec.Ingress)
+	assert.Equal(t, []CiliumEgressRule{{}}, policy.Spec.Egress)
 }
 
 func TestCiliumPolicyGenerator_Generate_BasicIngressEgress(t *testing.T) {
@@ -206,6 +208,8 @@ func TestCiliumPolicyGenerator_Generate_SelfTrafficFiltering(t *testing.T) {
 	assert.Contains(t, policy.Name, "deny-all")
 	assert.NotNil(t, policy.Spec.EnableDefaultDeny.Ingress)
 	assert.True(t, *policy.Spec.EnableDefaultDeny.Ingress)
+	assert.Equal(t, []CiliumIngressRule{{}}, policy.Spec.Ingress)
+	assert.Equal(t, []CiliumEgressRule{{}}, policy.Spec.Egress)
 }
 
 func TestCiliumPolicyGenerator_GetType(t *testing.T) {

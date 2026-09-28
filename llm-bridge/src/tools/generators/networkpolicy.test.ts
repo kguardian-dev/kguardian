@@ -65,11 +65,22 @@ test("standard policy: a direction stays default-denied when every peer drops ou
   assert.equal(policy.spec.egress, undefined);
 });
 
-test("cilium policy: an unparseable peer drops the rule rather than widening it", async () => {
-  // A Cilium rule carrying neither toEndpoints nor toCIDR selects ALL peers, so
-  // dropping is the only safe response - emitting the rule would fail open.
+test("cilium policy: an unparseable peer drops its rule, never one that selects every peer", async () => {
+  // A Cilium rule with toPorts but neither toEndpoints nor toCIDR selects ALL
+  // peers on those ports, so the bad peer's rule is dropped and the good peer
+  // keeps its own.
+  const policy = await generateCiliumPolicy(pod, [...egressTo("fd00::xyz"), ...egressTo("10.96.0.10")], noResolve) as any;
+  assert.deepEqual(policy.spec.egress.map((r: any) => r.toCIDR), [["10.96.0.10/32"]]);
+});
+
+test("cilium policy: every peer dropped falls back to the deny-all, as the advisor does", async () => {
+  // Nothing emitted in either direction is the deny-all: one empty rule per
+  // direction (Cilium's default-deny form, which whitelists nothing), never a
+  // spec without an ingress or egress section, which the CRD rejects.
   const policy = await generateCiliumPolicy(pod, egressTo("fd00::xyz"), noResolve) as any;
-  assert.equal(policy.spec.egress, undefined);
+  assert.match(policy.metadata.name, /-cilium-policy-deny-all$/);
+  assert.deepEqual(policy.spec.egress, [{}]);
+  assert.deepEqual(policy.spec.ingress, [{}]);
 });
 
 test("cilium policy: canonical CIDR peers", async () => {

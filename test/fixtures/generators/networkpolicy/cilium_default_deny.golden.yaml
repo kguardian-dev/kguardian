@@ -9,10 +9,14 @@ metadata:
   namespace: prod
 spec:
   description: Default-deny Cilium network policy for pod idle
+  egress:
+  - {}
   enableDefaultDeny:
     egress: true
     ingress: true
   endpointSelector:
     matchLabels:
       k8s:app: idle
+  ingress:
+  - {}
 status: {}
