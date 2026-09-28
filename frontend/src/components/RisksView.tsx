@@ -19,6 +19,7 @@ import api from '../services/api';
 import { useSeccompProfiles } from '../hooks/useSeccompProfiles';
 import type { WorkloadProfileSummary } from '../types/seccompWorkload';
 import { crStatus } from '../utils/seccompCapture';
+import { verdictsForNamespace } from '../utils/workloads';
 import { SEVERITY_BADGE_CLASS, SEVERITY_RANK, SEVERITY_TEXT_CLASS, type Severity as SharedSeverity } from '../utils/severity';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
@@ -36,15 +37,22 @@ interface RisksViewProps {
   computeFindings?: ComputeFinding[];
   /** False when no node reports compute — the section is then not offered. */
   computeEnabled?: boolean;
+  /** The live compute poll is failing (hooks/useComputeData `unavailable`): the tile reads a dash, not a clean 0. */
+  computeUnavailable?: boolean;
   /** Truncation / history flags from the findings endpoint. */
   computeMeta?: ComputeFindingsMeta;
   /** "View workload" for a `resources` finding: jump to the pod on the map. */
   onViewWorkload?: (namespace: string, podName: string) => void;
   /** Seccomp profile rows (cluster-wide); feeds the posture strip's
-   *  "Seccomp enforcing" tile. Omitted → the tile is not shown. */
+   *  "Seccomp enforcing" tile. Omitted → the tile is not shown, unless
+   *  `seccompUnavailable` says why there is no list. */
   seccompProfiles?: WorkloadProfileSummary[];
+  /** Why the profile list has no rows to count (still loading, or the read failed): the tile then shows a dash, not a clean 0/0 and not nothing. */
+  seccompUnavailable?: string;
   /** Posture tile click-through into the Workloads coverage view. */
   onOpenWorkloads?: (control?: 'seccomp') => void;
+  /** Increments on the header Refresh; re-reads the would-deny verdicts (a failed read is retried this way). */
+  refreshTick?: number;
 }
 
 /** Sensitive-syscall and compute findings use the upper three steps of the
@@ -128,10 +136,13 @@ export function RisksView({
   onOpenAudit,
   computeFindings = [],
   computeEnabled = false,
+  computeUnavailable = false,
   computeMeta,
   onViewWorkload,
   seccompProfiles,
+  seccompUnavailable,
   onOpenWorkloads,
+  refreshTick = 0,
 }: RisksViewProps) {
   const workloads = useMemo(() => pods.filter((p) => !p.isExternal), [pods]);
 
@@ -211,20 +222,28 @@ export function RisksView({
       .sort((a, b) => b.peers - a.peers);
   }, [workloads]);
 
-  // Would-deny summary from the audit evaluator, namespace-scoped.
+  // Would-deny summary from the audit evaluator. The Broker's `namespace=`
+  // filters on the policy's namespace and so drops cluster-scoped policies'
+  // verdicts; fetch the cluster-wide window and keep the verdicts whose
+  // subject pod is in this namespace.
   const [auditLoading, setAuditLoading] = useState(true);
+  const [auditError, setAuditError] = useState<string | null>(null);
   const [wouldDeny, setWouldDeny] = useState<AuditVerdict[]>([]);
   useEffect(() => {
     let cancelled = false;
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
     setAuditLoading(true);
     api
-      .getAuditVerdicts({ namespace, verdict: 'WouldDeny', limit: 500 })
+      .getAuditVerdicts({ verdict: 'WouldDeny', limit: 500 })
       .then((rows) => {
-        if (!cancelled) setWouldDeny(rows);
+        if (cancelled) return;
+        setWouldDeny(verdictsForNamespace(rows, namespace));
+        setAuditError(null);
       })
-      .catch(() => {
-        if (!cancelled) setWouldDeny([]);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setWouldDeny([]);
+        setAuditError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
         if (!cancelled) setAuditLoading(false);
@@ -232,7 +251,7 @@ export function RisksView({
     return () => {
       cancelled = true;
     };
-  }, [namespace]);
+  }, [namespace, refreshTick]);
 
   const topWouldDeny = useMemo(() => {
     const byPolicy = new Map<string, number>();
@@ -265,9 +284,10 @@ export function RisksView({
           // Retention off means the engine has nothing to score: say so on
           // the tile, which is visible whatever other findings exist.
           label: computeMeta?.historyDisabled ? 'Compute (history off)' : 'Compute',
-          value: computeFindings.length,
+          value: computeUnavailable && computeFindings.length === 0 ? '—' : computeFindings.length,
           icon: Cpu,
-          tone: computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : 'text-secondary',
+          tone: computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : computeUnavailable ? 'text-tertiary' : 'text-secondary',
+          title: computeUnavailable ? 'The live compute feed is not answering right now; findings shown are from the last successful read.' : undefined,
         }]
       : []),
     ...(seccompPosture
@@ -280,7 +300,16 @@ export function RisksView({
           title: `Workloads in ${namespace} whose SeccompProfile CR blocks unlisted syscalls, out of those with a profile`,
           onClick: onOpenWorkloads ? () => onOpenWorkloads('seccomp') : undefined,
         }]
-      : []),
+      : seccompUnavailable
+        ? [{
+            label: 'Seccomp enforcing',
+            value: '—',
+            icon: Lock,
+            tone: 'text-tertiary',
+            title: `Seccomp posture unknown: ${seccompUnavailable}`,
+            onClick: onOpenWorkloads ? () => onOpenWorkloads('seccomp') : undefined,
+          }]
+        : []),
   ];
 
   return (
@@ -300,7 +329,7 @@ export function RisksView({
           {stats.map((s) => <StatTile key={s.label} {...s} />)}
         </StatStrip>
 
-        {findingCount === 0 && !auditLoading && topWouldDeny.length === 0 ? (
+        {findingCount === 0 && !auditLoading && auditError === null && topWouldDeny.length === 0 ? (
           <div className="rounded-surface border border-hubble-border bg-hubble-card">
             <EmptyState
               icon={ShieldCheck}
@@ -331,8 +360,12 @@ export function RisksView({
                   <Skeleton className="h-8 w-full" />
                   <Skeleton className="h-8 w-2/3" />
                 </div>
+              ) : auditError !== null ? (
+                <p role="alert" className="px-4 py-3 text-xs text-hubble-error">
+                  Could not read audit verdicts: {auditError}. Would-deny counts are unknown, not zero.
+                </p>
               ) : topWouldDeny.length === 0 ? (
-                <p className="px-4 py-3 text-xs text-tertiary">No would-deny verdicts recorded for this namespace.</p>
+                <p className="px-4 py-3 text-xs text-tertiary">No would-deny verdicts for workloads in this namespace among the latest 500 recorded.</p>
               ) : (
                 <ul className="divide-y divide-hubble-border">
                   {topWouldDeny.slice(0, 5).map((row) => (
@@ -518,9 +551,10 @@ export function RisksView({
 /**
  * Risks as routed: RisksView plus the seccomp profile list its posture strip
  * reads. Kept out of RisksView so the view stays a pure props-in component.
- * A failed profile fetch hides the tile rather than showing a false 0/0.
+ * While the list is loading, or failed with nothing cached, the tile shows a
+ * dash and says why, rather than a false 0/0 or a silent gap.
  */
-export function RisksRoute({ refreshTick = 0, ...props }: Omit<RisksViewProps, 'seccompProfiles'> & { refreshTick?: number }) {
+export function RisksRoute({ refreshTick = 0, ...props }: Omit<RisksViewProps, 'seccompProfiles' | 'seccompUnavailable'> & { refreshTick?: number }) {
   const { profiles, error, loading, refresh } = useSeccompProfiles();
   // Reload the posture tile's data on the header Refresh (skip the mount).
   const seenTick = useRef(refreshTick);
@@ -529,8 +563,9 @@ export function RisksRoute({ refreshTick = 0, ...props }: Omit<RisksViewProps, '
     seenTick.current = refreshTick;
     void refresh();
   }, [refreshTick, refresh]);
-  const available = !loading && !(error && profiles.length === 0);
-  return <RisksView {...props} seccompProfiles={available ? profiles : undefined} />;
+  const listed = profiles.length > 0 || (!loading && !error);
+  const unavailable = listed ? undefined : loading ? 'the Broker has not answered the profile list yet' : `the profile list could not be read (${error})`;
+  return <RisksView {...props} refreshTick={refreshTick} seccompProfiles={listed ? profiles : undefined} seccompUnavailable={unavailable} />;
 }
 
 function Section({

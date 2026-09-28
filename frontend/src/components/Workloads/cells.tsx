@@ -35,20 +35,30 @@ export function NetworkPill({ network }: { network: NetworkCoverage }) {
   );
 }
 
-/** Observed syscalls vs the deployed SeccompProfile CR. */
+/**
+ * Observed syscalls vs the deployed SeccompProfile CR. Only observed syscalls
+ * the CR lacks are a drift (they would be blocked when enforcing); syscalls
+ * the CR allows but were never observed just mean the CR is broader.
+ */
 export function DriftCell({ drift }: { drift: CrDrift | null }) {
   if (!drift) return <span className="text-tertiary">—</span>;
-  if (drift.inSync) {
+  const unobserved = drift.extra.length > 0 && (
+    <span className="text-tertiary" title={`In the CR, never observed (not a drift): ${drift.extra.join(', ')}`} data-testid="drift-unobserved">
+      · {drift.extra.length} allowed but unobserved
+    </span>
+  );
+  if (drift.missing.length === 0) {
     return (
       <span className="inline-flex items-center gap-1 text-hubble-success" title="Every observed syscall is in the CR">
         <CheckCircle2 className="w-3.5 h-3.5" /> in sync
+        {unobserved}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 text-hubble-warning" title={`Observed but not in the CR: ${drift.missing.join(', ')}`}>
       <AlertTriangle className="w-3.5 h-3.5" /> {drift.missing.length} missing
-      {drift.extra.length > 0 && <span className="text-tertiary">· {drift.extra.length} extra</span>}
+      {unobserved}
     </span>
   );
 }

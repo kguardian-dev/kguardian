@@ -1,5 +1,5 @@
 import apiClient from './api';
-import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
+import { isTimeout, PROFILE_READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, WorkloadProfile } from '../types/profile';
 
 /**
@@ -15,7 +15,7 @@ import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, Workloa
  *    predates the profile endpoints (the route itself does not exist);
  *  - `busy`: 503, the read budget shed the request; retry later;
  *  - `bad_request`: 400;
- *  - `timeout`: no answer within READ_TIMEOUT_MS (retryable);
+ *  - `timeout`: no answer within PROFILE_READ_TIMEOUT_MS (retryable);
  *  - `error`: anything else (network, 500, auth).
  */
 export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'unsupported' | 'busy' | 'bad_request' | 'timeout' | 'error';
@@ -78,7 +78,7 @@ export class ProfileApi {
 
   constructor(opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}) {
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
-    this.timeoutMs = opts.timeoutMs ?? READ_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? PROFILE_READ_TIMEOUT_MS;
   }
 
   private get base(): string {

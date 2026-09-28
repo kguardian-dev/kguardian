@@ -1,6 +1,7 @@
 import type { AuditVerdict, PodInfo } from '../types';
-import type { CaptureInfo, CrDrift, WorkloadProfileSummary } from '../types/seccompWorkload';
-import { captureFromPods, crStatus, resolveCapture, type CrStatus } from './seccompCapture';
+import type { SyscallsDimension } from '../types/profile';
+import type { CaptureInfo, CrDrift, CrInfo, DistributionInfo, WorkloadProfileSummary } from '../types/seccompWorkload';
+import { captureFromPods, crStatus, isBlockingAction, resolveCapture, type CrStatus } from './seccompCapture';
 
 /**
  * Network-policy coverage as far as the broker can tell today. kguardian does
@@ -12,6 +13,9 @@ export type NetworkCoverage =
   | { state: 'audit'; policies: string[]; wouldDeny: number; verdicts: number }
   | { state: 'unreported' };
 
+/** A CR state, or `unknown` when the seccomp profile list could not be read. */
+export type SeccompState = CrStatus | 'unknown';
+
 export interface WorkloadRow {
   /** `ns/kind/name` — the same key the seccomp profiles use. */
   key: string;
@@ -21,10 +25,12 @@ export interface WorkloadRow {
   /** Live pods only. */
   pods: PodInfo[];
   profile: WorkloadProfileSummary | null;
-  seccomp: CrStatus;
-  /** Observed-vs-CR drift; null when no CR is deployed. */
+  /** `unknown` while the profile list is loading or failed and no per-workload read has answered. */
+  seccomp: SeccompState;
+  /** Observed-vs-CR drift; null when no CR is deployed (or unknown, see `seccomp`). */
   drift: CrDrift | null;
-  capture: CaptureInfo;
+  /** null = unknown (see `seccomp`): pod tiers alone do not say whether the profile behind them is complete. */
+  capture: CaptureInfo | null;
   network: NetworkCoverage;
 }
 
@@ -43,12 +49,34 @@ export function workloadOf(pod: PodInfo): { namespace: string; kind: string; nam
   return { namespace: pod.pod_namespace, kind: 'Pod', name: pod.pod_name };
 }
 
-/** The pod an audit verdict is about: the destination for ingress rules, the source for egress. */
-function verdictSubject(v: AuditVerdict): { ns: string; pod: string } | null {
-  const ingress = v.direction.toLowerCase() === 'ingress';
-  const ns = ingress ? v.dst_namespace : v.src_namespace;
-  const pod = ingress ? v.dst_pod : v.src_pod;
+const isEgress = (v: AuditVerdict) => v.direction.toLowerCase() === 'egress';
+
+/** The namespace an audit verdict is about: the destination's for ingress rules, the source's for egress. Not the policy's. */
+export function verdictSubjectNamespace(v: AuditVerdict): string | null {
+  return isEgress(v) ? v.src_namespace : v.dst_namespace;
+}
+
+/** The pod an audit verdict is about, when the Broker recorded one (a deleted peer may leave it null). */
+export function verdictSubject(v: AuditVerdict): { ns: string; pod: string } | null {
+  const ns = verdictSubjectNamespace(v);
+  const pod = isEgress(v) ? v.src_pod : v.dst_pod;
   return ns && pod ? { ns, pod } : null;
+}
+
+/**
+ * Verdicts whose subject is in `namespace`. The Broker's own `namespace=`
+ * query filters on the policy's namespace instead, which drops every verdict
+ * from a cluster-scoped AuditClusterNetworkPolicy.
+ */
+export function verdictsForNamespace(verdicts: readonly AuditVerdict[], namespace: string): AuditVerdict[] {
+  return verdicts.filter((v) => verdictSubjectNamespace(v) === namespace);
+}
+
+export interface BuildRowsOptions {
+  /** The profile list is loading or failed: a row without a profile reads unknown, not "no profile". */
+  seccompUnavailable?: boolean;
+  /** Per-workload reads made while the list was unavailable; null = the Broker has no profile for that workload. */
+  seccompFallback?: ReadonlyMap<string, WorkloadProfileSummary | null>;
 }
 
 /**
@@ -61,6 +89,7 @@ export function buildWorkloadRows(
   pods: readonly PodInfo[],
   profiles: readonly WorkloadProfileSummary[],
   verdicts: readonly AuditVerdict[] = [],
+  opts: BuildRowsOptions = {},
 ): WorkloadRow[] {
   const livePods = new Map<string, PodInfo[]>();
   const ident = new Map<string, { namespace: string; kind: string; name: string }>();
@@ -99,7 +128,11 @@ export function buildWorkloadRows(
 
   const rows: WorkloadRow[] = [];
   for (const [key, w] of ident) {
-    const profile = profileByKey.get(key) ?? null;
+    // Fallback reads only stand in while the list is unavailable; a loaded list is authoritative.
+    const fallback = opts.seccompUnavailable ? opts.seccompFallback?.get(key) : undefined;
+    const profile = profileByKey.get(key) ?? fallback ?? null;
+    // No profile is an answer only when the list loaded, or the per-workload read said so.
+    const known = profile !== null || !opts.seccompUnavailable || fallback === null;
     const live = livePods.get(key) ?? [];
     const net = network.get(key);
     rows.push({
@@ -107,9 +140,9 @@ export function buildWorkloadRows(
       ...w,
       pods: live,
       profile,
-      seccomp: profile ? crStatus(profile) : 'none',
+      seccomp: profile ? crStatus(profile) : known ? 'none' : 'unknown',
       drift: profile?.cr ? profile.cr.drift : null,
-      capture: profile ? resolveCapture(profile, live) : captureFromPods(live),
+      capture: profile ? resolveCapture(profile, live) : known ? captureFromPods(live) : null,
       network: net
         ? { state: 'audit', policies: [...net.policies].sort(), wouldDeny: net.wouldDeny, verdicts: net.verdicts }
         : { state: 'unreported' },
@@ -118,4 +151,58 @@ export function buildWorkloadRows(
   return rows.sort(
     (a, b) => a.namespace.localeCompare(b.namespace) || a.name.localeCompare(b.name) || a.kind.localeCompare(b.kind),
   );
+}
+
+/** Drift that matters: observed syscalls the CR does not allow. Syscalls the CR allows but never observed are not a drift. */
+export function hasBlockingDrift(drift: CrDrift | null): boolean {
+  return drift !== null && drift.missing.length > 0;
+}
+
+/**
+ * The node readiness to show for a CR. The CR's own `status.distribution`
+ * (the controller's count against the API server's node list) is the answer
+ * when the Broker mirrored it; the Broker's node-status count only covers
+ * nodes that reported recently and becomes the qualifier, shown when it differs.
+ */
+export function crDistribution(cr: Pick<CrInfo, 'distribution' | 'statusDistribution'>): { primary: DistributionInfo; reporting: DistributionInfo | null } {
+  const status = cr.statusDistribution;
+  if (!status) return { primary: cr.distribution, reporting: null };
+  const state = status.state ?? (status.ready >= status.total ? 'Ready' : status.ready > 0 ? 'Partial' : 'Pending');
+  const primary = { ...status, state };
+  const differs = status.ready !== cr.distribution.ready || status.total !== cr.distribution.total;
+  return { primary, reporting: differs ? cr.distribution : null };
+}
+
+/**
+ * A Syscalls tab from `GET /seccomp/profiles/{ns}/{kind}/{name}` for when the
+ * workload profile read fails: the same observed set, capture and CR (with
+ * the CR's own status.distribution, which the profile lacks today), with
+ * posture and denials unknown (that endpoint has neither).
+ */
+export function syscallsDimensionFromSeccomp(detail: WorkloadProfileSummary): SyscallsDimension {
+  const capture = resolveCapture(detail);
+  const cr = detail.cr ?? null;
+  return {
+    status: 'unknown',
+    coverage: { level: 'partial', fraction: null, observedSince: null, note: 'From the seccomp profile endpoint: the workload profile could not be read, so posture and denials are unknown.' },
+    reasons: [],
+    observed: { syscallCount: detail.syscallCount, hash: detail.hash, architectures: detail.architectures, updatedAt: detail.updatedAt },
+    capture: detail.capture
+      ? { level: capture.level, complete: capture.complete, incompletePods: detail.capture.incomplete ?? capture.pods.filter((p) => p.level !== 'full').length }
+      : null,
+    cr: cr
+      ? {
+          name: cr.name,
+          defaultAction: cr.defaultAction,
+          mode: isBlockingAction(cr.defaultAction) ? 'enforce' : 'audit',
+          syscallCount: cr.syscallCount,
+          inSync: cr.drift.inSync,
+          missing: cr.drift.missing,
+          extra: cr.drift.extra,
+          distribution: { ready: cr.distribution.ready, total: cr.distribution.total, state: cr.distribution.state },
+          statusDistribution: cr.statusDistribution ?? null,
+        }
+      : null,
+    denials: null,
+  };
 }

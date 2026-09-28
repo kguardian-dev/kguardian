@@ -1,11 +1,11 @@
-import type { ImageTrust, SupplyChainDimension } from '../types/profile';
+import type { ImageContainer, ImageTrust, SupplyChainDimension } from '../types/profile';
 import { reasonText } from './signatures';
 
 /**
  * How ImageTrustPolicy results (contract v1.9) are shown. The one rule:
- * no answer is never an all-clear. Absent (older Broker), not read,
- * `available: false` and `evaluatedAt: null` are unknown and say why;
- * only a finished evaluation can say what would be denied.
+ * no answer is never an all-clear. Absent (older Broker), no current digest,
+ * not read, `available: false` and `evaluatedAt: null` are unknown and say
+ * why; only a finished evaluation can say what would be denied.
  */
 
 export type TrustVerdict = 'WouldDeny' | 'Unknown' | 'Trusted';
@@ -48,14 +48,19 @@ export function trustReasonText(code: string | null | undefined): string | null 
 /** What the workload page can say about image trust, and whether it is an answer at all. */
 export type TrustState =
   | { kind: 'absent' }
+  | { kind: 'no_current_digest' }
   | { kind: 'not_read' }
   | { kind: 'unavailable'; reason: string }
   | { kind: 'pending' }
   | { kind: 'none_apply' }
   | { kind: 'answer'; trust: ImageTrust };
 
-export function trustState(sc: SupplyChainDimension | null | undefined): TrustState {
-  if (!sc || !('imageTrust' in sc) || sc.imageTrust === undefined) return { kind: 'absent' };
+export function trustState(sc: SupplyChainDimension | null | undefined, containers?: readonly Pick<ImageContainer, 'running'>[]): TrustState {
+  if (!sc || !('imageTrust' in sc) || sc.imageTrust === undefined) {
+    // `supplyChain: null` with nothing running is the contract's "no current digest", not a Broker without the field.
+    if (sc === null && containers && containers.every((c) => c.running.length === 0)) return { kind: 'no_current_digest' };
+    return { kind: 'absent' };
+  }
   const t = sc.imageTrust;
   if (t === null) return { kind: 'not_read' };
   if (!t.available) return { kind: 'unavailable', reason: t.reason?.trim() || 'no reason given' };
@@ -74,6 +79,8 @@ export function trustSummary(s: TrustState): string {
   switch (s.kind) {
     case 'absent':
       return 'Image trust policies: not reported by this Broker (unknown).';
+    case 'no_current_digest':
+      return 'Image trust policies: no current digest for this workload, so no policy was evaluated (unknown).';
     case 'not_read':
       return 'Image trust policies: not read for this workload (unknown).';
     case 'unavailable':

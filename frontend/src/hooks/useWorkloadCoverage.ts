@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../services/api';
 import type { AuditVerdict, PodInfo } from '../types';
-import { buildWorkloadRows } from '../utils/workloads';
-import { useSeccompProfiles } from './useSeccompProfiles';
+import { buildWorkloadRows, verdictsForNamespace, type WorkloadRow } from '../utils/workloads';
+import { useSeccompProfileFallback, useSeccompProfiles } from './useSeccompProfiles';
 
 /**
  * Rows per verdict kind the coverage column reads. The broker caps
@@ -12,29 +12,42 @@ import { useSeccompProfiles } from './useSeccompProfiles';
  */
 export const COVERAGE_VERDICT_LIMIT = 500;
 
+export interface WorkloadCoverageOptions {
+  /**
+   * The rows the table shows (its scope and name filter). While the seccomp
+   * profile list is failing, the first of these are read one workload at a
+   * time from `GET /seccomp/profiles/{ns}/{kind}/{name}` instead.
+   */
+  visible?: (row: WorkloadRow) => boolean;
+}
+
 /**
  * Everything the Workloads coverage table and the placeholder workload page
  * read, from endpoints the broker already serves: the cluster-wide pod list
  * (passed in — usePodData already holds it), the seccomp profile list
  * (polled), and the most recent audit verdicts (fetched on mount/refresh).
  */
-export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0, namespace?: string) {
+export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0, namespace?: string, opts: WorkloadCoverageOptions = {}) {
   const seccomp = useSeccompProfiles();
   const [verdicts, setVerdicts] = useState<AuditVerdict[]>([]);
+  const [verdictsUnavailable, setVerdictsUnavailable] = useState(false);
 
   const loadVerdicts = useCallback(async () => {
-    // A failed verdict read is swallowed into []: the column then reads
-    // "not reported", which is the honest fallback. `namespace` filters on
-    // the POLICY's namespace — for namespaced AuditNetworkPolicies that is
-    // the subject workload's namespace, so a narrowed view's window is not
-    // shared with noisy workloads elsewhere in the cluster.
-    const base = { limit: COVERAGE_VERDICT_LIMIT, ...(namespace ? { namespace } : {}) };
-    const [deny, allow] = await Promise.all([
-      api.getAuditVerdicts({ ...base, verdict: 'WouldDeny' }).catch(() => []),
-      api.getAuditVerdicts({ ...base, verdict: 'Allow' }).catch(() => []),
+    // A failed verdict read leaves the window empty and is flagged: the
+    // column then reads "not reported" and the would-deny tile a dash, never
+    // "no policy" or 0. Always the cluster-wide window: the Broker's
+    // `namespace=` filters on the POLICY's namespace, so it drops every
+    // verdict from a cluster-scoped policy. A narrowed view keeps the
+    // verdicts whose subject pod is in its namespace.
+    const base = { limit: COVERAGE_VERDICT_LIMIT };
+    const results = await Promise.allSettled([
+      api.getAuditVerdicts({ ...base, verdict: 'WouldDeny' }),
+      api.getAuditVerdicts({ ...base, verdict: 'Allow' }),
     ]);
-    setVerdicts([...deny, ...allow]);
-  }, [namespace]);
+    const ok = results.filter((r): r is PromiseFulfilledResult<AuditVerdict[]> => r.status === 'fulfilled');
+    setVerdicts(ok.flatMap((r) => r.value));
+    setVerdictsUnavailable(ok.length < results.length);
+  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, same as usePodData
@@ -54,7 +67,28 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
     void refresh();
   }, [refreshTick, refresh]);
 
-  const rows = useMemo(() => buildWorkloadRows(allPods, seccomp.profiles, verdicts), [allPods, seccomp.profiles, verdicts]);
+  const scoped = useMemo(() => (namespace ? verdictsForNamespace(verdicts, namespace) : verdicts), [verdicts, namespace]);
+
+  // No list yet, or the list failed with nothing cached: seccomp cells and
+  // tiles are unknown, not "no profile" and 0.
+  const seccompUnavailable = seccomp.profiles.length === 0 && (seccomp.loading || seccomp.error != null);
+  const baseRows = useMemo(
+    () => buildWorkloadRows(allPods, seccomp.profiles, scoped, { seccompUnavailable }),
+    [allPods, seccomp.profiles, scoped, seccompUnavailable],
+  );
+
+  const { visible } = opts;
+  const fallbackFor = useMemo(() => {
+    if (!seccompUnavailable || seccomp.loading) return [];
+    const shown = visible ? baseRows.filter(visible) : baseRows;
+    return shown.map((r) => ({ namespace: r.namespace, kind: r.kind, name: r.name }));
+  }, [baseRows, visible, seccompUnavailable, seccomp.loading]);
+  const fallback = useSeccompProfileFallback(seccomp.api, fallbackFor.length > 0, fallbackFor, refreshTick);
+  // Only while the list is unavailable: once it has loaded it is authoritative, fallback reads or not.
+  const rows = useMemo(
+    () => (seccompUnavailable && fallback.size > 0 ? buildWorkloadRows(allPods, seccomp.profiles, scoped, { seccompUnavailable, seccompFallback: fallback }) : baseRows),
+    [baseRows, fallback, allPods, seccomp.profiles, scoped, seccompUnavailable],
+  );
 
   return {
     rows,
@@ -62,7 +96,10 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
     profiles: seccomp.profiles,
     loading: seccomp.loading,
     error: seccomp.error,
-    verdictCount: verdicts.length,
+    seccompUnavailable,
+    /** A verdict read failed: the would-deny tile is unknown, not 0. */
+    verdictsUnavailable,
+    verdictCount: scoped.length,
     refresh,
   };
 }

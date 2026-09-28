@@ -46,10 +46,14 @@ export interface WorkloadListItem {
   namespace: string;
   kind: string;
   name: string;
-  revision: number;
-  contentHash: string;
-  computedAt: string;
-  lastChangedAt: string;
+  /** null when the snapshotter has never computed this workload (only a failed attempt exists); posture, dimensions and findingCounts are then absent on the wire. */
+  revision: number | null;
+  contentHash: string | null;
+  computedAt: string | null;
+  lastChangedAt: string | null;
+  /** The snapshotter's most recent failed attempt (Broker 1.20+); beside a computed profile, the profile fields are the last good one. */
+  lastError?: string | null;
+  failedAt?: string | null;
   posture: Posture;
   dimensions: {
     network: DimensionBrief;
@@ -208,7 +212,10 @@ export interface SyscallsDimension extends DimensionEnvelope {
     inSync: boolean;
     missing: string[];
     extra: string[];
+    /** The Broker's node-status count: nodes that reported this CR recently. */
     distribution: { ready: number; total: number; state: string };
+    /** The CR's own status.distribution (every node the controller counts), when the Broker mirrors it. */
+    statusDistribution?: { ready: number; total: number; state: string } | null;
   } | null;
   denials: { total: number; syscalls: string[]; lastSeen: string | null } | null;
 }
