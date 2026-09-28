@@ -1201,11 +1201,12 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
         api.exposed_via,
         vec!["other_namespace", "unattributed", "public_ip"]
     );
-    // Node ingress (NodePort / LB with Cluster policy SNATs to a node IP)
-    // is possible exposure, not "internal".
+    // Node-only ingress (kubelet probes, host-network agents or a NodePort:
+    // indistinguishable) is reported as its own class, not as exposure.
     let node = &by("viaNode").network;
-    assert_eq!(node.exposed, Some(true));
+    assert_eq!(node.exposed, Some(false));
     assert_eq!(node.exposed_via, vec!["node"]);
+    assert_eq!(node.ingress_from_nodes, 1);
     // Same-namespace ingress only: observed, and not exposed. The pod of
     // the same NAME in another namespace (public and cross-namespace
     // ingress) must not leak in.
@@ -1241,7 +1242,7 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
             ns.exposed_workloads,
             ns.unknown_exposure_workloads
         ),
-        (5, 5, 2, 2)
+        (5, 5, 1, 2)
     );
     assert!(
         crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-NOPE", 168)

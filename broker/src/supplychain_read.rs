@@ -1996,19 +1996,22 @@ pub struct NetworkExposure {
     pub ingress_from_unattributed_peers: i64,
     /// Of those, public (internet-routable) addresses.
     pub ingress_from_public_ips: i64,
-    /// Distinct node / host-network peers. A NodePort or LoadBalancer
-    /// Service with `externalTrafficPolicy: Cluster` SNATs outside clients
-    /// to a node IP, so this counts as possible exposure (kubelet probes
-    /// land here too; the broker cannot tell them apart).
+    /// Distinct node / host-network peers. Kubelet probes, host-network
+    /// agents and NodePort SNAT all arrive from node IPs and the broker
+    /// cannot tell them apart, so node ingress is reported (in
+    /// `exposedVia`) but never makes `exposed` true on its own.
     pub ingress_from_nodes: i64,
-    /// true: ingress from outside the namespace, an unattributed peer or a
-    /// node was observed; `exposedVia` says which. false: INGRESS flows
-    /// were observed in the window and none came from outside. null:
-    /// unknown (no pods, or no ingress flows captured in the window, even
-    /// if there was egress). Never read false as "cannot be reached".
+    /// true: ingress from outside the namespace, an unattributed peer or
+    /// a public IP was observed; `exposedVia` says which. false: INGRESS
+    /// flows were observed in the window and none came from outside
+    /// (node-only ingress reads false, with `node` in `exposedVia`).
+    /// null: unknown (no pods, or no ingress flows captured in the
+    /// window, even if there was egress). Never read false as "cannot be
+    /// reached".
     pub exposed: Option<bool>,
-    /// Why `exposed` is true: any of `other_namespace`, `unattributed`,
-    /// `public_ip`, `node`.
+    /// The ingress classes observed from outside the workload's pods:
+    /// any of `other_namespace`, `unattributed`, `public_ip`, `node`.
+    /// `exposed` is true when any class other than `node` is present.
     pub exposed_via: Vec<&'static str>,
 }
 
@@ -2229,6 +2232,9 @@ fn network_from(row: Option<&NetRow>, window_hours: i64) -> NetworkExposure {
     if public > 0 {
         via.push("public_ip");
     }
+    // Reported, not counted: node-only ingress is kubelet probes or a
+    // host-network agent as often as it is a NodePort.
+    let outside = !via.is_empty();
     if r.from_nodes > 0 {
         via.push("node");
     }
@@ -2246,7 +2252,7 @@ fn network_from(row: Option<&NetRow>, window_hours: i64) -> NetworkExposure {
         exposed: if r.pods == 0 || r.ingress_flows == 0 {
             None
         } else {
-            Some(!via.is_empty())
+            Some(outside)
         },
         exposed_via: if r.pods == 0 || r.ingress_flows == 0 {
             Vec::new()
@@ -2576,8 +2582,8 @@ mod tests {
         let n = network_from(Some(&internal), 24);
         assert_eq!(n.exposed, Some(false));
         assert!(n.exposed_via.is_empty());
-        // Node ingress: NodePort / LoadBalancer with Cluster policy SNATs
-        // to a node IP, so it is possible exposure.
+        // Node-only ingress (kubelet probes, host-network agents, or a
+        // NodePort: indistinguishable) is reported but is not exposure.
         let node = NetRow {
             pods: 2,
             flows: 5,
@@ -2586,8 +2592,35 @@ mod tests {
             ..row.clone()
         };
         let n = network_from(Some(&node), 24);
-        assert_eq!(n.exposed, Some(true));
+        assert_eq!(n.exposed, Some(false), "node-only ingress is not exposed");
         assert_eq!(n.exposed_via, vec!["node"]);
+        assert_eq!(n.ingress_from_nodes, 1);
+        // Node plus another namespace: exposed, and both classes listed.
+        let node_and_cross = NetRow {
+            pods: 2,
+            flows: 5,
+            ingress_flows: 3,
+            from_nodes: 2,
+            cross_namespace: 1,
+            ..row.clone()
+        };
+        let n = network_from(Some(&node_and_cross), 24);
+        assert_eq!(n.exposed, Some(true));
+        assert_eq!(n.exposed_via, vec!["other_namespace", "node"]);
+        // Node plus a public IP: exposed by the public peer.
+        let node_and_public = NetRow {
+            pods: 1,
+            flows: 2,
+            ingress_flows: 2,
+            from_nodes: 1,
+            unresolved: 1,
+            unresolved_ips: vec!["8.8.4.4".into()],
+            ..row.clone()
+        };
+        let n = network_from(Some(&node_and_public), 24);
+        assert_eq!(n.exposed, Some(true));
+        assert_eq!(n.ingress_from_public_ips, 1);
+        assert_eq!(n.exposed_via, vec!["unattributed", "public_ip", "node"]);
         let internet = NetRow {
             pods: 2,
             flows: 3,
