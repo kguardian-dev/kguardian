@@ -2,7 +2,7 @@ import apiClient from './api';
 import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { CvePage, Exposure, ImageDetail, ImagePage, ImageVulnsPage, SbomPage, VulnSeverity } from '../types/vulns';
 import type { AdmissionFormat, ExportManifest, RunningSignaturePage } from '../types/attestations';
-import { busyReadMessage } from '../utils/vulnView';
+import { busyMessage, retryAfterMs } from './brokerBusy';
 
 /**
  * Typed read-only client for the supply-chain reads (#1671) and the image
@@ -14,7 +14,9 @@ import { busyReadMessage } from '../utils/vulnView';
  *  - `not_found`: 404 on an exposure / image read (no affected image, or
  *    the digest is not in the inventory);
  *  - `unsupported`: 404 on a list route: a Broker without these endpoints;
- *  - `busy`: 503, the read budget shed the request;
+ *  - `busy`: 503, the read budget shed the request or the database cancelled
+ *    the statement; the message follows the body and `retryAfterMs` the
+ *    Broker's `Retry-After`;
  *  - `bad_request`: 400;
  *  - `auth`: 401 / 403, the Broker wants a token the UI's proxy did not
  *    present (or one without the read scope);
@@ -26,11 +28,14 @@ export type VulnErrorKind = 'not_found' | 'unsupported' | 'busy' | 'bad_request'
 export class VulnApiError extends Error {
   readonly status: number;
   readonly kind: VulnErrorKind;
-  constructor(status: number, kind: VulnErrorKind, message: string) {
+  /** The Broker's `Retry-After` on a 503, in ms; null when it sent none. */
+  readonly retryAfterMs: number | null;
+  constructor(status: number, kind: VulnErrorKind, message: string, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'VulnApiError';
     this.status = status;
     this.kind = kind;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -140,7 +145,7 @@ export class VulnApi {
           : 'The token the frontend presents does not have the Broker read scope.',
       );
     }
-    if (res.status === 503) throw new VulnApiError(503, 'busy', busyReadMessage(text));
+    if (res.status === 503) throw new VulnApiError(503, 'busy', busyMessage(text), retryAfterMs(res.headers));
     if (res.status === 400) throw new VulnApiError(400, 'bad_request', msg);
     if (res.status === 409 || res.status === 422) throw new VulnApiError(res.status, 'bad_request', msg);
     throw new VulnApiError(res.status, 'error', msg);

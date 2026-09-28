@@ -210,24 +210,6 @@ export function groupNotCovered(header: readonly string[], inlineMax = 10): { li
   return { lines: header.filter((l) => !l.startsWith('not covered:')), notCovered };
 }
 
-const fmtKib = (kib: number) => (kib >= 1024 ? `${Math.round(kib / 1024)} MiB` : `${kib} KiB`);
-
-/**
- * The message for a 503 the Broker's read memory budget refused. A read that
- * asks for the whole budget can never run beside another read, so "try again
- * in a few seconds" would be the wrong advice for it.
- */
-export function busyReadMessage(body: string): string {
-  const m = /needs (\d+) KiB of a (\d+) KiB budget/.exec(body);
-  if (!m) return 'The Broker is shedding reads right now (read budget). Try again in a few seconds.';
-  const needs = Number(m[1]);
-  const total = Number(m[2]);
-  if (needs >= total) {
-    return `This read reserves the Broker's whole read memory budget (${fmtKib(total)}), so it is refused whenever any other read is in flight, and a retry asks for the whole budget again. Retry when the Broker is idle, or raise BROKER_READ_MEMORY_BUDGET_MB (and the container memory limit with it).`;
-  }
-  return `The Broker is shedding reads right now (read budget: this read needs ${fmtKib(needs)} of ${fmtKib(total)}). Try again in a few seconds.`;
-}
-
 /** Worse first: a headline chip keeps the worst state any row has for that factor. */
 const TONE_RANK: Record<Factor['tone'], number> = { risk: 4, unknown: 3, warn: 2, neutral: 1, good: 0 };
 const HEADLINE_KEYS = ['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix'];

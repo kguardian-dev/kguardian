@@ -1,4 +1,5 @@
 import apiClient from './api';
+import { busyMessage, retryAfterMs } from './brokerBusy';
 import { isTimeout, PROFILE_READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, WorkloadProfile } from '../types/profile';
 
@@ -13,7 +14,9 @@ import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, Workloa
  *  - `workload_not_found` / `revision_not_found`: the broker's own 404 codes;
  *  - `unsupported`: a 404 with no contract error code — a Broker that
  *    predates the profile endpoints (the route itself does not exist);
- *  - `busy`: 503, the read budget shed the request; retry later;
+ *  - `busy`: 503, the read budget shed the request or the database cancelled
+ *    the statement; the message follows the body and `retryAfterMs` the
+ *    Broker's `Retry-After`; retry later;
  *  - `bad_request`: 400;
  *  - `timeout`: no answer within PROFILE_READ_TIMEOUT_MS (retryable);
  *  - `error`: anything else (network, 500, auth).
@@ -23,12 +26,15 @@ export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'un
 export class ProfileApiError extends Error {
   readonly status: number;
   readonly kind: ProfileErrorKind;
+  /** The Broker's `Retry-After` on a 503, in ms; null when it sent none. */
+  readonly retryAfterMs: number | null;
 
-  constructor(status: number, kind: ProfileErrorKind, message: string) {
+  constructor(status: number, kind: ProfileErrorKind, message: string, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'ProfileApiError';
     this.status = status;
     this.kind = kind;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -41,7 +47,7 @@ export function errorMessage(err: unknown): string {
   return String(err);
 }
 
-function classify(status: number, text: string): ProfileApiError {
+function classify(status: number, text: string, headers?: Headers): ProfileApiError {
   let code: string | undefined;
   let message: string | undefined;
   try {
@@ -54,7 +60,7 @@ function classify(status: number, text: string): ProfileApiError {
   const msg = message ?? (text.trim() || `request failed with ${status}`);
   if (status === 404 && (code === 'workload_not_found' || code === 'revision_not_found')) return new ProfileApiError(status, code, msg);
   if (status === 404) return new ProfileApiError(status, 'unsupported', 'This Broker does not serve workload profiles. Upgrade the Broker to a release with the profile API.');
-  if (status === 503) return new ProfileApiError(status, 'busy', 'The Broker is shedding reads right now (read budget). Try again in a few seconds.');
+  if (status === 503) return new ProfileApiError(status, 'busy', busyMessage(text), headers ? retryAfterMs(headers) : null);
   if (status === 400) return new ProfileApiError(status, 'bad_request', msg);
   return new ProfileApiError(status, 'error', msg);
 }
@@ -102,7 +108,7 @@ export class ProfileApi {
       if (isTimeout(err)) throw new ProfileApiError(0, 'timeout', timeoutMessage(this.timeoutMs));
       throw new ProfileApiError(0, 'error', `Could not reach the Broker: ${errorMessage(err)}`);
     }
-    if (!res.ok) throw classify(res.status, text);
+    if (!res.ok) throw classify(res.status, text, res.headers);
     return JSON.parse(text) as T;
   }
 
