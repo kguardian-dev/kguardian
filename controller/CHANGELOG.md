@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.16.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.1...controller/v1.16.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **controller:** budget the pod loops and fail a stalled resync loudly ([9ee50d6](https://github.com/kguardian-dev/kguardian/commit/9ee50d6e784134c831da8933740f62bc5674f01a))
+* **controller:** budget the pod loops and surface nodes that stop reporting pods ([43cbb55](https://github.com/kguardian-dev/kguardian/commit/43cbb55eda9c9a111464819924bf7d90c4284285))
+
 ## [1.16.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.0...controller/v1.16.1) (2026-09-27)
 
 
