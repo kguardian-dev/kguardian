@@ -938,7 +938,7 @@ pub async fn post_seccomp_denials(
             upsert_node_report(&mut conn, &heartbeat_node, capturing, interval_seconds)
         })
         .await?
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+        .map_err(crate::db_error_response)?;
         debug!(%node, capturing, "seccomp denial heartbeat (no denials drained)");
         return Ok(HttpResponse::Ok().json(crate::Accepted { accepted: 0 }));
     }
@@ -959,7 +959,7 @@ pub async fn post_seccomp_denials(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     // AFTER the transaction commits, never before: the controller clears its
     // BPF map only on a successful POST, so a batch the broker 500s on is
@@ -1354,7 +1354,7 @@ pub async fn get_seccomp_denials(
         )?)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(rows))
 }

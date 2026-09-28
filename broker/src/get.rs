@@ -51,7 +51,7 @@ pub async fn get_pod_traffic(
         pod_traffic(&mut conn, row_limit)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_traffic {
         Some(p) => HttpResponse::Ok().json(p),
@@ -178,7 +178,7 @@ pub async fn get_pod_details(
         pod_details(&mut conn, include_dead)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_detail {
         Some(mut p) => {
@@ -343,7 +343,7 @@ pub async fn get_pod_namespaces(
         pod_namespaces(&mut conn)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(namespaces))
 }
 
@@ -376,7 +376,7 @@ pub async fn get_pods_by_node(
         pods_by_node(&mut conn, &node_name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(pods))
 }
@@ -422,7 +422,7 @@ pub async fn get_svc_details(
         svc_details_all(&mut conn)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match svc_detail {
         Some(s) => HttpResponse::Ok().json(s),
@@ -460,7 +460,7 @@ pub async fn get_svc_by_ip(
         svc_ip(&mut conn, &ip)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match svc_detail {
         Some(p) => HttpResponse::Ok().json(p),
@@ -509,7 +509,7 @@ pub async fn get_pod_by_name(
         pod_name(&mut conn, &name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_detail {
         Some(p) => HttpResponse::Ok().json(p),
@@ -579,7 +579,7 @@ pub async fn get_pod_by_ip(
         }
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_detail {
         Some(p) => HttpResponse::Ok().json(p),
@@ -704,7 +704,7 @@ pub async fn get_pod_traffic_name(
         pod_traffic_by_name(&mut conn, &pod_name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_detail {
         Some(p) => HttpResponse::Ok().json(p),
@@ -776,7 +776,7 @@ pub async fn get_pod_syscall_name(
         pod_syscalls_by_name(&mut conn, &pod_name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match pod_syscalls {
         Some(p) => HttpResponse::Ok().json(p),
@@ -932,7 +932,7 @@ pub async fn get_audit_verdicts(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(rows))
 }

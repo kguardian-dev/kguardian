@@ -281,7 +281,7 @@ async fn post_capabilities(
         upsert(&mut conn, &rows)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(IngestSummary {
         accepted,
         dropped,
@@ -722,7 +722,7 @@ pub async fn get_workload_capabilities(
     .await?
     .map_err(|e| {
         warn!(error = %e, "capabilities read failed");
-        actix_web::error::ErrorInternalServerError(e)
+        crate::db_error_response(e)
     })?;
     Ok(HttpResponse::Ok().json(view))
 }

@@ -801,7 +801,7 @@ pub async fn get_attestation_policy(
         load_rows(&mut conn, ns.as_deref(), None)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     let Some(rows) = rows else {
         return Ok(HttpResponse::UnprocessableEntity().body(format!(
             "more than {MAX_POLICY_ROWS} running containers; generate per namespace with ?namespace="

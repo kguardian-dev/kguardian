@@ -714,7 +714,7 @@ async fn post_runtime_executables(
         upsert_rows(&mut conn, &batch.rows)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(IngestSummary {
         accepted,
         dropped,
@@ -1077,7 +1077,7 @@ pub async fn get_workload_runtime(
         Ok::<_, DbError>(out)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(out))
 }
 
@@ -1277,7 +1277,7 @@ pub async fn get_image_runtime(
         Ok::<_, DbError>(out)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(out))
 }
 
@@ -1604,7 +1604,7 @@ async fn post_runtime_coverage(
         upsert_coverage(&mut conn, &rows)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(IngestSummary {
         accepted,
         dropped,

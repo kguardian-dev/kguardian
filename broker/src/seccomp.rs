@@ -1725,7 +1725,7 @@ async fn rebuild_profiles_body(
         Ok((all, crs))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     // More CRs than workloads is possible (several CRs can reference one
     // workload), and over-charging there is harmless; charging for blobs that
@@ -1772,7 +1772,7 @@ async fn rebuild_profiles_body(
         Ok(buf)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(web::Bytes::from(body))
 }
@@ -1839,7 +1839,7 @@ pub async fn get_seccomp_profile(
         }
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match result {
         Some((summary, profile)) => HttpResponse::Ok().json(ProfileDetail { summary, profile }),
@@ -1866,7 +1866,7 @@ pub async fn get_seccomp_profile_file(
         one_observed(&mut conn, &namespace, &kind, &name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match obs {
         Some(o) if o.meta.hash == hash => match o.require_names() {
@@ -2318,7 +2318,7 @@ async fn export_impl(
         one_observed(&mut conn, &ns, &k, &n)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     let Some(obs) = obs else {
         return Ok(HttpResponse::NotFound().body("no seccomp profile for that workload"));
@@ -2561,7 +2561,7 @@ pub async fn post_seccomp_node_status(
         Ok(())
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(()))
 }
@@ -2763,7 +2763,7 @@ pub async fn put_seccomp_cr(
         }))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(out))
 }
@@ -2787,7 +2787,7 @@ pub async fn delete_seccomp_cr(
         Ok(n > 0)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(if deleted {
         HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))

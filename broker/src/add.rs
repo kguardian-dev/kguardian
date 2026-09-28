@@ -37,7 +37,7 @@ pub async fn add_pods_batch(
         create_pod_traffic_batch(&mut conn, form)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     info!(
         "Inserted {} new network traffic events ({} duplicates filtered)",
@@ -293,7 +293,7 @@ pub async fn add_pod_details(
         Ok::<_, DbError>(pod)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(pods))
 }
 
@@ -511,7 +511,7 @@ pub async fn mark_pod_dead(
         mark_pod_as_dead(&mut conn, &pod_name, pod_ip.as_deref())
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(result))
 }
@@ -644,7 +644,7 @@ pub async fn add_svc_details(
         upsert_svc_details(&mut conn, form)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(pods))
 }
 
@@ -715,7 +715,7 @@ pub async fn add_pods_syscalls(
         create_pod_syscalls(&mut conn, form)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(()))
 }
@@ -1503,7 +1503,7 @@ pub async fn add_node_facts(
         Ok(())
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     debug!("node facts upserted");
     Ok(HttpResponse::Ok().json(()))
 }

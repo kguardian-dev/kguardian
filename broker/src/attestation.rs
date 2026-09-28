@@ -1482,7 +1482,7 @@ async fn get_attestation(
         load_one(&mut conn, &digest)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match row {
         Some(mut r) => {
             // Rows stored before ingest redacted `detail`.
@@ -1652,7 +1652,7 @@ pub async fn get_attestations(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -1856,7 +1856,7 @@ pub async fn get_running_attestations(
         running(&mut conn, namespace.as_deref(), after.as_ref(), limit)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
