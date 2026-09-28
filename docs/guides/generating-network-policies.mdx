@@ -367,6 +367,20 @@ kguardian resolves IPs to Kubernetes resources. The resolution happens when the 
     ```
   </Accordion>
 
+  <Accordion title="Services without a selector" icon="server">
+    `default/kubernetes` (the API server) and Services whose Endpoints an operator manages have no `spec.selector`, so there are no backend labels to select. NetworkPolicy is evaluated after the Service DNAT, so an `ipBlock` on the ClusterIP never matches either. kguardian keeps the Service's name and says so above the rule:
+    ```yaml
+    # Service default/kubernetes has no selector — ipBlock 10.100.0.1 is its ClusterIP and will not match after DNAT
+    - to:
+        - ipBlock:
+            cidr: 10.100.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    ```
+    Replace the ipBlock with the addresses from `kubectl get endpoints kubernetes -n default` before applying. The Cilium form emits `toEntities: [kube-apiserver]` for the API server, which follows those endpoints; any other selector-less Service gets a `toCIDR` carrying the same note.
+  </Accordion>
+
   <Accordion title="External Traffic" icon="globe">
     For traffic to external IPs (e.g., public APIs), kguardian generates CIDR blocks:
     ```yaml
@@ -614,7 +628,9 @@ Now your namespace runs default-deny — only explicitly observed communication 
 
 ### No Traffic Data
 
-**Symptom:** CLI says "No traffic data found for pod"
+**Symptom:** CLI says "No traffic data found for pod", or the Policy Builder shows "No traffic observed, so this policy allows nothing"
+
+A workload with no observed traffic gets an explicit deny-all: `policyTypes: [Ingress, Egress]` with no rules (Cilium: `enableDefaultDeny` both true plus one empty rule `- {}` per direction, which the CiliumNetworkPolicy CRD requires), the same deny the CLI and advisor produce. The Policy Builder marks it with a warning that cannot be dismissed and labels the button "Save Deny-All Policy". A workload whose traffic read failed is shown as "traffic read failed" in the picker rather than "0 conns"; that is not evidence it is idle.
 
 **Solutions:**
 1. Ensure the pod has been running for at least 5 minutes
