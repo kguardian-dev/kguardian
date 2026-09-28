@@ -103,3 +103,45 @@ test('the tally reflects the whole workload, not the filtered page', () => {
   expect(decisionSelect.value).toBe('DROP');
   expect(screen.getByText('50% completed')).toBeTruthy();
 });
+
+// F-17: the table must agree with the map. A stored peer whose pod record
+// is gone (pruned) or superseded (a StatefulSet slot restarted under the
+// same name, new uid) is labelled by its stored workload, namespace and pod
+// name; "Unattributed" is kept for a row with NO stored identity that the
+// start-time guard excluded.
+const redisNow: PodInfo = {
+  pod_name: 'argocd-redis-ha-server-1', pod_ip: '10.62.101.1', pod_namespace: 'argocd', time_stamp: '2026-09-28T16:00:00',
+  node_name: 'ip-10-62-100-1', is_dead: false, pod_identity: 'redis-ha', workload_kind: 'StatefulSet', workload_name: 'argocd-redis-ha-server',
+  pod_obj: { metadata: { uid: 'redis-uid-now' } }, started_at: '2026-09-28T15:56:43',
+};
+const storedFrom = (name: string, uid: string, ip: string, kind: string, workload: string) => flow({
+  traffic_type: 'INGRESS', pod_port: '6379', traffic_in_out_ip: ip, traffic_in_out_port: '0', time_stamp: '2026-09-26T13:06:51',
+  peer_kind: 'pod', peer_namespace: 'argocd', peer_name: name, peer_uid: uid, peer_workload_kind: kind, peer_workload_name: workload,
+});
+
+test('a stored peer whose record has a different uid now is labelled by its stored workload, not Unattributed', () => {
+  render(<DataTable selectedPod={withTraffic([storedFrom('argocd-redis-ha-server-1', 'redis-uid-before-restart', '10.62.77.3', 'StatefulSet', 'argocd-redis-ha-server')])} allPodsLookup={[pod, redisNow]} services={[]} />);
+  fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
+  const row = rowFor(/argocd-redis-ha-server-1/);
+  expect(within(row).getByText('argocd-redis-ha-server')).toBeTruthy();
+  expect(within(row).getByText('ns: argocd')).toBeTruthy();
+  expect(within(row).getByText('argocd-redis-ha-server-1')).toBeTruthy();
+  expect(screen.queryByText('Unattributed')).toBeNull();
+});
+
+test('a stored peer whose record is gone from the listing is labelled by its stored workload too', () => {
+  render(<DataTable selectedPod={withTraffic([storedFrom('argocd-redis-ha-haproxy-7f9d9c8b5-old01', 'gone', '10.62.55.9', 'Deployment', 'argocd-redis-ha-haproxy')])} allPodsLookup={[pod]} services={[]} />);
+  fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
+  const row = rowFor(/argocd-redis-ha-haproxy-7f9d9c8b5-old01/);
+  expect(within(row).getByText('argocd-redis-ha-haproxy')).toBeTruthy();
+  expect(within(row).getByText('ns: argocd')).toBeTruthy();
+  expect(screen.queryByText('Unattributed')).toBeNull();
+});
+
+test('a row with no stored identity that the start-time guard excluded stays Unattributed', () => {
+  // 10.62.101.1 is redisNow's IP; the flow predates redisNow's start.
+  render(<DataTable selectedPod={withTraffic([flow({ traffic_type: 'INGRESS', pod_port: '6379', traffic_in_out_ip: '10.62.101.1', time_stamp: '2026-09-20T00:00:00' })])} allPodsLookup={[pod, redisNow]} services={[]} />);
+  fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
+  expect(screen.getByText('Unattributed')).toBeTruthy();
+  expect(screen.queryByText('argocd-redis-ha-server')).toBeNull();
+});

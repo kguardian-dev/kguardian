@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { peerCIDR } from './ipCidr';
+import { isPrivateAddress, peerCIDR } from './ipCidr';
 
 // The UI cannot use node:net (it is browser code), so ipCidr hand-rolls both the
 // address validation and the canonical serialization. These cases pin that
@@ -95,5 +95,82 @@ describe('peerCIDR', () => {
   it('returns null for an address that already carries a prefix', () => {
     expect(peerCIDR('10.0.0.0/24')).toBeNull();
     expect(peerCIDR('fd00::/64')).toBeNull();
+  });
+});
+
+// The map must not call a VPC address "Internet" just because no record holds
+// it: on the dev cluster 18 of argocd's 69 "Internet" IPs were 10.62.0.0/16.
+describe('isPrivateAddress', () => {
+  it('RFC 1918, CGNAT and link-local IPv4 are private', () => {
+    expect(isPrivateAddress('10.62.139.244')).toBe(true);
+    expect(isPrivateAddress('10.0.0.1')).toBe(true);
+    expect(isPrivateAddress('172.16.0.1')).toBe(true);
+    expect(isPrivateAddress('172.31.255.254')).toBe(true);
+    expect(isPrivateAddress('192.168.1.9')).toBe(true);
+    expect(isPrivateAddress('100.64.0.1')).toBe(true);
+    expect(isPrivateAddress('100.127.255.255')).toBe(true);
+    expect(isPrivateAddress('169.254.169.254')).toBe(true);
+  });
+
+  it('the neighbours of those ranges are public', () => {
+    expect(isPrivateAddress('11.0.0.1')).toBe(false);
+    expect(isPrivateAddress('172.15.255.255')).toBe(false);
+    expect(isPrivateAddress('172.32.0.1')).toBe(false);
+    expect(isPrivateAddress('192.169.0.1')).toBe(false);
+    expect(isPrivateAddress('100.63.255.255')).toBe(false);
+    expect(isPrivateAddress('100.128.0.1')).toBe(false);
+    expect(isPrivateAddress('169.253.0.1')).toBe(false);
+    expect(isPrivateAddress('140.82.121.4')).toBe(false);
+    expect(isPrivateAddress('8.8.8.8')).toBe(false);
+  });
+
+  it('loopback, unspecified, multicast and broadcast are not Internet either', () => {
+    // A real row: DHCPv6 all-agents multicast from a host-network datadog-agent pod.
+    expect(isPrivateAddress('ff02::1:2')).toBe(true);
+    expect(isPrivateAddress('ff05::1:3')).toBe(true);
+    expect(isPrivateAddress('::1')).toBe(true);
+    expect(isPrivateAddress('::')).toBe(true);
+    expect(isPrivateAddress('0.0.0.0')).toBe(true);
+    expect(isPrivateAddress('0.255.255.255')).toBe(true);
+    expect(isPrivateAddress('127.0.0.1')).toBe(true);
+    expect(isPrivateAddress('224.0.0.251')).toBe(true);
+    expect(isPrivateAddress('239.255.255.250')).toBe(true);
+    expect(isPrivateAddress('240.0.0.1')).toBe(true);
+    expect(isPrivateAddress('255.255.255.255')).toBe(true);
+    expect(isPrivateAddress('::ffff:127.0.0.1')).toBe(true);
+    // Neighbours stay public.
+    expect(isPrivateAddress('1.0.0.1')).toBe(false);
+    expect(isPrivateAddress('126.255.255.255')).toBe(false);
+    expect(isPrivateAddress('128.0.0.1')).toBe(false);
+    expect(isPrivateAddress('223.255.255.255')).toBe(false);
+    expect(isPrivateAddress('::2')).toBe(false);
+    expect(isPrivateAddress('fe00::1')).toBe(false);
+  });
+
+  it('IPv6: ULA and link-local are private, global unicast is not', () => {
+    expect(isPrivateAddress('fd00::1')).toBe(true);
+    expect(isPrivateAddress('fc00::')).toBe(true);
+    expect(isPrivateAddress('fdff:ffff::1')).toBe(true);
+    expect(isPrivateAddress('fe80::1')).toBe(true);
+    expect(isPrivateAddress('FE80::1')).toBe(true);
+    expect(isPrivateAddress('febf::1')).toBe(true);
+    expect(isPrivateAddress('fec0::1')).toBe(false);
+    expect(isPrivateAddress('fb00::1')).toBe(false);
+    expect(isPrivateAddress('2001:db8::1')).toBe(false);
+    expect(isPrivateAddress('2606:4700::1111')).toBe(false);
+  });
+
+  it('an IPv4-mapped address is judged as its IPv4', () => {
+    expect(isPrivateAddress('::ffff:10.0.0.1')).toBe(true);
+    expect(isPrivateAddress('::ffff:a00:1')).toBe(true);
+    expect(isPrivateAddress('::ffff:8.8.8.8')).toBe(false);
+  });
+
+  it('anything that is not an address literal is not private', () => {
+    expect(isPrivateAddress('')).toBe(false);
+    expect(isPrivateAddress('10.0.0')).toBe(false);
+    expect(isPrivateAddress('10.0.0.256')).toBe(false);
+    expect(isPrivateAddress('fe80::1%eth0')).toBe(false);
+    expect(isPrivateAddress('example.com')).toBe(false);
   });
 });

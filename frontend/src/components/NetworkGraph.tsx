@@ -34,7 +34,7 @@ import { shouldExitFocus } from '../utils/graphFocus';
 import { EDGE_COLOR_DAEMONSET, edgeStrokeColor, isDaemonSetPeer, partitionDaemonSetPeers, shouldAutoShowDaemonSets } from '../utils/daemonSetPeers';
 import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
-import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
+import { buildExternalNodes, localWorkloadIndex, remoteNodeForRow } from '../utils/externalPeers';
 import type { MapLens, PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
@@ -145,6 +145,10 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [pods]);
 
+  // Stored workload → local node, for a stored peer whose record is gone or
+  // superseded (its name may no longer be in the listing).
+  const localPodByWorkload = useMemo(() => localWorkloadIndex(pods), [pods]);
+
   // Build service ClusterIP → local PodNodeData map by matching selectors
   const svcIpToLocalPodMap = useMemo(() => {
     const map = new Map<string, PodNodeData>();
@@ -207,10 +211,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       services,
       rowPeers,
       localPodByName,
+      localPodByWorkload,
       svcIpToLocalPod: svcIpToLocalPodMap,
       podNameToSvcIp,
     });
-  }, [pods, showExternalNodes, showTraffic, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName]);
+  }, [pods, showExternalNodes, showTraffic, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName, localPodByWorkload]);
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic
@@ -354,9 +359,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         const trafficType = traffic.traffic_type?.toLowerCase();
         if (trafficType === 'egress') {
           sourcePod = pod;
-          destPod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, egressExternalByKey);
+          destPod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, egressExternalByKey, localPodByWorkload);
         } else if (trafficType === 'ingress') {
-          sourcePod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, ingressExternalByKey);
+          sourcePod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, ingressExternalByKey, localPodByWorkload);
           destPod = pod;
         }
 
@@ -467,7 +472,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return edges;
-  }, [pods, allDisplayPods, svcIpToLocalPodMap, showTraffic, wellKnownPorts, rowPeers, localPodByName]);
+  }, [pods, allDisplayPods, svcIpToLocalPodMap, showTraffic, wellKnownPorts, rowPeers, localPodByName, localPodByWorkload]);
 
   // Contention edges as React Flow edges: dashed, error-coloured, labelled
   // with the blame share (components/ContentionEdge). Only between nodes

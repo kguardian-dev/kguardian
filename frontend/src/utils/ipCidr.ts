@@ -140,3 +140,34 @@ export function peerCIDR(ip: string): string | null {
   if (mapped !== null) return `${mapped}/32`;
   return `${formatIPv6(groups)}/128`;
 }
+
+/**
+ * isPrivateAddress - true for an address that cannot be a peer on the
+ * Internet: RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT 100.64/10, IPv4
+ * "this network" 0/8, loopback 127/8, link-local 169.254/16, multicast 224/4
+ * and reserved 240/4 (which holds the broadcast address); IPv6 unspecified
+ * and loopback (::, ::1), ULA fc00::/7, link-local fe80::/10 and multicast
+ * ff00::/8. An IPv4-mapped IPv6 address is judged as its IPv4. Unparseable
+ * input is false.
+ */
+export function isPrivateAddress(ip: string): boolean {
+  let v4 = parseIPv4(ip);
+  if (v4 === null) {
+    const groups = parseIPv6(ip);
+    if (groups === null) return false;
+    const mapped = mappedIPv4(groups);
+    if (mapped === null) {
+      const top = groups[0];
+      if ((top & 0xfe00) === 0xfc00 || (top & 0xffc0) === 0xfe80 || (top & 0xff00) === 0xff00) return true;
+      return groups.slice(0, 7).every((g) => g === 0) && groups[7] <= 1; // :: and ::1
+    }
+    v4 = parseIPv4(mapped);
+    if (v4 === null) return false;
+  }
+  const [a, b] = v4;
+  return a === 0 || a === 10 || a === 127 || a >= 224
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 169 && b === 254);
+}
