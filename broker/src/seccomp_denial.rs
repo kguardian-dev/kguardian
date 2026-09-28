@@ -4728,8 +4728,20 @@ mod tests {
         upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
 
         // The handler's own sequence: validate and fold against one clock
-        // reading, then store what came out.
-        let now = Utc::now();
+        // reading, then store what came out. That reading is the DATABASE's
+        // clock: the fold clamps the row to `now` and the zero-day prune below
+        // asks the server whether `last_seen < NOW()`, so a database clock
+        // behind this process (a container VM's, typically) would keep the
+        // row and fail the test for a reason that is not the code's.
+        #[derive(diesel::QueryableByName)]
+        struct Clock {
+            #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+            now: DateTime<Utc>,
+        }
+        let now = diesel::sql_query("SELECT NOW() AS now")
+            .get_result::<Clock>(&mut conn)
+            .expect("database clock")
+            .now;
         let skewed = DenialInput {
             first_seen: now + chrono::Duration::days(3650),
             last_seen: now + chrono::Duration::days(3650),
@@ -4751,7 +4763,7 @@ mod tests {
         let stored = denials_query(&mut conn, None, None, None, None, 100).expect("query");
         assert_eq!(stored.len(), 1);
         assert!(
-            stored[0].last_seen <= Utc::now(),
+            stored[0].last_seen <= now,
             "stored ahead of the clock, it pins the top of the list until the \
              clock catches up: {}",
             stored[0].last_seen
