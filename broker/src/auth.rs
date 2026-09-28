@@ -145,6 +145,7 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/compute/contention", READ),
     rule("GET", "/compute/findings", READ),
     rule("GET", "/compute/nodes", READ),
+    rule("GET", "/node/status", READ),
     rule("GET", "/version", READ),
     rule("GET", "/cluster/environment", READ),
     rule("GET", "/seccomp/profiles", READ),

@@ -1,0 +1,72 @@
+---
+title: "Node Endpoints"
+description: "Which nodes' controllers are still reporting pods"
+icon: "server"
+---
+
+## Overview
+
+Every controller re-posts each live pod on its node once a minute
+(`POST /pod/spec`). A row not re-posted for `PEER_STALE_ALIVE_SECS`
+(default 900) is marked dead by the broker's stale-alive sweep, and the
+pod disappears from `/pod/info`, `/pod/namespaces`, the Workloads view
+and the maps. When a controller is running but its resync has stopped,
+that removal is the only symptom. `GET /node/status` names the nodes,
+so the UI can say "3 nodes have not reported pods since 07:37" instead
+of silently showing fewer pods.
+
+## GET /node/status
+
+Requires the `read` scope when broker auth is on. One row per node the
+broker has heard from, in node-name order. Derived from tables the
+controller already writes; nothing new is posted.
+
+### Example
+
+```bash
+curl http://localhost:9090/node/status
+```
+
+### Response
+
+```json
+{
+  "staleAfterSecs": 900,
+  "nodes": [
+    {
+      "node": "ip-10-62-65-125",
+      "lastPodPostAt": "2026-09-28T07:37:12Z",
+      "alivePods": 0,
+      "lastHeartbeatAt": "2026-09-28T12:35:00Z",
+      "stale": true
+    },
+    {
+      "node": "ip-10-62-66-9",
+      "lastPodPostAt": "2026-09-28T12:36:10Z",
+      "alivePods": 41,
+      "lastHeartbeatAt": "2026-09-28T12:36:00Z",
+      "stale": false
+    }
+  ]
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `staleAfterSecs` | The sweep's window (`PEER_STALE_ALIVE_SECS`), so a client judges `lastHeartbeatAt` against the same clock. |
+| `node` | Node name as the controller posts it. |
+| `lastPodPostAt` | Newest `pod_details.time_stamp` for the node, dead rows included, so it still points at the last post after the sweep has run. `null` when the broker holds no row for the node: it never received a pod for it, or every row has been pruned, which retention does to dead rows after `DEAD_POD_RETENTION_DAYS`, so a node stuck for longer than that reads `null` too. RFC 3339, UTC. |
+| `alivePods` | Rows not yet marked dead. `0` on a stale node once the sweep has run. |
+| `lastHeartbeatAt` | The compute heartbeat (`node_compute_latest.updated_at`), posted every sample interval, or every 5 minutes when compute gauges are off. `null` for a controller predating compute gauges. |
+| `stale` | `lastPodPostAt` is older than `now - staleAfterSecs`, or `null`. |
+
+A node with `stale: true` and a recent `lastHeartbeatAt` is a running
+controller that has stopped re-posting pods, the case the UI banner
+reports; with `lastPodPostAt: null` as well it is one that has not posted
+for longer than retention keeps dead rows, or never could. A node with
+both stale is one that left the cluster; its rows age out through
+retention.
+
+The sweep itself logs at WARN when it marks rows dead, with the per-node
+counts (`by_node=ip-10-62-65-125=55 ip-10-62-76-240=55`), so the same
+event is visible in the broker log.

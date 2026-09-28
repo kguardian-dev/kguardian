@@ -21,12 +21,15 @@ use kube::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 
 /// Watch this node's pods and keep the netns-inode → pod map current.
 ///
@@ -69,6 +72,13 @@ pub async fn watch_pods(
     let excluded_namespaces: Arc<[String]> = excluded_namespaces.into();
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
+    // A second client for the LIST and the per-pod owner lookups, with a
+    // response deadline. The watch stream stays on the default client:
+    // kube-runtime's idle timeout covers the stream while it is being
+    // polled, and a 30 s inactivity limit would cut a quiet watch each
+    // time it fired.
+    let lookups = lookup_client().await?;
+    let lookup_pods: Api<Pod> = Api::all(lookups.clone());
     #[cfg(not(debug_assertions))]
     let wc = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
     #[cfg(debug_assertions)]
@@ -83,18 +93,21 @@ pub async fn watch_pods(
     // safety net: a field-selector LIST *is* reliable, and process_pod is
     // idempotent, so re-walking on-node pods only ever fills gaps the
     // watch left. See resync_pods.
+    let clock = Arc::new(PassClock::new());
     let resync = resync_pods(
-        pods.clone(),
+        lookup_pods,
         node_name.clone(),
         tx.clone(),
         Arc::clone(&container_map),
         Arc::clone(&excluded_namespaces),
         sender_ip.clone(),
         ignore_daemonset_traffic,
-        c.clone(),
+        lookups.clone(),
         cluster_capture_level,
         compute.clone(),
+        Arc::clone(&clock),
     );
+    let liveness = resync_liveness(clock, PASS_BUDGET, LIVENESS_BUDGETS, PASS_BUDGET / 2);
 
     // `.default_backoff()` wraps the RAW watcher stream, BEFORE
     // `.applied_objects()`. That is the order kube-rs's own examples
@@ -132,40 +145,49 @@ pub async fn watch_pods(
                 let container_map = Arc::clone(&container_map);
                 let excluded_namespaces = Arc::clone(&excluded_namespaces);
                 let node_name = node_name.clone();
-                let c = c.clone();
+                let c = lookups.clone();
                 let compute = compute.clone();
                 async move {
-                    if let Some(reg) = process_pod(
-                        &p,
-                        container_map,
-                        &excluded_namespaces,
-                        sender_ip,
-                        ignore_daemonset_traffic,
-                        &node_name,
-                        &c,
-                        cluster_capture_level,
-                        compute.as_ref(),
-                    )
-                    .await
-                    {
-                        if let Err(e) = t.send(reg).await {
-                            tracing::error!("Failed to send pod registration: {:?}", e);
+                    // One event at a time, so a handler that never returns
+                    // stops every later event on this node. The whole event
+                    // runs under a budget and is reported while it runs; an
+                    // abandoned pod is re-walked by the next resync pass.
+                    let progress = Arc::new(Progress::default());
+                    let event = async {
+                        let processed = process_pod(
+                            &p,
+                            container_map,
+                            &excluded_namespaces,
+                            sender_ip,
+                            ignore_daemonset_traffic,
+                            &node_name,
+                            &c,
+                            cluster_capture_level,
+                            compute.as_ref(),
+                            &progress,
+                        )
+                        .await;
+                        if let Some(reg) = processed.registration {
+                            let (inode, flags) = (reg.netns_inode, reg.flags);
+                            progress.set_stage(Stage::Send);
+                            send_registration(&t, reg, "watch").await;
+                            // debug not info — fires on every pod event that
+                            // passes the per-node + namespace-exclusion filter,
+                            // including the full re-sync on controller startup
+                            // AND every pod-status transition (rolling deploys
+                            // generate hundreds per minute on busy nodes). The
+                            // inode-to-pod mapping is debug-relevant only when
+                            // chasing eBPF event correlation issues; operators
+                            // under default RUST_LOG=info don't need it.
+                            debug!(
+                                "Pod {:?}, inode num {:?}, flags {:#x}",
+                                p.name(),
+                                inode,
+                                flags
+                            );
                         }
-                        // debug not info — fires on every pod event that
-                        // passes the per-node + namespace-exclusion filter,
-                        // including the full re-sync on controller startup
-                        // AND every pod-status transition (rolling deploys
-                        // generate hundreds per minute on busy nodes). The
-                        // inode-to-pod mapping is debug-relevant only when
-                        // chasing eBPF event correlation issues; operators
-                        // under default RUST_LOG=info don't need it.
-                        debug!(
-                            "Pod {:?}, inode num {:?}, flags {:#x}",
-                            p.name(),
-                            reg.netns_inode,
-                            reg.flags
-                        );
-                    }
+                    };
+                    bounded_event(event, Arc::clone(&progress), EVENT_BUDGET).await;
                 }
             },
         )
@@ -192,11 +214,505 @@ pub async fn watch_pods(
     let mut subsystems = Supervisor::new();
     subsystems.spawn(Subsystem::PodWatchStream, watch);
     subsystems.spawn(Subsystem::PodResync, resync);
+    // Its own task: it must still run when the resync task cannot be
+    // polled, which is the failure it exists to end.
+    subsystems.spawn(Subsystem::PodResyncLiveness, liveness);
     let fault = subsystems.watch().await;
     // Logs any fault the other half had already queued, so a stall in
     // one is not reported without the error that caused it.
     let _ = subsystems.shutdown(Draining::AfterFault).await;
     Err(fault.into())
+}
+
+/// Response deadline for the LIST and the per-pod owner lookups.
+///
+/// kube-client 4.x infers a `Config` with `read_timeout: None`, in
+/// cluster too, so a request whose reply never arrives waits forever.
+/// Both pod loops are serial (the watch handles one event at a time,
+/// the resync one pod at a time), so an await that never returns stops
+/// the loop for good; on 2026-09-28 both loops on four nodes stopped
+/// that way with nothing logged, and after `PEER_STALE_ALIVE_SECS` the
+/// broker marked every pod on those nodes dead. The apiserver reads were
+/// the one unbounded await identifiable from the code and are bounded
+/// here. On the node examined, each loop's last recorded step was a
+/// successful `/pod/spec` post, so the await that actually blocked is
+/// not identified; the watchdog below is what names it next time.
+pub(crate) const APISERVER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The inferred config, with a response deadline on every request.
+pub(crate) fn with_read_timeout(mut config: kube::Config) -> kube::Config {
+    config.read_timeout = Some(APISERVER_READ_TIMEOUT);
+    config
+}
+
+async fn lookup_client() -> Result<Client, Error> {
+    let config = kube::Config::infer()
+        .await
+        .map_err(kube::Error::InferConfig)?;
+    Ok(Client::try_from(with_read_timeout(config))?)
+}
+
+/// How long a registration may wait for the eBPF loader to take it.
+/// The loader drains this channel between ring-buffer polls; a send
+/// that waits this long means the poll loop is wedged, and until now
+/// the wait was silent and unbounded. A retirement that times out is
+/// not retried (its map entry is already flagged), so the kernel keeps
+/// that inode until it is recycled; blocking forever was the worse harm.
+const SEND_BUDGET: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Sent,
+    TimedOut,
+    Closed,
+}
+
+pub(crate) async fn send_bounded<T>(
+    tx: &mpsc::Sender<T>,
+    value: T,
+    budget: Duration,
+) -> SendOutcome {
+    match tokio::time::timeout(budget, tx.send(value)).await {
+        Ok(Ok(())) => SendOutcome::Sent,
+        Ok(Err(_)) => SendOutcome::Closed,
+        Err(_) => SendOutcome::TimedOut,
+    }
+}
+
+async fn send_registration(
+    tx: &mpsc::Sender<PodRegistration>,
+    reg: PodRegistration,
+    origin: &'static str,
+) -> SendOutcome {
+    let unregister = reg.unregister;
+    let outcome = send_bounded(tx, reg, SEND_BUDGET).await;
+    match outcome {
+        SendOutcome::Sent => {}
+        SendOutcome::TimedOut => warn!(
+            origin,
+            unregister,
+            budget_secs = SEND_BUDGET.as_secs(),
+            "eBPF loader did not take a pod registration within the budget; its poll loop \
+             is not draining, so this node's capture map is falling behind"
+        ),
+        SendOutcome::Closed => error!(
+            origin,
+            unregister, "pod registration channel closed; the eBPF loader is gone"
+        ),
+    }
+    outcome
+}
+
+/// Whether the broker took a pod's `/pod/spec` post.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PostOutcome {
+    /// Terminal, deleting, or no address yet: nothing to post.
+    #[default]
+    Skipped,
+    Posted,
+    /// Non-2xx, timeout, or connection failure; the row goes stale.
+    Failed,
+}
+
+/// What `process_pod` did for one pod.
+#[derive(Debug, Default)]
+pub(crate) struct Processed {
+    pub registration: Option<PodRegistration>,
+    pub post: PostOutcome,
+}
+
+/// One resync pass, as the INFO line and the WARN decisions see it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PassStats {
+    pub listed: u32,
+    pub posted: u32,
+    pub post_failed: u32,
+    pub registered: u32,
+    pub sends_dropped: u32,
+}
+
+impl PassStats {
+    fn record(&mut self, processed: &Processed) {
+        match processed.post {
+            PostOutcome::Posted => self.posted += 1,
+            PostOutcome::Failed => self.post_failed += 1,
+            PostOutcome::Skipped => {}
+        }
+        if processed
+            .registration
+            .as_ref()
+            .is_some_and(|r| !r.unregister)
+        {
+            self.registered += 1;
+        }
+    }
+}
+
+/// The WARN a finished pass earns, if any. A pass that posted nothing
+/// while pods needed posting is the one that ends with the broker
+/// marking the node's pods dead; partial failure is worth a line too.
+/// A node whose listed pods are all finished Jobs posts nothing and is
+/// healthy, so "attempted" is the denominator, not "listed".
+pub(crate) fn pass_warning(stats: &PassStats) -> Option<String> {
+    if stats.listed == 0 {
+        return Some(
+            "pod resync listed no pods on this node; if the node runs pods, the field \
+             selector or CURRENT_NODE is wrong and nothing here is being reported"
+                .to_string(),
+        );
+    }
+    let attempted = stats.posted + stats.post_failed;
+    if attempted > 0 && stats.posted == 0 {
+        return Some(format!(
+            "pod resync posted no pods this pass ({} attempted, all failed); the broker \
+             marks this node's pods dead after PEER_STALE_ALIVE_SECS without a successful \
+             re-post",
+            attempted
+        ));
+    }
+    if stats.post_failed > 0 {
+        return Some(format!(
+            "pod resync: {} of {} pod posts failed this pass; those rows go stale until \
+             a later pass succeeds",
+            stats.post_failed, attempted
+        ));
+    }
+    None
+}
+
+/// Where `process_pod` is for the pod it is on. The watchdog line names
+/// it, so the next stall says which await it sat in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Stage {
+    Idle = 0,
+    /// Terminal check, startup-capture bookkeeping, capture tier.
+    Filter = 1,
+    /// Owner-reference GETs against the apiserver.
+    Lookup = 2,
+    /// `POST /pod/spec`.
+    Post = 3,
+    /// containerd lookups and the netns registration.
+    Netns = 4,
+    /// cgroup resolution for compute gauges.
+    Compute = 5,
+    /// Handing the registration to the eBPF loader.
+    Send = 6,
+}
+
+impl Stage {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Stage::Idle => "idle",
+            Stage::Filter => "filter",
+            Stage::Lookup => "owner-lookup",
+            Stage::Post => "post",
+            Stage::Netns => "netns",
+            Stage::Compute => "compute",
+            Stage::Send => "send",
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Stage::Filter,
+            2 => Stage::Lookup,
+            3 => Stage::Post,
+            4 => Stage::Netns,
+            5 => Stage::Compute,
+            6 => Stage::Send,
+            _ => Stage::Idle,
+        }
+    }
+}
+
+/// How far a pass, or one watch event, has got; read from another task.
+#[derive(Debug, Default)]
+pub(crate) struct Progress {
+    done: AtomicU32,
+    stage: AtomicU8,
+    pod: Mutex<String>,
+    posted: AtomicU32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    pub done: u32,
+    pub posted: u32,
+    pub stage: Stage,
+    pub pod: String,
+}
+
+impl Progress {
+    pub(crate) fn begin_pod(&self, pod: &Pod) {
+        *self.pod.lock().unwrap_or_else(|p| p.into_inner()) = pod_ref(pod);
+        self.set_stage(Stage::Filter);
+    }
+
+    pub(crate) fn set_stage(&self, stage: Stage) {
+        self.stage.store(stage as u8, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_posted(&self) {
+        self.posted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn finish_pod(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+        self.set_stage(Stage::Idle);
+    }
+
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            done: self.done.load(Ordering::Relaxed),
+            posted: self.posted.load(Ordering::Relaxed),
+            stage: Stage::from_u8(self.stage.load(Ordering::Relaxed)),
+            pod: self.pod.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        }
+    }
+}
+
+fn pod_ref(pod: &Pod) -> String {
+    format!(
+        "{}/{}",
+        pod.metadata.namespace.as_deref().unwrap_or(""),
+        pod.name_any()
+    )
+}
+
+/// A pass still running after this long is reported while it runs,
+/// every `SLOW_PASS_EVERY`, with the pod and stage it is on; a watch
+/// event's handler after `HANDLER_SLOW_AFTER`. On the stalled node of
+/// 2026-09-28 every thread was parked in `futex_wait` and none was in a
+/// syscall: both loops sat in a future that was never woken, with the
+/// server-closed watch stream left in `CLOSE_WAIT` and 22 KB unread.
+/// The parked await is not identified, so the report must not depend on
+/// knowing it; the stage says where it was.
+const SLOW_PASS_AFTER: Duration = Duration::from_secs(120);
+const HANDLER_SLOW_AFTER: Duration = Duration::from_secs(60);
+const SLOW_PASS_EVERY: Duration = Duration::from_secs(60);
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Drive `pass` to completion while a separate task reports it: once
+/// `after` has elapsed, and every `every` after that, `on_slow(elapsed,
+/// snapshot)` runs for as long as `pass` is still pending.
+///
+/// A separate task rather than a `select!` on the same one: a pass that
+/// has blocked its worker thread in a lock or a `/proc` read is never
+/// polled again, and a watchdog sharing its task would be as silent as
+/// the stall it exists to report.
+pub(crate) async fn watch_slow_pass<F, T>(
+    pass: F,
+    progress: Arc<Progress>,
+    after: Duration,
+    every: Duration,
+    mut on_slow: impl FnMut(Duration, Snapshot) + Send + 'static,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let started = Instant::now();
+    let watchdog = AbortOnDrop(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + after, every);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            on_slow(started.elapsed(), progress.snapshot());
+        }
+    }));
+    // Let the watchdog reach its first tick before the pass can block
+    // this thread; otherwise it may sit unpolled in this worker's queue.
+    tokio::task::yield_now().await;
+    let out = pass.await;
+    drop(watchdog);
+    out
+}
+
+fn warn_slow_resync(listed: usize) -> impl FnMut(Duration, Snapshot) + Send + 'static {
+    move |elapsed, snap| {
+        warn!(
+            elapsed_secs = elapsed.as_secs(),
+            pods_done = snap.done,
+            listed,
+            pod = %snap.pod,
+            stage = snap.stage.name(),
+            "pod resync pass is still running; pods after this one have not been re-posted \
+             and the broker marks them dead after PEER_STALE_ALIVE_SECS"
+        )
+    }
+}
+
+fn warn_slow_handler() -> impl FnMut(Duration, Snapshot) + Send + 'static {
+    |elapsed, snap| {
+        warn!(
+            elapsed_secs = elapsed.as_secs(),
+            pod = %snap.pod,
+            stage = snap.stage.name(),
+            "pod watch handler is still running; no later pod event on this node is \
+             processed until it returns"
+        )
+    }
+}
+
+/// Budgets for a whole resync pass and a whole watch event, after which
+/// the future is dropped and the loop goes on. A pass takes seconds on
+/// a full node and minutes in the worst case the bounded calls allow
+/// (three 30 s lookups and 7 s of containerd per pod); 600 s plus the
+/// 60 s sleep and a fresh pass still re-posts every row inside the
+/// broker's 900 s stale window, so whatever the parked await turns out
+/// to be, the node's pods do not go dead over it. Dropping mid-pod is
+/// safe: every step is idempotent and re-walked, a dropped request
+/// closes its connection, a dropped RPC is cancelled, and a dropped
+/// channel send releases its permit.
+///
+/// An in-task timeout rescues a parked future, not a worker thread
+/// blocked on a std lock or a DashMap shard; both show as `futex_wait`
+/// in a thread capture and the 2026-09-28 one cannot tell them apart.
+/// `resync_liveness` covers the second case from outside the task.
+const PASS_BUDGET: Duration = Duration::from_secs(600);
+const EVENT_BUDGET: Duration = Duration::from_secs(180);
+
+/// Passes the resync may go without completing one before the
+/// subsystem is declared dead. The Supervisor treats that as fatal, so
+/// the process exits and the kubelet restarts the controller with a
+/// restart count to show for it, instead of the node's pods going
+/// quietly dead.
+const LIVENESS_BUDGETS: u32 = 3;
+
+/// When the resync last completed a pass, readable from another task.
+/// On tokio's clock rather than std's, which is the same clock outside a
+/// paused test runtime and lets the liveness tests run on virtual time.
+#[derive(Debug)]
+pub(crate) struct PassClock {
+    started: tokio::time::Instant,
+    last_done_ms: AtomicU64,
+}
+
+impl PassClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            last_done_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn mark(&self) {
+        self.last_done_ms
+            .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Time since the last completed pass, or since start before the first.
+    pub(crate) fn since_last(&self) -> Duration {
+        self.started.elapsed().saturating_sub(Duration::from_millis(
+            self.last_done_ms.load(Ordering::Relaxed),
+        ))
+    }
+}
+
+/// Fail once no pass has completed within `budgets` times `budget`,
+/// checking every `every`. Runs as its own supervised subsystem.
+pub(crate) async fn resync_liveness(
+    clock: Arc<PassClock>,
+    budget: Duration,
+    budgets: u32,
+    every: Duration,
+) -> Result<(), Error> {
+    let limit = budget * budgets;
+    let mut ticker = tokio::time::interval(every);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let since = clock.since_last();
+        if since > limit {
+            error!(
+                since_last_pass_secs = since.as_secs(),
+                limit_secs = limit.as_secs(),
+                budget_secs = budget.as_secs(),
+                "no pod resync pass has completed within the liveness limit: the loop is \
+                 stuck past its budget; exiting so the kubelet restarts the controller"
+            );
+            return Err(Error::Custom(format!(
+                "pod resync: no pass completed for {}s (limit {}s)",
+                since.as_secs(),
+                limit.as_secs()
+            )));
+        }
+    }
+}
+
+/// One resync pass under its budget and watchdog; `None` when abandoned.
+async fn bounded_pass<F>(
+    pass: F,
+    progress: Arc<Progress>,
+    budget: Duration,
+    listed: usize,
+) -> Option<PassStats>
+where
+    F: Future<Output = PassStats>,
+{
+    let bounded = tokio::time::timeout(budget, pass);
+    match watch_slow_pass(
+        bounded,
+        Arc::clone(&progress),
+        SLOW_PASS_AFTER,
+        SLOW_PASS_EVERY,
+        warn_slow_resync(listed),
+    )
+    .await
+    {
+        Ok(stats) => Some(stats),
+        Err(_) => {
+            let snap = progress.snapshot();
+            warn!(
+                budget_secs = budget.as_secs(),
+                listed,
+                pods_done = snap.done,
+                posted = snap.posted,
+                pod = %snap.pod,
+                stage = snap.stage.name(),
+                "pod resync pass exceeded its budget and was abandoned; the pods it did not \
+                 reach are re-posted by the next pass"
+            );
+            None
+        }
+    }
+}
+
+/// One watch event under its budget and watchdog; `false` when abandoned.
+async fn bounded_event<F>(event: F, progress: Arc<Progress>, budget: Duration) -> bool
+where
+    F: Future<Output = ()>,
+{
+    let bounded = tokio::time::timeout(budget, event);
+    match watch_slow_pass(
+        bounded,
+        Arc::clone(&progress),
+        HANDLER_SLOW_AFTER,
+        SLOW_PASS_EVERY,
+        warn_slow_handler(),
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err(_) => {
+            let snap = progress.snapshot();
+            warn!(
+                budget_secs = budget.as_secs(),
+                pod = %snap.pod,
+                stage = snap.stage.name(),
+                "pod watch handler exceeded its budget and was abandoned; the next resync pass \
+                 re-walks this pod"
+            );
+            false
+        }
+    }
 }
 
 /// Periodic re-list of this node's pods, registering any the streaming
@@ -215,6 +731,7 @@ async fn resync_pods(
     client: Client,
     cluster_capture_level: CaptureLevel,
     compute: Option<ComputeContext>,
+    clock: Arc<PassClock>,
 ) -> Result<(), Error> {
     const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
     let lp = ListParams::default().fields(&format!("spec.nodeName={}", node_name));
@@ -230,78 +747,119 @@ async fn resync_pods(
         // keeps registering pods meanwhile; those are newer than the
         // list and must not be retired by it.
         let listed_at = Instant::now();
-        match pods.list(&lp).await {
-            Ok(list) => {
-                let mut processed = 0u32;
-                for pod in &list.items {
-                    if let Some(reg) = process_pod(
-                        pod,
-                        Arc::clone(&container_map),
-                        &excluded_namespaces,
-                        sender_ip.clone(),
-                        ignore_daemonset_traffic,
-                        &node_name,
-                        &client,
-                        cluster_capture_level,
-                        compute.as_ref(),
-                    )
-                    .await
-                    {
-                        if let Err(e) = tx.send(reg).await {
-                            error!("resync: failed to send pod registration: {:?}", e);
-                        }
-                        processed += 1;
+        let list = match pods.list(&lp).await {
+            Ok(list) => list,
+            // Transient list failures (apiserver blip) are non-fatal —
+            // the next tick retries. Only the watch task failing restarts.
+            // A failed LIST proves the loop is alive, so it counts for
+            // liveness: an apiserver outage must not restart every
+            // controller and throw away capture state it cannot rebuild.
+            Err(e) => {
+                warn!("Pod resync list failed (will retry next tick): {}", e);
+                clock.mark();
+                continue;
+            }
+        };
+        let progress = Arc::new(Progress::default());
+        let pass = async {
+            let mut stats = PassStats {
+                listed: list.items.len() as u32,
+                ..PassStats::default()
+            };
+            for pod in &list.items {
+                let processed = process_pod(
+                    pod,
+                    Arc::clone(&container_map),
+                    &excluded_namespaces,
+                    sender_ip.clone(),
+                    ignore_daemonset_traffic,
+                    &node_name,
+                    &client,
+                    cluster_capture_level,
+                    compute.as_ref(),
+                    &progress,
+                )
+                .await;
+                stats.record(&processed);
+                if processed.post == PostOutcome::Posted {
+                    progress.note_posted();
+                }
+                if let Some(reg) = processed.registration {
+                    progress.set_stage(Stage::Send);
+                    if send_registration(&tx, reg, "resync").await != SendOutcome::Sent {
+                        stats.sends_dropped += 1;
                     }
                 }
-                debug!("Pod resync pass processed {} on-node pods", processed);
-                // Deletions are decoded away by the watch; retire pods
-                // that left the node from startup capture's registry too.
-                {
-                    let live: std::collections::HashSet<String> = list
-                        .items
-                        .iter()
-                        .filter_map(|p| p.metadata.uid.clone())
-                        .collect();
-                    crate::early_capture::retain_known_pods(&live, listed_at);
-                    crate::early_capture::retain_host_network_pods(&live, listed_at);
-                    crate::runtime_inventory::retain_pods(&live);
-                    // Pods deleted between resyncs never reach the terminal
-                    // branch (the watch decodes deletions away): retire
-                    // their netns registrations here. Only entries older
-                    // than this LIST — a pod registered after it was taken
-                    // is newer than its evidence.
-                    for unreg in retire_pod(&container_map, |p| {
-                        !live.contains(&p.info.config.metadata.uid)
-                            && p.registered_at.is_some_and(|at| at < listed_at)
-                    }) {
-                        if let Err(e) = tx.send(unreg).await {
-                            error!("resync: failed to send pod unregistration: {:?}", e);
-                        }
-                    }
-                }
-                // The streaming watch decodes deletions away
-                // (`applied_objects`), so a pod that vanished between
-                // resyncs is retired here: the compute registry must
-                // not keep sampling a cgroup that no longer exists, and
-                // the contention probe must stop tracking its id.
-                if let Some(ctx) = compute.as_ref() {
-                    let live: std::collections::HashSet<String> = list
-                        .items
-                        .iter()
-                        .filter_map(|p| p.metadata.uid.clone())
-                        .collect();
-                    let stale = prune_compute_registry(&ctx.map, &live, listed_at);
-                    if stale > 0 {
-                        debug!(
-                            stale,
-                            "compute registry: retired pods absent from the resync list"
-                        );
+                progress.finish_pod();
+            }
+            // Deletions are decoded away by the watch; retire pods
+            // that left the node from startup capture's registry too.
+            {
+                let live: std::collections::HashSet<String> = list
+                    .items
+                    .iter()
+                    .filter_map(|p| p.metadata.uid.clone())
+                    .collect();
+                crate::early_capture::retain_known_pods(&live, listed_at);
+                crate::early_capture::retain_host_network_pods(&live, listed_at);
+                crate::runtime_inventory::retain_pods(&live);
+                // Pods deleted between resyncs never reach the terminal
+                // branch (the watch decodes deletions away): retire
+                // their netns registrations here. Only entries older
+                // than this LIST — a pod registered after it was taken
+                // is newer than its evidence.
+                for unreg in retire_pod(&container_map, |p| {
+                    !live.contains(&p.info.config.metadata.uid)
+                        && p.registered_at.is_some_and(|at| at < listed_at)
+                }) {
+                    if send_registration(&tx, unreg, "resync").await != SendOutcome::Sent {
+                        stats.sends_dropped += 1;
                     }
                 }
             }
-            // Transient list failures (apiserver blip) are non-fatal —
-            // the next tick retries. Only the watch task failing restarts.
-            Err(e) => warn!("Pod resync list failed (will retry next tick): {}", e),
+            // The streaming watch decodes deletions away
+            // (`applied_objects`), so a pod that vanished between
+            // resyncs is retired here: the compute registry must
+            // not keep sampling a cgroup that no longer exists, and
+            // the contention probe must stop tracking its id.
+            if let Some(ctx) = compute.as_ref() {
+                let live: std::collections::HashSet<String> = list
+                    .items
+                    .iter()
+                    .filter_map(|p| p.metadata.uid.clone())
+                    .collect();
+                let stale = prune_compute_registry(&ctx.map, &live, listed_at);
+                if stale > 0 {
+                    debug!(
+                        stale,
+                        "compute registry: retired pods absent from the resync list"
+                    );
+                }
+            }
+            stats
+        };
+        let Some(stats) =
+            bounded_pass(pass, Arc::clone(&progress), PASS_BUDGET, list.items.len()).await
+        else {
+            continue;
+        };
+        // A completed pass or a failed LIST counts for liveness; an
+        // abandoned pass does not, since a loop that keeps hitting its
+        // budget is the case a restart heals.
+        clock.mark();
+        // One line per pass: the count posted is the one number that
+        // says whether this node's rows are being kept alive.
+        info!(
+            listed = stats.listed,
+            posted = stats.posted,
+            post_failed = stats.post_failed,
+            registered = stats.registered,
+            sends_dropped = stats.sends_dropped,
+            elapsed_ms = listed_at.elapsed().as_millis() as u64,
+            "pod resync pass"
+        );
+        if let Some(message) = pass_warning(&stats) {
+            warn!("{message}");
         }
     }
 }
@@ -317,7 +875,9 @@ async fn process_pod(
     client: &Client,
     cluster_capture_level: CaptureLevel,
     compute: Option<&ComputeContext>,
-) -> Option<PodRegistration> {
+    progress: &Progress,
+) -> Processed {
+    progress.begin_pod(pod);
     // A Succeeded/Failed or deleting pod no longer owns its IP, but its
     // object lingers in the API server and shows up in every resync.
     // Re-posting it kept its broker row alive (and flapping against the
@@ -352,12 +912,15 @@ async fn process_pod(
         // graceful shutdown is still the pod's own behaviour.
         if pod_is_finished(pod) {
             if let Some(uid) = pod.metadata.uid.as_deref() {
-                return retire_pod(&container_map, |p| p.info.config.metadata.uid == uid)
-                    .into_iter()
-                    .next();
+                return Processed {
+                    registration: retire_pod(&container_map, |p| p.info.config.metadata.uid == uid)
+                        .into_iter()
+                        .next(),
+                    post: PostOutcome::Skipped,
+                };
             }
         }
-        return None;
+        return Processed::default();
     }
     // Startup capture needs to know the pod long before it is Ready (and
     // registered): a known pod's pending cgroups wait longer, and its
@@ -380,15 +943,24 @@ async fn process_pod(
     // Nothing downstream relied on it: a pod that turns unready AFTER
     // being posted has always kept its row. See `post_plan`.
     let plan = post_plan(pod);
-    let pod_ip = if plan.post_details {
+    let posted = if plan.post_details {
         let runtime_inventory = should_process_pod(&pod.metadata.namespace, excluded_namespaces)
             && !crate::runtime_inventory::opted_out(pod);
-        update_pods_details(pod, node_name, client, capture_level, runtime_inventory).await
+        update_pods_details(
+            pod,
+            node_name,
+            client,
+            capture_level,
+            runtime_inventory,
+            progress,
+        )
+        .await
     } else {
-        Ok(None)
+        PostedDetails::default()
     };
+    let post = posted.outcome;
     if let Some(con_ids) = plan.register_container_ids {
-        if let Ok(Some(pod_ip)) = pod_ip {
+        if let Some(pod_ip) = posted.pod_ip {
             match ignore_map_action(pod, &pod_ip, ignore_daemonset_traffic, excluded_namespaces) {
                 IgnoreMapAction::Ignore(ips) => {
                     // debug not info — fires per daemonset pod event,
@@ -397,9 +969,15 @@ async fn process_pod(
                     // Operators set IGNORE_DAEMONSET_TRAFFIC=true to NOT
                     // see this stream by default.
                     debug!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
+                    progress.set_stage(Stage::Send);
                     for ip in ips {
-                        if let Err(e) = sender_ip.send(ip).await {
-                            error!("Failed to send pod ip: {}", e);
+                        match send_bounded(&sender_ip, ip, SEND_BUDGET).await {
+                            SendOutcome::Sent => {}
+                            SendOutcome::TimedOut => warn!(
+                                budget_secs = SEND_BUDGET.as_secs(),
+                                "eBPF loader did not take an ignore-map address within the budget"
+                            ),
+                            SendOutcome::Closed => error!("ignore-map channel closed"),
                         }
                     }
                 }
@@ -411,15 +989,20 @@ async fn process_pod(
                 compute.is_some(),
             );
             if plan.netns {
-                return process_container_ids(
-                    &con_ids,
-                    pod,
-                    &pod_ip,
-                    container_map,
-                    capture_level,
-                    compute,
-                )
-                .await;
+                progress.set_stage(Stage::Netns);
+                return Processed {
+                    registration: process_container_ids(
+                        &con_ids,
+                        pod,
+                        &pod_ip,
+                        container_map,
+                        capture_level,
+                        compute,
+                        progress,
+                    )
+                    .await,
+                    post,
+                };
             }
             if plan.cgroups {
                 // Excluded namespace: no traffic or syscall tracking (those
@@ -428,13 +1011,17 @@ async fn process_pod(
                 // the node matters as a possible victim or culprit — the
                 // kguardian namespace itself included.
                 if let Some(ctx) = compute {
+                    progress.set_stage(Stage::Compute);
                     register_compute(pod, ctx).await;
                 }
             }
         }
     }
 
-    None
+    Processed {
+        registration: None,
+        post,
+    }
 }
 
 /// What `process_pod` does to the eBPF `ignore_ips` map for a pod.
@@ -674,20 +1261,29 @@ fn collect_pod_ips(pod_ips: Option<&[PodIP]>, primary: &str) -> Vec<String> {
     out
 }
 
+/// The address a pod was posted under, and whether the broker took it.
+/// Registration goes ahead on the address either way: a refused post
+/// leaves the row stale, not the eBPF map empty.
+#[derive(Debug, Default)]
+struct PostedDetails {
+    pod_ip: Option<String>,
+    outcome: PostOutcome,
+}
+
 async fn update_pods_details(
     pod: &Pod,
     node_name: &str,
     client: &Client,
     capture_level: CaptureLevel,
     runtime_inventory: bool,
-) -> Result<Option<String>, Error> {
+    progress: &Progress,
+) -> PostedDetails {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
     let pod_status = match pod.status.as_ref() {
         Some(status) => status,
-        None => return Ok(None),
+        None => return PostedDetails::default(),
     };
-    let mut pod_ip_address: Option<String> = None;
     if let Some(pod_ip) = pod_status.pod_ip.as_ref() {
         // Canonicalise: everything downstream (the broker's IP-keyed
         // lookups, the TrafficKey cache, the eBPF address comparison in
@@ -705,6 +1301,7 @@ async fn update_pods_details(
         let pod_ips = collect_pod_ips(pod_status.pod_ips.as_deref(), &pod_ip);
 
         // Extract pod identity and workload selector labels
+        progress.set_stage(Stage::Lookup);
         let (pod_identity, workload_selector_labels) =
             extract_pod_identity_and_selectors(pod, client).await;
 
@@ -756,13 +1353,20 @@ async fn update_pods_details(
             pod_security: Some(crate::image_inventory::pod_security(pod)),
         };
 
-        if let Err(e) = api_post_call(json!(z), "pod/spec").await {
-            error!("Failed to post Pod details: {}", e);
-        }
-        pod_ip_address = Some(pod_ip.to_string());
-        return Ok(pod_ip_address);
+        progress.set_stage(Stage::Post);
+        let outcome = match api_post_call(json!(z), "pod/spec").await {
+            Ok(()) => PostOutcome::Posted,
+            Err(e) => {
+                error!("Failed to post Pod details: {}", e);
+                PostOutcome::Failed
+            }
+        };
+        return PostedDetails {
+            pod_ip: Some(pod_ip.to_string()),
+            outcome,
+        };
     }
-    Ok(pod_ip_address)
+    PostedDetails::default()
 }
 
 /// Annotation a workload sets on its pod template to raise its syscall
@@ -863,9 +1467,11 @@ async fn process_container_ids(
     container_map: ContainerMap,
     capture_level: CaptureLevel,
     compute: Option<&ComputeContext>,
+    progress: &Progress,
 ) -> Option<PodRegistration> {
     let reg = register_netns(con_ids, pod, pod_ip, container_map, capture_level).await;
     if let Some(ctx) = compute {
+        progress.set_stage(Stage::Compute);
         register_compute(pod, ctx).await;
     }
     reg
@@ -1696,6 +2302,382 @@ async fn get_deployment_name_and_selector_from_replicaset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the kube-client default that let a hung apiserver reply stall
+    /// the resync forever, and that the lookup client overrides it.
+    #[test]
+    fn lookup_client_config_gets_a_read_timeout_the_default_lacks() {
+        let inferred = kube::Config::new(Default::default());
+        assert_eq!(inferred.read_timeout, None);
+        let bounded = with_read_timeout(inferred);
+        assert_eq!(bounded.read_timeout, Some(APISERVER_READ_TIMEOUT));
+        assert!(APISERVER_READ_TIMEOUT < Duration::from_secs(60));
+    }
+
+    fn processed(post: PostOutcome, registration: Option<PodRegistration>) -> Processed {
+        Processed { registration, post }
+    }
+
+    #[test]
+    fn pass_stats_count_posts_failures_and_live_registrations_only() {
+        let mut stats = PassStats {
+            listed: 4,
+            ..PassStats::default()
+        };
+        stats.record(&processed(
+            PostOutcome::Posted,
+            Some(PodRegistration::register(1, 0)),
+        ));
+        stats.record(&processed(PostOutcome::Posted, None));
+        stats.record(&processed(PostOutcome::Failed, None));
+        // A retirement is a registration message but not a registered pod.
+        stats.record(&processed(
+            PostOutcome::Skipped,
+            Some(PodRegistration::unregister(2, 0)),
+        ));
+        assert_eq!(
+            stats,
+            PassStats {
+                listed: 4,
+                posted: 2,
+                post_failed: 1,
+                registered: 1,
+                sends_dropped: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn pass_warning_fires_for_an_empty_list_and_for_failed_posts_only() {
+        let healthy = PassStats {
+            listed: 3,
+            posted: 3,
+            ..PassStats::default()
+        };
+        assert_eq!(pass_warning(&healthy), None);
+        // Every listed pod finished: nothing to post, nothing to warn about.
+        let all_terminal = PassStats {
+            listed: 3,
+            ..PassStats::default()
+        };
+        assert_eq!(pass_warning(&all_terminal), None);
+        let none_listed = PassStats::default();
+        assert!(pass_warning(&none_listed)
+            .unwrap()
+            .contains("listed no pods"));
+        let all_failed = PassStats {
+            listed: 3,
+            post_failed: 3,
+            ..PassStats::default()
+        };
+        let message = pass_warning(&all_failed).unwrap();
+        assert!(message.contains("posted no pods"), "{message}");
+        assert!(message.contains("PEER_STALE_ALIVE_SECS"), "{message}");
+        let partial = PassStats {
+            listed: 3,
+            posted: 2,
+            post_failed: 1,
+            ..PassStats::default()
+        };
+        let message = pass_warning(&partial).unwrap();
+        assert!(message.contains("1 of 3 pod posts failed"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn send_bounded_reports_a_full_channel_instead_of_waiting_forever() {
+        let (tx, mut rx) = mpsc::channel::<u32>(1);
+        let budget = Duration::from_millis(50);
+        assert_eq!(send_bounded(&tx, 1, budget).await, SendOutcome::Sent);
+        // Nothing drains: the second send would block for good without the budget.
+        let started = Instant::now();
+        assert_eq!(send_bounded(&tx, 2, budget).await, SendOutcome::TimedOut);
+        assert!(started.elapsed() >= budget);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(rx.recv().await, Some(1));
+        drop(rx);
+        assert_eq!(send_bounded(&tx, 3, budget).await, SendOutcome::Closed);
+    }
+
+    fn test_pod(ns: &str, name: &str) -> Pod {
+        let mut pod = Pod::default();
+        pod.metadata.namespace = Some(ns.into());
+        pod.metadata.name = Some(name.into());
+        pod
+    }
+
+    type Reports = Arc<Mutex<Vec<(Duration, Snapshot)>>>;
+
+    fn collector() -> (Reports, impl FnMut(Duration, Snapshot) + Send + 'static) {
+        let reports: Reports = Arc::default();
+        let sink = Arc::clone(&reports);
+        (reports, move |elapsed, snap| {
+            sink.lock().unwrap().push((elapsed, snap));
+        })
+    }
+
+    #[test]
+    fn stage_round_trips_through_its_byte_and_names_are_distinct() {
+        let all = [
+            Stage::Idle,
+            Stage::Filter,
+            Stage::Lookup,
+            Stage::Post,
+            Stage::Netns,
+            Stage::Compute,
+            Stage::Send,
+        ];
+        for s in all {
+            assert_eq!(Stage::from_u8(s as u8), s);
+        }
+        let names: std::collections::HashSet<&str> = all.iter().map(|s| s.name()).collect();
+        assert_eq!(names.len(), all.len());
+        let progress = Progress::default();
+        assert_eq!(progress.snapshot().stage, Stage::Idle);
+        progress.begin_pod(&test_pod("ns", "pod-1"));
+        assert_eq!(progress.snapshot().pod, "ns/pod-1");
+        assert_eq!(progress.snapshot().stage, Stage::Filter);
+        progress.finish_pod();
+        assert_eq!(progress.snapshot().done, 1);
+        assert_eq!(progress.snapshot().stage, Stage::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_slow_pass_is_reported_while_it_runs_with_its_progress() {
+        let progress = Arc::new(Progress::default());
+        let pass = {
+            let progress = Arc::clone(&progress);
+            async move {
+                for i in 0..4 {
+                    progress.begin_pod(&test_pod("ns", &format!("pod-{i}")));
+                    progress.set_stage(Stage::Netns);
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    progress.finish_pod();
+                }
+                "finished"
+            }
+        };
+        let (reports, on_slow) = collector();
+        let out = watch_slow_pass(
+            pass,
+            Arc::clone(&progress),
+            Duration::from_millis(60),
+            Duration::from_millis(40),
+            on_slow,
+        )
+        .await;
+        assert_eq!(out, "finished");
+        let reports = reports.lock().unwrap();
+        assert!(reports.len() >= 2, "{reports:?}");
+        assert!(reports[0].0 >= Duration::from_millis(60), "{reports:?}");
+        assert!(reports[0].1.done >= 1, "{reports:?}");
+        assert!(
+            reports.windows(2).all(|w| w[0].1.done <= w[1].1.done),
+            "{reports:?}"
+        );
+        // The line names the pod and the step it is on; that is what turns
+        // "still running" into something an operator can act on.
+        let mid = reports
+            .iter()
+            .find(|(_, s)| s.stage == Stage::Netns)
+            .expect("a report while a pod was in netns");
+        assert!(mid.1.pod.starts_with("ns/pod-"), "{mid:?}");
+    }
+
+    /// A stall in a std lock or a `/proc` read blocks the worker thread,
+    /// so nothing on that task runs again. On 2026-09-28 both loops on
+    /// the affected node stopped after a successful post, in an await or
+    /// a call not identified; whichever it was, the report must come.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_that_blocks_its_thread_is_still_reported() {
+        let progress = Arc::new(Progress::default());
+        progress.begin_pod(&test_pod("ns", "stuck"));
+        progress.set_stage(Stage::Compute);
+        let (reports, on_slow) = collector();
+        watch_slow_pass(
+            async { std::thread::sleep(Duration::from_millis(300)) },
+            Arc::clone(&progress),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            on_slow,
+        )
+        .await;
+        let reports = reports.lock().unwrap();
+        assert!(reports.len() >= 2, "{reports:?}");
+        assert!(
+            reports
+                .iter()
+                .all(|(_, s)| s.stage == Stage::Compute && s.pod == "ns/stuck"),
+            "{reports:?}"
+        );
+    }
+
+    /// The watch closure runs one event's `process_pod` under the same
+    /// watchdog; a stuck handler is reported with its pod and stage.
+    #[tokio::test]
+    async fn a_slow_watch_handler_is_reported_with_its_pod_and_stage() {
+        let progress = Arc::new(Progress::default());
+        let handler = {
+            let progress = Arc::clone(&progress);
+            async move {
+                progress.begin_pod(&test_pod("domain-frontend-dev-06", "frontend-cms-portal-1"));
+                progress.set_stage(Stage::Netns);
+                tokio::time::sleep(Duration::from_millis(120)).await;
+            }
+        };
+        let (reports, on_slow) = collector();
+        watch_slow_pass(
+            handler,
+            Arc::clone(&progress),
+            Duration::from_millis(40),
+            Duration::from_millis(40),
+            on_slow,
+        )
+        .await;
+        let reports = reports.lock().unwrap();
+        assert!(!reports.is_empty());
+        assert!(
+            reports.iter().all(|(_, s)| {
+                s.pod == "domain-frontend-dev-06/frontend-cms-portal-1" && s.stage == Stage::Netns
+            }),
+            "{reports:?}"
+        );
+        assert_eq!(Stage::Netns.name(), "netns");
+        assert!(HANDLER_SLOW_AFTER <= SLOW_PASS_AFTER);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_pass_is_not_reported() {
+        let (reports, on_slow) = collector();
+        let out = watch_slow_pass(
+            async { 7 },
+            Arc::new(Progress::default()),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            on_slow,
+        )
+        .await;
+        assert_eq!(out, 7);
+        // Past the first tick: the aborted watchdog must not fire late.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(reports.lock().unwrap().is_empty());
+    }
+
+    /// The resync loop's contract after 2026-09-28: a pass whose await
+    /// is never woken is dropped at the budget and the next tick runs a
+    /// fresh one, so the node's rows keep being re-posted regardless.
+    #[tokio::test]
+    async fn a_stuck_resync_pass_is_abandoned_at_its_budget_and_the_next_pass_runs() {
+        let progress = Arc::new(Progress::default());
+        progress.begin_pod(&test_pod("ns", "stuck"));
+        progress.set_stage(Stage::Netns);
+        progress.note_posted();
+        let started = Instant::now();
+        let abandoned = bounded_pass(
+            std::future::pending::<PassStats>(),
+            Arc::clone(&progress),
+            Duration::from_millis(60),
+            5,
+        )
+        .await;
+        assert_eq!(abandoned, None);
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The loop continues: the next pass is unaffected by the last.
+        let next = bounded_pass(
+            async {
+                PassStats {
+                    listed: 5,
+                    posted: 5,
+                    ..PassStats::default()
+                }
+            },
+            Arc::new(Progress::default()),
+            Duration::from_millis(60),
+            5,
+        )
+        .await;
+        assert_eq!(next.map(|s| s.posted), Some(5));
+        assert!(PASS_BUDGET + Duration::from_secs(60) < Duration::from_secs(900));
+    }
+
+    /// Same contract for one watch event: the consumer of the stream is
+    /// this handler, so a handler that never returns must be dropped or
+    /// the stream is never polled again.
+    #[tokio::test]
+    async fn a_stuck_watch_handler_is_abandoned_at_its_budget_and_the_stream_goes_on() {
+        let progress = Arc::new(Progress::default());
+        progress.begin_pod(&test_pod("domain-frontend-dev-06", "frontend-cms-portal-1"));
+        progress.set_stage(Stage::Compute);
+        let started = Instant::now();
+        let completed = bounded_event(
+            std::future::pending::<()>(),
+            Arc::clone(&progress),
+            Duration::from_millis(60),
+        )
+        .await;
+        assert!(!completed);
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let next = bounded_event(
+            async {},
+            Arc::new(Progress::default()),
+            Duration::from_millis(60),
+        )
+        .await;
+        assert!(next);
+        assert!(HANDLER_SLOW_AFTER < EVENT_BUDGET && EVENT_BUDGET < PASS_BUDGET);
+    }
+
+    /// The out-of-task backstop: with no pass completing, the liveness
+    /// subsystem fails at `LIVENESS_BUDGETS` budgets, which the
+    /// Supervisor turns into a process exit and a visible restart.
+    /// Virtual time (`start_paused`): sleeps, ticks and the clock advance
+    /// together, so the test cannot race a loaded runner.
+    #[tokio::test(start_paused = true)]
+    async fn liveness_fails_when_no_pass_completes_within_three_budgets() {
+        let clock = Arc::new(PassClock::new());
+        let budget = Duration::from_millis(40);
+        let started = tokio::time::Instant::now();
+        let outcome = resync_liveness(clock, budget, 3, Duration::from_millis(10)).await;
+        let err = outcome.expect_err("a stalled resync must fail the subsystem");
+        assert!(err.to_string().contains("no pass completed"), "{err}");
+        assert!(started.elapsed() >= budget * 3, "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(LIVENESS_BUDGETS, 3);
+        assert!(PASS_BUDGET * LIVENESS_BUDGETS == Duration::from_secs(1800));
+    }
+
+    /// A slow pass that keeps completing is not a stall. Same virtual
+    /// clock: the marker's 50 ms cadence stays under the 120 ms limit by
+    /// construction, not by the host being idle.
+    #[tokio::test(start_paused = true)]
+    async fn liveness_stays_quiet_while_passes_keep_completing() {
+        let clock = Arc::new(PassClock::new());
+        let marker = {
+            let clock = Arc::clone(&clock);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    clock.mark();
+                }
+            })
+        };
+        let limit = Duration::from_millis(40) * 3;
+        let liveness = resync_liveness(
+            Arc::clone(&clock),
+            Duration::from_millis(40),
+            3,
+            Duration::from_millis(10),
+        );
+        // 400 ms is more than three budgets past any single mark; the
+        // check must still be running when the window closes.
+        let still_running = tokio::time::timeout(Duration::from_millis(400), liveness)
+            .await
+            .is_err();
+        marker.abort();
+        assert!(still_running, "liveness failed a progressing resync");
+        assert!(clock.since_last() < limit, "{:?}", clock.since_last());
+    }
 
     fn pod_ip(ip: &str) -> PodIP {
         PodIP { ip: ip.to_string() }

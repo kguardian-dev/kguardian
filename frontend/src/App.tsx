@@ -25,6 +25,7 @@ import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadParams, wo
 import { jumpTarget } from './utils/vulnView';
 import { badgesByNode, useMapLens } from './hooks/useMapLens';
 import { LensLegend } from './components/Vulns/LensLegend';
+import { NodeReportingBanner } from './components/NodeReportingBanner';
 
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
@@ -681,6 +682,7 @@ function App() {
             </Button>
           </div>
         </header>
+        <NodeReportingBanner refreshTick={refreshTick} />
 
         {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">

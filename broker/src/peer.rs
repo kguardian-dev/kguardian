@@ -301,6 +301,11 @@ fn stale_alive_secs() -> u64 {
         .unwrap_or(DEFAULT_STALE_ALIVE_SECS)
 }
 
+/// The sweep's window, for reads that report against it (`/node/status`).
+pub(crate) fn stale_alive_window() -> Duration {
+    Duration::from_secs(stale_alive_secs())
+}
+
 /// The stale-alive sweep as a statement: every row still flagged alive
 /// that the controller has not re-posted since `cutoff` is marked dead.
 /// The controller re-posts every live pod on each 60 s resync (updating
@@ -312,19 +317,53 @@ fn stale_alive_secs() -> u64 {
 /// resync re-posts `is_dead=false` and the rows come straight back.
 /// A constant (and pinned by a unit test) rather than a diesel DSL
 /// expression only because naming the DSL's return type is unwieldy;
-/// `$1` is the cutoff, bound as a parameter.
+/// `$1` is the cutoff, bound as a parameter. `RETURNING node_name` is
+/// what lets the log name the nodes: a whole node going dead at once is
+/// a controller that stopped reporting, not a restart's ghosts.
 const STALE_ALIVE_SQL: &str = "UPDATE pod_details SET is_dead = true \
-     WHERE is_dead = false AND time_stamp < $1";
+     WHERE is_dead = false AND time_stamp < $1 RETURNING node_name";
 
-/// One stale-alive sweep: rows marked dead.
+#[derive(QueryableByName)]
+struct SweptRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    node_name: String,
+}
+
+/// Rows one stale-alive sweep marked dead, per node, node order.
 pub fn run_stale_alive_sweep(
     conn: &mut PgConnection,
     threshold: Duration,
-) -> Result<usize, DbError> {
+) -> Result<Vec<(String, usize)>, DbError> {
     let cutoff = window_cutoff(chrono::Utc::now().naive_utc(), threshold);
-    Ok(diesel::sql_query(STALE_ALIVE_SQL)
+    let swept = diesel::sql_query(STALE_ALIVE_SQL)
         .bind::<diesel::sql_types::Timestamp, _>(cutoff)
-        .execute(conn)?)
+        .load::<SweptRow>(conn)?;
+    Ok(count_by_node(swept.into_iter().map(|r| r.node_name)))
+}
+
+pub(crate) fn count_by_node(nodes: impl IntoIterator<Item = String>) -> Vec<(String, usize)> {
+    let mut counts = std::collections::BTreeMap::new();
+    for node in nodes {
+        *counts.entry(node).or_insert(0usize) += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// `node=count` pairs for the log line, the largest counts first and
+/// capped so a cluster-wide sweep cannot produce a megabyte of log.
+pub(crate) fn format_by_node(by_node: &[(String, usize)]) -> String {
+    const SHOWN: usize = 20;
+    let mut sorted: Vec<&(String, usize)> = by_node.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut out: Vec<String> = sorted
+        .iter()
+        .take(SHOWN)
+        .map(|(node, n)| format!("{node}={n}"))
+        .collect();
+    if sorted.len() > SHOWN {
+        out.push(format!("+{} more", sorted.len() - SHOWN));
+    }
+    out.join(" ")
 }
 
 /// Spawn the peer maintenance loop: the late-resolve pass
@@ -374,17 +413,27 @@ pub fn spawn(pool: DbPool) {
             }
             if stale > 0 {
                 let pool = pool.clone();
-                let result = tokio::task::spawn_blocking(move || -> Result<usize, DbError> {
-                    let mut conn = pool.get()?;
-                    run_stale_alive_sweep(&mut conn, Duration::from_secs(stale))
-                })
+                let result = tokio::task::spawn_blocking(
+                    move || -> Result<Vec<(String, usize)>, DbError> {
+                        let mut conn = pool.get()?;
+                        run_stale_alive_sweep(&mut conn, Duration::from_secs(stale))
+                    },
+                )
                 .await;
                 match result {
-                    Ok(Ok(0)) => debug!("peer stale-alive sweep: nothing stale"),
-                    Ok(Ok(marked_dead)) => info!(
-                        marked_dead,
+                    Ok(Ok(by_node)) if by_node.is_empty() => {
+                        debug!("peer stale-alive sweep: nothing stale")
+                    }
+                    // WARN, not INFO: whole nodes going dead here is how
+                    // F-19 hid ~150 running pods from the UI, and this
+                    // line was the only place it could have shown.
+                    Ok(Ok(by_node)) => warn!(
+                        marked_dead = by_node.iter().map(|(_, n)| n).sum::<usize>(),
+                        nodes = by_node.len(),
+                        by_node = %format_by_node(&by_node),
                         stale_alive_secs = stale,
-                        "peer stale-alive sweep marked ghost pods dead"
+                        "peer stale-alive sweep marked pods dead: their controllers have not \
+                         re-posted them within the window (see GET /node/status)"
                     ),
                     Ok(Err(e)) => warn!(error = %e, "peer stale-alive sweep failed"),
                     Err(e) => warn!(error = %e, "peer stale-alive sweep panicked"),
@@ -948,7 +997,7 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.ends_with("WHERE is_dead = false AND time_stamp < $1"),
+            sql.ends_with("WHERE is_dead = false AND time_stamp < $1 RETURNING node_name"),
             "{sql}"
         );
         assert!(!sql.contains("DELETE"), "{sql}");
@@ -964,6 +1013,23 @@ mod tests {
             window_cutoff(ts("2026-09-03T00:15:00"), Duration::from_secs(900)),
             cutoff
         );
+    }
+
+    #[test]
+    fn stale_sweep_log_names_nodes_largest_first_and_caps_the_list() {
+        let rows = ["b", "a", "b", "c", "b", "a"].map(String::from);
+        let by_node = count_by_node(rows);
+        assert_eq!(
+            by_node,
+            vec![("a".into(), 2), ("b".into(), 3), ("c".into(), 1)]
+        );
+        assert_eq!(format_by_node(&by_node), "b=3 a=2 c=1");
+        assert_eq!(format_by_node(&[]), "");
+        let many: Vec<(String, usize)> = (0..25).map(|i| (format!("n{i:02}"), 1)).collect();
+        let line = format_by_node(&many);
+        assert!(line.starts_with("n00=1 n01=1"), "{line}");
+        assert!(line.ends_with("n19=1 +5 more"), "{line}");
+        assert!(!line.contains("n20="), "{line}");
     }
 
     #[test]

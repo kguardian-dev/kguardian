@@ -40,3 +40,7 @@ dashmap = "6.1"
 rustls = { version = "0.23", features = ["ring"] } 
 serde_norway = "0.9"
 schemars = "1"
+
+[dev-dependencies]
+# `start_paused` liveness tests run on virtual time; production builds are unaffected.
+tokio = { version = "1.49.0", features = ["test-util"] }

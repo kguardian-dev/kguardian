@@ -112,6 +112,7 @@
             "group": "Endpoints",
             "pages": [
               "api-reference/endpoints/pods",
+              "api-reference/endpoints/nodes",
               "api-reference/endpoints/traffic",
               "api-reference/endpoints/syscalls",
               "api-reference/endpoints/seccomp",
