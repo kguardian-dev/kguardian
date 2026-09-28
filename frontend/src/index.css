@@ -30,6 +30,9 @@
      enough to read on the dark card, where the brand #4E3AD9 is ~2.4:1. */
   --theme-state-enforcing: #34D399;
   --theme-state-audit: #A5B4FC;
+  /* The accent as text (active rail item, palette icon, allow counts): the
+     brand indigo is 2.3 to 2.6:1 on these surfaces, the 300 step is >= 7.5:1. */
+  --theme-accent-fg: #A5B4FC;
 }
 
 /* Light theme override */
@@ -53,6 +56,8 @@
   --theme-sev-low: #475569;
   --theme-state-enforcing: #065F46;
   --theme-state-audit: #4338CA;
+  /* On light surfaces the brand indigo itself reads at >= 6.3:1. */
+  --theme-accent-fg: #4E3AD9;
 }
 
 @theme {
@@ -73,6 +78,8 @@
      one hover — replaces the ad-hoc blue-600/green-600 hovers across the app. */
   --color-hubble-accent: #4E3AD9;
   --color-hubble-accent-hover: #5B48E6;
+  /* Accent for text and icons (text-accent-fg); hubble-accent stays for fills. */
+  --color-accent-fg: var(--theme-accent-fg);
   --color-hubble-success: #10B981;
   --color-hubble-success-hover: #0E9E70;
   --color-hubble-warning: #F59E0B;

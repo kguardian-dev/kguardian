@@ -22,3 +22,10 @@ test('both toggles say whether the rail is expanded', () => {
   rerender(<Sidebar version="t" items={items} collapsed={false} onToggleCollapse={() => {}} />);
   expect(screen.getByRole('button', { name: 'Collapse sidebar' }).getAttribute('aria-expanded')).toBe('true');
 });
+
+test('the active item is coloured with the accent foreground token, not the brand fill (2.6:1 as text on the rail)', () => {
+  render(<Sidebar version="t" items={[{ id: 'map', label: 'Network Map', icon: Share2, group: 'Views', active: true, onClick: () => {} }]} />);
+  const cls = screen.getByRole('button', { name: 'Network Map' }).className;
+  expect(cls).toContain('text-accent-fg');
+  expect(cls).not.toContain('text-hubble-accent');
+});

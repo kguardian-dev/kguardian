@@ -19,7 +19,16 @@ export function AccountMenu({ collapsed = false, onOpenSettings }: AccountMenuPr
   const { theme, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   useDismissable(open, () => setOpen(false), ref);
+
+  // Focus returns to the button before the item unmounts, so what opens next
+  // (Settings) records the button as its opener, not the vanishing item.
+  const closeThen = (action: () => void) => {
+    triggerRef.current?.focus();
+    setOpen(false);
+    action();
+  };
 
   const primaryLabel = user?.name ?? 'Local access';
   const secondaryLabel = user?.email ?? (mode === 'oidc' ? 'Signed in' : 'SSO not configured');
@@ -28,6 +37,7 @@ export function AccountMenu({ collapsed = false, onOpenSettings }: AccountMenuPr
   return (
     <div ref={ref} className="relative flex-1 min-w-0">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((o) => !o)}
         title={collapsed ? primaryLabel : undefined}
         className={`w-full flex items-center h-9 rounded-control hover:bg-hubble-hover transition-colors ${
@@ -59,7 +69,7 @@ export function AccountMenu({ collapsed = false, onOpenSettings }: AccountMenuPr
           </div>
 
           <button
-            onClick={() => { onOpenSettings(); setOpen(false); }}
+            onClick={() => closeThen(onOpenSettings)}
             className="w-full flex items-center gap-2.5 px-3 h-9 text-sm text-secondary hover:bg-hubble-hover hover:text-primary transition-colors"
           >
             <SettingsIcon size={15} className="shrink-0" />
@@ -78,7 +88,7 @@ export function AccountMenu({ collapsed = false, onOpenSettings }: AccountMenuPr
             <>
               <div className="my-1 border-t border-hubble-border" />
               <button
-                onClick={() => { signOut(); setOpen(false); }}
+                onClick={() => closeThen(signOut)}
                 className="w-full flex items-center gap-2.5 px-3 h-9 text-sm text-hubble-error hover:bg-hubble-error/10 transition-colors"
               >
                 <LogOut size={15} className="shrink-0" />

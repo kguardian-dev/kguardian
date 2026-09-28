@@ -2,7 +2,7 @@
 import { afterEach, expect, test } from 'vitest';
 import { useEffect, useRef, useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { useDialogFocus } from './useDialogFocus';
+import { openModalDialogs, useDialogFocus } from './useDialogFocus';
 import { Modal } from '../components/ui/Modal';
 
 afterEach(cleanup);
@@ -187,4 +187,14 @@ test('stacked: closing a palette opened from the body puts focus in the rail, no
   // The element itself: the body's text is also "Search" here.
   expect(document.activeElement).not.toBe(document.body);
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Search' }));
+});
+
+test('openModalDialogs lists open aria-modal dialogs in document order and skips one fading out under aria-hidden', () => {
+  document.body.innerHTML = `
+    <div role="dialog" aria-modal="true" id="a"></div>
+    <div aria-hidden="true"><div role="dialog" aria-modal="true" id="closing"></div></div>
+    <div role="dialog" id="plain"></div>
+    <div role="dialog" aria-modal="true" id="b"></div>`;
+  expect(openModalDialogs().map((el) => el.id)).toEqual(['a', 'b']);
+  document.body.innerHTML = '';
 });

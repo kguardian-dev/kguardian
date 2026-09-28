@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './Button';
+import { openModalDialogs } from '../../hooks/useDialogFocus';
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | 'full';
 
@@ -30,6 +31,9 @@ interface ModalProps {
   /** Placement. 'top' anchors near the top (command-palette style);
    *  'right' is a full-height side drawer over the current view. */
   align?: 'center' | 'top' | 'right';
+  /** Selector of the element to focus on open (a search box that sits behind
+   *  the header's Close button). Defaults to the first focusable. */
+  initialFocus?: string;
 }
 
 const SIZE_CLASS: Record<ModalSize, string> = {
@@ -42,6 +46,18 @@ const SIZE_CLASS: Record<ModalSize, string> = {
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+// Return-focus chain per open dialog; one opened from inside another inherits its
+// chain, so the Policy Builder's editor returns focus to the rail after its picker unmounts.
+const returnChainOf = new WeakMap<HTMLElement, HTMLElement[]>();
+
+function returnChain(): HTMLElement[] {
+  if (typeof document === 'undefined') return [];
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return [];
+  const host = el.closest<HTMLElement>('[role="dialog"][aria-modal="true"]');
+  return [el, ...(host ? returnChainOf.get(host) ?? [] : [])];
+}
 
 /**
  * One dialog shell for every overlay in the app. Replaces the four hand-rolled
@@ -65,22 +81,29 @@ export function Modal({
   contentClassName = 'flex-1 min-h-0 overflow-y-auto',
   disableBackdropClose = false,
   align = 'center',
+  initialFocus,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   // Record the opener while rendering the open, before commit: a child with
   // autoFocus (the command palette's input) takes focus during commit, ahead
   // of any effect here, and would be recorded as the "opener" instead.
-  const activeNow = () => (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null));
-  const [opener, setOpener] = useState<HTMLElement | null>(() => (isOpen ? activeNow() : null));
+  const [returnTo, setReturnTo] = useState<HTMLElement[]>(() => (isOpen ? returnChain() : []));
   const [openSeen, setOpenSeen] = useState(isOpen);
   if (isOpen !== openSeen) {
     setOpenSeen(isOpen);
-    if (isOpen) setOpener(activeNow());
+    if (isOpen) setReturnTo(returnChain());
   }
   const labelId = useId();
   // Keep the node mounted through the exit transition.
   const [mounted, setMounted] = useState(isOpen);
   const [entered, setEntered] = useState(false);
+
+  // The latest onClose, so the key listener is not torn down and re-added on
+  // every render (callers pass fresh arrow functions).
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (isOpen) {
@@ -105,27 +128,36 @@ export function Modal({
     };
   }, [isOpen]);
 
-  // Focus management: remember the trigger, move focus in, restore on close.
+  // Move focus in once the panel is in the DOM: it mounts a frame after
+  // isOpen flips, so an effect on isOpen alone found no panel and left focus
+  // on the body. A child that already took focus (autoFocus) keeps it.
+  useEffect(() => {
+    if (!isOpen || !mounted) return;
+    const node = panelRef.current;
+    if (!node) return;
+    returnChainOf.set(node, returnTo);
+    if (node.contains(document.activeElement)) return;
+    const target =
+      (initialFocus ? node.querySelector<HTMLElement>(initialFocus) : null) ??
+      node.querySelector<HTMLElement>(FOCUSABLE) ??
+      node;
+    target.focus();
+  }, [isOpen, mounted, initialFocus, returnTo]);
+
+  // Restore focus on close.
   useEffect(() => {
     if (!isOpen) return;
-    const node = panelRef.current;
-    if (node) {
-      const first = node.querySelector<HTMLElement>(FOCUSABLE);
-      (first ?? node).focus();
-    }
     return () => {
-      const prev = opener;
-      if (prev && prev !== document.body && prev.isConnected) prev.focus?.();
+      returnTo.find((el) => el !== document.body && el.isConnected)?.focus?.();
       const now = document.activeElement;
-      if (now && now !== document.body && now.isConnected && !node?.contains(now)) return;
+      // Focus is on something real: not the body, not inside this dialog while
+      // it fades out under aria-hidden.
+      if (now && now !== document.body && now.isConnected && !now.closest('[aria-hidden="true"]')) return;
       // Opened with focus on the body (or its trigger is gone): don't drop
       // focus on the body, go to the dialog still open underneath, if any.
-      const under = [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].filter(
-        (el) => el !== node && !el.closest('[aria-hidden="true"]'),
-      );
-      under.at(-1)?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+      openModalDialogs().at(-1)?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
     };
-  }, [isOpen, opener]);
+  }, [isOpen, returnTo]);
 
   // Body-scroll-lock while any modal is open.
   useEffect(() => {
@@ -137,35 +169,39 @@ export function Modal({
     };
   }, [mounted]);
 
-  // Esc-to-close + Tab focus trap.
+  // Esc-to-close + Tab focus trap. Only the topmost dialog owns the keyboard:
+  // stopPropagation never reached the other open Modals' document listeners.
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' && e.key !== 'Tab') return;
+      const node = panelRef.current;
+      if (!node || openModalDialogs().at(-1) !== node) return;
       if (e.key === 'Escape') {
-        e.stopPropagation();
-        onClose();
+        e.stopImmediatePropagation();
+        onCloseRef.current();
         return;
       }
-      if (e.key !== 'Tab') return;
-      const node = panelRef.current;
-      if (!node) return;
       const items = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
         (el) => el.offsetParent !== null,
       );
       if (items.length === 0) return;
       const first = items[0];
       const last = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
+      // Focus outside the dialog (it opened with focus on the body) is pulled
+      // back in rather than let Tab walk the page behind the backdrop.
+      const inside = node.contains(document.activeElement);
+      if (e.shiftKey && (document.activeElement === first || !inside)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
         e.preventDefault();
         first.focus();
       }
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!mounted) return null;
 

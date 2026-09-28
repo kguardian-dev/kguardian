@@ -50,11 +50,16 @@ describe('AIAssistant opens docked', () => {
   });
 });
 
-describe('AIAssistant below 1024px', () => {
+describe('AIAssistant below 1280px', () => {
+  const queries: string[] = [];
   beforeEach(() => {
     localStorage.clear();
-    // A narrow window: the docked panel would leave the map too little room.
-    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('1023'), media: query, addEventListener: () => {}, removeEventListener: () => {} }));
+    // A window under 1280px: docked next to the rail, the panel would leave the
+    // map under 600px, where its toolbar wraps.
+    vi.stubGlobal('matchMedia', (query: string) => {
+      queries.push(query);
+      return { matches: query.includes('1279'), media: query, addEventListener: () => {}, removeEventListener: () => {} };
+    });
   });
   afterEach(() => {
     cleanup();
@@ -70,6 +75,8 @@ describe('AIAssistant below 1024px', () => {
     expect(screen.queryByLabelText('Expand to center')).toBeNull();
     // The preference is kept for wider screens.
     expect(localStorage.getItem('kguardian.ai-assistant.view-mode')).toBe('side-panel');
+    // 1024 to 1279 used to dock, leaving a 352px map at 1024.
+    expect(queries).toContain('(max-width: 1279px)');
   });
 });
 

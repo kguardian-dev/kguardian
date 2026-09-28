@@ -106,7 +106,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
                     collapsed ? 'justify-center px-0' : 'gap-2.5 px-3'
                   } ${
                     item.active
-                      ? 'bg-hubble-accent/15 text-hubble-accent font-medium'
+                      ? 'bg-hubble-accent/15 text-accent-fg font-medium'
                       : 'text-secondary hover:bg-hubble-hover hover:text-primary'
                   }`}
                 >
