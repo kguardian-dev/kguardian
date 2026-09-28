@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.20.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.2...frontend/v1.20.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* **controller:** budget the pod loops and surface nodes that stop reporting pods ([43cbb55](https://github.com/kguardian-dev/kguardian/commit/43cbb55eda9c9a111464819924bf7d90c4284285))
+* **frontend:** a namespace in an Images or Workloads link narrows to it ([#1790](https://github.com/kguardian-dev/kguardian/issues/1790)) ([79a3a35](https://github.com/kguardian-dev/kguardian/commit/79a3a35bafe8512f5612b45d0e42eb56be1db3d0))
+* **frontend:** attribute gone stored peers to their workload and stop calling private addresses Internet ([#1771](https://github.com/kguardian-dev/kguardian/issues/1771)) ([de6e866](https://github.com/kguardian-dev/kguardian/commit/de6e866cae1910015055e3856def4ca2d3385090))
+* **frontend:** broker timestamps as UTC; honest audit verdicts panel ([#1770](https://github.com/kguardian-dev/kguardian/issues/1770)) ([a2fcc9c](https://github.com/kguardian-dev/kguardian/commit/a2fcc9c8176c35c5a34b1147723c3d666e44ed97))
+* **frontend:** hand focus to the textarea when a reply ends on the Stop button ([#1783](https://github.com/kguardian-dev/kguardian/issues/1783)) ([85c4ea8](https://github.com/kguardian-dev/kguardian/commit/85c4ea8d14ad09282dfce18012e7ddfb6d4d0590))
+* **frontend:** honest workload views under slow or failing Broker reads ([#1775](https://github.com/kguardian-dev/kguardian/issues/1775)) ([bee7a65](https://github.com/kguardian-dev/kguardian/commit/bee7a65dcc9a1bf28ddbb5a40b2adae92eb03408))
+* **frontend:** Images view counts, drawer state and admission policy reads ([#1776](https://github.com/kguardian-dev/kguardian/issues/1776)) ([51f42a1](https://github.com/kguardian-dev/kguardian/commit/51f42a12ea118c676ab9cc35bddb0a2b295f23af))
+* **frontend:** make the Policy Builder honest about deny-all and selector-less Service peers ([#1773](https://github.com/kguardian-dev/kguardian/issues/1773)) ([381a74b](https://github.com/kguardian-dev/kguardian/commit/381a74b93a25e88c531bdcb9d78e5ae25c27a2c0))
+* **frontend:** read the 503 body so a database timeout is not called a read-budget shed ([#1787](https://github.com/kguardian-dev/kguardian/issues/1787)) ([dde76df](https://github.com/kguardian-dev/kguardian/commit/dde76df59d599ec70c7fac4371077e51eb38ad1d))
+* **frontend:** return focus from the docked assistant to what opened it ([#1784](https://github.com/kguardian-dev/kguardian/issues/1784)) ([6216669](https://github.com/kguardian-dev/kguardian/commit/6216669bfcb0ea463bcfdf41dfbac29f01946332))
+* **frontend:** sequence pod-data runs and make the map honest about what it is not showing ([#1777](https://github.com/kguardian-dev/kguardian/issues/1777)) ([e7e2e42](https://github.com/kguardian-dev/kguardian/commit/e7e2e42b2fb7f480aa7455c0f616612e5495172e))
+* **frontend:** show a banner when nodes stop reporting pods ([6d2c22e](https://github.com/kguardian-dev/kguardian/commit/6d2c22eb454f2cc0e5aae7d54cb3d876f893d762))
+* **frontend:** topmost dialog owns Escape and Tab; dialog focus, names and accent contrast ([#1772](https://github.com/kguardian-dev/kguardian/issues/1772)) ([2f261a1](https://github.com/kguardian-dev/kguardian/commit/2f261a1432c88066ed0e4089049ca2ebebeb7429))
+* **frontend:** type never-computed workload list items so every reader guards them ([#1786](https://github.com/kguardian-dev/kguardian/issues/1786)) ([6ad5c19](https://github.com/kguardian-dev/kguardian/commit/6ad5c19eb0d1345d52ff6e96c1d188c7082dbc9c))
+
 ## [1.20.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.1...frontend/v1.20.2) (2026-09-28)
 
 
