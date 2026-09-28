@@ -137,6 +137,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the broker. Defaults to false; enable when running >1 replica so voluntary evictions can't take all of them out. |
 | broker.podDisruptionBudget.maxUnavailable | string | `""` |  |
 | broker.podDisruptionBudget.minAvailable | int | `1` | Either minAvailable or maxUnavailable can be set (not both). Accepts integer or percentage string ("50%"). |
+| broker.podInventory.retention.deadPodDays | int | `0` | Prune pods that stopped running after this many days, independently of the audit window. 0 keeps the existing rule: the audit retention days (`broker.audit.retention.days`), or 7 when audit retention is off. `/pod/info` returns dead rows too, so on a cluster with heavy pod churn a shorter window keeps that listing small. Rendered into `DEAD_POD_RETENTION_DAYS`. |
 | broker.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Broker pod security context. Runs as non-root user 1000 |
 | broker.priorityClassName | string | `""` | Priority class to be used for the kguardian broker pods |
 | broker.readAcquireWaitMs | int | `5000` | How long a read queues for budget before being shed with 503 (ms). 0 fails fast with no queueing. 5s rides out a burst (a hard-cap read holds its budget ~1-3s) while failing inside a typical client timeout. |

@@ -118,6 +118,26 @@ kept — containers, volumes, and status are dropped.
 
 ```bash
 curl http://localhost:9090/pod/info
+curl 'http://localhost:9090/pod/info?include_dead=false'
+```
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_dead` | bool | `false` returns only pods running now. Default `true`: dead rows stay in the listing for the dead-pod retention window (`DEAD_POD_RETENTION_DAYS`, else the audit window, else 7 days when audit retention is off), because the UI and the policy generators attribute historical traffic peers against it. On a cluster with heavy pod churn the dead rows are most of the table, so callers that only need the live inventory should pass `false`. |
+
+## GET /pod/namespaces
+
+The distinct namespaces of pods running now, sorted, as a JSON array of
+strings. Cluster-wide rows (NULL namespace) are left out. This is what the
+UI's namespace picker reads; it used to derive the list from the whole
+`/pod/info` listing, which on a busy cluster grew past the browser's
+request timeout.
+
+```bash
+curl http://localhost:9090/pod/namespaces
+# ["argocd","kube-system","payments"]
 ```
 
 ## GET /pod/name/&#123;name&#125;

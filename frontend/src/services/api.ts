@@ -28,6 +28,17 @@ function rethrowCompute(error: unknown, path: string): never {
   throw error;
 }
 
+/** Sorted namespace list with "default" moved to the front when present. */
+export function orderNamespaces(namespaces: string[]): string[] {
+  const sorted = Array.from(new Set(namespaces)).sort();
+  const defaultIndex = sorted.indexOf('default');
+  if (defaultIndex > 0) {
+    sorted.splice(defaultIndex, 1);
+    sorted.unshift('default');
+  }
+  return sorted;
+}
+
 class BrokerAPIClient {
   private client: AxiosInstance;
 
@@ -261,9 +272,33 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get all unique namespaces from pods
+   * Namespaces with at least one running pod, "default" first.
+   *
+   * Reads `GET /pod/namespaces`, one DISTINCT over the live rows. Deriving
+   * the list from the whole `/pod/info` listing, as this did before, meant
+   * the picker depended on the heaviest response the broker produces: on a
+   * cluster with heavy pod churn the dead rows made that listing outgrow the
+   * client timeout, and the picker silently fell back to just "default". A
+   * broker older than the endpoint answers 404; then the old derivation runs.
    */
   async getNamespaces(): Promise<string[]> {
+    try {
+      const response = await this.client.get('/pod/namespaces');
+      if (Array.isArray(response.data)) {
+        return orderNamespaces(response.data.filter((ns): ns is string => typeof ns === 'string'));
+      }
+      console.warn('API returned non-array data for /pod/namespaces:', response.data);
+    } catch (error) {
+      if (!(axios.isAxiosError(error) && error.response?.status === 404)) {
+        console.error('Error fetching namespaces:', error);
+        return ['default'];
+      }
+    }
+    return this.namespacesFromPods();
+  }
+
+  /** Pre-`/pod/namespaces` brokers: derive the list from the pod inventory. */
+  private async namespacesFromPods(): Promise<string[]> {
     try {
       const pods = await this.getAllPods();
 
@@ -274,27 +309,12 @@ class BrokerAPIClient {
       }
 
       const namespaces = new Set<string>();
-
       pods.forEach(pod => {
-        if (pod.pod_namespace) {
+        if (pod.pod_namespace && !pod.is_dead) {
           namespaces.add(pod.pod_namespace);
         }
       });
-
-      // Convert to array and sort, with "default" always first
-      const namespaceArray = Array.from(namespaces).sort();
-      const defaultIndex = namespaceArray.indexOf('default');
-
-      if (defaultIndex > 0) {
-        // Move "default" to the front
-        namespaceArray.splice(defaultIndex, 1);
-        namespaceArray.unshift('default');
-      } else if (defaultIndex === -1 && namespaceArray.length > 0) {
-        // If no "default" namespace exists, still sort alphabetically
-        return namespaceArray;
-      }
-
-      return namespaceArray;
+      return orderNamespaces(Array.from(namespaces));
     } catch (error) {
       console.error('Error fetching namespaces:', error);
       return ['default'];

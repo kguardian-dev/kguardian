@@ -643,6 +643,15 @@ broker:
     # more. Clamped to a minimum 50ms broker-side.
     evalTimeoutMs: 500
 
+  podInventory:
+    retention:
+      # -- Prune pods that stopped running after this many days, independently
+      # of the audit window. 0 keeps the existing rule: the audit retention
+      # days (`broker.audit.retention.days`), or 7 when audit retention is
+      # off. `/pod/info` returns dead rows too, so on a cluster with heavy pod
+      # churn a shorter window keeps that listing small. Rendered into
+      # `DEAD_POD_RETENTION_DAYS`.
+      deadPodDays: 0
   traffic:
     # -- Retention for the `pod_traffic` table, the observed flows every
     # generated NetworkPolicy is built from. A tokio task in the broker

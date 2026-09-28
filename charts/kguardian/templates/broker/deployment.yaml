@@ -124,6 +124,17 @@ spec:
               value: {{ .Values.broker.audit.retention.batchSize | quote }}
             {{- end }}
             {{/*
+              Dead-pod pruning window (values.yaml `broker.podInventory.retention`).
+              0 means "follow the audit window", which is also what the broker does
+              when the env var is absent, so only a positive value is rendered.
+            */}}
+            {{- $podInventory := .Values.broker.podInventory | default dict }}
+            {{- $podRetention := $podInventory.retention | default dict }}
+            {{- if gt (int ($podRetention.deadPodDays | default 0)) 0 }}
+            - name: DEAD_POD_RETENTION_DAYS
+              value: {{ $podRetention.deadPodDays | quote }}
+            {{- end }}
+            {{/*
               pod_traffic retention (values.yaml `broker.traffic.retention`).
               Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:
               0 is the documented "disable retention" value. The dict

@@ -132,6 +132,7 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/pod/traffic", READ),
     rule("GET", "/pod/traffic/{name}", READ),
     rule("GET", "/pod/info", READ),
+    rule("GET", "/pod/namespaces", READ),
     rule("GET", "/pod/list/{node}", READ),
     rule("GET", "/pod/name/{name}", READ),
     rule("GET", "/pod/ip/{ip}", READ),
