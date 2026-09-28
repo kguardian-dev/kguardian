@@ -334,6 +334,19 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
 
+  // Docked, the panel is a landmark, not a Modal, so nothing returned focus
+  // when it closed. The opener is read while rendering the mount, before
+  // commit: an effect would run again under StrictMode after the input below
+  // has taken focus and record the textarea. The rail item is the fallback.
+  const [opener] = useState<HTMLElement | null>(() => {
+    const el = document.activeElement;
+    return el instanceof HTMLElement && el !== document.body ? el : null;
+  });
+  const closeDocked = () => {
+    (opener?.isConnected ? opener : document.querySelector<HTMLElement>('nav button[data-nav-id="assistant"]'))?.focus();
+    onClose();
+  };
+
   // A view's "Ask AI" context lands in the input for the user to review.
   const prefillNonce = prefill?.nonce;
   const prefillText = prefill?.text;
@@ -520,7 +533,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const onDockedKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== 'Escape') return;
     e.stopPropagation();
-    onClose();
+    closeDocked();
   };
 
   const toggleViewMode = () => {
@@ -679,7 +692,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         </div>
       </div>
 
-      <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
+      <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={closeDocked}>
         <Button variant="ghost" size="sm" iconOnly leftIcon={ChevronRight} onClick={toggleCollapse} aria-label="Collapse panel" title="Collapse panel" />
         <Button variant="ghost" size="sm" iconOnly leftIcon={Maximize2} onClick={toggleViewMode} aria-label="Expand to center" title="Expand to center" />
       </ChatHeader>
