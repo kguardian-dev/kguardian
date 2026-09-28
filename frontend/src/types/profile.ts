@@ -41,19 +41,22 @@ export interface DimensionBrief {
   status: PostureStatus;
 }
 
-export interface WorkloadListItem {
+interface WorkloadListItemBase {
   clusterId: string;
   namespace: string;
   kind: string;
   name: string;
-  /** null when the snapshotter has never computed this workload (only a failed attempt exists); posture, dimensions and findingCounts are then absent on the wire. */
-  revision: number | null;
-  contentHash: string | null;
-  computedAt: string | null;
-  lastChangedAt: string | null;
   /** The snapshotter's most recent failed attempt (Broker 1.20+); beside a computed profile, the profile fields are the last good one. */
   lastError?: string | null;
   failedAt?: string | null;
+}
+
+/** A `GET /workloads` item with a stored profile snapshot. */
+export interface ComputedWorkloadListItem extends WorkloadListItemBase {
+  revision: number;
+  contentHash: string;
+  computedAt: string;
+  lastChangedAt: string;
   posture: Posture;
   dimensions: {
     network: DimensionBrief;
@@ -64,6 +67,23 @@ export interface WorkloadListItem {
   };
   findingCounts: Record<FindingSeverity, number>;
 }
+
+/**
+ * A `GET /workloads` item whose every snapshot attempt failed (Broker 1.20+):
+ * no profile fields on the wire, only the failure. `computedAt === null` is
+ * the discriminant, so a reader must check it before touching the posture.
+ */
+export interface FailedWorkloadListItem extends WorkloadListItemBase {
+  revision: null;
+  contentHash: null;
+  computedAt: null;
+  lastChangedAt: null;
+  posture?: undefined;
+  dimensions?: undefined;
+  findingCounts?: undefined;
+}
+
+export type WorkloadListItem = ComputedWorkloadListItem | FailedWorkloadListItem;
 
 export interface WorkloadListPage {
   items: WorkloadListItem[];

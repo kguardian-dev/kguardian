@@ -10,6 +10,8 @@ import type { PodInfo, PodNodeData } from '../types';
 import type { ImageVulnsPage } from '../types/vulns';
 import { badgesByNode, coverageBadge, imagesByWorkload, sbomBadge, supplyBadge, useMapLens, vulnBadge, type ImageFacts } from './useMapLens';
 import { VulnApiError } from '../services/vulnApi';
+import type { ProfileApi } from '../services/profileApi';
+import type { WorkloadListItem } from '../types/profile';
 
 // Inputs are Broker responses: captures from a Broker at main
 // (fixtures/vuln-captures) and, for an older Broker, from #1671
@@ -185,10 +187,34 @@ describe('Supply chain lens, read through the replayed Broker', () => {
 });
 
 describe('Coverage lens', () => {
+  const checkout = listNamespacePayments.body.items.find((w) => w.name === 'checkout')!;
+  // Broker 1.20+: a workload whose every snapshot attempt failed is listed without posture or dimensions.
+  const failed: WorkloadListItem = {
+    clusterId: checkout.clusterId, namespace: 'payments', kind: 'Deployment', name: 'reports',
+    revision: null, contentHash: null, computedAt: null, lastChangedAt: null,
+    lastError: 'canceling statement due to statement timeout', failedAt: '2026-09-29T02:11:03.123456Z',
+  };
+
   test('from the workload profile list; no profile is unknown', () => {
-    const checkout = listNamespacePayments.body.items.find((w) => w.name === 'checkout')!;
-    expect(coverageBadge(checkout).text).toBe(`${Math.round(checkout.posture.coverage * 100)}% seen`);
+    expect(coverageBadge(checkout).text).toBe(`${Math.round(checkout.posture!.coverage * 100)}% seen`);
     expect(coverageBadge(undefined).tone).toBe('unknown');
+  });
+
+  test('a workload whose snapshots all failed is "profile failed" with the error, never a coverage number', () => {
+    const b = coverageBadge(failed);
+    expect(b).toMatchObject({ tone: 'unknown', text: 'profile failed' });
+    expect(b.label).toMatch(/snapshot for this workload failed: canceling statement due to statement timeout/);
+    expect(b.label).not.toMatch(/%/);
+  });
+
+  test('one failed workload in the page does not put the lens into its error state; the others keep their badges', async () => {
+    const profileApi = { listWorkloads: async () => ({ items: [checkout, failed], nextAfter: null }) } as unknown as ProfileApi;
+    const vulnApi = replayVulnApi().api;
+    const { result } = renderHook(() => useMapLens('payments', 'coverage', 0, { vulnApi, profileApi }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.byWorkload.get('payments/Deployment/checkout')?.text).toBe(`${Math.round(checkout.posture!.coverage * 100)}% seen`);
+    expect(result.current.byWorkload.get('payments/Deployment/reports')).toMatchObject({ tone: 'unknown', text: 'profile failed' });
   });
 });
 
