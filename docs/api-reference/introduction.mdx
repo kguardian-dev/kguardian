@@ -187,7 +187,9 @@ most-recent-first) and `/audit/verdicts` defaults to 100 (clamped to
 tiebreak for stable cursor-style traversal. Only
 `/pod/traffic/{name}` remains unbounded. The `/pod/info` and
 `/svc/info` endpoints return all rows but have stable ordering — see
-each page for the sort key.
+each page for the sort key; `/pod/info?include_dead=false` and
+`/pod/namespaces` are the small forms for callers that only need what
+runs now.
 
 ### Filtering
 

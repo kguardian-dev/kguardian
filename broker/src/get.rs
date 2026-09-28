@@ -131,6 +131,19 @@ pub fn pod_traffic(
     Ok(pod)
 }
 
+/// Query params for `GET /pod/info`.
+#[derive(serde::Deserialize)]
+pub struct PodInfoQuery {
+    /// `false` returns only the pods running now. The default (`true`) is
+    /// the whole table, dead rows included: the UI's map and the policy
+    /// generators attribute historical traffic peers against it, so a peer
+    /// that has since died still resolves to its namespace and identity.
+    /// Callers that only want the live inventory (service backends, the
+    /// assistant's pod list) pass `include_dead=false`; on a cluster with
+    /// heavy pod churn the dead rows are most of the table.
+    pub include_dead: Option<bool>,
+}
+
 #[get(
     "/pod/info",
     wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
@@ -138,8 +151,10 @@ pub fn pod_traffic(
 pub async fn get_pod_details(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
+    query: web::Query<PodInfoQuery>,
 ) -> actix_web::Result<impl Responder> {
-    debug!("select pod details table");
+    let include_dead = query.include_dead.unwrap_or(true);
+    debug!(include_dead, "select pod details table");
 
     // `pod_details_all` has NO row limit — it is a whole-table read. It is
     // charged a flat reservation rather than an exact `rows x cost` estimate
@@ -160,7 +175,7 @@ pub async fn get_pod_details(
 
     let pod_detail = web::block(move || {
         let mut conn = pool.get()?;
-        pod_details(&mut conn)
+        pod_details(&mut conn, include_dead)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -249,18 +264,87 @@ pub(crate) fn compact_svc_spec(v: &mut serde_json::Value) {
     }
 }
 
-pub fn pod_details(conn: &mut PgConnection) -> Result<Option<Vec<PodDetail>>, DbError> {
+/// The `/pod/info` listing. `include_dead=false` keeps only pods running
+/// now; see `PodInfoQuery`.
+fn pod_details_query(
+    include_dead: bool,
+) -> schema::pod_details::BoxedQuery<'static, diesel::pg::Pg> {
     use schema::pod_details::dsl::*;
+    let mut query = pod_details.into_boxed();
+    if !include_dead {
+        query = query.filter(is_dead.eq(false));
+    }
     // Stable display order so the frontend's pod-info table doesn't
     // reshuffle between reads. pod_namespace is Nullable — Postgres
     // sorts NULLs LAST for ASC by default, which lands cluster-wide
     // (namespaceless) entries at the bottom. pod_name is the PK so
     // ties are impossible within a namespace.
-    let pod = pod_details
-        .order((pod_namespace.asc(), pod_name.asc()))
+    query.order((pod_namespace.asc(), pod_name.asc()))
+}
+
+pub fn pod_details(
+    conn: &mut PgConnection,
+    include_dead: bool,
+) -> Result<Option<Vec<PodDetail>>, DbError> {
+    let pod = pod_details_query(include_dead)
         .load::<PodDetail>(conn)
         .optional()?;
     Ok(pod)
+}
+
+/// The distinct namespaces of pods running now, sorted. Cluster-wide rows
+/// carry a NULL namespace and are left out.
+fn pod_namespaces_query() -> schema::pod_details::BoxedQuery<
+    'static,
+    diesel::pg::Pg,
+    diesel::sql_types::Nullable<diesel::sql_types::Text>,
+> {
+    use schema::pod_details::dsl::*;
+    pod_details
+        .select(pod_namespace)
+        .distinct()
+        .filter(is_dead.eq(false))
+        .filter(pod_namespace.is_not_null())
+        .order(pod_namespace.asc())
+        .into_boxed()
+}
+
+pub fn pod_namespaces(conn: &mut PgConnection) -> Result<Vec<String>, DbError> {
+    let rows = pod_namespaces_query().load::<Option<String>>(conn)?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// Flat read-budget reservation for `/pod/namespaces`: a few hundred short
+/// strings at most, whatever the pod count.
+const NAMESPACES_LIST_COST_BYTES: u64 = 64 * 1024;
+
+#[get(
+    "/pod/namespaces",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
+pub async fn get_pod_namespaces(
+    pool: web::Data<DbPool>,
+    budget: web::Data<ReadBudget>,
+) -> actix_web::Result<impl Responder> {
+    debug!("select live pod namespaces");
+    // The UI's namespace picker used to derive this list from the whole
+    // `/pod/info` listing, which grows with every pod that ever ran during
+    // the retention window and times out in the browser on a busy cluster.
+    // This answers the same question from one DISTINCT over the live rows.
+    let _permit = match budget
+        .acquire(cost_kib(1, NAMESPACES_LIST_COST_BYTES))
+        .await
+    {
+        Ok(p) => p,
+        Err(shed) => return Ok(shed.into_response()),
+    };
+    let namespaces = web::block(move || {
+        let mut conn = pool.get()?;
+        pod_namespaces(&mut conn)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok().json(namespaces))
 }
 
 // New API: Get all pods for a specific node
@@ -1479,5 +1563,57 @@ mod tests {
         let err = validate_enum_filter("verdict", "Maybe", VALID_VERDICTS).unwrap_err();
         assert!(err.contains("verdict"), "error must name field: {err}");
         assert!(err.contains("Maybe"), "error must name value: {err}");
+    }
+
+    fn pod_info_sql(include_dead: bool) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(&pod_details_query(include_dead)).to_string()
+    }
+
+    #[test]
+    fn pod_info_lists_the_whole_table_by_default_and_live_rows_on_request() {
+        // Default keeps every row: the map and the policy generators resolve
+        // dead peers against this listing. `include_dead=false` is the cheap
+        // form for callers that only want what runs now.
+        let all = pod_info_sql(true);
+        assert!(!all.contains("WHERE"), "default must not filter: {all}");
+        let live = pod_info_sql(false);
+        assert!(live.contains(r#""pod_details"."is_dead" = $1"#), "{live}");
+        for sql in [&all, &live] {
+            assert!(
+                sql.contains(
+                    r#"ORDER BY "pod_details"."pod_namespace" ASC, "pod_details"."pod_name" ASC"#
+                ),
+                "stable ordering lost: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_info_query_defaults_to_including_dead_pods() {
+        let q: PodInfoQuery = serde_urlencoded::from_str("").expect("must parse");
+        assert_eq!(q.include_dead, None);
+        let q: PodInfoQuery = serde_urlencoded::from_str("include_dead=false").expect("must parse");
+        assert_eq!(q.include_dead, Some(false));
+        let q: PodInfoQuery = serde_urlencoded::from_str("include_dead=true").expect("must parse");
+        assert_eq!(q.include_dead, Some(true));
+        assert!(serde_urlencoded::from_str::<PodInfoQuery>("include_dead=maybe").is_err());
+    }
+
+    #[test]
+    fn pod_namespaces_is_one_distinct_over_live_named_rows() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&pod_namespaces_query()).to_string();
+        assert!(
+            sql.starts_with(r#"SELECT DISTINCT "pod_details"."pod_namespace" FROM "pod_details""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""pod_details"."is_dead" = $1"#), "{sql}");
+        assert!(
+            sql.contains(r#""pod_details"."pod_namespace" IS NOT NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "pod_details"."pod_namespace" ASC"#),
+            "{sql}"
+        );
     }
 }

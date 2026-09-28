@@ -164,16 +164,29 @@ const MAX_BATCHES_PER_PASS: u32 = 200;
 /// pruning must NOT be coupled to AUDIT_VERDICTS_RETENTION_DAYS=0.
 const DEFAULT_DEAD_POD_RETENTION_DAYS: u32 = 7;
 
-/// Resolve the dead-pod pruning window from the audit retention setting.
-/// Pure + testable so the decoupling can't silently regress: audit_days==0
-/// (audit pruning disabled) must still yield a non-zero dead-pod window,
-/// or pod_details bloats unbounded and /pod/info slows to a crawl.
-fn dead_pod_retention_window(audit_days: u32) -> u32 {
-    if audit_days > 0 {
-        audit_days
-    } else {
-        DEFAULT_DEAD_POD_RETENTION_DAYS
+/// Resolve the dead-pod pruning window. `DEAD_POD_RETENTION_DAYS`
+/// (`override_days`) wins when set to a positive number, so a cluster with
+/// heavy pod churn can keep pod_details small without shortening how long
+/// audit verdicts are kept. Otherwise the audit window is reused, and
+/// audit_days==0 (audit pruning disabled) still yields a non-zero dead-pod
+/// window, or pod_details bloats unbounded and /pod/info slows to a crawl.
+/// Pure + testable so neither rule can silently regress.
+fn dead_pod_retention_window(audit_days: u32, override_days: Option<u32>) -> u32 {
+    match override_days {
+        Some(days) if days > 0 => days,
+        _ if audit_days > 0 => audit_days,
+        _ => DEFAULT_DEAD_POD_RETENTION_DAYS,
     }
+}
+
+/// `DEAD_POD_RETENTION_DAYS`, when set to a positive integer (chart:
+/// `broker.podInventory.retention.deadPodDays`). Unset, blank, 0 or
+/// unparsable all mean "follow the audit window".
+fn dead_pod_retention_override() -> Option<u32> {
+    std::env::var("DEAD_POD_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|days| *days > 0)
 }
 
 /// Spawn a background task that periodically prunes audit_verdicts and
@@ -187,7 +200,7 @@ pub fn spawn(pool: DbPool) {
     // Dead-pod pruning runs independently: use the audit window when set,
     // otherwise a standalone default. Setting audit retention to 0 only
     // disables audit_verdicts pruning, not pod_details cleanup.
-    let dead_pod_days = dead_pod_retention_window(audit_days);
+    let dead_pod_days = dead_pod_retention_window(audit_days, dead_pod_retention_override());
     let interval = retention_interval();
     info!(
         audit_days,
@@ -2991,12 +3004,49 @@ mod tests {
         // unbounded and slowed /pod/info to a crawl. 0 -> standalone
         // default; any positive audit window is reused as-is.
         assert_eq!(
-            dead_pod_retention_window(0),
+            dead_pod_retention_window(0, None),
             DEFAULT_DEAD_POD_RETENTION_DAYS
         );
-        assert!(dead_pod_retention_window(0) > 0);
-        assert_eq!(dead_pod_retention_window(30), 30);
-        assert_eq!(dead_pod_retention_window(1), 1);
+        assert!(dead_pod_retention_window(0, None) > 0);
+        assert_eq!(dead_pod_retention_window(30, None), 30);
+        assert_eq!(dead_pod_retention_window(1, None), 1);
+    }
+
+    #[test]
+    fn dead_pod_window_override_wins_only_when_positive() {
+        // DEAD_POD_RETENTION_DAYS lets a high-churn cluster prune dead pods
+        // sooner than it prunes audit verdicts. 0 (or unset) keeps the
+        // audit-coupled rule, so an old values file behaves as before.
+        assert_eq!(dead_pod_retention_window(30, Some(3)), 3);
+        assert_eq!(dead_pod_retention_window(0, Some(3)), 3);
+        assert_eq!(dead_pod_retention_window(30, Some(0)), 30);
+        assert_eq!(
+            dead_pod_retention_window(0, Some(0)),
+            DEFAULT_DEAD_POD_RETENTION_DAYS
+        );
+    }
+
+    #[test]
+    fn dead_pod_override_env_parsing_ignores_blank_zero_and_garbage() {
+        // with_env holds the crate-wide env lock and restores the previous
+        // value: std::env is process-global, so even tests touching different
+        // keys must serialise (see test_support::env_lock).
+        let key = "DEAD_POD_RETENTION_DAYS";
+        with_env(key, Some(" 3\n"), || {
+            assert_eq!(dead_pod_retention_override(), Some(3));
+        });
+        with_env(key, Some("0"), || {
+            assert_eq!(dead_pod_retention_override(), None)
+        });
+        with_env(key, Some("soon"), || {
+            assert_eq!(dead_pod_retention_override(), None)
+        });
+        with_env(key, Some(""), || {
+            assert_eq!(dead_pod_retention_override(), None)
+        });
+        with_env(key, None, || {
+            assert_eq!(dead_pod_retention_override(), None)
+        });
     }
 
     #[test]
