@@ -1292,7 +1292,7 @@ frontend:
     # -- Frontend image pull policy
     pullPolicy: IfNotPresent
     # -- Frontend version tag (auto-updated by release-please)
-    tag: "1.20.0"
+    tag: "1.20.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
