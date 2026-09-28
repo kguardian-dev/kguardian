@@ -179,3 +179,22 @@ it('drops the oldest turns when the browser refuses the write for size, so what 
     spy.mockRestore();
   }
 });
+
+it('a reply that finishes while the Stop button holds focus hands focus to the textarea, not to a disabled Send', async () => {
+  const started = pendingStream();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const stream = await started;
+  const stop = screen.getByRole('button', { name: 'Stop generating' });
+  stop.focus();
+  expect(document.activeElement).toBe(stop);
+
+  act(() => {
+    stream.handlers.onText?.('argocd has the most.');
+    stream.handlers.onDone?.({ model: 'm' });
+    stream.finish();
+  });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBe(stop));
+  expect((stop as HTMLButtonElement).disabled).toBe(true);
+  expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about traffic/));
+});

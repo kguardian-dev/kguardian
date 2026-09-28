@@ -262,6 +262,8 @@ const ChatMessages: React.FC<{
 
 const ChatInput: React.FC<{
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  /** The Send/Stop button, so a stream that ends while it holds focus can hand focus on. */
+  sendRef: React.RefObject<HTMLButtonElement | null>;
   inputValue: string;
   onInputChange: (value: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -270,7 +272,7 @@ const ChatInput: React.FC<{
    *  in flight, so a keyboard user's focus is not lost to a swapped element. */
   onStop: () => void;
   isTyping: boolean;
-}> = ({ inputRef, inputValue, onInputChange, onKeyDown, onSend, onStop, isTyping }) => (
+}> = ({ inputRef, sendRef, inputValue, onInputChange, onKeyDown, onSend, onStop, isTyping }) => (
   <div className="border-t border-hubble-border p-3 shrink-0">
     <div className="flex items-end gap-2">
       <textarea
@@ -284,6 +286,7 @@ const ChatInput: React.FC<{
         rows={2}
       />
       <Button
+        ref={sendRef}
         variant={isTyping ? 'secondary' : 'primary'}
         leftIcon={isTyping ? Square : Send}
         onClick={isTyping ? onStop : onSend}
@@ -329,6 +332,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isResizing, setIsResizing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const sendRef = useRef<HTMLButtonElement>(null);
 
   // A view's "Ask AI" context lands in the input for the user to review.
   const prefillNonce = prefill?.nonce;
@@ -472,6 +476,9 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       // aborted stream, where neither onDone nor onError fires — so no bubble
       // is left stuck in the streaming state with a spinning activity line.
       patchAssistant(m => (m.streaming ? { ...m, streaming: false, activity: undefined } : m));
+      // Ending on the Stop button would leave a disabled Send holding focus,
+      // which drops it to the body; the textarea takes it instead.
+      if (sendRef.current && document.activeElement === sendRef.current) inputRef.current?.focus();
       setIsTyping(false);
     }
   };
@@ -592,6 +599,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const chatInput = (
     <ChatInput
       inputRef={inputRef}
+      sendRef={sendRef}
       inputValue={inputValue}
       onInputChange={setInputValue}
       onKeyDown={handleKeyDown}
