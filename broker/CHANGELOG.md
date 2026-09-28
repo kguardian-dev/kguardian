@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.3](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.2...broker/v1.19.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* **broker:** serve the namespace picker from one DISTINCT and let callers skip dead pods ([a27fcc9](https://github.com/kguardian-dev/kguardian/commit/a27fcc9fad3fc9bb6e812cc2eade1e07cceb20f0))
+* serve the namespace picker without the whole pod listing and prune dead pods on their own window ([f5f5077](https://github.com/kguardian-dev/kguardian/commit/f5f507725b6ef7d9d5236ba93de7dc1736cdb780))
+
 ## [1.19.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.1...broker/v1.19.2) (2026-09-27)
 
 
