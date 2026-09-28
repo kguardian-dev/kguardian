@@ -160,9 +160,22 @@ export function exposedViaText(via: ExposedVia[]): string {
   return order.filter((v) => via.includes(v)).map((v) => VIA_LABEL[v]).join(', ');
 }
 
+/**
+ * Ingress seen only from node addresses: how kubelet probes reach a pod,
+ * and how NodePort traffic arrives after SNAT. Brokers up to 1.19 flag it
+ * `exposed: true`; later ones `false`, still listing `node` in `exposedVia`.
+ */
+export const nodeOnlyExposure = (via: readonly ExposedVia[]) => via.length > 0 && via.every((v) => v === 'node');
+
 /** One workload's observed exposure (the exposure read), as a chip. */
 export function exposureFactor(exposed: boolean | null | undefined, via: ExposedVia[] = [], windowHours = 168): Factor | null {
   const days = Math.round(windowHours / 24);
+  if (exposed != null && nodeOnlyExposure(via)) {
+    return {
+      key: 'exposure', tone: 'neutral', label: 'Node ingress only',
+      title: `In the last ${days}d the only ingress from outside the namespace came from node addresses: how kubelet liveness and readiness probes reach a pod, and how NodePort traffic arrives after SNAT, so it is proof of neither. No other namespace, unattributed peer or public IP was seen.${exposed ? ' This Broker still counts it as exposed.' : ''}`,
+    };
+  }
   if (exposed === true) {
     return {
       key: 'exposure', tone: 'risk', label: `Exposed: ${exposedViaText(via) || 'outside ingress'}`,

@@ -11,7 +11,7 @@ import { StatStrip, StatTile } from '../ui/StatTile';
 import { SectionSkeleton } from '../Profile/parts';
 import { VulnErrorState } from './parts';
 import { NotTrustedNote, SignatureBadge, SignerList } from './SignatureParts';
-import { AdmissionPolicyModal } from './AdmissionPolicyModal';
+import { AdmissionPolicyModal, type AdmissionScope } from './AdmissionPolicyModal';
 
 const FILTERS: Array<{ id: 'all' | SignatureState; label: string }> = [
   { id: 'all', label: 'All' },
@@ -44,8 +44,11 @@ export function SupplyChainTab({ namespace, scopeLabel, refreshTick, api, onOpen
   const shown = filter === 'all' ? rows : rows.filter((r) => r.state === filter);
   const unread = running.error != null && rows.length === 0;
   const none = !running.loading && !unread && rows.length > 0 && counts.unchecked === rows.length;
-  const more = running.truncated ? '+' : undefined;
+  // Counts are a lower bound while a first read's pages are still arriving, and when the read hit its cap.
+  const more = running.truncated || running.partial ? '+' : undefined;
   const tile = (n: number) => (running.loading && rows.length === 0 ? '…' : unread ? '—' : n);
+  const exportScope = useMemo<AdmissionScope>(() => ({ kind: 'cluster', namespace }), [namespace]);
+  const progress = running.loading && running.progress && running.progress.items > 0 ? running.progress : null;
 
   return (
     <div className="space-y-4">
@@ -74,7 +77,10 @@ export function SupplyChainTab({ namespace, scopeLabel, refreshTick, api, onOpen
         </div>
 
         {running.loading && rows.length === 0 ? (
-          <SectionSkeleton rows={4} />
+          <>
+            <SectionSkeleton rows={4} />
+            {progress && <p role="status" data-testid="running-progress" className="px-4 pb-3 text-xs text-tertiary">Read {progress.items} running containers so far (page {progress.pages})…</p>}
+          </>
         ) : unread ? (
           <VulnErrorState error={running.error} unsupportedTitle="Signature results not available" onRetry={() => void running.reload()} />
         ) : rows.length === 0 ? (
@@ -83,9 +89,14 @@ export function SupplyChainTab({ namespace, scopeLabel, refreshTick, api, onOpen
           <>
             {running.error != null && (
               <div role="alert" className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-hubble-border bg-severity-medium/10 text-xs text-severity-medium">
-                <span>Could not refresh ({vulnErrorMessage(running.error)}). Showing the last result.</span>
+                <span>Could not refresh ({vulnErrorMessage(running.error)}). {running.partial ? 'Showing the pages read before it failed; counts are a lower bound.' : 'Showing the last result.'}</span>
                 <Button variant="secondary" size="sm" onClick={() => void running.reload()}>Retry</Button>
               </div>
+            )}
+            {progress && (
+              <p role="status" data-testid="running-progress" className="px-4 py-2 border-b border-hubble-border text-xs text-tertiary">
+                Still reading: {progress.items} running containers so far (page {progress.pages}).{running.partial ? ' Counts and filters are incomplete until it finishes.' : ' The rows below are the last complete read.'}
+              </p>
             )}
             {none && (
               <p role="status" className="px-4 py-2.5 border-b border-hubble-border text-xs text-secondary bg-hubble-hover/20">
@@ -103,11 +114,11 @@ export function SupplyChainTab({ namespace, scopeLabel, refreshTick, api, onOpen
           <p className="text-[11px] text-tertiary">
             ImageTrustPolicy results (would-deny and unknown containers) are written by the evaluator to each policy&apos;s status; the Broker does not serve them, so they are not shown here. Read them with <span className="font-mono">kubectl get imagetrustpolicies,clusterimagetrustpolicies -A -o yaml</span>.
           </p>
-          {running.truncated && <p className="text-[11px] text-severity-medium">More running containers exist than were read; counts are a lower bound.</p>}
+          {(running.truncated || (running.partial && !running.loading)) && <p className="text-[11px] text-severity-medium">More running containers exist than were read; counts are a lower bound.</p>}
         </footer>
       </section>
 
-      {exporting && <AdmissionPolicyModal api={api} scope={{ kind: 'cluster', namespace }} onClose={() => setExporting(false)} />}
+      {exporting && <AdmissionPolicyModal api={api} scope={exportScope} onClose={() => setExporting(false)} />}
     </div>
   );
 }

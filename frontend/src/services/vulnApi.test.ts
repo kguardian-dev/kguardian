@@ -65,6 +65,34 @@ describe('VulnApi paths pass the /api proxy', () => {
   });
 });
 
+describe('VulnApi read budget and cancellation', () => {
+  test('a 503 whose body says the read needs the whole budget carries that message', async () => {
+    const body = 'broker read memory budget exhausted: this request needs 262144 KiB of a 262144 KiB budget and waited 5000 ms without getting it. The request was REFUSED, not truncated — retry.';
+    const err = await withStatus(503, body).admissionPolicy({ format: 'kguardian' }).catch((e) => e as VulnApiError);
+    expect(err.kind).toBe('busy');
+    expect(err.message).toMatch(/whole read memory budget/);
+    expect(err.message).not.toMatch(/few seconds/);
+    // A bare 503 still reads as the generic shed.
+    expect((await withStatus(503).listCves().catch((e) => e as VulnApiError)).message).toMatch(/few seconds/);
+  });
+
+  test('an aborted admission read rejects as cancelled, not as a Broker timeout, and the fetch saw the abort', async () => {
+    let seen: AbortSignal | undefined;
+    const hang = ((_: RequestInfo | URL, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)));
+    }) as typeof fetch;
+    const api = new VulnApi({ fetchImpl: hang });
+    const c = new AbortController();
+    const p = api.admissionPolicy({ format: 'kguardian' }, c.signal).catch((e) => e as VulnApiError);
+    c.abort();
+    const err = await p;
+    expect(seen?.aborted).toBe(true);
+    expect(err.kind).toBe('error');
+    expect(err.message).toBe('The read was cancelled.');
+  });
+});
+
 describe('VulnApi timeout', () => {
   test('a read that never answers becomes a retryable "did not answer" error, not an endless skeleton', async () => {
     const hang = ((_: RequestInfo | URL, init?: RequestInit) =>

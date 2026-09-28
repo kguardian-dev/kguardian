@@ -1,12 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Bug, ChevronRight, Flame, Layers, Package, ShieldQuestion } from 'lucide-react';
-import { useCveList, useImageList, type ImageEnrichment } from '../hooks/useVulns';
+import { CVE_TOTALS_LIMIT, useCveList, useCveTotals, useImageList, type ImageEnrichment } from '../hooks/useVulns';
 import { vulnErrorMessage, vulnApi, type VulnApi } from '../services/vulnApi';
 import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
-import { shortDigest } from '../utils/posture';
+import { formatTimestamp, shortDigest } from '../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
-import { cveRowFactors, sourceLabel } from '../utils/vulnView';
+import { asUtc, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { StatStrip, StatTile } from './ui/StatTile';
@@ -71,32 +71,50 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const severity = SEVERITY_FILTERS.find((f) => f.id === sevId)?.value;
   const tierFilter = TIER_FILTERS.find((f) => f.id === tierId)?.value;
   const cves = useCveList({ namespace: ns, severity, fixable: fixable || undefined, running: running || undefined, tier: tierFilter }, refreshTick, api);
+  // The header tiles count the scope alone, not the table's filters or its first page.
+  const totals = useCveTotals(ns, refreshTick, api);
   const [openedFrom, setOpenedFrom] = useState<CveSummary | undefined>(undefined);
 
   // Tiers are the Broker's (#1678). A Broker without them sends no `tier`:
-  // the rows say "Tier ?" and the tier tiles say unknown.
-  const tiersKnown = cves.items.some((c) => c.tier != null);
+  // the rows say "Tier ?" and the tier tiles say unknown. Judged on the
+  // scope-only read, so a filter that empties the table changes nothing.
+  const tierRows = totals.items.length > 0 ? totals.items : cves.items;
+  const tiersKnown = tierRows.some((c) => c.tier != null);
+  const preTierBroker = tierRows.length > 0 && !tiersKnown;
   const rows = useMemo(
     () => cves.items.map((c) => ({ c, tier: brokerTier(c.tier), factors: cveRowFactors(c) })).sort((a, b) => tierRank(b.tier) - tierRank(a.tier)),
     [cves.items],
   );
   const counts = useMemo(() => {
     const by: Record<string, number> = { P0: 0, P1: 0, P2: 0, Background: 0 };
-    for (const r of rows) if (r.tier) by[r.tier] += 1;
-    return { P0: by.P0, P1: by.P1, running: cves.items.filter((c) => c.runningWorkloads > 0).length, kev: cves.items.filter((c) => c.kev === true).length, kevUnknown: cves.items.filter((c) => c.kev === null).length, loaded: cves.items.filter((c) => c.inUse === true).length, loadedUnknown: cves.items.filter((c) => c.inUse === null).length, tagOnly: cves.items.filter((c) => c.weakestJoin === 'workload_tag').length };
-  }, [rows, cves.items]);
+    for (const c of totals.items) {
+      const t = brokerTier(c.tier);
+      if (t) by[t] += 1;
+    }
+    const all = totals.items;
+    return { P0: by.P0, P1: by.P1, running: all.filter((c) => c.runningWorkloads > 0).length, kev: all.filter((c) => c.kev === true).length, kevUnknown: all.filter((c) => c.kev === null).length, loaded: all.filter((c) => c.inUse === true).length, loadedUnknown: all.filter((c) => c.inUse === null).length };
+  }, [totals.items]);
 
   const openCve = (id: string, from?: CveSummary) => {
     setOpenedFrom(from);
     onParamsChange({ cve: id, digest: undefined });
   };
   const scopeLabel = allNamespaces ? 'all namespaces' : namespace;
-  const loadedAll = !cves.hasMore;
+  // The tiles cover every CVE in scope unless the Broker had more than one read returns.
+  const loadedAll = !totals.capped;
   // Nothing could be read: the tiles say so instead of counting zero.
-  const unread = cves.error != null && cves.items.length === 0;
+  const unread = totals.error != null && totals.items.length === 0;
+  const tableUnread = cves.error != null && cves.items.length === 0;
+  const tilesLoading = totals.loading && totals.items.length === 0;
   // Loaded-package state is null (unknown) on every row until a Broker has runtime evidence.
-  const loadedKnown = cves.items.some((c) => c.inUse !== null);
-  const tierTile = (n: number) => (tiersKnown || cves.items.length === 0 ? n : 'unknown');
+  const loadedKnown = totals.items.some((c) => c.inUse !== null);
+  const tierTile = (n: number) => (tiersKnown || totals.items.length === 0 ? n : 'unknown');
+  const filtered = sevId !== 'all' || tierId !== 'all' || fixable || running;
+  const cappedNote = loadedAll ? '' : ` Counted over the first ${CVE_TOTALS_LIMIT} CVEs in scope; more exist.`;
+  const reloadAll = () => {
+    void cves.reload();
+    void totals.reload();
+  };
   // A count of known values says how many it could not count.
   const tileSuffix = (unknown: number) => {
     const more = loadedAll || unread ? '' : '+';
@@ -119,17 +137,24 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
           </p>
         </div>
 
-        <StatStrip count={5} label="Vulnerability posture">
-          <StatTile label="P0 act now" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts)." : TIER_UNKNOWN_TITLE} />
-          <StatTile label="P1 schedule" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? undefined : TIER_UNKNOWN_TITLE} />
-          <StatTile label="CVEs on running workloads" value={cves.loading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} />
-          <StatTile label="In CISA KEV" value={cves.loading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={cves.loading ? undefined : tileSuffix(counts.kevUnknown)} title={counts.kevUnknown > 0 ? `${counts.kevUnknown} CVE${counts.kevUnknown === 1 ? '' : 's'}: no source said whether it is in KEV (unknown, not "no").` : undefined} />
-          {loadedKnown ? (
-            <StatTile label="Executed or loaded" value={cves.loading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={cves.loading ? undefined : tileSuffix(counts.loadedUnknown)} title="CVEs whose package a workload was observed executing or loading. Unknown: no runtime evidence either way." />
-          ) : (
-            <StatTile label="Executed or loaded" value={unread ? '—' : 'unknown'} icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
+        <div className="space-y-1.5">
+          <StatStrip count={5} label="Vulnerability posture">
+            <StatTile label="P0 act now" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={(tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts)." : TIER_UNKNOWN_TITLE) + cappedNote} />
+            <StatTile label="P1 schedule" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? cappedNote.trim() || undefined : TIER_UNKNOWN_TITLE + cappedNote} />
+            <StatTile label="CVEs on running workloads" value={tilesLoading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} title={cappedNote.trim() || undefined} />
+            <StatTile label="In CISA KEV" value={tilesLoading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={tilesLoading ? undefined : tileSuffix(counts.kevUnknown)} title={(counts.kevUnknown > 0 ? `${counts.kevUnknown} CVE${counts.kevUnknown === 1 ? '' : 's'}: no source said whether it is in KEV (unknown, not "no").` : '') + cappedNote || undefined} />
+            {loadedKnown ? (
+              <StatTile label="Executed or loaded" value={tilesLoading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={tilesLoading ? undefined : tileSuffix(counts.loadedUnknown)} title={`CVEs whose package a workload was observed executing or loading. Unknown: no runtime evidence either way.${cappedNote}`} />
+            ) : (
+              <StatTile label="Executed or loaded" value={unread ? '—' : 'unknown'} icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
+            )}
+          </StatStrip>
+          {(filtered || !loadedAll) && !unread && !tilesLoading && (
+            <p className="text-[11px] text-tertiary" data-testid="tiles-caption">
+              The tiles count every CVE in {scopeLabel}{loadedAll ? '' : ` (the first ${CVE_TOTALS_LIMIT})`}; the filters below narrow the table only.
+            </p>
           )}
-        </StatStrip>
+        </div>
 
         <Tabs tabs={TABS} active={tab} onChange={(t) => onParamsChange({ tab: t === 'vulns' ? undefined : t })} label="Images sections" idPrefix="images" />
 
@@ -144,7 +169,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                       {SEVERITY_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
                     </select>
                   </label>
-                  {(tiersKnown || tierId !== 'all') && (
+                  {(!preTierBroker || tierId !== 'all') && (
                     <label className="flex items-center gap-1.5 text-tertiary">
                       Tier
                       <select value={tierId} onChange={(e) => setTierId(e.target.value)} className="h-8 rounded-control border border-hubble-border bg-hubble-darker px-2 text-xs text-primary">
@@ -159,12 +184,12 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                     <input type="checkbox" checked={running} onChange={(e) => setRunning(e.target.checked)} /> Running workloads only
                   </label>
                 </div>
-                {!unread && <SummaryFreshness computedAt={cves.computedAt} staleSeconds={cves.staleSeconds} loading={cves.loading} />}
+                {!tableUnread && <SummaryFreshness computedAt={cves.computedAt} staleSeconds={cves.staleSeconds} receivedAt={cves.receivedAt} loading={cves.loading} />}
               </header>
               {cves.loading && cves.items.length === 0 ? (
                 <SectionSkeleton rows={4} />
               ) : cves.error && cves.items.length === 0 ? (
-                <VulnErrorState error={cves.error} onRetry={() => void cves.reload()} />
+                <VulnErrorState error={cves.error} onRetry={reloadAll} />
               ) : cves.items.length === 0 ? (
                 cves.computedAt === null ? (
                   <EmptyState icon={Bug} compact title="Not computed yet" description="The Broker rebuilds the vulnerability summary every few minutes. Until its first rebuild there is nothing to list; that is not the same as no vulnerabilities." />
@@ -178,7 +203,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                 )
               ) : (
                 <>
-                  {cves.error != null && <StaleNotice error={cves.error} onRetry={() => void cves.reload()} />}
+                  {cves.error != null && <StaleNotice error={cves.error} onRetry={reloadAll} />}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="text-[11px] uppercase tracking-wide text-tertiary">
@@ -274,13 +299,27 @@ function StaleNotice({ error, onRetry }: { error: unknown; onRetry: () => void }
   );
 }
 
-function SummaryFreshness({ computedAt, staleSeconds, loading }: { computedAt: string | null; staleSeconds: number | null; loading: boolean }) {
+const FRESHNESS_TICK_MS = 30_000;
+
+/** Re-render every `ms`, so an age keeps moving while the page sits open. */
+function useTick(ms: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+  return now;
+}
+
+function SummaryFreshness({ computedAt, staleSeconds, receivedAt, loading }: { computedAt: string | null; staleSeconds: number | null; receivedAt: number | null; loading: boolean }) {
+  const now = useTick(FRESHNESS_TICK_MS);
   if (loading) return null;
   if (computedAt === null) return <span className="text-[11px] text-tertiary">Summary not computed yet</span>;
-  const stale = staleSeconds ?? 0;
+  // The Broker's own age at response time, advanced by this browser's clock since: the two clocks need not agree.
+  const stale = (staleSeconds ?? 0) + (receivedAt === null ? 0 : Math.max(0, Math.round((now - receivedAt) / 1000)));
   const age = stale < 90 ? `${stale}s` : stale < 5400 ? `${Math.round(stale / 60)}m` : `${Math.round(stale / 3600)}h`;
   return (
-    <span className={`text-[11px] ${stale > 3600 ? 'text-severity-medium' : 'text-tertiary'}`} title="The Broker rebuilds this summary on an interval; counts can lag new scans by up to one interval.">
+    <span className={`text-[11px] ${stale > 3600 ? 'text-severity-medium' : 'text-tertiary'}`} title={`Rebuilt ${formatTimestamp(asUtc(computedAt))}. The Broker rebuilds this summary on an interval; counts can lag new scans by up to one interval.`}>
       Summary rebuilt {age} ago
     </span>
   );
@@ -318,7 +357,7 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
             </table>
           </div>
           <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
-            <span>Keyed by digest. Each row reads the image, its vulnerability reports and its SBOMs (3 reads per digest, a few at a time).</span>
+            <span>Keyed by digest. Each row reads the image and its vulnerability reports, then its SBOMs when a source reported on it (2 to 3 reads per digest, a few at a time).</span>
             {list.hasMore && (
               <Button variant="secondary" size="sm" onClick={() => void list.loadMore()} disabled={list.loadingMore}>
                 {list.loadingMore ? 'Loading…' : 'Load more images'}
@@ -369,7 +408,22 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
 function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
   if (e.sbomError) return <UnknownPill error={e.sbomError} />;
+  if (e.sbomSkipped) {
+    return <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has reported on this digest, so its SBOM was not looked up here. Open the image to read it.">Not read</span>;
+  }
   if (e.sbomReports && e.sbomReports.length === 0) {
+    const matched = sbomFromMatcher(e.vulnReports);
+    if (matched.length > 0) {
+      return (
+        <div className="flex flex-col gap-1">
+          {matched.map((m) => (
+            <span key={`${m.matcher}-${m.sbomSource}`} data-testid="sbom-matched" className="inline-flex flex-wrap items-center gap-1 text-[11px] text-secondary" title="This report says it was matched from that SBOM, but the Broker never received the document itself, so only the report says it exists.">
+              {sourceLabel(m.sbomSource)} <TrustBadge trust={m.trust} /> <span className="text-tertiary">used by {sourceLabel(m.matcher)}; not held by the Broker</span>
+            </span>
+          ))}
+        </div>
+      );
+    }
     return <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has an SBOM for this digest: its contents are unknown">No SBOM</span>;
   }
   return (

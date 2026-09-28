@@ -3,7 +3,8 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { cleanup, render } from '@testing-library/react';
 
 afterEach(cleanup);
-import { TierBadge } from './parts';
+import { TierBadge, VulnErrorState } from './parts';
+import { VulnApiError } from '../../services/vulnApi';
 
 /** Text a sighted user sees: everything except sr-only spans. */
 const seen = (el: Element): string =>
@@ -42,5 +43,16 @@ describe('TierBadge floor', () => {
   test('without a floor: plain tier, "Bkg" for Background', () => {
     expect(badge({ tier: 'P1' }).textContent).toBe('P1');
     expect(badge({ tier: 'Background' }).textContent).toBe('Bkg');
+  });
+});
+
+describe('VulnErrorState retry', () => {
+  test('IMG-17: a 400 (the request itself is wrong) offers no Retry; a retryable error does', () => {
+    const bad = render(<VulnErrorState error={new VulnApiError(400, 'bad_request', 'digest must be sha256:<64 hex> or sha512:<128 hex>')} onRetry={() => {}} />);
+    expect(bad.getByRole('alert').textContent).toMatch(/digest must be/);
+    expect(bad.queryByRole('button', { name: /Retry/ })).toBeNull();
+    cleanup();
+    const busy = render(<VulnErrorState error={new VulnApiError(503, 'busy', 'shedding')} onRetry={() => {}} />);
+    expect(busy.getByRole('button', { name: /Retry/ })).toBeTruthy();
   });
 });

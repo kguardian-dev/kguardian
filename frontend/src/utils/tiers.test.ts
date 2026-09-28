@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { brokerFactors, brokerTier, factChips, inUseFactor, mergeFactors, privilegedFactor, tierRank } from './tiers';
+import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, privilegedFactor, tierRank } from './tiers';
 import { vulnCapture, VULN_CAPTURES } from '../fixtures/vulns';
 import type { ImageVulnsPage } from '../types/vulns';
 import { findingFactors } from './vulnView';
@@ -103,6 +103,25 @@ test('captured: a finding no source reported on shows KEV and EPSS as "not repor
   const express = items.find((f) => f.id === 'CVE-2099-0002')!;
   expect(express.kev).toBe(false);
   expect(findingFactors(express).some((f) => f.key === 'kev')).toBe(false);
+});
+
+test('IMG-06: ingress from nodes alone is a neutral chip that names kubelet probes, not the red exposed chip, under either Broker shape', () => {
+  const node = exposureFactor(true, ['node'])!;
+  expect(node.tone).toBe('neutral');
+  expect(node.label).toBe('Node ingress only');
+  expect(node.title).toMatch(/kubelet liveness and readiness probes/);
+  expect(node.title).toMatch(/NodePort/);
+  expect(node.title).toMatch(/still counts it as exposed/);
+  // Broker #1780 and later: exposed: false with node still listed. Same chip, no "still counts" caveat.
+  const later = exposureFactor(false, ['node'])!;
+  expect(later).toMatchObject({ tone: 'neutral', label: 'Node ingress only' });
+  expect(later.title).not.toMatch(/still counts/);
+  // Anything beyond the node is exposure; so is "exposed" with no source named, since the Broker said so.
+  expect(exposureFactor(true, ['node', 'other_namespace'])!.tone).toBe('risk');
+  expect(exposureFactor(true, ['public_ip'])!.label).toBe('Exposed: public IP');
+  expect(exposureFactor(true, [])!.tone).toBe('risk');
+  expect(exposureFactor(false)!.tone).toBe('neutral');
+  expect(exposureFactor(null)!.tone).toBe('unknown');
 });
 
 test('a Background finding reads "Not observed loaded" (captured: busybox, covered and never run)', () => {

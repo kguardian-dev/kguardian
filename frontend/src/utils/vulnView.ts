@@ -1,6 +1,6 @@
-import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, VulnSeverity } from '../types/vulns';
+import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, Report, SbomTrust, VulnSeverity } from '../types/vulns';
 import type { Severity } from './severity';
-import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, privilegedFactor, TIER_RANK, type Factor, type RiskTierName } from './tiers';
+import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, nodeOnlyExposure, privilegedFactor, TIER_RANK, type Factor, type RiskTierName } from './tiers';
 
 /** View helpers for the supply-chain UI (kept out of component files). */
 
@@ -111,19 +111,77 @@ export function workloadFactors(w: ExposedWorkload, e: Exposure, imageFinding: F
   return mergeFactors(broker, facts, own);
 }
 
+const workloadId = (w: { namespace: string; kind: string; name: string }) => `${w.namespace}/${w.kind}/${w.name}`;
+
+export interface ImpactCounts {
+  images: number;
+  /** Exposure rows: one per workload container, running or not. */
+  containers: number;
+  /** Distinct running workloads (a finished init container of a running Deployment is one row, not a second workload). */
+  running: number;
+  /** Running workloads the Broker flags exposed: a subset of `running`. */
+  exposed: number;
+  /** Running workloads with observed ingress from another namespace, an unattributed peer or a public IP: the funnel's "with outside ingress". */
+  beyondNodes: number;
+  /** Running workloads whose only outside ingress came from node addresses (kubelet probes, or NodePort traffic after SNAT), whichever way the Broker flags them. */
+  nodeOnly: number;
+  /** Running workloads with no observed ingress at all. */
+  unknownExposure: number;
+}
+
+const isNodeOnly = (w: ExposedWorkload) => w.network?.exposed != null && nodeOnlyExposure(w.network.exposedVia);
+
+/** The drawer's impact funnel; everything after containers counts distinct running workloads, so it never widens. */
+export function impactCounts(e: Exposure): ImpactCounts {
+  const running = new Set<string>();
+  const exposed = new Set<string>();
+  const beyondNodes = new Set<string>();
+  const nodeOnly = new Set<string>();
+  const unknown = new Set<string>();
+  for (const w of e.workloads) {
+    if (!w.running) continue;
+    const id = workloadId(w);
+    running.add(id);
+    if (w.network?.exposed == null) unknown.add(id);
+    else if (isNodeOnly(w)) nodeOnly.add(id);
+    else if (w.network.exposed) beyondNodes.add(id);
+    if (w.network?.exposed === true) exposed.add(id);
+  }
+  // A workload reads as its most exposed row.
+  for (const id of beyondNodes) nodeOnly.delete(id);
+  for (const id of [...beyondNodes, ...nodeOnly, ...exposed]) unknown.delete(id);
+  return { images: e.images.length, containers: e.workloads.length, running: running.size, exposed: exposed.size, beyondNodes: beyondNodes.size, nodeOnly: nodeOnly.size, unknownExposure: unknown.size };
+}
+
+/** Exposed workloads named in the AI prompt; the rest is a count. */
+export const PROMPT_WORKLOADS_MAX = 10;
+
+const namedList = (names: string[]) => {
+  const named = names.slice(0, PROMPT_WORKLOADS_MAX);
+  const more = names.length - named.length;
+  return `${named.join(', ') || 'none seen'}${more > 0 ? `, +${more} more` : ''}`;
+};
+
 /**
  * The context block "Ask AI" hands the assistant for one CVE: the facts the
  * drawer shows, stated with the same honesty (unknown stays unknown).
+ * `factors` are the headline's merged chips (worst over every row), so the
+ * prompt agrees with what the drawer says; without them the first image's
+ * own tier factors stand in.
  */
-export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null = null): string {
-  const running = e.workloads.filter((w) => w.running);
-  const exposed = e.workloads.filter((w) => w.network?.exposed === true);
-  const unknown = e.workloads.filter((w) => w.network?.exposed == null);
+export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null = null, factors: readonly Factor[] = []): string {
+  const impact = impactCounts(e);
+  const names = (pick: (w: ExposedWorkload) => boolean) => [...new Set(e.workloads.filter((w) => w.running && pick(w)).map((w) => `${w.namespace}/${w.name}`))];
+  const exposedNames = names((w) => w.network?.exposed === true && !isNodeOnly(w));
+  const nodeNames = names(isNodeOnly);
   const fixes = [...new Set(e.images.flatMap((i) => i.packages.flatMap((p) => p.fixedVersions)))];
+  const why = factors.length ? factors.map((x) => x.label).join(', ') : f?.tierFactors?.join(', ');
+  const facts = factors.length ? '' : `${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}`;
   return [
-    `Context: ${e.id} (${e.severity.toLowerCase()}${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}; kguardian tier ${tier ?? 'unknown'}${f?.tierFactors?.length ? ` from ${f.tierFactors.join(', ')}` : ''}).`,
-    `Affects ${e.images.length} image(s) and ${e.workloads.length} workload container(s), ${running.length} running.`,
-    `Observed outside ingress: ${exposed.map((w) => `${w.namespace}/${w.name}`).join(', ') || 'none seen'}; exposure unknown for ${unknown.length}.`,
+    `Context: ${e.id} (${e.severity.toLowerCase()}${facts}; kguardian tier ${tier ?? 'unknown'}${why ? ` from ${why}` : ''}).`,
+    `Affects ${impact.images} image(s) and ${impact.containers} workload container(s); ${impact.running} distinct workload(s) running.`,
+    `Observed outside ingress on ${impact.beyondNodes} running workload(s): ${namedList(exposedNames)}; exposure unknown for ${impact.unknownExposure}.`,
+    ...(impact.nodeOnly > 0 ? [`Ingress from nodes only (kubelet probes, or NodePort traffic after SNAT) on ${impact.nodeOnly} running workload(s): ${namedList(nodeNames)}.`] : []),
     `Fix: ${e.fixable ? fixes.join(' / ') || 'available' : 'no fix yet'}.`,
     e.inUse === null
       ? `In use: unknown (treated as in use)${f?.inUseDetail?.reason ? `, reason: ${f.inUseDetail.reason}` : ''}.`
@@ -131,6 +189,43 @@ export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null 
     '',
     `Question: which of these workloads should I fix first, and how do I contain ${e.id} until then?`,
   ].join('\n');
+}
+
+/**
+ * The SBOM a matcher worked from when `/sbom` lists none under the digest:
+ * the report names its `sbomSources` and their trust. Findings were computed
+ * from it, so the image is not "No SBOM"; the Broker just does not serve that
+ * SBOM under the running digest.
+ */
+export function sbomFromMatcher(vulnReports: readonly Report[] | null | undefined): Array<{ matcher: string; sbomSource: string; trust: SbomTrust | null }> {
+  const out: Array<{ matcher: string; sbomSource: string; trust: SbomTrust | null }> = [];
+  for (const r of vulnReports ?? []) for (const s of r.sbomSources ?? []) out.push({ matcher: r.source, sbomSource: s, trust: r.sbomTrust });
+  return out;
+}
+
+/** Header lines of a generated policy, with the per-image "not covered:" lines set aside once there are more than `inlineMax`. */
+export function groupNotCovered(header: readonly string[], inlineMax = 10): { lines: string[]; notCovered: string[] } {
+  const notCovered = header.filter((l) => l.startsWith('not covered:'));
+  if (notCovered.length <= inlineMax) return { lines: [...header], notCovered: [] };
+  return { lines: header.filter((l) => !l.startsWith('not covered:')), notCovered };
+}
+
+const fmtKib = (kib: number) => (kib >= 1024 ? `${Math.round(kib / 1024)} MiB` : `${kib} KiB`);
+
+/**
+ * The message for a 503 the Broker's read memory budget refused. A read that
+ * asks for the whole budget can never run beside another read, so "try again
+ * in a few seconds" would be the wrong advice for it.
+ */
+export function busyReadMessage(body: string): string {
+  const m = /needs (\d+) KiB of a (\d+) KiB budget/.exec(body);
+  if (!m) return 'The Broker is shedding reads right now (read budget). Try again in a few seconds.';
+  const needs = Number(m[1]);
+  const total = Number(m[2]);
+  if (needs >= total) {
+    return `This read reserves the Broker's whole read memory budget (${fmtKib(total)}), so it is refused whenever any other read is in flight, and a retry asks for the whole budget again. Retry when the Broker is idle, or raise BROKER_READ_MEMORY_BUDGET_MB (and the container memory limit with it).`;
+  }
+  return `The Broker is shedding reads right now (read budget: this read needs ${fmtKib(needs)} of ${fmtKib(total)}). Try again in a few seconds.`;
 }
 
 /** Worse first: a headline chip keeps the worst state any row has for that factor. */

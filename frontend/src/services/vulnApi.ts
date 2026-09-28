@@ -2,6 +2,7 @@ import apiClient from './api';
 import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { CvePage, Exposure, ImageDetail, ImagePage, ImageVulnsPage, SbomPage, VulnSeverity } from '../types/vulns';
 import type { AdmissionFormat, ExportManifest, RunningSignaturePage } from '../types/attestations';
+import { busyReadMessage } from '../utils/vulnView';
 
 /**
  * Typed read-only client for the supply-chain reads (#1671) and the image
@@ -60,6 +61,19 @@ export interface CveListQuery extends TierFilters {
   after?: string;
 }
 
+/** The read's own timeout, and the caller's abort when it passes one. */
+function readSignal(timeoutMs: number, external?: AbortSignal): AbortSignal {
+  const timeout = timeoutSignal(timeoutMs);
+  if (!external) return timeout;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([timeout, external]);
+  const c = new AbortController();
+  for (const s of [timeout, external]) {
+    if (s.aborted) c.abort(s.reason);
+    else s.addEventListener('abort', () => c.abort(s.reason), { once: true });
+  }
+  return c.signal;
+}
+
 function tierParams(q: TierFilters): Record<string, string | number | boolean | undefined> {
   return {
     tier: q.tier?.length ? q.tier.join(',') : undefined,
@@ -83,15 +97,16 @@ export class VulnApi {
     return (apiClient?.baseURL ?? '/api').replace(/\/$/, '');
   }
 
-  private async json<T>(path: string, query: Record<string, string | number | boolean | undefined> = {}, listRoute: boolean | string = false): Promise<T> {
-    return JSON.parse(await this.read(path, query, listRoute, 'application/json')) as T;
+  private async json<T>(path: string, query: Record<string, string | number | boolean | undefined> = {}, listRoute: boolean | string = false, signal?: AbortSignal): Promise<T> {
+    return JSON.parse(await this.read(path, query, listRoute, 'application/json', signal)) as T;
   }
 
   /**
    * One read. `listRoute`: a 404 means the Broker lacks the route
-   * (`unsupported`); a string is the message to show for it.
+   * (`unsupported`); a string is the message to show for it. `signal` lets
+   * the caller drop a read it no longer wants (a modal that closed or moved on).
    */
-  private async read(path: string, query: Record<string, string | number | boolean | undefined>, listRoute: boolean | string, accept: string): Promise<string> {
+  private async read(path: string, query: Record<string, string | number | boolean | undefined>, listRoute: boolean | string, accept: string, signal?: AbortSignal): Promise<string> {
     const sp = new URLSearchParams();
     for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') sp.set(k, String(v));
     const q = sp.toString();
@@ -101,10 +116,11 @@ export class VulnApi {
       res = await this.fetchImpl(`${this.base}${path}${q ? `?${q}` : ''}`, {
         headers: { Accept: accept },
         credentials: 'same-origin',
-        signal: timeoutSignal(this.timeoutMs),
+        signal: readSignal(this.timeoutMs, signal),
       });
       text = await res.text();
     } catch (err) {
+      if (signal?.aborted) throw new VulnApiError(0, 'error', 'The read was cancelled.');
       if (isTimeout(err)) throw new VulnApiError(0, 'timeout', timeoutMessage(this.timeoutMs));
       throw new VulnApiError(0, 'error', `Could not reach the Broker: ${vulnErrorMessage(err)}`);
     }
@@ -124,7 +140,7 @@ export class VulnApi {
           : 'The token the frontend presents does not have the Broker read scope.',
       );
     }
-    if (res.status === 503) throw new VulnApiError(503, 'busy', 'The Broker is shedding reads right now (read budget). Try again in a few seconds.');
+    if (res.status === 503) throw new VulnApiError(503, 'busy', busyReadMessage(text));
     if (res.status === 400) throw new VulnApiError(400, 'bad_request', msg);
     if (res.status === 409 || res.status === 422) throw new VulnApiError(res.status, 'bad_request', msg);
     throw new VulnApiError(res.status, 'error', msg);
@@ -179,13 +195,13 @@ export class VulnApi {
   }
 
   /** `GET /attestations/policy`: an audit-mode admission policy (YAML) from the signers verified on running images. */
-  admissionPolicy(q: { format?: AdmissionFormat; namespace?: string } = {}): Promise<string> {
-    return this.read('/attestations/policy', { format: q.format, mode: 'audit', namespace: q.namespace }, NO_SIGNATURES, 'application/yaml');
+  admissionPolicy(q: { format?: AdmissionFormat; namespace?: string } = {}, signal?: AbortSignal): Promise<string> {
+    return this.read('/attestations/policy', { format: q.format, mode: 'audit', namespace: q.namespace }, NO_SIGNATURES, 'application/yaml', signal);
   }
 
   /** The `admission` artifact of a workload's export bundle, in audit mode (`GET …/export`, read-only). */
-  async workloadAdmission(ns: string, kind: string, name: string): Promise<ExportManifest> {
-    return this.json<ExportManifest>(`/workloads/${seg(ns)}/${seg(kind)}/${seg(name)}/export`, { artifacts: 'admission', mode: 'audit', format: 'zip-manifest' });
+  async workloadAdmission(ns: string, kind: string, name: string, signal?: AbortSignal): Promise<ExportManifest> {
+    return this.json<ExportManifest>(`/workloads/${seg(ns)}/${seg(kind)}/${seg(name)}/export`, { artifacts: 'admission', mode: 'audit', format: 'zip-manifest' }, false, signal);
   }
 }
 

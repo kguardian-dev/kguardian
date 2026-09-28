@@ -135,5 +135,6 @@ export function VulnErrorState({ error, onRetry, unsupportedTitle = 'Vulnerabili
   if (kind === 'unsupported') {
     return <EmptyState icon={Bug} compact title={unsupportedTitle} description={vulnErrorMessage(error)} />;
   }
-  return <SectionError message={vulnErrorMessage(error)} onRetry={onRetry} />;
+  // A 400 is the request itself (a malformed id): repeating it cannot succeed.
+  return <SectionError message={vulnErrorMessage(error)} onRetry={kind === 'bad_request' ? undefined : onRetry} />;
 }
