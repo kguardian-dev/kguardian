@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.28.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.27.1...chart/v1.28.0) (2026-09-28)
+
+
+### Features
+
+* **chart:** broker.podInventory.retention.deadPodDays prunes dead pods on their own window ([55367b2](https://github.com/kguardian-dev/kguardian/commit/55367b2bad35a1327734d8648dbe61cfe4a6fc37))
+
+
+### Bug Fixes
+
+* **chart:** move to broker 1.19.3, frontend 1.20.2 and llm-bridge 1.12.2 ([#1766](https://github.com/kguardian-dev/kguardian/issues/1766)) ([53b913b](https://github.com/kguardian-dev/kguardian/commit/53b913beef8c2b31f94bdd00dcd50443d5f56bcc))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.16.1 ([#1755](https://github.com/kguardian-dev/kguardian/issues/1755)) ([f4ebf3e](https://github.com/kguardian-dev/kguardian/commit/f4ebf3e437bf3a306eee5e9cfcb2f749beb93654))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.20.1 ([#1756](https://github.com/kguardian-dev/kguardian/issues/1756)) ([962849c](https://github.com/kguardian-dev/kguardian/commit/962849ccb8981e89c76da3a3eb493dbfb81548d0))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.12.1 ([#1757](https://github.com/kguardian-dev/kguardian/issues/1757)) ([5df5603](https://github.com/kguardian-dev/kguardian/commit/5df56033b4f705abf3a53b17c6116cad98e1bfd5))
+* serve the namespace picker without the whole pod listing and prune dead pods on their own window ([f5f5077](https://github.com/kguardian-dev/kguardian/commit/f5f507725b6ef7d9d5236ba93de7dc1736cdb780))
+
 ## [1.27.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.27.0...chart/v1.27.1) (2026-09-28)
 
 
