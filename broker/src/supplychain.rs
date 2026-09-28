@@ -69,7 +69,7 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Bool, Nullable, Text, Timestamp};
+use diesel::sql_types::{Array, BigInt, Bool, Nullable, Text, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -1291,11 +1291,18 @@ pub fn ingest_allowed(cfg: Option<&AuthConfig>) -> bool {
     cfg.is_some_and(|c| c.enabled() && c.configures(Scope::SupplyChain))
 }
 
-fn not_scoped() -> HttpResponse {
-    HttpResponse::Forbidden().body(
-        "supply-chain ingest requires scoped broker auth: set BROKER_TOKEN_SUPPLYCHAIN \
-         (chart: broker.auth) and give the supplychain component that token",
-    )
+/// The refusal while no `supplychain` token is configured. 503 with
+/// Retry-After rather than 403: the component queues and retries 5xx but
+/// drops a 4xx for good, and a registry SBOM is fetched once, so a payload
+/// posted while the broker's scoped auth is still rolling out must be
+/// kept, not lost. The payload is refused either way.
+pub(crate) fn not_scoped(what: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", "60"))
+        .body(format!(
+            "{what} ingest requires scoped broker auth: set BROKER_TOKEN_SUPPLYCHAIN \
+             (chart: broker.auth) and give the supplychain component that token"
+        ))
 }
 
 // ---------------------------------------------------------------------
@@ -1479,6 +1486,7 @@ pub fn store_vulnerabilities(
                 if p.header.scanned_at >= e.scanned_at {
                     upsert_header(conn, &p.header)?;
                     relink(conn, &p.header.digest, &p.header.source)?;
+                    relink_matched_sboms(conn, &p.header)?;
                 }
                 return Ok(Outcome::Unchanged);
             }
@@ -1504,6 +1512,7 @@ pub fn store_vulnerabilities(
             .execute(conn)?;
         upsert_header(conn, &p.header)?;
         relink(conn, &p.header.digest, &p.header.source)?;
+        relink_matched_sboms(conn, &p.header)?;
         // A KEV / EPSS fact is visible at once, not after the next pass.
         sql_query(CVE_FACTS_UPSERT_SQL)
             .bind::<Text, _>(&p.header.digest)
@@ -1793,9 +1802,16 @@ pub const JOIN_WORKLOAD_TAG: &str = "workload_tag";
 /// (`backup-29012345`) where the inventory keys the Deployment (`api`)
 /// or CronJob (`backup`), so a ReplicaSet/Job name that is the inventory
 /// workload name plus one `-<suffix>` of [a-z0-9]{1,12} matches.
+///
+/// An SBOM payload also carries the exact links of every vulnerability
+/// payload matched from it (one naming the SBOM's source in
+/// `sbom_sources`, under the SBOM's digest or the index it belongs to):
+/// BuildKit attaches an SBOM to one platform manifest, the matcher
+/// reports under the index, and a node may run another platform of it,
+/// so the SBOM a report came from is served wherever the report is.
 const WANTED_LINKS_CTE: &str = "\
 WITH hdr AS ( \
-    SELECT manifest_digests, norm_repository, tag, observed_in FROM vuln_sources \
+    SELECT kind, index_digest, manifest_digests, norm_repository, tag, observed_in FROM vuln_sources \
     WHERE digest = $1 AND source = $2 \
 ), exact AS ( \
     SELECT i.digest AS image_digest, 'image_id'::text AS join_kind, 1::smallint AS join_rank \
@@ -1803,6 +1819,12 @@ WITH hdr AS ( \
     UNION ALL \
     SELECT i.digest, 'platform_manifest'::text, 2::smallint FROM images i \
     WHERE i.digest <> $1 AND i.digest IN (SELECT unnest(h.manifest_digests) FROM hdr h) \
+    UNION ALL \
+    SELECT l.image_digest, l.join_kind, l.join_rank FROM hdr h \
+    JOIN vuln_sources v ON v.kind = 'vulnerabilities' AND $2 = ANY(v.sbom_sources) \
+        AND (v.digest = $1 OR v.digest = h.index_digest) \
+    JOIN supplychain_image_links l ON l.digest = v.digest AND l.source = v.source AND l.join_rank < 3 \
+    WHERE h.kind = 'sbom' \
 ), tagged AS ( \
     SELECT DISTINCT wc.image_digest, 'workload_tag'::text AS join_kind, 3::smallint AS join_rank \
     FROM hdr h \
@@ -1867,6 +1889,26 @@ struct Key {
     digest: String,
     #[diesel(sql_type = Text)]
     source: String,
+}
+
+/// Relink the SBOM payloads a vulnerability payload was matched from, so
+/// they carry its inventory links at once rather than at the next pass.
+fn relink_matched_sboms(conn: &mut PgConnection, h: &Header) -> QueryResult<usize> {
+    if h.sbom_sources.is_empty() {
+        return Ok(0);
+    }
+    let keys: Vec<Key> = sql_query(
+        "SELECT digest, source FROM vuln_sources WHERE kind = 'sbom' \
+         AND source = ANY($2) AND (digest = $1 OR index_digest = $1)",
+    )
+    .bind::<Text, _>(&h.digest)
+    .bind::<Array<Text>, _>(&h.sbom_sources)
+    .load(conn)?;
+    let mut changed = 0;
+    for k in &keys {
+        changed += relink(conn, &k.digest, &k.source)?;
+    }
+    Ok(changed)
 }
 
 /// Relink up to `batch` payloads after the cursor, in key order. Returns
@@ -2096,7 +2138,7 @@ async fn ingest(
     kind: Kind,
 ) -> HttpResponse {
     if !ingest_allowed(req.app_data::<web::Data<AuthConfig>>().map(|d| d.get_ref())) {
-        return not_scoped();
+        return not_scoped("supply-chain");
     }
     let digest = path.into_inner();
     if !is_valid_digest(&digest) {

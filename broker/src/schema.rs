@@ -484,6 +484,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    // The snapshotter's last failure per workload, deleted by its next
+    // successful snapshot; GET /workloads reads it as lastError/failedAt.
+    workload_profile_failures (cluster_id, pod_namespace, workload_kind, workload_name) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        last_error -> Varchar,
+        failed_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     // Immutable, content-hashed profile snapshots, written only when the
     // hash changes. Bounded per workload and by age (retention.rs).
     workload_profile_versions (id) {

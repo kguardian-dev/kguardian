@@ -403,13 +403,24 @@ async fn ingest_refusals_happen_before_the_database() {
     let path = format!("/images/{}/vulnerabilities", d(1));
     let good = serde_json::to_vec(&vulns_json(&d(1), "2026-09-20T08:00:00Z", &[])).unwrap();
 
-    // Auth off: refused outright.
+    // Auth off: refused before anything is read, as a retryable 503 (the
+    // component keeps the payload; a 4xx would drop it for good).
     let open = app!(AuthConfig::default());
-    let r = atest::TestRequest::post()
-        .uri(&path)
-        .set_payload(gzip(&good))
-        .insert_header((header::CONTENT_ENCODING, "gzip"));
-    assert_eq!(status!(open, r), StatusCode::FORBIDDEN);
+    for p in [path.clone(), format!("/images/{}/sbom", d(1))] {
+        let r = atest::TestRequest::post()
+            .uri(&p)
+            .set_payload(gzip(&good))
+            .insert_header((header::CONTENT_ENCODING, "gzip"));
+        let resp = atest::call_service(&open, r.to_request()).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{p}");
+        assert_eq!(
+            resp.headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok()),
+            Some("60"),
+            "{p}"
+        );
+    }
 
     let app = app!(auth(&[
         ("BROKER_TOKEN_SUPPLYCHAIN", SC_TOK),
@@ -1201,11 +1212,12 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
         api.exposed_via,
         vec!["other_namespace", "unattributed", "public_ip"]
     );
-    // Node ingress (NodePort / LB with Cluster policy SNATs to a node IP)
-    // is possible exposure, not "internal".
+    // Node-only ingress (kubelet probes, host-network agents or a NodePort:
+    // indistinguishable) is reported as its own class, not as exposure.
     let node = &by("viaNode").network;
-    assert_eq!(node.exposed, Some(true));
+    assert_eq!(node.exposed, Some(false));
     assert_eq!(node.exposed_via, vec!["node"]);
+    assert_eq!(node.ingress_from_nodes, 1);
     // Same-namespace ingress only: observed, and not exposed. The pod of
     // the same NAME in another namespace (public and cross-namespace
     // ingress) must not leak in.
@@ -1241,7 +1253,7 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
             ns.exposed_workloads,
             ns.unknown_exposure_workloads
         ),
-        (5, 5, 2, 2)
+        (5, 5, 1, 2)
     );
     assert!(
         crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-NOPE", 168)
@@ -3028,4 +3040,129 @@ fn live_database_in_use_without_the_coverage_function_is_unknown() {
         iu::coverage_available(&mut conn).unwrap(),
         "the rollback restored kg_runtime_coverage"
     );
+}
+
+/// The SBOM a matcher report was matched from is served under every
+/// running digest the report is, whatever digest the SBOM was posted
+/// under: BuildKit attaches an SBOM to one platform manifest, the matcher
+/// reports under the index, and a node may run another platform of it.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_sbom_matched_by_a_report_follows_it_to_the_running_digest() {
+    let mut conn = live_conn();
+    // Running: the arm64 manifest d(30) of index d(32). The registry SBOM
+    // sits on the amd64 manifest d(31), paged and sent out of order.
+    seed_inventory(
+        &mut conn,
+        &d(30),
+        "ghcr.io/example/multi",
+        "1",
+        "Deployment",
+        "multi",
+        "app",
+        0,
+    );
+    let at = "2026-09-25T08:00:00Z";
+    let page = |i: i64, names: &[&str]| {
+        let mut v = sbom_json(&d(31), at, names, Some(("set-m", i, 3)));
+        v["source"] = json!("registry");
+        v["image"]["digest_kind"] = json!("manifest");
+        v["image"]["index_digest"] = json!(d(32));
+        v["sbom_trust"] = json!("unverified");
+        v
+    };
+    let store_pages = |conn: &mut PgConnection| {
+        assert!(matches!(
+            store_s(conn, page(2, &["e", "f"])).unwrap(),
+            Outcome::Staged { .. }
+        ));
+        assert!(matches!(
+            store_s(conn, page(0, &["a", "b"])).unwrap(),
+            Outcome::Staged { .. }
+        ));
+        assert_eq!(
+            store_s(conn, page(1, &["c", "d"])).unwrap(),
+            Outcome::Stored { items: 6 }
+        );
+    };
+    let report = |source: &str, matched_from: Option<&str>, at: &str| {
+        let mut v = vulns_json(&d(32), at, &[(&format!("CVE-{source}"), "HIGH", Some("2"))]);
+        v["source"] = json!(source);
+        v["image"]["digest_kind"] = json!("index");
+        v["image"]["platform_manifests"] = json!({"linux/amd64": d(31), "linux/arm64": d(30)});
+        v["observed_in"] = json!([]);
+        if let Some(s) = matched_from {
+            v["sbom_source"] = json!(s);
+            v["sbom_trust"] = json!("unverified");
+        }
+        v
+    };
+    let sbom = |conn: &mut PgConnection| {
+        crate::supplychain_read::image_sbom(conn, &d(30), None, 0, 10).unwrap()
+    };
+
+    store_pages(&mut conn);
+    assert!(
+        sbom(&mut conn).reports.is_empty(),
+        "nothing joins the amd64 SBOM to the arm64 digest on its own"
+    );
+    // A report of the index that was not matched from it links nothing.
+    store_v(&mut conn, report("trivy-operator", None, at));
+    assert!(sbom(&mut conn).reports.is_empty());
+    // Grype's report of the index, matched from the registry SBOM.
+    store_v(
+        &mut conn,
+        report("grype", Some("registry"), "2026-09-26T08:00:00Z"),
+    );
+    let vulns = crate::supplychain_read::image_vulnerabilities(
+        &mut conn,
+        &d(30),
+        None,
+        None,
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    let g = vulns
+        .reports
+        .iter()
+        .find(|r| r.source == "grype")
+        .expect("the report is served under the running digest");
+    assert_eq!(g.join, "platform_manifest");
+    assert_eq!(g.sbom_sources, ["registry"]);
+    let p = sbom(&mut conn);
+    assert_eq!(
+        p.reports
+            .iter()
+            .map(|r| (r.source.as_str(), r.join.as_str(), r.report_digest.clone()))
+            .collect::<Vec<_>>(),
+        [("registry", "platform_manifest", d(31))]
+    );
+    assert_eq!(p.reports[0].sbom_trust.as_deref(), Some("unverified"));
+    assert_eq!(p.report.as_ref().map(|r| r.item_count), Some(6));
+    assert_eq!(
+        p.items.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["a", "b", "c", "d", "e", "f"]
+    );
+    // The periodic pass finds nothing to change.
+    assert_eq!(relink_batch(&mut conn, None, 100).unwrap().0, 0);
+
+    // The other order: the report lands first, the SBOM after.
+    exec(
+        &mut conn,
+        "TRUNCATE vuln_sources, image_vulnerabilities, image_sbom_components, image_sbom_pages, \
+            supplychain_image_links",
+    );
+    store_v(
+        &mut conn,
+        report("grype", Some("registry"), "2026-09-26T08:00:00Z"),
+    );
+    assert!(sbom(&mut conn).reports.is_empty());
+    store_pages(&mut conn);
+    let p = sbom(&mut conn);
+    assert_eq!(p.reports.len(), 1, "{:?}", p.reports);
+    assert_eq!(p.reports[0].join, "platform_manifest");
+    assert_eq!(p.items.len(), 6);
+    assert_eq!(relink_batch(&mut conn, None, 100).unwrap().0, 0);
 }

@@ -1329,10 +1329,7 @@ async fn post_attestation(
         req.app_data::<web::Data<crate::auth::AuthConfig>>()
             .map(|d| d.get_ref()),
     ) {
-        return HttpResponse::Forbidden().body(
-            "attestation ingest requires scoped broker auth: set BROKER_TOKEN_SUPPLYCHAIN \
-             (chart: broker.auth) and give the supplychain component that token",
-        );
+        return crate::supplychain::not_scoped("attestation");
     }
     let digest = path.into_inner();
     if !is_valid_digest(&digest) {

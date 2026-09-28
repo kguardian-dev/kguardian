@@ -48,7 +48,9 @@
 //! per profile ([`NETWORK_SCAN_ROWS`]), peers returned
 //! ([`NETWORK_PEERS_MAX`]), pods ([`PODS_MAX`]), compute rows
 //! ([`COMPUTE_ROWS_MAX`]), verdict groups ([`AUDIT_POLICIES_MAX`]), list and
-//! version page sizes.
+//! version page sizes. The two flow aggregates also run under their own
+//! statement timeout ([`network_read_timeout_ms`]); past it the profile is
+//! served without its network dimension rather than failing.
 
 use crate::image_inventory::{
     self, ContainerDigest, ContainerImages, ContainerSecurity, PodSecurity, WorkloadContainers,
@@ -136,11 +138,33 @@ pub fn snapshot_interval() -> Duration {
     )
 }
 
-/// `PROFILE_SNAPSHOT_BATCH` workloads per tick (default 200, [1, 5000]).
+/// `PROFILE_SNAPSHOT_BATCH` workloads per candidate query (default 200,
+/// [1, 5000]); a tick takes batches until its budget is spent.
 pub fn snapshot_batch() -> i64 {
     env_num("PROFILE_SNAPSHOT_BATCH")
         .unwrap_or(200)
         .clamp(1, 5_000)
+}
+
+/// `PROFILE_SNAPSHOT_TICK_BUDGET_SECS`: a tick keeps taking batches while
+/// candidates remain and this much time has not passed (default: the
+/// interval; 0 = one batch per tick).
+pub fn snapshot_tick_budget(interval: Duration) -> Duration {
+    Duration::from_secs(
+        env_num("PROFILE_SNAPSHOT_TICK_BUDGET_SECS")
+            .map(|v| v.clamp(0, 86_400) as u64)
+            .unwrap_or(interval.as_secs()),
+    )
+}
+
+/// `PROFILE_NETWORK_READ_TIMEOUT_MS`: statement timeout of the profile's
+/// two `pod_traffic` aggregates together (default 10 000; 0 = only the
+/// pool's backstop). Past it the profile is served without its network
+/// dimension, `coverage.note` saying so, instead of failing whole.
+pub fn network_read_timeout_ms() -> u64 {
+    env_num("PROFILE_NETWORK_READ_TIMEOUT_MS")
+        .map(|v| v.clamp(0, 600_000) as u64)
+        .unwrap_or(10_000)
 }
 
 /// `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50, [1, 1000]).
@@ -454,7 +478,13 @@ pub struct CrIn {
     #[serde(rename = "syscallCount")]
     pub syscall_count: usize,
     pub drift: DriftIn,
+    /// The broker's count from node-status posts (nodes heard from
+    /// recently).
     pub distribution: DistIn,
+    /// The CR's own `status.distribution` (the controllers' count against
+    /// the API server's node list); absent when the CR carries none.
+    #[serde(rename = "statusDistribution", default)]
+    pub status_distribution: Option<DistIn>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -574,6 +604,9 @@ pub struct Sources {
     pub network_truncated: bool,
     /// Distinct rule set for the snapshot (see [`NetRuleRow`]).
     pub network_rules: Vec<NetRuleRow>,
+    /// Why the flow aggregates were not read (their statement timeout ran
+    /// out): `network` and `network_rules` are then empty and say nothing.
+    pub network_unread: Option<String>,
     /// `None` = no verdict in the window mentions the pods.
     pub audit: Vec<AuditRow>,
     pub compute: Vec<ComputeRow>,
@@ -610,8 +643,103 @@ impl Sources {
     }
 }
 
+/// The two `pod_traffic` aggregates, `Err(why)` when their statement
+/// timeout ran out: the profile is then served without its network
+/// dimension instead of failing whole (a busy namespace's flow rows can
+/// outlast the pool's 30 s backstop).
+type NetworkRead = Result<(Vec<NetRow>, bool, Vec<NetRuleRow>), String>;
+
+fn read_network(
+    conn: &mut PgConnection,
+    key: &Key,
+    pods: &[String],
+    timeout_ms: u64,
+) -> Result<NetworkRead, DbError> {
+    let started = std::time::Instant::now();
+    // Whether our bound, rather than the session's own tighter timeout,
+    // was in force for the statement that ran last.
+    let mut bounded = false;
+    let out = conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        bounded = bound_statement(conn, timeout_ms)?;
+        let mut rows: Vec<NetRow> = sql_query(NETWORK_SQL)
+            .bind::<Text, _>(&key.namespace)
+            .bind::<Array<Text>, _>(pods)
+            .bind::<BigInt, _>(NETWORK_SCAN_ROWS)
+            .bind::<BigInt, _>(NETWORK_PEERS_MAX + 1)
+            .load(conn)?;
+        let scanned = rows.first().map(|r| r.scanned).unwrap_or(0);
+        let truncated = rows.len() as i64 > NETWORK_PEERS_MAX || scanned >= NETWORK_SCAN_ROWS;
+        rows.truncate(NETWORK_PEERS_MAX as usize);
+        // The rules query gets what is left of the bound.
+        if timeout_ms > 0 {
+            let left = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+            bounded = bound_statement(conn, left.max(1))?;
+        }
+        let mut rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
+            .bind::<Text, _>(&key.namespace)
+            .bind::<Text, _>(&key.kind)
+            .bind::<Text, _>(&key.name)
+            .bind::<BigInt, _>(NETWORK_RULES_MAX)
+            .load(conn)?;
+        rules.dedup();
+        Ok((rows, truncated, rules))
+    });
+    match out {
+        Ok(v) => Ok(Ok(v)),
+        Err(e) if is_statement_timeout(&e) => Ok(Err(if bounded {
+            format!(
+                "the flow aggregate was not read: the pod_traffic query exceeded its {timeout_ms} ms bound"
+            )
+        } else {
+            "the flow aggregate was not read: the pod_traffic query exceeded the database's \
+             statement timeout"
+                .into()
+        })),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `SET LOCAL statement_timeout`, never above the session's own: true
+/// when it applied, false when the session's tighter timeout stays.
+fn bound_statement(conn: &mut PgConnection, ms: u64) -> QueryResult<bool> {
+    #[derive(QueryableByName)]
+    struct Applied {
+        #[diesel(sql_type = Text)]
+        #[allow(dead_code)]
+        applied: String,
+    }
+    if ms == 0 {
+        return Ok(false);
+    }
+    let v = format!("{ms}ms");
+    sql_query(
+        "SELECT set_config('statement_timeout', $1, true) AS applied \
+         WHERE current_setting('statement_timeout') = '0' \
+            OR current_setting('statement_timeout')::interval > $2::interval",
+    )
+    .bind::<Text, _>(&v)
+    .bind::<Text, _>(&v)
+    .load::<Applied>(conn)
+    .map(|rows| !rows.is_empty())
+}
+
+fn is_statement_timeout(e: &diesel::result::Error) -> bool {
+    matches!(e, diesel::result::Error::DatabaseError(_, info)
+        if info.message().contains("statement timeout"))
+}
+
 /// Read every source for one workload.
 pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbError> {
+    load_sources_bounded(conn, key, network_read_timeout_ms())
+}
+
+/// [`load_sources`] with an explicit statement timeout (ms) for the flow
+/// aggregates; 0 leaves only the pool's backstop.
+pub fn load_sources_bounded(
+    conn: &mut PgConnection,
+    key: &Key,
+    network_timeout_ms: u64,
+) -> Result<Sources, DbError> {
     let WorkloadContainers {
         containers,
         truncated,
@@ -643,28 +771,15 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         .map(|p| p.pod_name.clone())
         .collect();
 
-    let (network, network_truncated) = if all_pods.is_empty() {
-        (Vec::new(), false)
+    // The rules query joins through pod_details too: no pods, no rows.
+    let (network, network_truncated, network_rules, network_unread) = if all_pods.is_empty() {
+        (Vec::new(), false, Vec::new(), None)
     } else {
-        let mut rows: Vec<NetRow> = sql_query(NETWORK_SQL)
-            .bind::<Text, _>(&key.namespace)
-            .bind::<Array<Text>, _>(&all_pods)
-            .bind::<BigInt, _>(NETWORK_SCAN_ROWS)
-            .bind::<BigInt, _>(NETWORK_PEERS_MAX + 1)
-            .load(conn)?;
-        let scanned = rows.first().map(|r| r.scanned).unwrap_or(0);
-        let truncated = rows.len() as i64 > NETWORK_PEERS_MAX || scanned >= NETWORK_SCAN_ROWS;
-        rows.truncate(NETWORK_PEERS_MAX as usize);
-        (rows, truncated)
+        match read_network(conn, key, &all_pods, network_timeout_ms)? {
+            Ok((rows, truncated, rules)) => (rows, truncated, rules, None),
+            Err(why) => (Vec::new(), false, Vec::new(), Some(why)),
+        }
     };
-
-    let mut network_rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
-        .bind::<Text, _>(&key.namespace)
-        .bind::<Text, _>(&key.kind)
-        .bind::<Text, _>(&key.name)
-        .bind::<BigInt, _>(NETWORK_RULES_MAX)
-        .load(conn)?;
-    network_rules.dedup();
 
     let audit: Vec<AuditRow> = if all_pods.is_empty() {
         Vec::new()
@@ -745,6 +860,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         network,
         network_truncated,
         network_rules,
+        network_unread,
         audit,
         compute,
         compute_truncated,
@@ -1734,6 +1850,7 @@ pub struct CrView {
     pub missing: Vec<String>,
     pub extra: Vec<String>,
     pub distribution: DistIn,
+    pub status_distribution: Option<DistIn>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1799,6 +1916,7 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
         missing: c.drift.missing.clone(),
         extra: c.drift.extra.clone(),
         distribution: c.distribution.clone(),
+        status_distribution: c.status_distribution.clone(),
     });
     match &cr {
         None => {
@@ -2146,7 +2264,10 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
     let since = s.network.iter().map(|r| r.first_seen).min();
     let mut findings = Vec::new();
     let mut reasons = Vec::new();
-    let status = if peers.is_empty() {
+    let status = if let Some(why) = &s.network_unread {
+        reasons.push(reason("network_unread", why.clone()));
+        "unknown"
+    } else if peers.is_empty() {
         reasons.push(reason(
             "no_flows",
             "No flows observed for this workload's pods",
@@ -2202,11 +2323,14 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
                     },
                     fraction: None,
                     observed_since: since.map(utc),
-                    note: format!(
-                        "Flows from {} pod(s) ({} live)",
-                        if s.any_pods { "the workload's" } else { "no" },
-                        s.live_pods.len()
-                    ),
+                    note: match &s.network_unread {
+                        Some(why) => why.clone(),
+                        None => format!(
+                            "Flows from {} pod(s) ({} live)",
+                            if s.any_pods { "the workload's" } else { "no" },
+                            s.live_pods.len()
+                        ),
+                    },
                 },
                 reasons,
             },
@@ -2773,9 +2897,12 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         content_hash: v.content_hash.clone(),
         created_at: utc(v.created_at),
     });
-    let snapshot_pending = version
-        .as_ref()
-        .is_none_or(|v| v.content_hash != content_hash);
+    // A partial profile is never versioned (snapshot_one refuses it), so
+    // it must not promise a snapshot.
+    let snapshot_pending = s.network_unread.is_none()
+        && version
+            .as_ref()
+            .is_none_or(|v| v.content_hash != content_hash);
     let names: Vec<String> = s.live_pods.iter().take(POD_NAMES_LISTED).cloned().collect();
     Profile {
         workload: WorkloadView {
@@ -2913,11 +3040,16 @@ fn snapshot_of(d: &Dimensions, s: &Sources) -> (Value, BTreeMap<&'static str, St
             )
         })
         .collect();
-    let network = json!({
-        "rules": rules.into_iter().map(|(dir, proto, port, peer)| json!({
-            "direction": dir, "protocol": proto, "port": port, "peer": peer
-        })).collect::<Vec<_>>(),
-    });
+    // Not read is not "no rules": a null section, and never a version.
+    let network = if s.network_unread.is_some() {
+        Value::Null
+    } else {
+        json!({
+            "rules": rules.into_iter().map(|(dir, proto, port, peer)| json!({
+                "direction": dir, "protocol": proto, "port": port, "peer": peer
+            })).collect::<Vec<_>>(),
+        })
+    };
 
     let snap = json!({
         "podSecurity": pod_security,
@@ -3298,18 +3430,114 @@ struct KeyRow {
     name: String,
 }
 
-/// Workloads with any source data, least recently computed first.
-const CANDIDATES_SQL: &str = "\
-SELECT k.ns, k.kind, k.name FROM ( \
-    SELECT pod_namespace AS ns, workload_kind AS kind, workload_name AS name FROM workload_containers \
-    UNION SELECT pod_namespace, workload_kind, workload_name FROM workload_syscalls \
-    UNION SELECT pod_namespace, workload_kind, workload_name FROM pod_details \
-          WHERE NOT is_dead AND pod_namespace IS NOT NULL AND workload_kind IS NOT NULL AND workload_name IS NOT NULL \
-) k \
-LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.ns \
-     AND l.workload_kind = k.kind AND l.workload_name = k.name \
-ORDER BY l.computed_at ASC NULLS FIRST, k.ns, k.kind, k.name \
-LIMIT $2";
+/// `EXISTS`: the workload keyed by the three SQL expressions has a pod the
+/// controller still reports (an ownerless pod is keyed `("Pod", name)`).
+macro_rules! alive_sql {
+    ($ns:expr, $kind:expr, $name:expr) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM pod_details pd WHERE NOT pd.is_dead \
+               AND pd.pod_namespace = ",
+            $ns,
+            " AND ((pd.workload_kind = ",
+            $kind,
+            " AND pd.workload_name = ",
+            $name,
+            ") OR (",
+            $kind,
+            " = 'Pod' AND pd.pod_name = ",
+            $name,
+            " AND pd.workload_kind IS NULL)))"
+        )
+    };
+}
+
+/// Workloads with any source data, minus `$3..$5` (visited this tick):
+/// those with alive pods first, then by last attempt (never attempted
+/// first), so finished Jobs and replaced ReplicaSets cannot keep live
+/// workloads waiting.
+const CANDIDATES_SQL: &str = concat!(
+    "WITH k AS ( \
+        SELECT pod_namespace AS ns, workload_kind AS kind, workload_name AS name FROM workload_containers \
+        UNION SELECT pod_namespace, workload_kind, workload_name FROM workload_syscalls \
+        UNION SELECT pod_namespace, workload_kind, workload_name FROM pod_details \
+              WHERE NOT is_dead AND pod_namespace IS NOT NULL AND workload_kind IS NOT NULL AND workload_name IS NOT NULL \
+    ) \
+    SELECT k.ns, k.kind, k.name FROM k \
+    LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.ns \
+         AND l.workload_kind = k.kind AND l.workload_name = k.name \
+    LEFT JOIN workload_profile_failures f ON f.cluster_id = $1 AND f.pod_namespace = k.ns \
+         AND f.workload_kind = k.kind AND f.workload_name = k.name \
+    WHERE NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[], $5::text[]) AS s(ns, kind, name) \
+                      WHERE s.ns = k.ns AND s.kind = k.kind AND s.name = k.name) \
+    ORDER BY ",
+    alive_sql!("k.ns", "k.kind", "k.name"),
+    " DESC, GREATEST(l.computed_at, f.failed_at) ASC NULLS FIRST, k.ns, k.kind, k.name \
+    LIMIT $2"
+);
+
+/// The next `batch` candidates after `seen`.
+fn candidates(conn: &mut PgConnection, batch: i64, seen: &[KeyRow]) -> QueryResult<Vec<KeyRow>> {
+    sql_query(CANDIDATES_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .bind::<BigInt, _>(batch)
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.ns.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.name.as_str()).collect::<Vec<_>>())
+        .load(conn)
+}
+
+/// Longest `lastError` kept (the database's message, never a statement).
+pub const FAILURE_MESSAGE_MAX: usize = 512;
+
+/// Remember that the last snapshot attempt for `key` failed and why.
+fn record_failure(conn: &mut PgConnection, key: &Key, error: &str) -> QueryResult<()> {
+    let mut msg = error.to_string();
+    if msg.len() > FAILURE_MESSAGE_MAX {
+        let mut cut = FAILURE_MESSAGE_MAX;
+        while !msg.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        msg.truncate(cut);
+    }
+    sql_query(
+        "INSERT INTO workload_profile_failures \
+         (cluster_id, pod_namespace, workload_kind, workload_name, last_error, failed_at) \
+         VALUES ($1, $2, $3, $4, $5, timezone('UTC', NOW())) \
+         ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name) DO UPDATE SET \
+           last_error = EXCLUDED.last_error, failed_at = EXCLUDED.failed_at",
+    )
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+    .bind::<Text, _>(&key.namespace)
+    .bind::<Text, _>(&key.kind)
+    .bind::<Text, _>(&key.name)
+    .bind::<Text, _>(&msg)
+    .execute(conn)
+    .map(|_| ())
+}
+
+fn clear_failure(conn: &mut PgConnection, key: &Key) -> QueryResult<usize> {
+    sql_query(
+        "DELETE FROM workload_profile_failures WHERE cluster_id = $1 AND pod_namespace = $2 \
+         AND workload_kind = $3 AND workload_name = $4",
+    )
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+    .bind::<Text, _>(&key.namespace)
+    .bind::<Text, _>(&key.kind)
+    .bind::<Text, _>(&key.name)
+    .execute(conn)
+}
+
+/// Failure rows of workloads with no source data left: never visited
+/// again, so they would otherwise stay forever.
+const FAILURES_PRUNE_SQL: &str = concat!(
+    "DELETE FROM workload_profile_failures f WHERE f.cluster_id = $1 \
+       AND NOT EXISTS (SELECT 1 FROM workload_containers wc WHERE wc.pod_namespace = f.pod_namespace \
+             AND wc.workload_kind = f.workload_kind AND wc.workload_name = f.workload_name) \
+       AND NOT EXISTS (SELECT 1 FROM workload_syscalls ws WHERE ws.pod_namespace = f.pod_namespace \
+             AND ws.workload_kind = f.workload_kind AND ws.workload_name = f.workload_name) \
+       AND NOT ",
+    alive_sql!("f.pod_namespace", "f.workload_kind", "f.workload_name")
+);
 
 /// Compute and store one workload's profile.
 pub fn snapshot_one(
@@ -3321,40 +3549,78 @@ pub fn snapshot_one(
     if sources.is_empty() {
         return Ok(None);
     }
+    if let Some(why) = &sources.network_unread {
+        // Served live as a partial profile, never versioned: a snapshot
+        // with no rules would read as every peer removed.
+        return Err(format!("network dimension not read; profile not snapshotted: {why}").into());
+    }
     let p = build(key, &sources, Utc::now());
     store_snapshot(conn, key, &p, cap).map(Some)
 }
 
-/// One snapshotter tick. Sequential: one workload's reads at a time.
+/// What one tick did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TickStats {
+    pub computed: usize,
+    pub new_versions: usize,
+    pub failed: usize,
+    pub batches: usize,
+}
+
+/// One snapshotter tick. Sequential: one workload's reads at a time. Takes
+/// batches of `batch` candidates until none are left or `budget` has
+/// passed (the first batch always runs). A failed workload gets a
+/// `workload_profile_failures` row; a computed one loses it.
 pub fn snapshot_tick(
     conn: &mut PgConnection,
     batch: i64,
     cap: i64,
-) -> Result<(usize, usize), DbError> {
-    let keys: Vec<KeyRow> = sql_query(CANDIDATES_SQL)
-        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
-        .bind::<BigInt, _>(batch)
-        .load(conn)?;
-    let (mut done, mut new) = (0, 0);
-    for k in keys {
-        let key = Key {
-            namespace: k.ns,
-            kind: k.kind,
-            name: k.name,
-        };
-        match snapshot_one(conn, &key, cap) {
-            Ok(Some(SnapshotOutcome::NewVersion(_))) => {
-                done += 1;
-                new += 1;
+    budget: Duration,
+) -> Result<TickStats, DbError> {
+    let started = std::time::Instant::now();
+    let mut stats = TickStats::default();
+    let mut seen: Vec<KeyRow> = Vec::new();
+    loop {
+        let keys = candidates(conn, batch, &seen)?;
+        if keys.is_empty() {
+            break;
+        }
+        let full = keys.len() as i64 >= batch;
+        stats.batches += 1;
+        for k in keys {
+            let key = Key {
+                namespace: k.ns.clone(),
+                kind: k.kind.clone(),
+                name: k.name.clone(),
+            };
+            match snapshot_one(conn, &key, cap) {
+                Ok(outcome) => {
+                    stats.computed += 1;
+                    if matches!(outcome, Some(SnapshotOutcome::NewVersion(_))) {
+                        stats.new_versions += 1;
+                    }
+                    clear_failure(conn, &key)?;
+                }
+                Err(e) => {
+                    stats.failed += 1;
+                    warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
+                        "workload profile snapshot failed");
+                    if let Err(e) = record_failure(conn, &key, &e.to_string()) {
+                        warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
+                            "could not record the snapshot failure");
+                    }
+                }
             }
-            Ok(_) => done += 1,
-            Err(e) => {
-                warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
-                "workload profile snapshot failed")
-            }
+            seen.push(k);
+        }
+        if !full || started.elapsed() >= budget {
+            break;
         }
     }
-    Ok((done, new))
+    sql_query(FAILURES_PRUNE_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .execute(conn)?;
+    Ok(stats)
 }
 
 /// Spawn the snapshotter loop.
@@ -3362,29 +3628,39 @@ pub fn spawn(pool: DbPool) {
     let interval = snapshot_interval();
     let batch = snapshot_batch();
     let cap = max_versions_per_workload();
+    let budget = snapshot_tick_budget(interval);
     info!(
         interval_secs = interval.as_secs(),
-        batch, cap, "workload profile snapshotter scheduled"
+        batch,
+        budget_secs = budget.as_secs(),
+        cap,
+        "workload profile snapshotter scheduled"
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             let pool = pool.clone();
-            let r = tokio::task::spawn_blocking(move || -> Result<(usize, usize), DbError> {
+            let r = tokio::task::spawn_blocking(move || -> Result<TickStats, DbError> {
                 let mut conn = pool.get()?;
-                snapshot_tick(&mut conn, batch, cap)
+                snapshot_tick(&mut conn, batch, cap, budget)
             })
             .await;
             match r {
-                Ok(Ok((done, new))) => {
-                    if new > 0 {
+                Ok(Ok(t)) => {
+                    if t.new_versions > 0 || t.failed > 0 {
                         info!(
-                            computed = done,
-                            new_versions = new,
+                            computed = t.computed,
+                            new_versions = t.new_versions,
+                            failed = t.failed,
+                            batches = t.batches,
                             "workload profiles snapshotted"
                         );
                     } else {
-                        debug!(computed = done, "workload profiles snapshotted; no changes");
+                        debug!(
+                            computed = t.computed,
+                            batches = t.batches,
+                            "workload profiles snapshotted; no changes"
+                        );
                     }
                 }
                 Ok(Err(e)) => warn!(error = %e, "workload profile snapshotter tick failed"),
@@ -3408,10 +3684,17 @@ pub struct ListQuery {
     pub search: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
+    /// `true` also lists workloads none of whose pods are alive (finished
+    /// Jobs, replaced ReplicaSets, deleted Deployments still in the read
+    /// model). Default `false`.
+    pub include_gone: Option<bool>,
 }
 
+/// A list row: the last good profile (null fields when the workload has
+/// never been computed) and the last failure, if the most recent attempt
+/// failed.
 #[derive(Debug, Clone, QueryableByName)]
-struct LatestRow {
+struct ListRow {
     #[diesel(sql_type = Text)]
     cluster_id: String,
     #[diesel(sql_type = Text)]
@@ -3420,30 +3703,49 @@ struct LatestRow {
     workload_kind: String,
     #[diesel(sql_type = Text)]
     workload_name: String,
-    #[diesel(sql_type = Integer)]
-    revision: i32,
-    #[diesel(sql_type = Text)]
-    content_hash: String,
-    #[diesel(sql_type = Jsonb)]
-    summary: Value,
-    #[diesel(sql_type = Timestamp)]
-    computed_at: NaiveDateTime,
-    #[diesel(sql_type = Timestamp)]
-    last_changed_at: NaiveDateTime,
+    #[diesel(sql_type = Nullable<Integer>)]
+    revision: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    content_hash: Option<String>,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    summary: Option<Value>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    computed_at: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    last_changed_at: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Text>)]
+    last_error: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    failed_at: Option<NaiveDateTime>,
 }
 
-const LIST_SQL: &str = "\
-SELECT cluster_id, pod_namespace, workload_kind, workload_name, revision, content_hash, summary, \
-       computed_at, last_changed_at \
-FROM workload_profile_latest \
-WHERE cluster_id = $1 \
-  AND ($2::text IS NULL OR pod_namespace = $2) \
-  AND ($3::text IS NULL OR workload_kind = $3) \
-  AND ($4::text IS NULL OR posture_status = $4) \
-  AND ($5::text IS NULL OR (pod_namespace, workload_kind, workload_name) > ($5, $6, $7)) \
-  AND ($9::text IS NULL OR strpos(lower(workload_name), lower($9)) > 0) \
-ORDER BY pod_namespace, workload_kind, workload_name \
-LIMIT $8";
+/// Computed and failed workloads, one row each; `$10` (include_gone) false
+/// keeps only workloads with an alive pod.
+const LIST_SQL: &str = concat!(
+    "WITH k AS ( \
+        SELECT pod_namespace, workload_kind, workload_name FROM workload_profile_latest WHERE cluster_id = $1 \
+        UNION \
+        SELECT pod_namespace, workload_kind, workload_name FROM workload_profile_failures WHERE cluster_id = $1 \
+    ) \
+    SELECT $1::text AS cluster_id, k.pod_namespace, k.workload_kind, k.workload_name, \
+           l.revision, l.content_hash, l.summary, l.computed_at, l.last_changed_at, \
+           f.last_error, f.failed_at \
+    FROM k \
+    LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.pod_namespace \
+         AND l.workload_kind = k.workload_kind AND l.workload_name = k.workload_name \
+    LEFT JOIN workload_profile_failures f ON f.cluster_id = $1 AND f.pod_namespace = k.pod_namespace \
+         AND f.workload_kind = k.workload_kind AND f.workload_name = k.workload_name \
+    WHERE ($2::text IS NULL OR k.pod_namespace = $2) \
+      AND ($3::text IS NULL OR k.workload_kind = $3) \
+      AND ($4::text IS NULL OR l.posture_status = $4) \
+      AND ($5::text IS NULL OR (k.pod_namespace, k.workload_kind, k.workload_name) > ($5, $6, $7)) \
+      AND ($9::text IS NULL OR strpos(lower(k.workload_name), lower($9)) > 0) \
+      AND ($10 OR ",
+    alive_sql!("k.pod_namespace", "k.workload_kind", "k.workload_name"),
+    ") \
+    ORDER BY k.pod_namespace, k.workload_kind, k.workload_name \
+    LIMIT $8"
+);
 
 fn empty_to_none(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -3456,6 +3758,7 @@ fn parse_after(s: &str) -> Option<(String, String, String)> {
     ([a, b, c].iter().all(|x| valid_segment(x))).then(|| (a.into(), b.into(), c.into()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn list_workloads(
     conn: &mut PgConnection,
     namespace: Option<&str>,
@@ -3463,9 +3766,10 @@ pub fn list_workloads(
     status: Option<&str>,
     search: Option<&str>,
     after: Option<&(String, String, String)>,
+    include_gone: bool,
     limit: i64,
 ) -> Result<Value, DbError> {
-    let mut rows: Vec<LatestRow> = sql_query(LIST_SQL)
+    let mut rows: Vec<ListRow> = sql_query(LIST_SQL)
         .bind::<Text, _>(DEFAULT_CLUSTER_ID)
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Nullable<Text>, _>(kind)
@@ -3475,6 +3779,7 @@ pub fn list_workloads(
         .bind::<Nullable<Text>, _>(after.map(|a| a.2.as_str()))
         .bind::<BigInt, _>(limit + 1)
         .bind::<Nullable<Text>, _>(search)
+        .bind::<diesel::sql_types::Bool, _>(include_gone)
         .load(conn)?;
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -3496,10 +3801,12 @@ pub fn list_workloads(
                 "name": r.workload_name,
                 "revision": r.revision,
                 "contentHash": r.content_hash,
-                "computedAt": utc(r.computed_at),
-                "lastChangedAt": utc(r.last_changed_at),
+                "computedAt": r.computed_at.map(utc),
+                "lastChangedAt": r.last_changed_at.map(utc),
+                "lastError": r.last_error,
+                "failedAt": r.failed_at.map(utc),
             });
-            if let (Value::Object(m), Value::Object(s)) = (&mut item, r.summary) {
+            if let (Value::Object(m), Some(Value::Object(s))) = (&mut item, r.summary) {
                 m.extend(s);
             }
             item
@@ -3548,6 +3855,7 @@ pub async fn get_workloads(
     let namespace = empty_to_none(q.namespace);
     let kind = empty_to_none(q.kind);
     let search = empty_to_none(q.search).filter(|x| x.len() <= MAX_SEGMENT);
+    let include_gone = q.include_gone.unwrap_or(false);
     let _permit = match budget
         .acquire(cost_kib(limit + 1, LIST_ROW_COST_BYTES))
         .await
@@ -3564,6 +3872,7 @@ pub async fn get_workloads(
             status.as_deref(),
             search.as_deref(),
             after.as_ref(),
+            include_gone,
             limit,
         )
     })
@@ -5256,6 +5565,72 @@ mod tests {
         assert_eq!(p.controls[0].in_sync, Some(false));
     }
 
+    /// The CR block carries both counts the seccomp summary has: the
+    /// broker's node-status count and the CR's own `status.distribution`,
+    /// which differ when a node stops reporting (48/48 beside 60/60).
+    #[test]
+    fn cr_status_distribution_is_mirrored_from_the_seccomp_summary() {
+        let summary = |cr_extra: Value| {
+            let mut v = json!({
+                "hash": "h", "syscallCount": 3, "architectures": ["x86_64"],
+                "updatedAt": "2026-09-14T00:33:00",
+                "capture": {"level": "full", "complete": true, "incomplete": 0},
+                "cr": {
+                    "name": "media-transform-api", "defaultAction": "SCMP_ACT_LOG", "hash": "x",
+                    "syscallCount": 2, "drift": {"missing": [], "extra": [], "inSync": true},
+                    "distribution": {"ready": 48, "total": 48, "state": "Ready"}
+                },
+                "denials": null
+            });
+            if let (Value::Object(cr), Value::Object(x)) = (&mut v["cr"], cr_extra) {
+                cr.extend(x);
+            }
+            serde_json::from_value::<SeccompSummary>(v).unwrap()
+        };
+        let with = summary(json!({
+            "statusDistribution": {"ready": 60, "total": 60, "state": "Ready"}
+        }));
+        let names: BTreeSet<String> = ["read", "write"].iter().map(|x| x.to_string()).collect();
+        let p = build(
+            &key(),
+            &Sources {
+                seccomp: Some((with, names.clone())),
+                ..Default::default()
+            },
+            now(),
+        );
+        let cr = p.dimensions.syscalls.cr.as_ref().unwrap();
+        assert_eq!((cr.distribution.ready, cr.distribution.total), (48, 48));
+        let sd = cr.status_distribution.as_ref().expect("mirrored");
+        assert_eq!((sd.ready, sd.total, sd.state.as_str()), (60, 60, "Ready"));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["dimensions"]["syscalls"]["cr"]["statusDistribution"],
+            json!({"ready": 60, "total": 60, "state": "Ready"})
+        );
+        assert_eq!(
+            v["dimensions"]["syscalls"]["cr"]["distribution"]["ready"],
+            48
+        );
+        // A CR without one (older controller, or nothing distributed yet).
+        for absent in [json!({}), json!({"statusDistribution": null})] {
+            let p = build(
+                &key(),
+                &Sources {
+                    seccomp: Some((summary(absent), names.clone())),
+                    ..Default::default()
+                },
+                now(),
+            );
+            let v = serde_json::to_value(&p).unwrap();
+            assert!(v["dimensions"]["syscalls"]["cr"]["statusDistribution"].is_null());
+            assert_eq!(
+                v["dimensions"]["syscalls"]["cr"]["distribution"]["ready"],
+                48
+            );
+        }
+    }
+
     #[test]
     fn syscalls_dimension_from_the_seccomp_summary() {
         let sum = SeccompSummary {
@@ -5283,6 +5658,7 @@ mod tests {
                     total: 1,
                     state: "Ready".into(),
                 },
+                status_distribution: None,
             }),
             denials: Some(DenialIn {
                 total: 0,
@@ -5308,6 +5684,59 @@ mod tests {
             p.snapshot["syscalls"]["syscalls"],
             json!(["exit", "read", "write"])
         );
+    }
+
+    #[test]
+    fn list_query_parses_include_gone() {
+        let q: ListQuery = serde_urlencoded::from_str("limit=5&include_gone=true").unwrap();
+        assert_eq!((q.limit, q.include_gone), (Some(5), Some(true)));
+        let q: ListQuery = serde_urlencoded::from_str("namespace=shop").unwrap();
+        assert_eq!(q.include_gone, None);
+        assert!(serde_urlencoded::from_str::<ListQuery>("include_gone=maybe").is_err());
+    }
+
+    #[test]
+    fn unread_network_is_unknown_with_the_reason_and_never_a_snapshot() {
+        let key = Key {
+            namespace: "shop".into(),
+            kind: "Deployment".into(),
+            name: "api".into(),
+        };
+        let why = "the flow aggregate was not read: the pod_traffic query exceeded 10000 ms";
+        let s = Sources {
+            any_pods: true,
+            live_pods: vec!["api-1".into()],
+            network_unread: Some(why.into()),
+            ..Default::default()
+        };
+        let p = build(&key, &s, Utc::now());
+        let n = &p.dimensions.network;
+        assert_eq!(n.env.status, "unknown");
+        assert_eq!(n.env.coverage.level, "none");
+        assert_eq!(n.env.coverage.note, why);
+        assert_eq!(n.env.reasons[0].code, "network_unread");
+        assert_eq!(n.env.reasons[0].message, why);
+        assert!(n.peers.is_empty() && !n.truncated);
+        assert!(p.posture.unknown_dimensions.contains(&"network"));
+        assert!(p.snapshot["network"].is_null(), "{}", p.snapshot);
+        assert!(p.findings.iter().all(|f| f.dimension != "network"));
+        assert!(!p.snapshot_pending, "no version will follow a partial read");
+        // The same sources with the flows read: the usual empty answer.
+        let read = Sources {
+            network_unread: None,
+            ..s
+        };
+        let p = build(&key, &read, Utc::now());
+        assert_eq!(p.dimensions.network.env.reasons[0].code, "no_flows");
+        assert!(p.snapshot_pending, "no stored version yet: pending");
+        assert!(p
+            .dimensions
+            .network
+            .env
+            .coverage
+            .note
+            .starts_with("Flows from"));
+        assert!(p.snapshot["network"]["rules"].is_array());
     }
 
     #[test]
@@ -6013,6 +6442,7 @@ mod live_tests {
              DELETE FROM pod_details WHERE pod_namespace = '{ns}'; \
              DELETE FROM audit_verdicts WHERE policy_namespace = '{ns}'; \
              DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_failures WHERE pod_namespace = '{ns}'; \
              DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
         ))
         .expect("reset");
@@ -6662,12 +7092,13 @@ mod live_tests {
         );
 
         // The snapshotter tick picks the workload up and fills the read model.
-        let (done, _) = snapshot_tick(&mut conn, 100_000, 50).unwrap();
-        assert!(done >= 1);
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let t = snapshot_tick(&mut conn, 100_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 1);
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["name"], json!("checkout"));
         assert_eq!(l["items"][0]["posture"]["status"], json!("risk"));
-        let l = list_workloads(&mut conn, Some(ns), None, Some("ok"), None, None, 10).unwrap();
+        let l =
+            list_workloads(&mut conn, Some(ns), None, Some("ok"), None, None, false, 10).unwrap();
         assert_eq!(l["items"], json!([]));
 
         // Unknown workload: nothing at all.
@@ -6776,7 +7207,7 @@ mod live_tests {
         ));
 
         // List endpoint reads the latest row.
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"].as_array().unwrap().len(), 1);
         assert_eq!(l["items"][0]["revision"], json!(4));
         assert_eq!(
@@ -6817,7 +7248,7 @@ mod live_tests {
             store_with_head(&mut conn, &k, &p, 50, Some(stale_head.clone())).unwrap(),
             SnapshotOutcome::LostRace(5)
         );
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["revision"], json!(4));
         // An identical row at that revision is not a conflict.
         conn.batch_execute(&format!(
@@ -6836,7 +7267,7 @@ mod live_tests {
         ))
         .unwrap();
         store_snapshot(&mut conn, &k, &p, 50).unwrap();
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["revision"], json!(99));
 
         // Unknown workload.
@@ -6851,6 +7282,301 @@ mod live_tests {
             diff_versions(&mut conn, &unknown, None, None).unwrap(),
             DiffResult::NoVersions
         ));
+        reset(&mut conn, ns);
+    }
+    /// `GET /workloads` lists workloads with alive pods unless
+    /// `include_gone`; a failed attempt is carried as `lastError` /
+    /// `failedAt` beside the last good profile, a failed-only workload is
+    /// listed with null profile fields, and a computed profile clears it.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_list_hides_gone_workloads_and_reports_failures() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-gone";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, 'c', "{}");
+        let d = format!("sha256:{}", "d".repeat(64));
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) \
+             VALUES ('retired-1', '10.0.0.31', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'retired'), \
+                    ('ghost-1', '10.0.0.32', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'ghost') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = EXCLUDED.is_dead, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name; \
+             INSERT INTO images (digest, repository, tags, digest_kind) VALUES ('{d}', 'ghcr.io/example/retired', '{{1}}', 'repo') \
+             ON CONFLICT (digest) DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, image_digest, \
+               container_kind, image_ref, last_pod_name, state, state_reason, last_seen) \
+             VALUES ('{ns}', 'Deployment', 'retired', 'app', '{d}', 'regular', 'ghcr.io/example/retired:1', 'retired-1', \
+               'terminated', 'Completed', timezone('UTC', NOW()) - INTERVAL '1 day');"
+        ))
+        .unwrap();
+        let k = |n: &str| Key {
+            namespace: ns.into(),
+            kind: "Deployment".into(),
+            name: n.into(),
+        };
+        let names = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = |conn: &mut PgConnection, gone: bool, limit: i64| {
+            list_workloads(conn, Some(ns), None, None, None, None, gone, limit).unwrap()
+        };
+
+        // Nothing computed yet: a failure alone puts the workload on the list.
+        record_failure(&mut conn, &k("ghost"), "boom").unwrap();
+        let l = list(&mut conn, false, 10);
+        assert_eq!(names(&l), vec!["ghost"]);
+        let g = &l["items"][0];
+        assert_eq!(g["lastError"], json!("boom"));
+        assert!(g["failedAt"].is_string());
+        assert!(g["revision"].is_null() && g["computedAt"].is_null(), "{g}");
+        assert!(
+            ["posture", "dimensions", "findingCounts", "drift"]
+                .iter()
+                .all(|k| g.get(k).is_none()),
+            "profile keys are absent, not null: {g}"
+        );
+
+        // A tick computes checkout, ghost (pod only) and retired (inventory only).
+        let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 3, "{t:?}");
+        let l = list(&mut conn, false, 10);
+        assert_eq!(
+            names(&l),
+            vec!["checkout", "ghost"],
+            "no alive pod: not listed"
+        );
+        let g = &l["items"][1];
+        assert!(
+            g["lastError"].is_null() && g["failedAt"].is_null(),
+            "a computed profile clears the failure: {g}"
+        );
+        assert_eq!(g["revision"], json!(1));
+        assert_eq!(
+            names(&list(&mut conn, true, 10)),
+            vec!["checkout", "ghost", "retired"]
+        );
+
+        // A later failure sits beside the last good profile, cut to size.
+        record_failure(
+            &mut conn,
+            &k("checkout"),
+            &"x".repeat(FAILURE_MESSAGE_MAX + 50),
+        )
+        .unwrap();
+        let l = list(&mut conn, false, 10);
+        let c = &l["items"][0];
+        assert_eq!(c["name"], json!("checkout"));
+        assert_eq!(c["revision"], json!(1));
+        assert!(c["posture"]["status"].is_string());
+        assert_eq!(c["lastError"].as_str().unwrap().len(), FAILURE_MESSAGE_MAX);
+        assert!(c["failedAt"].is_string());
+
+        // The cursor walks computed and failed-only rows in one key order.
+        let p1 = list_workloads(&mut conn, Some(ns), None, None, None, None, true, 1).unwrap();
+        assert_eq!(names(&p1), vec!["checkout"]);
+        let after = parse_after(p1["nextAfter"].as_str().unwrap()).unwrap();
+        let p2 =
+            list_workloads(&mut conn, Some(ns), None, None, None, Some(&after), true, 1).unwrap();
+        assert_eq!(names(&p2), vec!["ghost"]);
+
+        // A failure row with no source data behind it is pruned; the
+        // recompute clears checkout's.
+        record_failure(&mut conn, &k("vanished"), "gone").unwrap();
+        snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        let l = list(&mut conn, true, 10);
+        assert_eq!(names(&l), vec!["checkout", "ghost", "retired"]);
+        assert!(l["items"][0]["lastError"].is_null());
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name IN ('retired-1', 'ghost-1')")
+            .unwrap();
+        reset(&mut conn, ns);
+    }
+
+    /// Candidates: alive workloads before gone ones, never attempted
+    /// before least recently attempted (computed or failed), and the keys
+    /// already visited this tick left out.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_snapshot_candidates_put_alive_workloads_first() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-order";
+        reset(&mut conn, ns);
+        // a: alive, never attempted; c: alive, computed an hour ago; e:
+        // alive, failed half an hour ago; b: gone, never attempted; d:
+        // gone, computed two hours ago.
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) VALUES \
+               ('ord-a-1', '10.0.1.1', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'a'), \
+               ('ord-c-1', '10.0.1.3', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'c'), \
+               ('ord-e-1', '10.0.1.5', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'e'), \
+               ('ord-b-1', '10.0.1.2', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'b'), \
+               ('ord-d-1', '10.0.1.4', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'd') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = EXCLUDED.is_dead, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name; \
+             INSERT INTO workload_syscalls (pod_namespace, workload_kind, workload_name, syscalls, arches, hash, updated_at, syscall_count) VALUES \
+               ('{ns}', 'Deployment', 'b', 'exit', 'x86_64', 'b', timezone('UTC', NOW()), 1), \
+               ('{ns}', 'Deployment', 'd', 'exit', 'x86_64', 'd', timezone('UTC', NOW()), 1);"
+        ))
+        .unwrap();
+        let k = |n: &str| Key {
+            namespace: ns.into(),
+            kind: "Deployment".into(),
+            name: n.into(),
+        };
+        snapshot_one(&mut conn, &k("c"), 50).unwrap();
+        snapshot_one(&mut conn, &k("d"), 50).unwrap();
+        record_failure(&mut conn, &k("e"), "timeout").unwrap();
+        conn.batch_execute(&format!(
+            "UPDATE workload_profile_latest SET computed_at = timezone('UTC', NOW()) - INTERVAL '1 hour' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'c'; \
+             UPDATE workload_profile_latest SET computed_at = timezone('UTC', NOW()) - INTERVAL '2 hours' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'd'; \
+             UPDATE workload_profile_failures SET failed_at = timezone('UTC', NOW()) - INTERVAL '30 minutes' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'e';"
+        ))
+        .unwrap();
+        let ours = |rows: &[KeyRow]| -> Vec<String> {
+            rows.iter()
+                .filter(|r| r.ns == ns)
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let all = candidates(&mut conn, 100_000, &[]).unwrap();
+        assert_eq!(ours(&all), vec!["a", "c", "e", "b", "d"]);
+        let seen: Vec<KeyRow> = all
+            .into_iter()
+            .filter(|r| r.ns == ns && (r.name == "a" || r.name == "c"))
+            .collect();
+        assert_eq!(
+            ours(&candidates(&mut conn, 100_000, &seen).unwrap()),
+            vec!["e", "b", "d"]
+        );
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name LIKE 'ord-%'")
+            .unwrap();
+        reset(&mut conn, ns);
+    }
+
+    /// A tick takes one batch with no budget, and batches until no
+    /// candidate is left with one.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_snapshot_tick_takes_batches_until_the_budget_is_spent() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-tick";
+        reset(&mut conn, ns);
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) VALUES \
+               ('bud-1-1', '10.0.2.1', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-1'), \
+               ('bud-2-1', '10.0.2.2', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-2'), \
+               ('bud-3-1', '10.0.2.3', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-3') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = false, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name;"
+        ))
+        .unwrap();
+        let t = snapshot_tick(&mut conn, 1, 50, Duration::ZERO).unwrap();
+        assert_eq!((t.batches, t.computed + t.failed), (1, 1), "{t:?}");
+        let t = snapshot_tick(&mut conn, 1, 50, Duration::from_secs(600)).unwrap();
+        assert!(
+            t.batches >= 2 && t.batches == t.computed + t.failed,
+            "{t:?}"
+        );
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let names: Vec<&str> = l["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["bud-1", "bud-2", "bud-3"]);
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name LIKE 'bud-%'")
+            .unwrap();
+        reset(&mut conn, ns);
+    }
+    /// A flow aggregate that runs past its bound leaves the profile
+    /// readable without its network dimension; the snapshotter records
+    /// the failure instead of versioning a partial profile, and clears it
+    /// once the read fits.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_profile_survives_a_slow_flow_read() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-slow";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, 'e', "{}");
+        // Enough rows for the newest-first scan and sort to outlast 1 ms.
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_traffic (uuid, pod_name, pod_namespace, pod_ip, pod_port, ip_protocol, traffic_type, \
+               traffic_in_out_ip, traffic_in_out_port, time_stamp) \
+             SELECT 'kgtest-slow-' || g, 'checkout-1', '{ns}', '10.0.0.1', '8080', 'TCP', 'INGRESS', \
+               '10.1.' || (g / 250) || '.' || (g % 250), '40000', \
+               timezone('UTC', NOW()) - make_interval(secs => g) \
+             FROM generate_series(1, 60000) g;"
+        ))
+        .unwrap();
+        let k = key(ns);
+        let s = load_sources_bounded(&mut conn, &k, 1).unwrap();
+        let why = s.network_unread.clone().expect("the 1 ms bound ran out");
+        assert!(why.ends_with("exceeded its 1 ms bound"), "{why}");
+        assert!(s.network.is_empty() && s.network_rules.is_empty());
+        assert_eq!(
+            s.live_pods,
+            vec!["checkout-1".to_string()],
+            "other sources read"
+        );
+        assert_eq!(s.containers.len(), 1);
+        let p = build(&k, &s, Utc::now());
+        assert_eq!(p.dimensions.network.env.status, "unknown");
+        assert_eq!(p.dimensions.network.env.coverage.note, why);
+        assert_eq!(p.dimensions.images.containers.len(), 1);
+        // A generous bound reads them (and hits the scan limit).
+        let s = load_sources_bounded(&mut conn, &k, 30_000).unwrap();
+        assert!(s.network_unread.is_none());
+        assert!(!s.network.is_empty() && s.network_truncated);
+        // The session's own tighter timeout stays in force, and is what
+        // the reason names.
+        conn.batch_execute("SET statement_timeout = 1").unwrap();
+        let r = read_network(&mut conn, &k, &["checkout-1".to_string()], 60_000).unwrap();
+        conn.batch_execute("RESET statement_timeout").unwrap();
+        assert_eq!(
+            r.expect_err("the session's 1 ms timeout ran out"),
+            "the flow aggregate was not read: the pod_traffic query exceeded the database's \
+             statement timeout"
+        );
+        assert!(
+            read_network(&mut conn, &k, &["checkout-1".to_string()], 30_000)
+                .unwrap()
+                .is_ok()
+        );
+        // The snapshotter under the tight bound: a failure, not a version.
+        let t = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("PROFILE_NETWORK_READ_TIMEOUT_MS", "1");
+            let one = snapshot_one(&mut conn, &k, 50);
+            let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+            std::env::remove_var("PROFILE_NETWORK_READ_TIMEOUT_MS");
+            let e = one.expect_err("a partial profile is not snapshotted");
+            assert!(e.to_string().contains("not snapshotted"), "{e}");
+            t
+        };
+        assert!(t.failed >= 1, "{t:?}");
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let c = &l["items"][0];
+        assert_eq!(c["name"], json!("checkout"));
+        assert!(c["revision"].is_null(), "{c}");
+        assert!(c["lastError"].as_str().unwrap().contains("not read"), "{c}");
+        // With the read fitting again, the next tick computes and clears it.
+        let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 1, "{t:?}");
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let c = &l["items"][0];
+        assert_eq!(c["revision"], json!(1));
+        assert!(c["lastError"].is_null() && c["failedAt"].is_null(), "{c}");
+        assert!(c["posture"]["status"].is_string());
         reset(&mut conn, ns);
     }
 }

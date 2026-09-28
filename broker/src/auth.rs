@@ -983,11 +983,12 @@ mod tests {
             let s = status_of!(app, r.method, &concrete(r.pattern), None);
             if r.access == SUPPLYCHAIN {
                 // The one deliberate exception: supply-chain ingest refuses
-                // to run without scoped auth (supplychain::ingest_allowed),
-                // so an open broker can't be fed forged scan results.
+                // to run without scoped auth (supplychain::not_scoped), so
+                // an open broker can't be fed forged scan results. 503, not
+                // 403: the component keeps the payload and retries.
                 assert_eq!(
                     s,
-                    StatusCode::FORBIDDEN,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     "{} {}: supply-chain ingest must refuse with auth disabled",
                     r.method,
                     r.pattern

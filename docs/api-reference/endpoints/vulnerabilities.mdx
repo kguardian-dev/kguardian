@@ -181,10 +181,16 @@ inventory digests with the first rule that matches, and records which one:
 | `workload_tag` | Only when neither digest rule matched the payload, and only for an inventory digest that has no exact link from **any** source: same namespace, workload and container as a report's `observed_in`, and the same `repository:tag`. Trivy's ReplicaSet (`api-7c9d8f6b5`) or Job (`backup-29012345`) matches the inventory's Deployment (`api`) or CronJob (`backup`). | Tag only: the tag may have moved since the scan |
 | `report_digest` | Reads only: you asked for the payload's own digest and nothing in the inventory links to it. | Exact, but not known to run here |
 
-An exact link retires any tag guess on the same image. Links are refreshed
-at ingest and by the retention pass
-(`broker.supplychain.retention.intervalSeconds`, default 300 s), so a pod
-that starts after its image was scanned is matched within one interval.
+An exact link retires any tag guess on the same image. An SBOM also
+carries the exact links of every vulnerability report matched from it
+(one whose `sbomSources` names the SBOM's source, under the SBOM's digest
+or the index it belongs to): a registry SBOM is attached to one platform
+manifest while a node may run another platform of the same index, and the
+matcher reports under the index, so the SBOM a report came from is served
+under every running digest the report is. Links are refreshed at ingest
+and by the retention pass (`broker.supplychain.retention.intervalSeconds`,
+default 300 s), so a pod that starts after its image was scanned is
+matched within one interval.
 
 ## Ingest (supplychain token)
 
@@ -197,8 +203,12 @@ The payload schema is in `supplychain/README.md`. `{digest}` must equal
 `image.digest`.
 
 - **Scoped auth only.** These routes need a token with the `supplychain`
-  scope (`BROKER_TOKEN_SUPPLYCHAIN`). With broker auth off, or with only
-  the legacy shared token, they answer `403`.
+  scope (`BROKER_TOKEN_SUPPLYCHAIN`); a token without it answers `403`.
+  While the broker has no `supplychain` token at all (auth off, or only
+  the legacy shared token) they answer `503` with `Retry-After`, so a
+  component that starts before the broker's scoped auth is in place keeps
+  its payloads queued instead of dropping them; nothing is stored either
+  way.
 - **Bodies.** `Content-Encoding: gzip` (or none), at most 1 MiB on the
   wire, received within 30 s (`408` otherwise). A gzip body is inflated
   into at most `broker.supplychain.maxDecompressedBytes` (default 8 MiB)
@@ -383,15 +393,19 @@ are generated from, with the peer identity the broker stamps at ingest
    - `ingressFromPublicIps`: those of the unattributed peers that are
      internet-routable (not RFC 1918, CGNAT, link-local, ULA, loopback or
      documentation space);
-   - `ingressFromNodes`: node or host-network peers. A NodePort or
-     LoadBalancer Service with `externalTrafficPolicy: Cluster` rewrites
-     outside clients to a node IP, so this counts as possible exposure.
-     Kubelet probes arrive from node IPs too; the broker cannot tell them
-     apart.
-4. `exposed` is `true` when any of those is non-zero, and `exposedVia`
-   names which (`other_namespace`, `unattributed`, `public_ip`, `node`).
-   It is `false` when `INGRESS` flows were observed in the window and none
-   came from outside. It is `null` (unknown) when the broker knows no pods
+   - `ingressFromNodes`: node or host-network peers. Kubelet liveness and
+     readiness probes, host-network agents and a NodePort or LoadBalancer
+     Service with `externalTrafficPolicy: Cluster` (which rewrites outside
+     clients to a node IP) all arrive from node IPs, and the broker cannot
+     tell them apart.
+4. `exposedVia` names the classes seen (`other_namespace`, `unattributed`,
+   `public_ip`, `node`). `exposed` is `true` when any class other than
+   `node` is present: node-only ingress is probe traffic as often as it is
+   a NodePort, so it is reported as its own class and never counts as
+   exposure or feeds the `P0` tier on its own (`exposed: false,
+   exposedVia: ["node"]`). `exposed` is `false` when `INGRESS` flows were
+   observed in the window and none came from outside (node peers aside).
+   It is `null` (unknown) when the broker knows no pods
    for the workload, or they had no ingress flows in the window, even if
    they had egress: the controller does not capture inbound UDP, so a
    UDP-only server shows outbound flows and no ingress. Nothing observed

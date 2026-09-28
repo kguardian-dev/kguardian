@@ -50,16 +50,27 @@ error.
 
 Query (all optional): `namespace` (exact), `kind` (exact), `status` (`ok|warn|risk|unknown`, filters on
 `posture.status`), `search` (case-insensitive substring of the workload name, max 253 chars), `limit`
-(default 100, max 500, clamped), `after` (the previous page's `nextAfter`, opaque).
+(default 100, max 500, clamped), `after` (the previous page's `nextAfter`, opaque), `include_gone`
+(`true` also lists workloads none of whose pods are alive: finished Jobs, replaced ReplicaSets and deleted
+Deployments still in the read model; default `false`).
 
 Order: `(namespace, kind, name)` ascending. `nextAfter` is `null` on the last page.
 
 Source: the `workload_profile_latest` read model, refreshed by a background snapshotter (every
-`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, floor 60; `PROFILE_SNAPSHOT_BATCH` workloads per tick,
-default 200, least recently computed first). A workload appears after its first snapshot (the first tick
-runs ~60 s after broker start); `computedAt` says how fresh each row is. The detail endpoint (section 2)
-is always computed live. Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`,
-`list-search-ledger`, `list-status-risk`.
+`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, floor 60). A tick takes batches of
+`PROFILE_SNAPSHOT_BATCH` (default 200) candidates until none are left or
+`PROFILE_SNAPSHOT_TICK_BUDGET_SECS` (default: the interval; 0 = one batch) has passed; workloads with
+alive pods come first, then the least recently attempted. A workload appears after its first snapshot
+(the first tick runs ~60 s after broker start); `computedAt` says how fresh each row is. When the most
+recent attempt failed, `lastError` and `failedAt` say so and the last good profile stays beside them; a
+workload that failed before it was ever computed is listed with `revision`, `contentHash`, `computedAt`
+and `lastChangedAt` `null` and without the `posture`, `dimensions`, `findingCounts` and `drift` keys (they
+come from the stored summary, which does not exist), so a client can say "profile failed" rather than "not
+computed yet". Both are `null` otherwise. The tick budget is checked between batches: a batch runs to
+completion, so a tick can overrun the budget by one batch. The detail endpoint (section 2) is always
+computed live.
+Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`, `list-search-ledger`,
+`list-status-risk`.
 
 From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
 
@@ -70,6 +81,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
       "clusterId": "primary",
       "computedAt": "2026-09-26T03:05:49.483524Z",
       "contentHash": "fnv1a64:5ba183ed9b98a6fa",
+      "failedAt": null,
       "dimensions": {
         "compute": {
           "status": "unknown"
@@ -104,6 +116,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
       },
       "kind": "Deployment",
       "lastChangedAt": "2026-09-26T03:05:49.483524Z",
+      "lastError": null,
       "name": "source-controller",
       "namespace": "flux-system",
       "posture": {
@@ -360,7 +373,8 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
 
 - `contentHash`: hash of the live profile's policy-relevant snapshot (section 3). `version`: the latest
   **stored** version (`null` until the snapshotter stores one). `snapshotPending: true` = live differs
-  from the stored version (always `true` when `version` is `null`).
+  from the stored version (always `true` when `version` is `null`), except on a profile whose network
+  dimension was not read (section 2.4): that profile is never versioned, so it is `false`.
 - `controls[].state`: networkPolicy `"audit" | "unknown"`; seccompProfile `"enforcing" | "audit" | "none"`;
   imageAdmission always `null` (kguardian enforces no admission; signature results are in
   `images.supplyChain`, section 2.6). `inSync`: `true | false | null`.
@@ -700,6 +714,14 @@ From `GET /workloads/observability/DaemonSet/node-exporter/profile` -> 200 (capt
 - `peer.kind`: `"pod" | "service" | "node" | "external" | "unresolved"` (`external` = a public IP;
   `unresolved` = a private IP with no resolved identity).
 - `peers[]`: at most 200 groups from the newest 50 000 flow rows; `truncated: true` if either bound hit.
+- The two flow aggregates run under their own statement timeout, `PROFILE_NETWORK_READ_TIMEOUT_MS`
+  (default 10 000; 0 leaves only the pool's backstop). When it runs out the profile is still served:
+  `status` `unknown` with reason `network_unread`, `coverage.level` `none` and `coverage.note` saying
+  what happened, `peers` empty, `snapshot.network` `null`, `snapshotPending` `false`; every other
+  dimension is complete. The snapshotter never versions such a profile: it records the failure (list
+  `lastError`) and tries again next tick. The note names the bound that fired: the broker's
+  (`exceeded its N ms bound`) or, when the session's own statement timeout is tighter, the database's.
+  An enforcing export (section 4) is refused with the same message unless `acknowledgePartial=true`.
   `port` = the pod's own port for ingress, the peer's port for egress; `null` if unparseable.
 - `policy.audit`: `null` when no AuditNetworkPolicy verdict mentions the workload's pods in the last 24 h.
   `policy.enforced`: always `null` (applied NetworkPolicies are not mirrored).
@@ -751,6 +773,11 @@ From `GET /workloads/flux-system/Deployment/source-controller/profile` -> 200 (c
       "ready": 0,
       "total": 1,
       "state": "Pending"
+    },
+    "statusDistribution": {
+      "ready": 1,
+      "total": 1,
+      "state": "Ready"
     }
   },
   "denials": null
@@ -762,6 +789,10 @@ From `GET /workloads/flux-system/Deployment/source-controller/profile` -> 200 (c
   status at least `warn`.
 - `cr`: `null` = no SeccompProfile CR references the workload. `mode`: `audit` for `SCMP_ACT_LOG` /
   `SCMP_ACT_ALLOW`, else `enforce`. `missing` = observed but not allowed (blocked when enforced).
+  `distribution` is the broker's count from node-status posts (nodes heard from recently);
+  `statusDistribution` mirrors the CR's own `status.distribution` (the controllers' count against the API
+  server's node list), `null` when the CR carries none, exactly as `GET /seccomp/profiles/{..}` serves it.
+  The two differ when a node stops reporting.
 - `denials`: `null` = cannot tell "nothing denied" from "nothing capturing" (reason `denials_unknown`).
 - Findings: `syscalls.no_enforcing_profile` medium (no CR, or a CR in audit mode), `syscalls.drift`
   medium, `syscalls.denials` high.
@@ -1739,9 +1770,13 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
   unique `(cluster_id, pod_namespace, workload_kind, workload_name, revision)`.
 - `workload_profile_latest(cluster_id, pod_namespace, workload_kind, workload_name PK, revision,
   content_hash, posture_status, summary jsonb, computed_at, last_changed_at)`, backing `GET /workloads`.
+- `workload_profile_failures(cluster_id, pod_namespace, workload_kind, workload_name PK, last_error,
+  failed_at)`: the snapshotter's most recent failed attempt per workload, deleted by its next successful
+  snapshot (list `lastError` / `failedAt`).
 - `workload_profile_exports(id, cluster_id, pod_namespace, workload_kind, workload_name, revision, content_hash,
   mode, artifacts text[], baseline jsonb, exported_at)` (section 4).
-- Migrations `2026-09-27-100000_workload_profiles`, `2026-09-27-300000_workload_profile_exports`.
+- Migrations `2026-09-27-100000_workload_profiles`, `2026-09-27-300000_workload_profile_exports`,
+  `2026-09-30-230000_workload_profile_failures`.
 
 ## CHANGELOG
 
@@ -1873,3 +1908,17 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     for the workload, read live by the profile GET (1 MiB, 2 s, cached per namespace 30 s / 10 s when unavailable), `null`
     where not read. Unavailable is
     `available: false` with the reason. Outside posture, statuses, readiness and the snapshot hash.
+- 2026-09-29 (**v1.10**, an honest list; additive):
+  - `GET /workloads` lists only workloads with an alive pod unless `include_gone=true`.
+  - List items gain `lastError` / `failedAt`, the snapshotter's most recent failed attempt
+    (`workload_profile_failures`); a workload that failed before its first snapshot is listed with
+    `revision`, `contentHash`, `computedAt` and `lastChangedAt` `null` and no `posture`, `dimensions`,
+    `findingCounts` or `drift` keys.
+  - The snapshotter takes batches until `PROFILE_SNAPSHOT_TICK_BUDGET_SECS` (default: the interval) is
+    spent, workloads with alive pods and never-attempted ones first.
+  - The profile's two flow aggregates are bounded by `PROFILE_NETWORK_READ_TIMEOUT_MS` (default 10 s,
+    section 2.4). Past it the profile is served with `network` `unknown` (reason `network_unread`,
+    `snapshot.network` `null`, `snapshotPending` `false`) instead of a 500 at the pool's statement
+    timeout; the snapshotter records the failure rather than versioning a partial profile.
+  - `dimensions.syscalls.cr.statusDistribution` (section 2.5), the CR's own `status.distribution`
+    beside the broker's `distribution`; `null` when the CR has none.
