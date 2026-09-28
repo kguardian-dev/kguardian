@@ -222,6 +222,7 @@ subsystems! {
     PodWatchStream => "pod-watch-stream", Disposition::Required;
     /// The periodic re-list half — the safety net for the watch above.
     PodResync => "pod-resync", Disposition::Required;
+    PodResyncLiveness => "pod-resync-liveness", Disposition::Required;
     ServiceWatch => "service-watch", Disposition::Required;
     NetworkEvents => "network-events", Disposition::Required;
     SyscallEvents => "syscall-events", Disposition::Required;
@@ -946,6 +947,7 @@ mod tests {
             Subsystem::PodWatcher,
             Subsystem::PodWatchStream,
             Subsystem::PodResync,
+            Subsystem::PodResyncLiveness,
             Subsystem::ServiceWatch,
             Subsystem::PodReconciler,
         ] {
