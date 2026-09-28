@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.1...llm-bridge/v1.12.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **llm-bridge:** get_cluster_pods asks the broker for live pods only ([a2f78ee](https://github.com/kguardian-dev/kguardian/commit/a2f78ee619764773b981902fac2159bc1ab6d62a))
+* serve the namespace picker without the whole pod listing and prune dead pods on their own window ([f5f5077](https://github.com/kguardian-dev/kguardian/commit/f5f507725b6ef7d9d5236ba93de7dc1736cdb780))
+
 ## [1.12.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.0...llm-bridge/v1.12.1) (2026-09-27)
 
 
