@@ -1,5 +1,5 @@
 import { ShieldQuestion } from 'lucide-react';
-import type { SupplyChainDimension } from '../../types/profile';
+import type { ImageContainer, SupplyChainDimension } from '../../types/profile';
 import { asTrustVerdict, TRUST_CLASS, TRUST_LABEL, trustReasonText, trustState, trustSummary } from '../../utils/imageTrust';
 import { formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
 import { asUtc } from '../../utils/vulnView';
@@ -12,8 +12,8 @@ const pill = 'inline-flex items-center rounded-full border px-2 py-0.5 text-[11p
  * admitted or blocked, and it never sets posture. No answer is shown as
  * unknown with its reason, never as "nothing would be denied".
  */
-export function ImageTrustBlock({ supplyChain }: { supplyChain: SupplyChainDimension | null | undefined }) {
-  const s = trustState(supplyChain);
+export function ImageTrustBlock({ supplyChain, containers }: { supplyChain: SupplyChainDimension | null | undefined; containers?: readonly Pick<ImageContainer, 'running'>[] }) {
+  const s = trustState(supplyChain, containers);
   const answered = s.kind === 'answer' || s.kind === 'none_apply';
   return (
     <section aria-label="Image trust policies" data-trust-state={s.kind} className="px-4 py-3 border-t border-hubble-border space-y-2 text-xs">

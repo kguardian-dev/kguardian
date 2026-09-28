@@ -1,11 +1,12 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { ArrowLeft, CloudOff, SearchX, Share2 } from 'lucide-react';
 import type { PodNodeData } from '../types';
-import { useWorkloadProfile } from '../hooks/useWorkloadProfile';
+import { useElapsedSeconds, useWorkloadProfile } from '../hooks/useWorkloadProfile';
 import { useWorkloadSignatures } from '../hooks/useSignatures';
 import { vulnApi as defaultVulnApi, type VulnApi } from '../services/vulnApi';
 import { seccompApi } from '../services/seccompApi';
 import { errorKind, errorMessage, type ProfileApi } from '../services/profileApi';
+import { BROKER_STATEMENT_TIMEOUT_MS } from '../services/readTimeout';
 import { workloadKey, workloadOf } from '../utils/workloads';
 import { formatAgo, formatTimestamp } from '../utils/posture';
 import { Button } from './ui/Button';
@@ -17,6 +18,7 @@ import { PostureStrip } from './Profile/PostureStrip';
 import { OverviewTab } from './Profile/OverviewTab';
 import { NetworkTab } from './Profile/NetworkTab';
 import { SyscallsTab } from './Profile/SyscallsTab';
+import { SyscallsFallbackTab } from './Profile/SyscallsFallbackTab';
 import { ImagesTab } from './Profile/ImagesTab';
 import { PodSecurityTab } from './Profile/PodSecurityTab';
 import { VersionsTab } from './Profile/VersionsTab';
@@ -43,6 +45,9 @@ interface WorkloadViewProps {
   vulnApi?: VulnApi;
 }
 
+/** After this many seconds of waiting, the skeleton says why a profile read can be slow. */
+const SLOW_READ_HINT_AFTER_S = 5;
+
 /**
  * Workload Security Profile (`#/workload?ns=&kind=&name=&tab=`): the
  * Broker's profile read model for one workload — posture per dimension,
@@ -57,6 +62,8 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
   const tab = parseTab(tabParam);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const key = workloadKey(ns, kind, name);
+  const reading = !profile && loading;
+  const elapsed = useElapsedSeconds(reading);
 
   // The map node carrying this workload's traffic, for "Open in map".
   const node = useMemo(
@@ -74,12 +81,32 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
 
   const openTab = (t: ProfileTab) => onParamsChange({ tab: t === 'overview' ? undefined : t, from: undefined, to: undefined });
 
+  const versionsTab = (
+    <VersionsTab
+      ns={ns}
+      kind={kind}
+      name={name}
+      refreshTick={refreshTick}
+      snapshotPending={profile?.snapshotPending ?? false}
+      from={parseRevision(from)}
+      to={parseRevision(to)}
+      onSelect={(f, t) => onParamsChange({ tab: 'versions', from: f === undefined ? undefined : String(f), to: t === undefined ? undefined : String(t) })}
+      api={api}
+    />
+  );
+
   const kindOf = errorKind(error);
   let body: ReactNode;
-  if (!profile && loading) {
+  if (reading) {
     body = (
       <div className="rounded-surface border border-hubble-border bg-hubble-card">
         <SectionSkeleton rows={4} />
+        <p role="status" className="px-4 pb-3 text-xs text-tertiary tabular-nums" data-testid="profile-elapsed">
+          Reading the profile… {elapsed}s
+          {elapsed >= SLOW_READ_HINT_AFTER_S && (
+            <span className="ml-1">The Broker computes it live; a busy namespace can take up to {Math.round(BROKER_STATEMENT_TIMEOUT_MS / 1000)} s.</span>
+          )}
+        </p>
       </div>
     );
   } else if (!profile && kindOf === 'workload_not_found') {
@@ -93,9 +120,31 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
   } else if (!profile && kindOf === 'unsupported') {
     body = <EmptyState icon={CloudOff} title="Profiles not available" description={errorMessage(error)} />;
   } else if (!profile) {
+    // The profile read failed, but the seccomp endpoint answers on its own:
+    // keep the tabs so Syscalls (capture, CR, drift, export) still works.
+    const label = PROFILE_TABS.find((t) => t.id === tab)?.label ?? tab;
     body = (
-      <div className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
-        <SectionError message={`Could not load this workload's profile: ${errorMessage(error)}`} onRetry={() => void reload()} />
+      <div className="space-y-4">
+        <div className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
+          <SectionError message={`Could not load this workload's profile: ${errorMessage(error)}`} onRetry={() => void reload()} />
+        </div>
+        <Tabs tabs={PROFILE_TABS} active={tab} onChange={openTab} label="Profile sections" idPrefix="profile" />
+        <div {...tabPanelProps('profile', tab)} className="focus-visible:outline-none">
+          {tab === 'syscalls' ? (
+            <SyscallsFallbackTab ns={ns} kind={kind} name={name} api={seccompApi} onOpenSeccomp={() => setDrawerOpen(true)} />
+          ) : tab === 'versions' ? (
+            versionsTab
+          ) : (
+            <div className="rounded-surface border border-hubble-border bg-hubble-card">
+              <EmptyState
+                icon={CloudOff}
+                compact
+                title="Not available without the profile"
+                description={`The ${label} tab is built from the workload profile, which could not be read. Retry above; the Syscalls tab loads from the seccomp endpoint on its own.`}
+              />
+            </div>
+          )}
+        </div>
       </div>
     );
   } else {
@@ -115,19 +164,7 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
           {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={d.syscalls.observed ? () => setDrawerOpen(true) : undefined} />}
           {tab === 'images' && <ImagesTab dim={d.images} signatures={signatures} workload={{ ns, kind, name }} api={vulnApi} />}
           {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} capabilities={profile.capabilities} />}
-          {tab === 'versions' && (
-            <VersionsTab
-              ns={ns}
-              kind={kind}
-              name={name}
-              refreshTick={refreshTick}
-              snapshotPending={profile.snapshotPending}
-              from={parseRevision(from)}
-              to={parseRevision(to)}
-              onSelect={(f, t) => onParamsChange({ tab: 'versions', from: f === undefined ? undefined : String(f), to: t === undefined ? undefined : String(t) })}
-              api={api}
-            />
-          )}
+          {tab === 'versions' && versionsTab}
         </div>
       </div>
     );

@@ -39,15 +39,19 @@ function FailingList({ failing }: { failing: FailingCheck[] }) {
 export function PodSecurityTab({ dim, capabilities }: { dim: PodSecurityDimension; capabilities?: ProfileCapabilities }) {
   const status = asStatus(dim.status);
   if (dim.level === null && dim.containers.length === 0) {
+    // Capabilities are observed separately from the pod spec, so the panel stays.
     return (
-      <Panel icon={ShieldCheck} title="Pod Security Standards" action={<StatusPill status={status} />}>
-        <EmptyState
-          icon={ShieldCheck}
-          compact
-          title="No securityContext reported yet"
-          description="The level is computed from each container's securityContext, which the Controller reports with the pod spec. Nothing has arrived for this workload."
-        />
-      </Panel>
+      <div className="space-y-4">
+        <Panel icon={ShieldCheck} title="Pod Security Standards" action={<StatusPill status={status} />}>
+          <EmptyState
+            icon={ShieldCheck}
+            compact
+            title="No securityContext reported yet"
+            description="The level is computed from each container's securityContext, which the Controller reports with the pod spec. Nothing has arrived for this workload."
+          />
+        </Panel>
+        <CapabilitiesPanel caps={capabilities} />
+      </div>
     );
   }
   const pod = dim.pod;

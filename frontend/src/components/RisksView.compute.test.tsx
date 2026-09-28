@@ -116,3 +116,20 @@ test('resources findings offer "View workload", never a Policy button', () => {
   fireEvent.click(screen.getAllByText('View workload')[0]);
   expect(onViewWorkload).toHaveBeenCalledWith('payments', 'api-1');
 });
+
+test('a failing live compute feed reads as a dash on the Compute tile, not a clean 0', () => {
+  render(view({ computeFindings: [], computeUnavailable: true }));
+  const tile = screen.getByText('Compute').closest('[title]')!;
+  expect(tile.textContent).toContain('—');
+  expect(tile.textContent).not.toMatch(/\d/);
+  expect(tile.getAttribute('title')).toMatch(/not answering/);
+  cleanup();
+  // Findings from the last good read still count; the tooltip says they may be stale.
+  render(view({ computeUnavailable: true }));
+  const withFindings = screen.getByText('Compute').closest('[class*="rounded-surface"]')!;
+  expect(withFindings.textContent).toMatch(/\d/);
+  expect(withFindings.getAttribute('title')).toMatch(/last successful read/);
+  cleanup();
+  render(view({ computeFindings: [] }));
+  expect(screen.getByText('Compute').closest('[class*="rounded-surface"]')!.textContent).toContain('0');
+});

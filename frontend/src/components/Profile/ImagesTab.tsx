@@ -81,7 +81,7 @@ function ContainerCard({ c }: { c: ImageContainer }) {
 }
 
 /** Who signed this workload's running images, and its admission policy export. */
-function SupplyChainPanel({ sig, workload, api, supplyChain }: { sig: WorkloadSignatureState; workload: { ns: string; kind: string; name: string }; api: VulnApi; supplyChain: SupplyChainDimension | null }) {
+function SupplyChainPanel({ sig, workload, api, supplyChain, containers }: { sig: WorkloadSignatureState; workload: { ns: string; kind: string; name: string }; api: VulnApi; supplyChain: SupplyChainDimension | null; containers: ImageContainer[] }) {
   const [exporting, setExporting] = useState(false);
   return (
     <Panel
@@ -110,7 +110,7 @@ function SupplyChainPanel({ sig, workload, api, supplyChain }: { sig: WorkloadSi
           <NotTrustedNote className="px-4 py-2.5 border-t border-hubble-border" />
         </>
       )}
-      <ImageTrustBlock supplyChain={supplyChain} />
+      <ImageTrustBlock supplyChain={supplyChain} containers={containers} />
       {exporting && <AdmissionPolicyModal api={api} scope={{ kind: 'workload', namespace: workload.ns, workloadKind: workload.kind, name: workload.name }} onClose={() => setExporting(false)} />}
     </Panel>
   );
@@ -153,7 +153,7 @@ export function ImagesTab({ dim, signatures, workload, api }: { dim: ImagesDimen
       </Panel>
 
       {signatures && workload && api ? (
-        <SupplyChainPanel sig={signatures} workload={workload} api={api} supplyChain={dim.supplyChain} />
+        <SupplyChainPanel sig={signatures} workload={workload} api={api} supplyChain={dim.supplyChain} containers={dim.containers} />
       ) : (
         <Panel icon={FileBadge2} title="Supply chain">
           <p className="px-4 py-3 text-xs text-tertiary">Signature results are not loaded here.</p>

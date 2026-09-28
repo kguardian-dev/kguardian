@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { profileApi, type ProfileApi } from '../services/profileApi';
+import { errorKind, profileApi, type ProfileApi } from '../services/profileApi';
 import type { PostureStatus, ProfileDiff, VersionList, WorkloadListItem, WorkloadProfile } from '../types/profile';
 
 /**
@@ -14,31 +14,60 @@ function useLatest() {
   }, []);
 }
 
+/** Longest wait between profile polls after consecutive failures. */
+export const PROFILE_POLL_MAX_BACKOFF_MS = 300_000;
+
+/**
+ * Failures worth backing off for: the Broker is slow or struggling (timeout,
+ * 5xx, shed read, network), and asking again in 30 s only adds load. A 404
+ * or 400 will not change by waiting, so those keep the plain poll.
+ */
+function isTransient(err: unknown): boolean {
+  const kind = errorKind(err);
+  return kind === 'timeout' || kind === 'busy' || kind === 'error';
+}
+
 /**
  * One workload's live profile. Reloads on key change and on the header
  * Refresh (`refreshTick`), and polls (the profile is computed live). A poll
  * that fails keeps the last good profile and surfaces the error beside it.
+ * A poll is skipped while a read is still in flight, and after a transient
+ * failure the next poll waits twice as long per consecutive failure (up to
+ * PROFILE_POLL_MAX_BACKOFF_MS); `reload` (the Retry button) resets that.
  */
 export function useWorkloadProfile(ns: string, kind: string, name: string, refreshTick = 0, pollMs = 30_000, api: ProfileApi = profileApi) {
   const [profile, setProfile] = useState<WorkloadProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  const failures = useRef(0);
+  const nextPollAt = useRef(0);
+  const inflight = useRef(false);
 
   const load = useCallback(async () => {
     const current = begin();
+    inflight.current = true;
     try {
       const p = await api.getProfile(ns, kind, name);
       if (!current()) return;
+      failures.current = 0;
+      nextPollAt.current = 0;
       setProfile(p);
       setError(null);
     } catch (err) {
       if (!current()) return;
+      if (isTransient(err)) {
+        failures.current += 1;
+        nextPollAt.current = Date.now() + Math.min(pollMs * 2 ** failures.current, PROFILE_POLL_MAX_BACKOFF_MS);
+      }
       setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        inflight.current = false;
+        setLoading(false);
+      }
     }
-  }, [api, ns, kind, name, begin]);
+  }, [api, ns, kind, name, begin, pollMs]);
 
   useEffect(() => {
     // A different workload: forget the previous one before loading.
@@ -47,9 +76,14 @@ export function useWorkloadProfile(ns: string, kind: string, name: string, refre
     setError(null);
     setLoading(true);
     /* eslint-enable react-hooks/set-state-in-effect */
+    failures.current = 0;
+    nextPollAt.current = 0;
     void load();
     if (pollMs <= 0) return;
-    const t = setInterval(() => void load(), pollMs);
+    const t = setInterval(() => {
+      if (inflight.current || Date.now() < nextPollAt.current) return;
+      void load();
+    }, pollMs);
     return () => clearInterval(t);
   }, [load, pollMs]);
 
@@ -57,10 +91,42 @@ export function useWorkloadProfile(ns: string, kind: string, name: string, refre
   useEffect(() => {
     if (seenTick.current === refreshTick) return;
     seenTick.current = refreshTick;
+    failures.current = 0;
+    nextPollAt.current = 0;
     void load();
   }, [refreshTick, load]);
 
-  return { profile, loading, error, reload: load };
+  // The user asked: drop the back-off, and show the skeleton again while
+  // there is no profile to keep on screen.
+  const reload = useCallback(async () => {
+    failures.current = 0;
+    nextPollAt.current = 0;
+    setLoading(true);
+    await load();
+  }, [load]);
+
+  return { profile, loading, error, reload };
+}
+
+/**
+ * Whole seconds since `active` last became true; 0 while inactive. For a
+ * skeleton that should say how long it has been waiting.
+ */
+export function useElapsedSeconds(active: boolean): number {
+  const [elapsed, setElapsed] = useState(0);
+  // Reset on (de)activation during render, so a new wait never shows the previous one's count.
+  const [wasActive, setWasActive] = useState(active);
+  if (active !== wasActive) {
+    setWasActive(active);
+    setElapsed(0);
+  }
+  useEffect(() => {
+    if (!active) return;
+    const started = Date.now();
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return active ? elapsed : 0;
 }
 
 /** Version history, newest first, with "load older" paging. */
@@ -141,15 +207,20 @@ export function useProfileDiff(ns: string, kind: string, name: string, from: num
   return { diff, loading, error, reload: load };
 }
 
-/** Rows per `GET /workloads` page the Workloads table asks for. */
-export const POSTURE_PAGE_SIZE = 100;
+/** Rows per `GET /workloads` page the Workloads table asks for (the Broker's maximum). */
+export const POSTURE_PAGE_SIZE = 500;
+
+/** Pages the Workloads table fetches on its own before offering Load more. */
+export const POSTURE_AUTO_PAGES = 5;
 
 /**
  * `GET /workloads` posture summaries for the Workloads table's posture
  * column, one server page at a time (the Broker orders by `(namespace,
  * kind, name)`; the table's `(namespace, name, kind)` is close enough that
  * a page covers the top of the table): the first page on load / scope or
- * filter change / refresh, more only when the user asks (`loadMore`).
+ * filter change / refresh, further pages through `loadMore` (the table calls
+ * it while rendered rows are uncovered, up to POSTURE_AUTO_PAGES, then the
+ * user does). `pages` counts the pages fetched since the last first page.
  * `namespace`, `status` and `search` are server-side filters. `error` set means the column is unavailable (older
  * Broker, read budget); the rest of the table works.
  */
@@ -165,10 +236,13 @@ export function useWorkloadPostures(
 ) {
   const [byKey, setByKey] = useState<Map<string, WorkloadListItem>>(new Map());
   const [nextAfter, setNextAfter] = useState<string | null>(null);
+  const [pages, setPages] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
 
   const page = useCallback(
     (after: string | undefined) =>
@@ -179,17 +253,24 @@ export function useWorkloadPostures(
   const load = useCallback(async () => {
     if (!enabled) return;
     const current = begin();
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
     try {
       const p = await page(undefined);
       if (!current()) return;
       setByKey(new Map(p.items.map((i) => [`${i.namespace}/${i.kind}/${i.name}`, i])));
       setNextAfter(p.nextAfter);
+      setPages(1);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
   }, [page, begin, enabled]);
 
@@ -199,7 +280,7 @@ export function useWorkloadPostures(
   }, [load, refreshTick]);
 
   const loadMore = useCallback(async () => {
-    if (!nextAfter) return;
+    if (!nextAfter || firstPageInFlight.current) return;
     const current = begin();
     setLoadingMore(true);
     try {
@@ -211,6 +292,7 @@ export function useWorkloadPostures(
         return next;
       });
       setNextAfter(p.nextAfter);
+      setPages((n) => n + 1);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -219,5 +301,5 @@ export function useWorkloadPostures(
     }
   }, [nextAfter, page, begin]);
 
-  return { byKey, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore };
+  return { byKey, loading, loadingMore, error, hasMore: nextAfter !== null, pages, loadMore };
 }

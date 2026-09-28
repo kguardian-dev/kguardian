@@ -1,12 +1,13 @@
 import type { WorkloadListItem } from '../../types/profile';
-import { asStatus, DIMENSION_LABEL, STATUS_LABEL } from '../../utils/posture';
+import { asStatus, DIMENSION_LABEL, formatAgo, formatTimestamp, STATUS_LABEL } from '../../utils/posture';
+import { asUtc } from '../../utils/vulnView';
 import { StatusPill } from '../Profile/parts';
 
 /**
- * Workloads table posture: the `GET /workloads` rollup. Three honest
+ * Workloads table posture: the `GET /workloads` rollup. Four honest
  * non-answers besides a status — still loading, the Broker could not serve
- * the column, and a workload the snapshotter has not reached yet — none of
- * which may read as OK.
+ * the column, a workload with no stored snapshot, and a workload whose
+ * snapshot failed before it was ever computed — none of which may read as OK.
  */
 export function PostureCell({
   item,
@@ -31,8 +32,25 @@ export function PostureCell({
       );
     }
     return (
-      <span className="text-xs text-tertiary" title="The Broker has not computed a profile for this workload yet (it snapshots every few minutes)">
-        not computed yet
+      <span
+        className="text-xs text-tertiary"
+        title="The Broker has no stored profile snapshot for this workload. Snapshots are computed in the background; one that fails (for example on a statement timeout) is only retried on a later pass, so this can persist."
+      >
+        no snapshot
+      </span>
+    );
+  }
+  const failedAgo = item.failedAt ? formatAgo(asUtc(item.failedAt)) : null;
+  const failure = item.lastError ? `${item.lastError}` : 'no error message recorded';
+  if (item.computedAt === null) {
+    // Never computed: the snapshotter's failed attempt is the only fact, and it can persist.
+    return (
+      <span
+        className="text-xs text-severity-medium"
+        title={`The Broker's profile snapshot for this workload failed${item.failedAt ? ` at ${formatTimestamp(asUtc(item.failedAt))}` : ''}: ${failure}. It is retried on a later pass.`}
+        data-testid="posture-failed"
+      >
+        profile failed{failedAgo ? ` · ${failedAgo}` : ''}
       </span>
     );
   }
@@ -43,6 +61,7 @@ export function PostureCell({
     status === 'unknown' ? 'No dimension has data yet' : 'Worst status across the dimensions with data',
     `coverage ${coverage}% of the four core dimensions`,
     unknown.length ? `No data: ${unknown.join(', ')}` : '',
+    item.lastError || item.failedAt ? `The latest snapshot attempt failed${failedAgo ? ` ${failedAgo}` : ''} (${failure}); this is the last good profile` : '',
   ]
     .filter(Boolean)
     .join('. ');
@@ -55,6 +74,11 @@ export function PostureCell({
       {item.posture.coverage > 0 && (
         <span className="font-mono text-[11px] tabular-nums text-tertiary" title={title}>
           {coverage}%
+        </span>
+      )}
+      {(item.lastError || item.failedAt) && (
+        <span className="text-[11px] text-severity-medium" title={title} data-testid="posture-stale">
+          · snapshot failed{failedAgo ? ` ${failedAgo}` : ''}
         </span>
       )}
     </span>

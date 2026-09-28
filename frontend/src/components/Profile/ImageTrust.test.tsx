@@ -172,3 +172,27 @@ test.each([
   expect(b.textContent).not.toMatch(/undefined|NaN|-1 would|x trusted|0\.5/);
   expect(within(b).queryByRole('list', { name: 'Image trust results' })).toBeNull();
 });
+
+test('supplyChain null with nothing running is "no current digest", not "not reported by this Broker"', async () => {
+  const b: WorkloadProfile = JSON.parse(JSON.stringify(answered('checkout').body));
+  b.dimensions.images.supplyChain = null;
+  for (const c of b.dimensions.images.containers) {
+    c.previous = [...c.running, ...c.previous];
+    c.running = [];
+    c.stale = true;
+  }
+  page('checkout', b);
+  const el = await block();
+  expect(el.getAttribute('data-trust-state')).toBe('no_current_digest');
+  expect(within(el).getByTestId('trust-summary').textContent).toBe('Image trust policies: no current digest for this workload, so no policy was evaluated (unknown).');
+  expect(within(el).getByTestId('trust-summary').textContent).not.toMatch(ALL_CLEAR);
+});
+
+test('supplyChain null while a digest is running is still an older Broker (absent)', async () => {
+  const b: WorkloadProfile = JSON.parse(JSON.stringify(answered('checkout').body));
+  b.dimensions.images.supplyChain = null;
+  page('checkout', b);
+  const el = await block();
+  expect(el.getAttribute('data-trust-state')).toBe('absent');
+  expect(within(el).getByTestId('trust-summary').textContent).toBe('Image trust policies: not reported by this Broker (unknown).');
+});

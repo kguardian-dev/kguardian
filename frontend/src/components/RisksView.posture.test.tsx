@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { RisksView } from './RisksView';
 import api from '../services/api';
+import type { AuditVerdict } from '../types';
 import type { WorkloadProfileSummary } from '../types/seccompWorkload';
 
 // The posture strip on Risks: shared StatTile, a seccomp tile counted for the
@@ -78,4 +79,57 @@ test('syscall names that collide with Object.prototype are not sensitive', () =>
   });
   expect(screen.queryByText('Sensitive syscalls', { selector: 'h3' })).toBeNull();
   expect(screen.queryByText('constructor')).toBeNull();
+});
+
+test('while the profile list is unavailable the seccomp tile stays, with a dash and the reason', () => {
+  view({ seccompUnavailable: 'the profile list could not be read (canceling statement due to statement timeout)' });
+  const tile = screen.getByText('Seccomp enforcing').closest('[title]')!;
+  expect(tile.textContent).toContain('—');
+  expect(tile.textContent).not.toMatch(/\d/);
+  expect(tile.getAttribute('title')).toMatch(/statement timeout/);
+});
+
+test('would-deny verdicts come from the cluster-wide window and are kept by the subject pod\'s namespace, so a cluster-scoped policy counts', async () => {
+  const v = (id: number, over: Partial<AuditVerdict>): AuditVerdict => ({
+    id, policy_uid: 'u', policy_namespace: '', policy_name: 'cluster-baseline-audit', direction: 'Ingress',
+    src_namespace: 'observability', src_pod: 'prometheus-0', dst_namespace: 'payments', dst_pod: 'api-1',
+    dst_port: 8080, protocol: 'TCP', reason: null, observed_at: 't', verdict: 'WouldDeny', ...over,
+  });
+  const spy = vi.spyOn(api, 'getAuditVerdicts').mockResolvedValue([
+    v(1, {}),
+    v(2, { dst_namespace: 'observability', dst_pod: 'grafana-1' }),
+    // Egress: the subject is the source.
+    v(3, { direction: 'Egress', src_namespace: 'payments', src_pod: 'api-1', dst_namespace: 'observability', dst_pod: 'grafana-1' }),
+    v(4, { direction: 'Egress', src_namespace: 'observability', src_pod: 'grafana-1', dst_namespace: 'payments', dst_pod: 'api-1' }),
+  ]);
+  view();
+  expect(await screen.findByText('2 would-deny')).not.toBeNull();
+  expect(screen.getByText('cluster-baseline-audit')).not.toBeNull();
+  expect(spy).toHaveBeenCalledWith({ verdict: 'WouldDeny', limit: 500 });
+});
+
+test('a failed verdict read is an error in the would-deny section, never "No standout findings" or an empty list', async () => {
+  vi.spyOn(api, 'getAuditVerdicts').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+  view();
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toMatch(/Could not read audit verdicts: canceling statement due to statement timeout/);
+  expect(alert.textContent).toMatch(/unknown, not zero/);
+  expect(screen.queryByText('No standout findings')).toBeNull();
+  expect(screen.queryByText(/No would-deny verdicts/)).toBeNull();
+});
+
+test('the header Refresh retries a failed verdict read and clears the error once it succeeds', async () => {
+  const v: AuditVerdict = {
+    id: 1, policy_uid: 'u', policy_namespace: '', policy_name: 'cluster-baseline-audit', direction: 'Ingress',
+    src_namespace: 'observability', src_pod: 'prometheus-0', dst_namespace: 'payments', dst_pod: 'api-1',
+    dst_port: 8080, protocol: 'TCP', reason: null, observed_at: 't', verdict: 'WouldDeny',
+  };
+  const spy = vi.spyOn(api, 'getAuditVerdicts').mockRejectedValueOnce(new Error('canceling statement due to statement timeout')).mockResolvedValueOnce([v]);
+  const props = { pods: [], namespace: 'payments', onSelectPod: () => {}, onBuildPolicy: () => {}, onOpenAudit: () => {} };
+  const { rerender } = render(<RisksView {...props} refreshTick={0} />);
+  expect((await screen.findByRole('alert')).textContent).toMatch(/Could not read audit verdicts/);
+  rerender(<RisksView {...props} refreshTick={1} />);
+  expect(await screen.findByText('1 would-deny')).not.toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(spy).toHaveBeenCalledTimes(2);
 });

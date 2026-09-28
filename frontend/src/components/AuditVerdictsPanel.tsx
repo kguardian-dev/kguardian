@@ -6,6 +6,7 @@ import { brokerTimeMs, formatBrokerTime } from '../utils/brokerTime';
 import { Modal } from './ui/Modal';
 import { EmptyState } from './ui/EmptyState';
 import { Button } from './ui/Button';
+import { verdictSubjectNamespace } from '../utils/workloads';
 
 interface Props {
   isOpen: boolean;
@@ -23,8 +24,7 @@ const VERDICT_CAP = 400;
 
 // The workload a verdict is about: the destination of an Ingress flow, the
 // source of an Egress one. Not the policy's namespace.
-const subjectNamespace = (v: AuditVerdict): string | null =>
-  v.direction === 'Egress' ? v.src_namespace : v.dst_namespace;
+const subjectNamespace = verdictSubjectNamespace;
 
 /**
  * AuditVerdictsPanel — modal table of evaluator verdicts.

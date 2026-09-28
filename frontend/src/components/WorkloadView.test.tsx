@@ -267,10 +267,11 @@ test('Pod security: stale containers are listed as not evaluated', async () => {
   expect(stale.textContent).toContain('legacy-proxy');
 });
 
-test('Pod security: a workload with no securityContext reported yet', async () => {
+test('Pod security: a workload with no securityContext reported yet still shows its Capabilities panel', async () => {
   const { api } = replayApi();
   renderPage(api, OTEL, { tab: 'podSecurity' });
   expect(await screen.findByText('No securityContext reported yet')).not.toBeNull();
+  expect(screen.getByRole('region', { name: 'Capabilities' })).not.toBeNull();
 });
 
 test('Image & packages: mixed digests, CrashLoopBackOff, a stale container, and vulnerabilities null = not configured', async () => {
@@ -502,4 +503,154 @@ test('Overview: an older broker (evaluated, no notEvaluated) still shows the dri
   expect(note.textContent).toContain('imageChangedSinceExport not evaluated');
   expect(note.textContent).toContain('securityContextRegression not evaluated');
   expect(note.textContent).toContain('does not say why');
+});
+
+// The seccomp endpoint's answer for checkout, as the page's Syscalls tab
+// reads it when the profile itself cannot be read.
+const seccompDetail = {
+  namespace: 'payments', kind: 'Deployment', name: 'checkout', hash: 'd209ca3de4379e1d', syscallCount: 104, architectures: ['SCMP_ARCH_AARCH64'], updatedAt: '2026-09-14T00:33:32Z',
+  capture: { level: 'full', complete: true, pods: [{ name: 'checkout-1', level: 'full' }] },
+  cr: {
+    name: 'media-transform-api', defaultAction: 'SCMP_ACT_LOG', hash: '03f8d0a8c2756eda', syscallCount: 140,
+    distribution: { ready: 55, total: 55, state: 'Ready', present: 55 }, statusDistribution: { ready: 60, total: 60, state: 'Ready' },
+    drift: { missing: [], extra: ['mount', 'ptrace'], inSync: false },
+  },
+  profile: { defaultAction: 'SCMP_ACT_LOG', syscalls: [] },
+};
+const failingApi = () => new ProfileApi({ fetchImpl: (async () => new Response('canceling statement due to statement timeout', { status: 500 })) as unknown as typeof fetch });
+const stubSeccomp = (status: number, body: unknown = seccompDetail) =>
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes('/seccomp/profiles/payments/Deployment/checkout') ? new Response(JSON.stringify(body), { status }) : new Response('', { status: 404 }),
+    ),
+  );
+
+test('a failed profile read keeps the tab strip: Syscalls loads from the seccomp endpoint and opens the drawer', async () => {
+  stubSeccomp(200);
+  renderPage(failingApi(), CHECKOUT, { tab: 'syscalls' });
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toMatch(/Could not load this workload's profile: canceling statement due to statement timeout/);
+  expect(within(alert).getByRole('button', { name: 'Retry' })).not.toBeNull();
+  expect(screen.getByRole('tab', { selected: true }).id).toBe('profile-tab-syscalls');
+  // Observed set, capture and the CR come from GET /seccomp/profiles/{ns}/{kind}/{name}.
+  expect(await screen.findByText('104')).not.toBeNull();
+  expect(screen.getByText('media-transform-api')).not.toBeNull();
+  expect(screen.getByText('Audit')).not.toBeNull();
+  // Node readiness is the CR's own status, with the Broker's recent-report count as the qualifier.
+  expect(screen.getByTestId('cr-nodes').textContent).toBe('60/60Ready· 55/55 reporting');
+  expect(screen.getByTestId('drift-unobserved').textContent).toContain('2 allowed but unobserved');
+  // Nothing the endpoint does not know is claimed.
+  expect(screen.getByText("can't tell")).not.toBeNull();
+  expect(screen.getByText(/posture and denials are unknown/)).not.toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Open seccomp profile' }));
+  expect(screen.getByTestId('seccomp-drawer').textContent).toBe('payments/Deployment/checkout');
+});
+
+test('a failed profile read: the other tabs say they need the profile, and Versions still lists', async () => {
+  stubSeccomp(200);
+  const { onParamsChange } = renderPage(failingApi(), CHECKOUT);
+  await screen.findByRole('alert');
+  expect(screen.getByText('Not available without the profile')).not.toBeNull();
+  expect(screen.getByText(/The Overview tab is built from the workload profile/)).not.toBeNull();
+  fireEvent.click(screen.getByRole('tab', { name: 'Network' }));
+  expect(onParamsChange).toHaveBeenLastCalledWith({ tab: 'network', from: undefined, to: undefined });
+  cleanup();
+  renderPage(failingApi(), CHECKOUT, { tab: 'podSecurity' });
+  await screen.findByRole('alert');
+  expect(screen.getByText(/The Pod security tab is built from the workload profile/)).not.toBeNull();
+});
+
+test('a failed profile read for a workload with no observed syscalls says so on the Syscalls tab, not an error', async () => {
+  stubSeccomp(404, { error: 'no profile for workload' });
+  renderPage(failingApi(), CHECKOUT, { tab: 'syscalls' });
+  expect(await screen.findByText('No syscalls reported yet')).not.toBeNull();
+  expect(screen.queryByRole('button', { name: 'Open seccomp profile' })).toBeNull();
+});
+
+test('a failed profile read and a failed seccomp read: the Syscalls tab shows its own error with Retry', async () => {
+  stubSeccomp(500, { error: 'canceling statement due to statement timeout' });
+  renderPage(failingApi(), CHECKOUT, { tab: 'syscalls' });
+  const own = await screen.findByText(/Could not read the seccomp profile either: canceling statement due to statement timeout/);
+  expect(own.closest('[role="alert"]')).not.toBeNull();
+  expect(within(own.closest('[role="alert"]') as HTMLElement).getByRole('button', { name: 'Retry' })).not.toBeNull();
+  // The profile's own error is still there, above the tabs.
+  expect(screen.getAllByRole('alert')).toHaveLength(2);
+});
+
+test('the skeleton says how long it has been reading, and after a few seconds why that can be slow', () => {
+  vi.useFakeTimers();
+  try {
+    const hang = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    renderPage(new ProfileApi({ fetchImpl: hang }));
+    expect(screen.getByLabelText('Loading')).not.toBeNull();
+    expect(screen.getByTestId('profile-elapsed').textContent).toBe('Reading the profile… 0s');
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByTestId('profile-elapsed').textContent).toBe('Reading the profile… 3s');
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByTestId('profile-elapsed').textContent).toMatch(/6s.*up to 30 s/);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('Syscalls: a CR broader than the observed set is in sync with "allowed but unobserved", never "extra"', async () => {
+  const p: WorkloadProfile = structuredClone(ledgerProfile);
+  p.dimensions.syscalls.cr = {
+    name: 'deployment-ledger', defaultAction: 'SCMP_ACT_LOG', mode: 'audit', syscallCount: 140, inSync: false, missing: [], extra: ['mount', 'ptrace'],
+    distribution: { ready: 3, total: 3, state: 'Ready' },
+  };
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/ledger/profile', p)]);
+  renderPage(api, LEDGER, { tab: 'syscalls' });
+  expect(await screen.findByText('in sync')).not.toBeNull();
+  // The profile carries only the Broker's node-status count today, and the fact says so.
+  const nodes = screen.getByTestId('cr-nodes');
+  expect(nodes.textContent).toBe('3/3Ready');
+  expect(nodes.getAttribute('title')).toMatch(/Broker's node-status count/);
+  expect(nodes.getAttribute('title')).toMatch(/status\.distribution is not available/);
+  expect(screen.getByTestId('drift-unobserved').textContent).toContain('2 allowed but unobserved');
+  expect(screen.getByText(/Allowed but unobserved \(in the CR, never seen; not a drift\)/)).not.toBeNull();
+  expect(screen.queryByText(/\bextra\b/)).toBeNull();
+  cleanup();
+  p.dimensions.syscalls.cr!.missing = ['clock_settime'];
+  const { api: api2 } = replayApi([answer('GET /workloads/payments/Deployment/ledger/profile', p)]);
+  renderPage(api2, LEDGER, { tab: 'syscalls' });
+  expect(await screen.findByText('1 observed, not in the CR')).not.toBeNull();
+  expect(screen.queryByText('in sync')).toBeNull();
+});
+
+test('Network: a bounded profile read that did not reach the flows says "not read", not "No flows observed"', async () => {
+  const note = 'The flow read did not finish within the bounded window, so network data was not read for this profile.';
+  const p: WorkloadProfile = structuredClone(checkoutProfile);
+  p.dimensions.network = {
+    ...p.dimensions.network,
+    status: 'unknown',
+    peers: [],
+    truncated: false,
+    reasons: [{ code: 'network_unread', message: note }],
+    coverage: { level: 'none', fraction: null, observedSince: null, note },
+  };
+  p.posture = { ...p.posture, unknownDimensions: ['network'] };
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/checkout/profile', p)]);
+  renderPage(api, CHECKOUT, { tab: 'network' });
+  expect(await screen.findByText('Network not read')).not.toBeNull();
+  expect(screen.getAllByText(note).length).toBeGreaterThan(0);
+  expect(screen.queryByText('No flows observed')).toBeNull();
+});
+
+test('Overview: exposure for an unread network says the flows were not read, not that there were none', async () => {
+  const note = 'The flow read did not finish within the bounded window, so network data was not read for this profile.';
+  const p: WorkloadProfile = structuredClone(checkoutProfile);
+  p.dimensions.network = { ...p.dimensions.network, status: 'unknown', peers: [], reasons: [{ code: 'network_unread', message: note }], coverage: { level: 'none', fraction: null, observedSince: null, note } };
+  p.exposure = { ingressPeers: null, ingressExternal: null, egressPeers: null, egressExternal: null };
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/checkout/profile', p)]);
+  renderPage(api, CHECKOUT);
+  const exposure = await screen.findByRole('region', { name: 'Exposure' });
+  expect(exposure.textContent).toContain(note);
+  expect(exposure.textContent).toContain('Exposure is unknown.');
+  expect(exposure.textContent).not.toContain('No flows observed');
 });

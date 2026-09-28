@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Lock, Search, AlertTriangle, ChevronRight, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Lock, Search, AlertTriangle, ChevronRight, CloudOff, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
 import type { PodInfo } from '../types';
 import { useWorkloadCoverage } from '../hooks/useWorkloadCoverage';
 import { routeHref, workloadParams } from '../utils/routes';
+import { hasBlockingDrift, type WorkloadRow } from '../utils/workloads';
+import { STATUS_LABEL } from '../utils/posture';
 import { EmptyState } from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
 import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
-import { CaptureBadge, StatePill } from './Seccomp';
+import { CaptureBadge, CrNodes, StatePill } from './Seccomp';
 import { DriftCell, NetworkPill } from './Workloads/cells';
 import { PostureCell } from './Workloads/PostureCell';
-import { useWorkloadPostures } from '../hooks/useWorkloadProfile';
+import { POSTURE_AUTO_PAGES, useWorkloadPostures } from '../hooks/useWorkloadProfile';
 import { errorMessage } from '../services/profileApi';
 import type { PostureStatus } from '../types/profile';
 import { Button } from './ui/Button';
@@ -40,21 +42,24 @@ interface WorkloadsViewProps {
   refreshTick?: number;
 }
 
-const READINESS_CLASS: Record<string, string> = {
-  Ready: 'text-hubble-success',
-  Partial: 'text-hubble-warning',
-  Pending: 'text-tertiary',
-};
-
-/** Own keys only: the state string comes from the broker. */
-function readinessClass(state: string): string {
-  return Object.hasOwn(READINESS_CLASS, state) ? READINESS_CLASS[state] : 'text-secondary';
-}
-
 const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
   { id: undefined, label: 'All controls' },
   { id: 'seccomp', label: 'Seccomp' },
 ];
+
+const DRIFT_TITLE = 'Workloads with observed syscalls their deployed CR does not allow (blocked when enforcing). Syscalls the CR allows but never observed are not counted.';
+const PARTIAL_TITLE = 'Workloads with a pod below full syscall capture';
+
+/** Why every posture filter reads empty, in the user's terms rather than the pod-discovery copy. */
+function emptyDescription(scopeLabel: string, query: string, postureFilter: PostureStatus | '', seccompMode: boolean): string {
+  const posture = postureFilter ? (postureFilter === 'unknown' ? 'no posture data' : `posture ${STATUS_LABEL[postureFilter]}`) : '';
+  if (posture && query) return `No workload in ${scopeLabel} has ${posture} and a name or namespace containing “${query}”.`;
+  if (posture) return `No workload in ${scopeLabel} has ${posture} in the Broker's profile list.`;
+  if (query) return `No workload name or namespace in ${scopeLabel} contains “${query}”.`;
+  return seccompMode
+    ? 'A workload appears once the controller has reported syscalls for it and it has an owning controller (Deployment, StatefulSet, DaemonSet, CronJob).'
+    : 'A workload appears once the controller has reported one of its pods.';
+}
 
 /**
  * Coverage table: one row per workload, with the state of every control
@@ -66,57 +71,77 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
  * scope chip narrows it to one namespace.
  */
 export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload, refreshTick }: WorkloadsViewProps) {
-  const { rows: allRows, loading, error, profiles } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace);
   const [query, setQuery] = useState('');
   const [postureFilter, setPostureFilter] = useState<PostureStatus | ''>('');
   const seccompMode = control === 'seccomp';
+  // The name filter also narrows the posture request (server-side search) and
+  // the seccomp fallback reads, debounced so typing does not fire one request
+  // per keystroke.
+  const search = useDebounced(query.trim(), 300);
+  const q = search.toLowerCase();
+  const visible = useCallback(
+    (r: WorkloadRow) => (allNamespaces || r.namespace === namespace) && (!q || r.key.toLowerCase().includes(q)),
+    [allNamespaces, namespace, q],
+  );
+  const { rows: allRows, loading, error, profiles, seccompUnavailable, verdictsUnavailable } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace, { visible });
   // The posture column only exists on the all-controls table; the seccomp
   // columns never ask for it.
-  // The name filter also narrows the posture request (server-side search),
-  // debounced so typing does not fire one request per keystroke.
-  const search = useDebounced(query.trim(), 300);
   const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, search || undefined, refreshTick, undefined, undefined, !seccompMode);
 
   const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const qi = query.trim().toLowerCase();
     return allRows
       .filter((r) => allNamespaces || r.namespace === namespace)
       .filter((r) => !seccompMode || r.profile)
       // A posture filter is server-side: keep the rows the Broker returned.
       .filter((r) => seccompMode || !postureFilter || postures.byKey.has(r.key))
-      .filter((r) => !q || r.key.toLowerCase().includes(q));
+      .filter((r) => !qi || r.key.toLowerCase().includes(qi));
   }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey]);
+
+  // Page postures until every rendered row has one or the Broker has no
+  // more, a bounded number of times; past that the user asks.
+  const uncovered = useMemo(() => !seccompMode && rows.some((r) => !postures.byKey.has(r.key)), [rows, postures.byKey, seccompMode]);
+  const { hasMore, loading: posturesLoading, loadingMore, pages, loadMore } = postures;
+  useEffect(() => {
+    if (!uncovered || !hasMore || posturesLoading || loadingMore || pages >= POSTURE_AUTO_PAGES) return;
+    void loadMore();
+  }, [uncovered, hasMore, posturesLoading, loadingMore, pages, loadMore]);
 
   const stats = useMemo<StatTileProps[]>(() => {
     const enforcing = rows.filter((r) => r.seccomp === 'enforcing').length;
-    const partial = rows.filter((r) => !r.capture.complete).length;
-    const drifted = rows.filter((r) => r.drift && !r.drift.inSync).length;
-    const audited = rows.filter((r) => r.network.state === 'audit').length;
+    const partial = rows.filter((r) => r.capture && !r.capture.complete).length;
+    const drifted = rows.filter((r) => hasBlockingDrift(r.drift)).length;
+    const wouldDeny = rows.filter((r) => r.network.state === 'audit' && r.network.wouldDeny > 0).length;
     const warn = (n: number) => (n > 0 ? 'text-hubble-warning' : 'text-secondary');
+    // A count from the seccomp profile list is not an answer while the list is loading or failed.
+    const unknownTitle = loading ? 'Unknown until the seccomp profile list has loaded' : 'Unknown: the seccomp profile list could not be read';
+    const seccompTile = (t: StatTileProps): StatTileProps => (seccompUnavailable ? { ...t, value: '—', suffix: undefined, tone: 'text-tertiary', title: unknownTitle } : t);
     if (seccompMode) {
       return [
-        { label: 'Workloads', value: rows.length, icon: Lock, tone: 'text-hubble-accent' },
-        { label: 'Enforcing CRs', value: enforcing, icon: Lock, tone: enforcing > 0 ? 'text-state-enforcing' : 'text-secondary' },
-        { label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted) },
-        { label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial) },
+        seccompTile({ label: 'Workloads', value: rows.length, icon: Lock, tone: 'text-hubble-accent' }),
+        seccompTile({ label: 'Enforcing CRs', value: enforcing, icon: Lock, tone: enforcing > 0 ? 'text-state-enforcing' : 'text-secondary' }),
+        seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE }),
+        seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE }),
       ];
     }
     return [
       { label: 'Workloads', value: rows.length, icon: Layers, tone: 'text-hubble-accent' },
-      {
+      seccompTile({
         label: 'Seccomp enforcing', value: enforcing, suffix: `/${rows.length}`, icon: Lock,
         tone: rows.length > 0 && enforcing === rows.length ? 'text-state-enforcing' : 'text-secondary',
         title: 'Workloads whose SeccompProfile CR blocks unlisted syscalls',
         onClick: () => onControlChange('seccomp'),
-      },
-      {
-        label: 'Network audit', value: audited, suffix: `/${rows.length}`, icon: ShieldAlert, tone: 'text-secondary',
-        title: 'Workloads named by recent AuditNetworkPolicy verdicts',
-      },
-      { label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: 'Observed syscalls missing from the deployed CR' },
-      { label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: 'Workloads with a pod below full syscall capture' },
+      }),
+      verdictsUnavailable
+        ? { label: 'Would-deny (recent)', value: '—', icon: ShieldAlert, tone: 'text-tertiary', title: 'Unknown: the audit verdicts could not be read' }
+        : {
+            label: 'Would-deny (recent)', value: wouldDeny, icon: ShieldAlert, tone: warn(wouldDeny),
+            title: 'Workloads that are the subject of a WouldDeny verdict among the latest 500 audit verdicts of each kind. A recent window, not policy coverage: kguardian does not know which policies select a workload.',
+          },
+      seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE }),
+      seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE }),
     ];
-  }, [rows, seccompMode, onControlChange]);
+  }, [rows, seccompMode, seccompUnavailable, verdictsUnavailable, loading, onControlChange]);
 
   const scopeLabel = allNamespaces ? 'all namespaces' : namespace;
 
@@ -144,9 +169,19 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
           {stats.map((s) => <StatTile key={s.label} {...s} />)}
         </StatStrip>
 
+        {verdictsUnavailable && !seccompMode && (
+          <p role="status" className="text-xs text-tertiary" data-testid="verdicts-unavailable">
+            Audit verdicts could not be read: the Network policy column reads not reported and the would-deny tile is unknown until the header Refresh succeeds.
+          </p>
+        )}
         {error && (
           <div role="alert" className="rounded-surface border border-hubble-error/40 bg-hubble-error/10 px-4 py-3 text-sm text-hubble-error">
             Could not load seccomp profiles: {error}
+            {seccompUnavailable && (
+              <span className="block mt-1 text-xs opacity-90">
+                Seccomp, drift and capture read unknown until the list answers; meanwhile the first rows shown are read one workload at a time.
+              </span>
+            )}
           </div>
         )}
 
@@ -198,23 +233,28 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
             </div>
           </header>
 
-          {loading && profiles.length === 0 && allRows.length === 0 ? (
-            <div className="space-y-2 p-3">
+          {loading && profiles.length === 0 && (seccompMode || allRows.length === 0) ? (
+            <div className="space-y-2 p-3" aria-busy="true" aria-label="Loading">
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-5/6" />
               <Skeleton className="h-8 w-2/3" />
             </div>
           ) : rows.length === 0 ? (
-            <EmptyState
-              icon={Radar}
-              title={query || postureFilter ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
-              description={
-                seccompMode
-                  ? 'A workload appears once the controller has reported syscalls for it and it has an owning controller (Deployment, StatefulSet, DaemonSet, CronJob).'
-                  : 'A workload appears once the controller has reported one of its pods.'
-              }
-              compact
-            />
+            seccompMode && seccompUnavailable ? (
+              <EmptyState
+                icon={CloudOff}
+                title="Seccomp profiles could not be read"
+                description="The Broker did not answer the profile list; the error is above. Workloads with a profile appear here as their own seccomp reads answer. Refresh from the header to try the list again."
+                compact
+              />
+            ) : (
+              <EmptyState
+                icon={Radar}
+                title={query || postureFilter ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
+                description={emptyDescription(scopeLabel, query.trim(), postureFilter, seccompMode)}
+                compact
+              />
+            )
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -269,23 +309,14 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                       </td>
                       {seccompMode && r.profile ? (
                         <>
-                          <td className="px-3 py-2.5"><CaptureBadge capture={r.capture} /></td>
+                          <td className="px-3 py-2.5">{r.capture && <CaptureBadge capture={r.capture} />}</td>
                           <td className="px-3 py-2.5">
                             <span className="inline-flex items-center gap-1.5">
                               <StatePill state={r.seccomp} />
                               {r.profile.cr && <span className="font-mono text-[11px] text-tertiary">{r.profile.cr.name}</span>}
                             </span>
                           </td>
-                          <td className={`px-3 py-2.5 font-mono text-xs tabular-nums ${r.profile.cr ? readinessClass(r.profile.cr.distribution.state) : 'text-tertiary'}`}>
-                            {r.profile.cr ? (
-                              <>
-                                {r.profile.cr.distribution.ready}/{r.profile.cr.distribution.total}
-                                <span className="ml-1.5 text-tertiary">{r.profile.cr.distribution.state}</span>
-                              </>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
+                          <td className="px-3 py-2.5">{r.profile.cr ? <CrNodes cr={r.profile.cr} /> : <span className="font-mono text-xs text-tertiary">—</span>}</td>
                           <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} /></td>
                           <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{r.profile.syscallCount}</td>
                         </>
@@ -297,14 +328,20 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                           <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{r.pods.length}</td>
                           <td className="px-3 py-2.5"><NetworkPill network={r.network} /></td>
                           <td className="px-3 py-2.5">
-                            {r.profile ? (
+                            {r.profile || r.seccomp === 'unknown' ? (
                               <StatePill state={r.seccomp} />
                             ) : (
                               <span className="text-xs text-tertiary" title="No syscalls aggregated for this workload yet (bare pods have no profile)">no profile</span>
                             )}
                           </td>
                           <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} /></td>
-                          <td className="px-3 py-2.5"><CaptureBadge capture={r.capture} /></td>
+                          <td className="px-3 py-2.5">
+                            {r.capture ? (
+                              <CaptureBadge capture={r.capture} />
+                            ) : (
+                              <span className="text-xs text-tertiary" title="Unknown: the seccomp profile list could not be read" data-testid="capture-unknown">—</span>
+                            )}
+                          </td>
                         </>
                       )}
                       <td className="px-2 py-2.5 text-tertiary">
@@ -328,7 +365,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 Posture loaded for {postures.byKey.size} workload{postures.byKey.size === 1 ? '' : 's'}
                 {postureFilter ? ' matching the filter; more may match' : ''}.
               </span>
-              <Button variant="secondary" size="sm" onClick={() => void postures.loadMore()} disabled={postures.loadingMore}>
+              <Button variant="secondary" size="sm" onClick={() => void postures.loadMore()} disabled={postures.loadingMore || postures.loading}>
                 {postures.loadingMore ? 'Loading…' : 'Load more postures'}
               </Button>
             </div>

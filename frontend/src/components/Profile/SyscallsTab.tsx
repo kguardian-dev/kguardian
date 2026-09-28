@@ -5,6 +5,7 @@ import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Fact, Panel, Reasons, StatusPill } from './parts';
 import { ControlStatePill } from './OverviewTab';
+import { CrNodes } from '../Seccomp/CrNodes';
 
 export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; onOpenSeccomp?: () => void }) {
   const status = asStatus(dim.status);
@@ -72,13 +73,22 @@ export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; on
               <Fact label="defaultAction"><span className="font-mono">{cr.defaultAction}</span></Fact>
               <Fact label="Syscalls in CR"><span className="font-mono tabular-nums">{cr.syscallCount}</span></Fact>
               <Fact label="Nodes">
-                <span className="font-mono tabular-nums">{cr.distribution.ready}/{cr.distribution.total}</span> <span className="text-tertiary">{cr.distribution.state}</span>
+                <CrNodes cr={cr} />
               </Fact>
               <Fact label="Drift">
-                {cr.inSync ? <span className="text-state-enforcing">in sync</span> : <span className="text-severity-medium">{cr.missing.length} missing · {cr.extra.length} extra</span>}
+                {cr.missing.length === 0 ? (
+                  <span className="text-state-enforcing" title="Every observed syscall is in the CR">in sync</span>
+                ) : (
+                  <span className="text-severity-medium">{cr.missing.length} observed, not in the CR</span>
+                )}
+                {cr.extra.length > 0 && (
+                  <span className="text-tertiary" title="In the CR, never observed: the CR is broader than the observed set, which is not a drift" data-testid="drift-unobserved">
+                    {' '}· {cr.extra.length} allowed but unobserved
+                  </span>
+                )}
               </Fact>
             </dl>
-            {!cr.inSync && (
+            {(cr.missing.length > 0 || cr.extra.length > 0) && (
               <div className="text-xs space-y-1">
                 {cr.missing.length > 0 && (
                   <p>
@@ -88,7 +98,7 @@ export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; on
                 )}
                 {cr.extra.length > 0 && (
                   <p>
-                    <span className="text-tertiary">In the CR, not observed: </span>
+                    <span className="text-tertiary">Allowed but unobserved (in the CR, never seen; not a drift): </span>
                     <span className="font-mono text-secondary">{cr.extra.join(', ')}</span>
                   </p>
                 )}

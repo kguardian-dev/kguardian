@@ -83,3 +83,107 @@ test('no verdict means "unreported", not "no policy"', () => {
   const [row] = buildWorkloadRows([pod('api-1')], [], [verdict({ dst_pod: 'someone-else' })]);
   expect(row.network).toEqual({ state: 'unreported' });
 });
+
+import { crDistribution, hasBlockingDrift, syscallsDimensionFromSeccomp, verdictsForNamespace } from './workloads';
+
+test('while the profile list is unavailable, a row without a profile is unknown: no CR state, no drift, no capture claim', () => {
+  const [row] = buildWorkloadRows([pod('api-1')], [], [], { seccompUnavailable: true });
+  expect(row.seccomp).toBe('unknown');
+  expect(row.drift).toBeNull();
+  expect(row.capture).toBeNull();
+  // A row that does have a profile is known regardless.
+  const [known] = buildWorkloadRows([pod('api-1')], [profile()], [], { seccompUnavailable: true });
+  expect(known.seccomp).toBe('none');
+  expect(known.capture).toMatchObject({ level: 'full', complete: true });
+});
+
+test('per-workload fallback reads answer for their row: a profile, or null for "the Broker has none"', () => {
+  const fallback = new Map([
+    ['payments/Deployment/api', profile({ cr: { name: 'deployment-api', defaultAction: 'SCMP_ACT_ERRNO', hash: 'x', syscallCount: 41, distribution: { ready: 3, total: 3, state: 'Ready' }, drift: { missing: [], extra: [], inSync: true } } })],
+    ['payments/StatefulSet/db', null],
+  ]);
+  const rows = buildWorkloadRows(
+    [pod('api-1'), pod('db-0', { workload_kind: 'StatefulSet', workload_name: 'db', capture_level: 'low' }), pod('w-0', { workload_name: 'worker' })],
+    [],
+    [],
+    { seccompUnavailable: true, seccompFallback: fallback },
+  );
+  const by = (n: string) => rows.find((r) => r.name === n)!;
+  expect(by('api').seccomp).toBe('enforcing');
+  expect(by('db').seccomp).toBe('none');
+  expect(by('db').capture).toMatchObject({ level: 'low', complete: false });
+  expect(by('worker').seccomp).toBe('unknown');
+  expect(by('worker').capture).toBeNull();
+  // Once the list has loaded it is authoritative: a stale fallback read does not outrank "no profile".
+  const [loaded] = buildWorkloadRows([pod('api-1')], [], [], { seccompUnavailable: false, seccompFallback: fallback });
+  expect(loaded.profile).toBeNull();
+  expect(loaded.seccomp).toBe('none');
+});
+
+test('verdictsForNamespace keeps verdicts by subject namespace, so a cluster-scoped policy still counts', () => {
+  const cluster = { policy_namespace: '', policy_name: 'cluster-baseline-audit' };
+  const kept = verdictsForNamespace(
+    [
+      verdict({ id: 1, ...cluster, dst_namespace: 'payments', dst_pod: 'api-1' }),
+      verdict({ id: 2, ...cluster, dst_namespace: 'observability', dst_pod: 'grafana-1' }),
+      // Egress: the subject is the source.
+      verdict({ id: 3, ...cluster, direction: 'Egress', src_namespace: 'payments', src_pod: 'api-1', dst_namespace: 'observability', dst_pod: 'grafana-1' }),
+      verdict({ id: 4, ...cluster, direction: 'Egress', src_namespace: 'observability', src_pod: 'grafana-1', dst_namespace: 'payments', dst_pod: 'api-1' }),
+    ],
+    'payments',
+  );
+  expect(kept.map((v) => v.id)).toEqual([1, 3]);
+  // A subject whose pod the Broker no longer knows still belongs to its namespace.
+  expect(verdictsForNamespace([verdict({ ...cluster, dst_namespace: 'payments', dst_pod: null })], 'payments')).toHaveLength(1);
+  // And the rows attribute them.
+  const [row] = buildWorkloadRows([pod('api-1')], [], kept);
+  expect(row.network).toEqual({ state: 'audit', policies: ['cluster-baseline-audit'], wouldDeny: 0, verdicts: 2 });
+});
+
+test('only observed syscalls the CR lacks are a drift; allowed-but-unobserved is not', () => {
+  expect(hasBlockingDrift(null)).toBe(false);
+  expect(hasBlockingDrift({ missing: [], extra: ['mount'], inSync: false })).toBe(false);
+  expect(hasBlockingDrift({ missing: ['ptrace'], extra: [], inSync: false })).toBe(true);
+});
+
+test('crDistribution prefers the CR\'s own status.distribution and qualifies it with the Broker\'s count when they differ', () => {
+  const broker = { ready: 55, total: 55, state: 'Ready', present: 55 };
+  expect(crDistribution({ distribution: broker, statusDistribution: { ready: 60, total: 60, state: 'Ready' } })).toEqual({
+    primary: { ready: 60, total: 60, state: 'Ready' },
+    reporting: broker,
+  });
+  // The same numbers need no qualifier; no mirrored status falls back to the Broker's.
+  expect(crDistribution({ distribution: broker, statusDistribution: { ready: 55, total: 55, state: 'Ready' } }).reporting).toBeNull();
+  expect(crDistribution({ distribution: broker, statusDistribution: null })).toEqual({ primary: broker, reporting: null });
+  expect(crDistribution({ distribution: broker })).toEqual({ primary: broker, reporting: null });
+  // A mirrored status without a state word gets one from its own numbers.
+  expect(crDistribution({ distribution: broker, statusDistribution: { ready: 30, total: 60 } as never }).primary.state).toBe('Partial');
+});
+
+test('syscallsDimensionFromSeccomp carries the observed set, capture and CR, with posture and denials unknown', () => {
+  const dim = syscallsDimensionFromSeccomp(
+    profile({
+      syscallCount: 104, architectures: ['SCMP_ARCH_AARCH64'], hash: 'd209', updatedAt: '2026-09-14T00:33:32Z',
+      capture: { level: 'full', complete: false, pods: [{ name: 'a', level: 'full' }, { name: 'b', level: 'low' }] },
+      cr: {
+        name: 'media-transform-api', defaultAction: 'SCMP_ACT_LOG', hash: 'x', syscallCount: 140,
+        distribution: { ready: 55, total: 55, state: 'Ready' }, statusDistribution: { ready: 60, total: 60, state: 'Ready' },
+        drift: { missing: [], extra: ['mount'], inSync: false },
+      },
+    }),
+  );
+  expect(dim.status).toBe('unknown');
+  expect(dim.denials).toBeNull();
+  expect(dim.observed).toEqual({ syscallCount: 104, hash: 'd209', architectures: ['SCMP_ARCH_AARCH64'], updatedAt: '2026-09-14T00:33:32Z' });
+  expect(dim.capture).toEqual({ level: 'full', complete: false, incompletePods: 1 });
+  // The Broker's count stays `distribution` (what the profile contract means by it); the CR's own status rides along.
+  expect(dim.cr).toEqual({
+    name: 'media-transform-api', defaultAction: 'SCMP_ACT_LOG', mode: 'audit', syscallCount: 140, inSync: false, missing: [], extra: ['mount'],
+    distribution: { ready: 55, total: 55, state: 'Ready' },
+    statusDistribution: { ready: 60, total: 60, state: 'Ready' },
+  });
+  // The Broker truncates the pod list, so its own incomplete count wins when present.
+  expect(syscallsDimensionFromSeccomp(profile({ capture: { level: 'low', complete: false, pods: [{ name: 'a', level: 'low' }], incomplete: 7, more: 6 } })).capture!.incompletePods).toBe(7);
+  expect(syscallsDimensionFromSeccomp(profile({ cr: { name: 'c', defaultAction: 'SCMP_ACT_ERRNO', hash: 'x', syscallCount: 1, distribution: { ready: 1, total: 1, state: 'Ready' }, drift: { missing: [], extra: [], inSync: true } } })).cr!.mode).toBe('enforce');
+  expect(syscallsDimensionFromSeccomp(profile({ capture: undefined })).capture).toBeNull();
+});

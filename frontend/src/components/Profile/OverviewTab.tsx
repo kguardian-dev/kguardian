@@ -246,6 +246,8 @@ function Readiness({ profile }: { profile: WorkloadProfile }) {
 
 function Exposure({ profile, onOpenTab }: { profile: WorkloadProfile; onOpenTab: (t: ProfileTab) => void }) {
   const e = profile.exposure;
+  // Flows the Broker did not read within its bounded window are not "no flows".
+  const unread = profile.dimensions.network.reasons.find((r) => r.code === 'network_unread');
   const none = e.ingressPeers === null && e.egressPeers === null;
   const since = profile.dimensions.network.coverage.observedSince;
   return (
@@ -261,7 +263,7 @@ function Exposure({ profile, onOpenTab }: { profile: WorkloadProfile; onOpenTab:
       }
     >
       {none ? (
-        <p className="px-4 py-3 text-xs text-tertiary">No flows observed for this workload, so exposure is unknown.</p>
+        <p className="px-4 py-3 text-xs text-tertiary">{unread ? `${unread.message} Exposure is unknown.` : 'No flows observed for this workload, so exposure is unknown.'}</p>
       ) : (
         <div className="px-4 py-2 text-xs">
           <dl className="divide-y divide-hubble-border">

@@ -12,6 +12,7 @@ import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Skeleton } from '../ui/Skeleton';
 import { CaptureBadge } from './CaptureBadge';
+import { CrNodes } from './CrNodes';
 import { PartialCaptureWarning } from './PartialCaptureWarning';
 import { StatePill } from './StatePill';
 import { ExportCrModal } from './ExportCrModal';
@@ -148,8 +149,7 @@ export function SeccompProfileDrawer({ api, workload, summary, onClose }: Seccom
                   <StatePill state={status} />
                   <span className="font-mono tabular-nums text-secondary">{cr.defaultAction}</span>
                   <span className="text-secondary">
-                    nodes <span className={`font-mono tabular-nums ${cr.distribution.state === 'Ready' ? 'text-hubble-success' : cr.distribution.state === 'Partial' ? 'text-hubble-warning' : 'text-tertiary'}`}>{cr.distribution.ready}/{cr.distribution.total}</span>{' '}
-                    <span className="text-tertiary">{cr.distribution.state}</span>
+                    nodes <CrNodes cr={cr} />
                   </span>
                   <span className="text-secondary">
                     syscalls <span className="font-mono tabular-nums">{cr.syscallCount}</span>

@@ -6,6 +6,8 @@ import { EmptyState } from '../ui/EmptyState';
 import { Fact, Panel, Reasons, StatusPill } from './parts';
 
 export function NetworkTab({ dim }: { dim: NetworkDimension }) {
+  // The Broker gave up reading flows within its bounded window: not the same as no flows.
+  const unread = dim.reasons.find((r) => r.code === 'network_unread');
   const status = asStatus(dim.status);
   const audit = dim.policy.audit;
   return (
@@ -32,7 +34,11 @@ export function NetworkTab({ dim }: { dim: NetworkDimension }) {
 
       <Panel icon={Network} title="Observed peers" hint={dim.coverage.note || undefined}>
         {dim.peers.length === 0 ? (
-          <EmptyState icon={Network} compact title="No flows observed" description="kguardian has not recorded traffic for this workload's pods. Absence of flows is not proof it is unreachable." />
+          unread ? (
+            <EmptyState icon={Network} compact title="Network not read" description={dim.coverage.note || unread.message} />
+          ) : (
+            <EmptyState icon={Network} compact title="No flows observed" description="kguardian has not recorded traffic for this workload's pods. Absence of flows is not proof it is unreachable." />
+          )
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-hubble-border border-b border-hubble-border">
