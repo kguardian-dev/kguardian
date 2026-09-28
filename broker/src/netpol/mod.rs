@@ -1365,6 +1365,9 @@ fn cilium_rules(
 }
 
 fn cilium_default_deny(target: &PodDetail) -> Value {
+    // The CRD requires an ingress or egress section (spec anyOf); one empty
+    // rule per direction is Cilium's "deny everything" form.
+    let deny_all = || Value::Array(vec![Value::Object(Map::new())]);
     obj([
         ("apiVersion", Value::from("cilium.io/v2")),
         ("kind", Value::from("CiliumNetworkPolicy")),
@@ -1390,6 +1393,8 @@ fn cilium_default_deny(target: &PodDetail) -> Value {
                         ("egress", Value::Bool(true)),
                     ]),
                 ),
+                ("ingress", deny_all()),
+                ("egress", deny_all()),
             ]),
         ),
         ("status", Value::Object(Map::new())),
