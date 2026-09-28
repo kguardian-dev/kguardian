@@ -656,8 +656,11 @@ fn read_network(
     timeout_ms: u64,
 ) -> Result<NetworkRead, DbError> {
     let started = std::time::Instant::now();
+    // Whether our bound, rather than the session's own tighter timeout,
+    // was in force for the statement that ran last.
+    let mut bounded = false;
     let out = conn.transaction::<_, diesel::result::Error, _>(|conn| {
-        bound_statement(conn, timeout_ms)?;
+        bounded = bound_statement(conn, timeout_ms)?;
         let mut rows: Vec<NetRow> = sql_query(NETWORK_SQL)
             .bind::<Text, _>(&key.namespace)
             .bind::<Array<Text>, _>(pods)
@@ -670,7 +673,7 @@ fn read_network(
         // The rules query gets what is left of the bound.
         if timeout_ms > 0 {
             let left = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
-            bound_statement(conn, left.max(1))?;
+            bounded = bound_statement(conn, left.max(1))?;
         }
         let mut rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
             .bind::<Text, _>(&key.namespace)
@@ -683,12 +686,12 @@ fn read_network(
     });
     match out {
         Ok(v) => Ok(Ok(v)),
-        Err(e) if is_statement_timeout(&e) => Ok(Err(if timeout_ms > 0 {
+        Err(e) if is_statement_timeout(&e) => Ok(Err(if bounded {
             format!(
-                "the flow aggregate was not read: the pod_traffic query exceeded {timeout_ms} ms"
+                "the flow aggregate was not read: the pod_traffic query exceeded its {timeout_ms} ms bound"
             )
         } else {
-            "the flow aggregate was not read: the pod_traffic query exceeded the database \
+            "the flow aggregate was not read: the pod_traffic query exceeded the database's \
              statement timeout"
                 .into()
         })),
@@ -696,21 +699,28 @@ fn read_network(
     }
 }
 
-/// `SET LOCAL statement_timeout`, never above the session's own.
-fn bound_statement(conn: &mut PgConnection, ms: u64) -> QueryResult<()> {
+/// `SET LOCAL statement_timeout`, never above the session's own: true
+/// when it applied, false when the session's tighter timeout stays.
+fn bound_statement(conn: &mut PgConnection, ms: u64) -> QueryResult<bool> {
+    #[derive(QueryableByName)]
+    struct Applied {
+        #[diesel(sql_type = Text)]
+        #[allow(dead_code)]
+        applied: String,
+    }
     if ms == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let v = format!("{ms}ms");
     sql_query(
-        "SELECT set_config('statement_timeout', $1, true) \
+        "SELECT set_config('statement_timeout', $1, true) AS applied \
          WHERE current_setting('statement_timeout') = '0' \
             OR current_setting('statement_timeout')::interval > $2::interval",
     )
     .bind::<Text, _>(&v)
     .bind::<Text, _>(&v)
-    .execute(conn)
-    .map(|_| ())
+    .load::<Applied>(conn)
+    .map(|rows| !rows.is_empty())
 }
 
 fn is_statement_timeout(e: &diesel::result::Error) -> bool {
@@ -2887,9 +2897,12 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         content_hash: v.content_hash.clone(),
         created_at: utc(v.created_at),
     });
-    let snapshot_pending = version
-        .as_ref()
-        .is_none_or(|v| v.content_hash != content_hash);
+    // A partial profile is never versioned (snapshot_one refuses it), so
+    // it must not promise a snapshot.
+    let snapshot_pending = s.network_unread.is_none()
+        && version
+            .as_ref()
+            .is_none_or(|v| v.content_hash != content_hash);
     let names: Vec<String> = s.live_pods.iter().take(POD_NAMES_LISTED).cloned().collect();
     Profile {
         workload: WorkloadView {
@@ -5707,6 +5720,7 @@ mod tests {
         assert!(p.posture.unknown_dimensions.contains(&"network"));
         assert!(p.snapshot["network"].is_null(), "{}", p.snapshot);
         assert!(p.findings.iter().all(|f| f.dimension != "network"));
+        assert!(!p.snapshot_pending, "no version will follow a partial read");
         // The same sources with the flows read: the usual empty answer.
         let read = Sources {
             network_unread: None,
@@ -5714,6 +5728,7 @@ mod tests {
         };
         let p = build(&key, &read, Utc::now());
         assert_eq!(p.dimensions.network.env.reasons[0].code, "no_flows");
+        assert!(p.snapshot_pending, "no stored version yet: pending");
         assert!(p
             .dimensions
             .network
@@ -7319,9 +7334,12 @@ mod live_tests {
         let g = &l["items"][0];
         assert_eq!(g["lastError"], json!("boom"));
         assert!(g["failedAt"].is_string());
+        assert!(g["revision"].is_null() && g["computedAt"].is_null(), "{g}");
         assert!(
-            g["revision"].is_null() && g["computedAt"].is_null() && g["posture"].is_null(),
-            "{g}"
+            ["posture", "dimensions", "findingCounts", "drift"]
+                .iter()
+                .all(|k| g.get(k).is_none()),
+            "profile keys are absent, not null: {g}"
         );
 
         // A tick computes checkout, ghost (pod only) and retired (inventory only).
@@ -7503,7 +7521,7 @@ mod live_tests {
         let k = key(ns);
         let s = load_sources_bounded(&mut conn, &k, 1).unwrap();
         let why = s.network_unread.clone().expect("the 1 ms bound ran out");
-        assert!(why.contains("exceeded 1 ms"), "{why}");
+        assert!(why.ends_with("exceeded its 1 ms bound"), "{why}");
         assert!(s.network.is_empty() && s.network_rules.is_empty());
         assert_eq!(
             s.live_pods,
@@ -7519,6 +7537,21 @@ mod live_tests {
         let s = load_sources_bounded(&mut conn, &k, 30_000).unwrap();
         assert!(s.network_unread.is_none());
         assert!(!s.network.is_empty() && s.network_truncated);
+        // The session's own tighter timeout stays in force, and is what
+        // the reason names.
+        conn.batch_execute("SET statement_timeout = 1").unwrap();
+        let r = read_network(&mut conn, &k, &["checkout-1".to_string()], 60_000).unwrap();
+        conn.batch_execute("RESET statement_timeout").unwrap();
+        assert_eq!(
+            r.expect_err("the session's 1 ms timeout ran out"),
+            "the flow aggregate was not read: the pod_traffic query exceeded the database's \
+             statement timeout"
+        );
+        assert!(
+            read_network(&mut conn, &k, &["checkout-1".to_string()], 30_000)
+                .unwrap()
+                .is_ok()
+        );
         // The snapshotter under the tight bound: a failure, not a version.
         let t = {
             let _g = crate::test_support::env_lock();
