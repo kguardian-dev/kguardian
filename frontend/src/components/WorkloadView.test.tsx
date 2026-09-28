@@ -357,7 +357,7 @@ test('a 404 with no contract code is an older Broker, not a missing workload', a
 test('503 (read budget) shows a section error with Retry, and Retry recovers', async () => {
   let busy = true;
   const fetchImpl = (async () =>
-    busy ? new Response('busy', { status: 503 }) : new Response(JSON.stringify(checkoutProfile), { status: 200 })) as unknown as typeof fetch;
+    busy ? new Response('broker read memory budget exhausted: this request needs 51200 KiB of a 262144 KiB budget and waited 5000 ms without getting it', { status: 503, headers: { 'Retry-After': '1' } }) : new Response(JSON.stringify(checkoutProfile), { status: 200 })) as unknown as typeof fetch;
   renderPage(new ProfileApi({ fetchImpl }));
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toMatch(/read budget/);

@@ -72,8 +72,21 @@ describe('VulnApi read budget and cancellation', () => {
     expect(err.kind).toBe('busy');
     expect(err.message).toMatch(/whole read memory budget/);
     expect(err.message).not.toMatch(/few seconds/);
-    // A bare 503 still reads as the generic shed.
-    expect((await withStatus(503).listCves().catch((e) => e as VulnApiError)).message).toMatch(/few seconds/);
+    // A bare 503 is a plain 503, not a claim about the cause.
+    const bare = await withStatus(503).listCves().catch((e) => e as VulnApiError);
+    expect(bare.message).toBe('The Broker is not taking this read right now (503). Try again in a few seconds.');
+    expect(bare.retryAfterMs).toBeNull();
+  });
+
+  test('a 503 for a statement the database cancelled shows the Broker\'s own message and its Retry-After, never a read-budget shed', async () => {
+    const api = new VulnApi({
+      fetchImpl: (async () => new Response('database busy: canceling statement due to statement timeout; retry after 5 s', { status: 503, headers: { 'Retry-After': '5' } })) as typeof fetch,
+    });
+    const err = await api.listCves().catch((e) => e as VulnApiError);
+    expect(err.kind).toBe('busy');
+    expect(err.message).toBe('Database busy: canceling statement due to statement timeout; retry after 5 s.');
+    expect(err.message).not.toMatch(/read budget|shedding/);
+    expect(err.retryAfterMs).toBe(5000);
   });
 
   test('an aborted admission read rejects as cancelled, not as a Broker timeout, and the fetch saw the abort', async () => {

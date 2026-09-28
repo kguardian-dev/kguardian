@@ -54,7 +54,7 @@ describe('ImageDrawer', () => {
     render(drawer(grafana, replayVulnApi([answer(`GET /images/${grafana}`, 'busy', 503)]).api));
     const sbom = await screen.findByTestId('sbom-report');
     expect(within(sbom).getByText('Registry SBOM')).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).toMatch(/shedding reads/);
+    expect(screen.getByRole('alert').textContent).toMatch(/not taking this read right now \(503: busy\)/);
     expect(screen.queryByText('observability/grafana')).toBeNull();
   });
 

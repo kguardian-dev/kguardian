@@ -44,6 +44,22 @@ test('non-contract failures: a bare 404 is an older Broker, 503 is busy, 500 an 
   await expect(offline.getProfile('a', 'b', 'c')).rejects.toMatchObject({ kind: 'error' });
 });
 
+test('a 503 is worded from its body: a cancelled statement is the Broker\'s own message with its Retry-After, a budget shed says so, a bare 503 claims neither', async () => {
+  const at = (body: string, headers: Record<string, string> = {}) =>
+    new ProfileApi({ fetchImpl: (async () => new Response(body, { status: 503, headers })) as unknown as typeof fetch }).getProfile('a', 'b', 'c').catch((e: unknown) => e as ProfileApiError);
+  const dbBusy = await at('database busy: canceling statement due to statement timeout; retry after 5 s', { 'Retry-After': '5' });
+  expect(dbBusy.kind).toBe('busy');
+  expect(dbBusy.message).toBe('Database busy: canceling statement due to statement timeout; retry after 5 s.');
+  expect(dbBusy.message).not.toMatch(/read budget|shedding/);
+  expect(dbBusy.retryAfterMs).toBe(5000);
+  const budget = await at('broker read memory budget exhausted: this request needs 262144 KiB of a 262144 KiB budget and waited 5000 ms without getting it.', { 'Retry-After': '1' });
+  expect(budget.message).toMatch(/whole read memory budget \(256 MiB\)/);
+  expect(budget.retryAfterMs).toBe(1000);
+  const bare = await at('busy');
+  expect(bare.message).toBe('The Broker is not taking this read right now (503: busy). Try again in a few seconds.');
+  expect(bare.retryAfterMs).toBeNull();
+});
+
 test('paging follows the captured nextAfter to the next captured page', async () => {
   const { api, calls } = replayApi();
   const p1 = await api.listWorkloads({ limit: 2 });

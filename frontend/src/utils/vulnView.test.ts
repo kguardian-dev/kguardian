@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { busyReadMessage, cveAiPrompt, groupNotCovered, impactCounts, PROMPT_WORKLOADS_MAX, sbomFromMatcher } from './vulnView';
+import { cveAiPrompt, groupNotCovered, impactCounts, PROMPT_WORKLOADS_MAX, sbomFromMatcher } from './vulnView';
 import { exposureOf, imageVulns } from '../fixtures/vulns';
 import type { ExposedVia, ExposedWorkload, Report } from '../types/vulns';
 import type { Factor } from './tiers';
@@ -99,25 +99,4 @@ test('IMG-14: up to ten "not covered" lines stay inline; more are set aside behi
   const g = groupNotCovered(many);
   expect(g.lines).toEqual(['identity: a', 'trailer']);
   expect(g.notCovered).toHaveLength(11);
-});
-
-describe('busyReadMessage', () => {
-  const body = (needs: number, total: number) =>
-    `broker read memory budget exhausted: this request needs ${needs} KiB of a ${total} KiB budget and waited 5000 ms without getting it. The request was REFUSED, not truncated — retry. Raise BROKER_READ_MEMORY_BUDGET_MB (and the container memory limit with it) if this is persistent.`;
-
-  test('IMG-02: a read that needs the whole budget is told so, not "try again in a few seconds"', () => {
-    const m = busyReadMessage(body(262144, 262144));
-    expect(m).toMatch(/whole read memory budget \(256 MiB\)/);
-    expect(m).toContain('BROKER_READ_MEMORY_BUDGET_MB');
-    expect(m).not.toMatch(/few seconds/);
-  });
-
-  test('a partial reservation is a transient shed, with its numbers', () => {
-    expect(busyReadMessage(body(51200, 262144))).toBe('The Broker is shedding reads right now (read budget: this read needs 50 MiB of 256 MiB). Try again in a few seconds.');
-    expect(busyReadMessage(body(512, 262144))).toMatch(/needs 512 KiB of 256 MiB/);
-  });
-
-  test('an unrecognised body keeps the generic message', () => {
-    expect(busyReadMessage('')).toMatch(/Try again in a few seconds/);
-  });
 });
