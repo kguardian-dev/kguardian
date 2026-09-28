@@ -101,6 +101,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
                     onNavigate?.();
                   }}
                   title={item.hint ?? item.label}
+                  data-nav-id={item.id}
                   aria-current={item.active ? 'page' : undefined}
                   className={`w-full flex items-center h-9 rounded-control text-sm transition-colors ${
                     collapsed ? 'justify-center px-0' : 'gap-2.5 px-3'
