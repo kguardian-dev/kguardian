@@ -102,7 +102,10 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get pod traffic by pod name
+   * Get pod traffic by pod name. A failed read (timeout, 5xx, network) is
+   * rethrown, never returned as `[]`: an empty array means the broker holds
+   * no flows for the pod, and a pod whose read failed must not look flow-less
+   * (the map would hide it and the Policy Builder would read it as 0 conns).
    */
   async getPodTrafficByName(podName: string): Promise<NetworkTraffic[]> {
     try {
@@ -110,7 +113,7 @@ class BrokerAPIClient {
       return response.data || [];
     } catch (error) {
       console.error('Error fetching pod traffic by name:', error);
-      return [];
+      throw error;
     }
   }
 
@@ -146,7 +149,8 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get syscalls for a pod by pod name
+   * Get syscalls for a pod by pod name. Rethrows on failure, as
+   * `getPodTrafficByName` does and for the same reason.
    */
   async getPodSyscalls(podName: string): Promise<SyscallInfo[]> {
     try {
@@ -154,20 +158,38 @@ class BrokerAPIClient {
       return response.data || [];
     } catch (error) {
       console.error('Error fetching pod syscalls:', error);
-      return [];
+      throw error;
     }
   }
+
+  /**
+   * In-flight `/svc/info` request, shared like `podsInFlight` below: the
+   * service listing is the second-heaviest response the broker produces (2 MB
+   * on a mid-sized cluster) and overlapping loads used to fetch it twice.
+   */
+  private servicesInFlight: Promise<ServiceInfo[]> | null = null;
 
   /**
    * Get all service details
    */
   async getAllServices(): Promise<ServiceInfo[]> {
+    if (this.servicesInFlight) return this.servicesInFlight;
+
+    const request = (async () => {
+      try {
+        const response = await this.client.get('/svc/info');
+        return response.data || [];
+      } catch (error) {
+        console.error('Error fetching all services:', error);
+        return [];
+      }
+    })();
+
+    this.servicesInFlight = request;
     try {
-      const response = await this.client.get('/svc/info');
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching all services:', error);
-      return [];
+      return await request;
+    } finally {
+      this.servicesInFlight = null;
     }
   }
 
@@ -278,6 +300,8 @@ class BrokerAPIClient {
    * cluster with heavy pod churn the dead rows made that listing outgrow the
    * client timeout, and the picker silently fell back to just "default". A
    * broker older than the endpoint answers 404; then the old derivation runs.
+   * Any other failure is rethrown: a transient error is not a list of one
+   * `default`, and the caller keeps the namespace it already had (the URL's).
    */
   async getNamespaces(): Promise<string[]> {
     try {
@@ -289,7 +313,7 @@ class BrokerAPIClient {
     } catch (error) {
       if (!(axios.isAxiosError(error) && error.response?.status === 404)) {
         console.error('Error fetching namespaces:', error);
-        return ['default'];
+        throw error;
       }
     }
     return this.namespacesFromPods();

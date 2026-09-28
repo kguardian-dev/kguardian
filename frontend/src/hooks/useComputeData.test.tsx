@@ -191,7 +191,7 @@ describe('useComputeData', () => {
     expect(result.current.history.get('uid-a')!.length).toBe(1);
   });
 
-  test('surfaces a transient API error without dropping the last good data, keeps polling, clears on recovery', async () => {
+  test('surfaces a transient API error without dropping the last good data, backs off one interval, clears on recovery', async () => {
     let fail = false;
     const api = {
       getComputeLatest: vi.fn(async () => {
@@ -203,15 +203,103 @@ describe('useComputeData', () => {
     };
     const { result } = renderHook(() => useComputeData('payments', { api }));
     await flush();
+    expect(result.current.unavailable).toBe(false);
     fail = true;
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     expect(result.current.error).toBe('boom');
+    expect(result.current.unavailable).toBe(true);
     expect(result.current.supported).toBe(true);
     expect(result.current.containersByPodUid.size).toBe(1);
     fail = false;
+    // One failure doubles the wait: the tick 5 s later is skipped, the one
+    // after it polls again and the failure is forgotten.
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     expect(api.getComputeLatest).toHaveBeenCalledTimes(3);
     expect(result.current.error).toBeNull();
+    expect(result.current.unavailable).toBe(false);
+  });
+
+  // MAP-09 / WL-13: the broker answered every latest poll with a 30 s
+  // statement that hit its timeout, and the UI issued a new one every 10 s.
+  test('consecutive latest failures back off (10 s, 20 s, 40 s...) and are capped', async () => {
+    const api = fakeApi(() => { throw new Error('canceling statement due to statement timeout'); });
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await flush(); // T0: attempt 1 fails; next not before T+10
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(1);
+    expect(result.current.unavailable).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); }); // T+5: skipped
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); }); // T+10: attempt 2; next not before T+30
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); }); // T+25: skipped
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); }); // T+30: attempt 3
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(3);
+    // An hour of failures is a handful of attempts at the 5 min cap, not 720.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60_000); });
+    expect(api.getComputeLatest.mock.calls.length).toBeGreaterThan(5);
+    expect(api.getComputeLatest.mock.calls.length).toBeLessThan(20);
+    expect(result.current.supported).toBe(true); // a timeout is not an older broker
+  });
+
+  test('a latest poll still in flight is not joined by another', async () => {
+    const pending: Array<(r: ComputeLatestResponse) => void> = [];
+    const api = {
+      getComputeLatest: vi.fn(() => new Promise<ComputeLatestResponse>((resolve) => pending.push(resolve))),
+      getComputeFindings: vi.fn(async () => ({ findings: [] })),
+      getComputeNodes: vi.fn(async () => []),
+    };
+    renderHook(() => useComputeData('payments', { api }));
+    await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(1);
+    await act(async () => { pending[0]({ containers: [], nodes: [node()] }); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(2);
+  });
+
+  test('a namespace change resets the back-off', async () => {
+    let fail = true;
+    const api = fakeApi(() => {
+      if (fail) throw new Error('boom');
+      return { containers: [], nodes: [node()] };
+    });
+    const { result, rerender } = renderHook(({ ns }) => useComputeData(ns, { api }), { initialProps: { ns: 'payments' } });
+    await flush();
+    for (let i = 0; i < 6; i++) await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(result.current.unavailable).toBe(true);
+    fail = false;
+    rerender({ ns: 'batch' });
+    await flush();
+    expect(api.getComputeLatest).toHaveBeenLastCalledWith('batch');
+    expect(result.current.unavailable).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
+  // IMG-12: the Images view mounted the poll app-wide and paid 5 s polls for
+  // gauges it never draws.
+  test('enabled=false issues nothing; enabling starts polling with an immediate refresh', async () => {
+    const api = fakeApi(() => ({ containers: [container()], nodes: [node()] }));
+    const { result, rerender } = renderHook(({ on }) => useComputeData('payments', { api, enabled: on }), { initialProps: { on: false } });
+    await flush();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(api.getComputeLatest).not.toHaveBeenCalled();
+    expect(api.getComputeFindings).not.toHaveBeenCalled();
+    expect(api.getComputeNodes).not.toHaveBeenCalled();
+    expect(result.current.enabled).toBe(false);
+
+    rerender({ on: true });
+    await flush();
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(1);
+    expect(api.getComputeFindings).toHaveBeenCalledTimes(1);
+    expect(api.getComputeNodes).toHaveBeenCalledTimes(1);
+    expect(result.current.enabled).toBe(true);
+
+    rerender({ on: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(api.getComputeLatest).toHaveBeenCalledTimes(1); // timers gone
   });
 
   // Fix #2: an older broker (404 on /compute/*) must not be hammered every

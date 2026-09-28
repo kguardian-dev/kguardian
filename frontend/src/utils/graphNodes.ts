@@ -20,12 +20,17 @@ export const UNPLACED = { x: -9999, y: -9999 } as const;
 /**
  * Nodes for a fresh layout. Returns [] while ELK has placed none of the
  * current set, so the graph stays hidden rather than flashing at (0,0).
+ * A node `prev` had already measured keeps its width and height: React Flow
+ * drops them with the old object and re-measures a frame later, and a fit in
+ * that frame would find nothing measured to fit.
  */
-export function placeNodes(displayNodes: readonly Node[], positions: Positions): Node[] {
+export function placeNodes(displayNodes: readonly Node[], positions: Positions, prev: readonly Node[] = []): Node[] {
   const hasPositions = displayNodes.length > 0 && displayNodes.some((n) => positions.has(n.id));
   if (!hasPositions) return [];
+  const measured = new Map(prev.filter((n) => n.width && n.height).map((n) => [n.id, { width: n.width, height: n.height }]));
   return displayNodes.map((node) => ({
     ...node,
+    ...measured.get(node.id),
     position: positions.get(node.id) ?? { ...UNPLACED },
   }));
 }
@@ -143,20 +148,56 @@ export function isRectInView(
   return left >= 0 && top >= 0 && right <= pane.width && bottom <= pane.height;
 }
 
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/**
+ * The viewport that fits `bounds` into the pane with the overlays' strips
+ * kept clear: React Flow's own fit (`getTransformForBounds`) computed for the
+ * pane minus the insets, then shifted by the top-left inset. `padding` is
+ * the same fraction of the bounds `fitView` takes. Without the insets the
+ * toolbar and summary panels covered the top row of cards after every fit.
+ */
+export function viewportForBounds(
+  bounds: Rect,
+  pane: { width: number; height: number },
+  insets: Insets,
+  opts: { padding: number; minZoom: number; maxZoom: number },
+): { x: number; y: number; zoom: number } {
+  const width = Math.max(1, pane.width - insets.left - insets.right);
+  const height = Math.max(1, pane.height - insets.top - insets.bottom);
+  const bw = Math.max(1, bounds.width);
+  const bh = Math.max(1, bounds.height);
+  const fit = Math.min(width / (bw * (1 + opts.padding)), height / (bh * (1 + opts.padding)));
+  const zoom = Math.min(Math.max(fit, opts.minZoom), opts.maxZoom);
+  return {
+    x: insets.left + width / 2 - (bounds.x + bw / 2) * zoom,
+    y: insets.top + height / 2 - (bounds.y + bh / 2) * zoom,
+    zoom,
+  };
+}
+
 /**
  * Whether a pod stays on the map while the Traffic filter is on. The filter
  * hides pods that have no flows, but a pod with compute gauges (or an
  * active contention edge) is still worth a card: the kguardian namespace
  * itself, or any excluded namespace, has no traffic by design yet its CPU
- * and memory matter.
+ * and memory matter. A pod whose traffic read failed is not flow-less, it
+ * is unknown, so it is never hidden: hiding it would turn a broker timeout
+ * into a workload silently missing from the map.
  */
 export function keepOnMap<C>(
-  pod: { id: string; traffic?: readonly unknown[] | null; compute?: C },
+  pod: { id: string; traffic?: readonly unknown[] | null; compute?: C; trafficError?: boolean },
   showTraffic: boolean,
   contentionIds: ReadonlySet<string> | null,
   hasGauges: (compute: C | undefined) => boolean,
 ): boolean {
   if (!showTraffic) return true;
+  if (pod.trafficError) return true;
   if (pod.traffic && pod.traffic.length > 0) return true;
   if (contentionIds?.has(pod.id)) return true;
   return hasGauges(pod.compute);

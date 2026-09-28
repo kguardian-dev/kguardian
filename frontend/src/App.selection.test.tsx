@@ -18,16 +18,30 @@ import type { PodNodeData } from './types';
 const graphProps: Record<string, unknown>[] = [];
 const podDataCalls: unknown[][] = [];
 
+const externalFixture = {
+  id: 'ext-93.184.216.34-out',
+  label: 'Internet',
+  isExternal: true,
+  externalNamespace: 'internet',
+  pod: { pod_name: '93.184.216.34', pod_ip: '93.184.216.34', pod_namespace: 'internet', time_stamp: '', node_name: '', is_dead: false },
+  pods: [],
+  traffic: [{ uuid: 'u', traffic_in_out_ip: '93.184.216.34', traffic_in_out_port: '443', traffic_type: 'EGRESS', time_stamp: 't' }],
+} as unknown as PodNodeData;
+
 vi.mock('./components/NetworkGraph', () => ({
   default: (props: Record<string, unknown>) => {
     graphProps.push(props);
     const select = props.onPodSelect as (p: Partial<PodNodeData> | null) => void;
+    const report = props.onSelectedExternal as (p: PodNodeData | null) => void;
     return (
       <div>
         <button onClick={() => select({ id: 'payments-api' })}>select-api</button>
         {/* An id NetworkGraph synthesises for itself: it is never in `pods`,
             so a resolved-id lookup yields null for it. */}
         <button onClick={() => select({ id: 'ext-93.184.216.34-out' })}>select-external</button>
+        {/* What the real graph does once the selection resolves to one of its
+            own synthesised nodes: hand App the node's data. */}
+        <button onClick={() => report(externalFixture)}>report-external</button>
         <button onClick={() => select(null)}>clear</button>
         <span data-testid="focused">{String(props.focusedNodeId ?? '')}</span>
         <span data-testid="selected">{String(props.selectedPodId ?? '')}</span>
@@ -36,7 +50,9 @@ vi.mock('./components/NetworkGraph', () => ({
   },
 }));
 
-vi.mock('./components/DataTable', () => ({ default: () => <div /> }));
+vi.mock('./components/DataTable', () => ({
+  default: (p: { selectedPod: PodNodeData | null }) => <div data-testid="table-pod">{p.selectedPod?.id ?? ''}</div>,
+}));
 
 const podFixture = {
   id: 'payments-api',
@@ -146,7 +162,29 @@ test('the selected id reaches usePodData, which is what seeds the sparklines', a
 
   // Dropping the second argument leaves every seed test green and no card
   // ever charted.
-  await waitFor(() => expect(podDataCalls[podDataCalls.length - 1]).toEqual(['payments', 'payments-api']));
+  await waitFor(() => expect(podDataCalls[podDataCalls.length - 1].slice(0, 2)).toEqual(['payments', 'payments-api']));
+});
+
+// F-15 (MAP-05): a Service, Unattributed or Internet card selected, expanded
+// and focused, but the bottom panel stayed shut: App resolved the selection
+// against the namespace's own pods, which never hold a synthesised node.
+test('selecting a synthesised card opens the panel with the data the graph reported', async () => {
+  const { container, getByText, getByTestId } = renderApp();
+  await waitFor(() => expect(getByText('select-external')).toBeTruthy());
+
+  fireEvent.click(getByText('select-external'));
+  await waitFor(() => expect(getByTestId('selected').textContent).toBe('ext-93.184.216.34-out'));
+  // Not in `pods`: without the graph's report there is nothing to show.
+  expect(getByTestId('table-pod').textContent).toBe('');
+
+  fireEvent.click(getByText('report-external'));
+  await waitFor(() => expect(getByTestId('table-pod').textContent).toBe('ext-93.184.216.34-out'));
+  const panel = [...container.querySelectorAll('div')].find((d) => d.style.maxHeight !== '' && d.style.opacity === '1');
+  expect(panel).toBeTruthy();
+
+  // Clearing the selection closes it again, even though the report stands.
+  fireEvent.click(getByText('clear'));
+  await waitFor(() => expect(getByTestId('table-pod').textContent).toBe(''));
 });
 
 test('clearing the selection clears the focus with it', async () => {

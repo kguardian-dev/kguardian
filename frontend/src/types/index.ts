@@ -131,6 +131,12 @@ export interface PodNodeData {
   /** Map lens badge (hooks/useMapLens): absent when the lens is Traffic —
    *  the card then renders exactly as it did before lenses. */
   lensBadge?: LensBadge;
+  /** The broker did not answer the traffic read for at least one member pod
+   *  (timeout, 5xx, network), so `traffic` may be incomplete. Set by
+   *  usePodData; the card says so and the Traffic filter never hides it. */
+  trafficError?: boolean;
+  /** As `trafficError`, for the syscall read. */
+  syscallsError?: boolean;
 }
 
 /** Map lens (URL `lens=`): what the cards carry besides their name. */

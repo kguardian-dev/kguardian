@@ -69,6 +69,8 @@ describe('podNodePropsEqual', () => {
     syscalls: (d) => { d.syscalls = [{ pod_name: 'api-1', syscalls: 'read,write,ptrace' } as never]; },
     compute: (d) => { d.compute = {} as never; },
     lensBadge: (d) => { d.lensBadge = { lens: 'vulns', tone: 'p0', text: 'P0 1', label: '1 P0/P1 vulnerability' }; },
+    trafficError: (d) => { d.trafficError = true; },
+    syscallsError: (d) => { d.syscallsError = true; },
   };
 
   test('every memo key has a change case here', () => {

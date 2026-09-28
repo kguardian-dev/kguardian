@@ -70,7 +70,10 @@ opt-in mode: a pod that is not sampled cannot be found to be a victim.
 The compute data is the only thing on the map that is live: the frontend
 polls `GET /compute/latest` for the selected namespace every 5 seconds and
 the findings every 15 seconds, and pauses both while the tab is hidden.
-Traffic and syscalls stay on manual refresh.
+Traffic and syscalls stay on manual refresh. A latest poll that fails (a
+timeout or a 5xx) is retried with a doubling back-off of up to five minutes,
+and the summary badge reads "compute unavailable" until one succeeds. The
+polls run only on the map and Risks, the views that draw gauges.
 
 <Steps>
   <Step title="Status dot">
