@@ -10,7 +10,7 @@ vi.mock('../services/api', () => ({
 }));
 
 import { generateNetworkPolicy, quoteYamlValue } from './networkPolicyGenerator';
-import { generateCiliumNetworkPolicy } from './ciliumPolicyGenerator';
+import { generateCiliumNetworkPolicy, ciliumPolicyToYAML } from './ciliumPolicyGenerator';
 
 // An observed direction whose every peer is unparseable must stay DENIED, not
 // become unrestricted.
@@ -88,6 +88,11 @@ describe('generateCiliumPolicy — unparseable peers must not disable defaultDen
     const policy = await generateCiliumNetworkPolicy(podWith(badEgress));
     expect(policy.spec.defaultDeny.egress).toBe(true);
     expect(policy.spec.egress ?? []).toEqual([]);
+    // Cilium's CRD needs an ingress or egress section, so the denied,
+    // rule-less direction is written as one empty rule; the other is absent.
+    const yaml = ciliumPolicyToYAML(policy);
+    expect(yaml).toContain('  egress:\n  - {}');
+    expect(yaml).not.toContain('\n  ingress:');
   });
 
   it('leaves an unobserved direction undefended rather than inventing a rule', async () => {

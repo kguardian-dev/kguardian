@@ -404,3 +404,260 @@ describe('generateCiliumNetworkPolicy — host-network peers', () => {
     expect(yaml).not.toContain('#');
   });
 });
+
+// --- no traffic, selector-less Services, supplied listings ----------------
+
+import { apiClient } from '../services/api';
+import type { ServiceInfo } from '../types';
+
+const ruleComments = (yaml: string) => commentLines(yaml).map((l) => l.trim());
+
+// (g) no traffic: the reference generators emit an explicit deny-all
+// (standard_default_deny / cilium_default_deny). Left implicit, the API
+// server defaults policyTypes to [Ingress] and the document denies ingress
+// without saying so.
+const idle = target(
+  { pod_name: 'idle', pod_ip: '10.0.0.99', pod_namespace: 'prod', workload_name: 'idle',
+    workload_selector_labels: { app: 'idle' }, host_network: false },
+  [],
+);
+
+// (h) Services with no `spec.selector`: the API server's own Service, and an
+// aggregated API served by manually managed Endpoints. Neither has backend
+// labels to select, and both ClusterIPs are gone from the wire after DNAT.
+const kubeApi = { svc_name: 'kubernetes', svc_namespace: 'default', svc_ip: '10.96.0.1',
+  service_spec: { spec: { clusterIP: '10.96.0.1', ports: [{ port: 443, protocol: 'TCP' }], type: 'ClusterIP' } } };
+const metricsApi = { svc_name: 'metrics-api', svc_namespace: 'kube-system', svc_ip: '10.96.0.77', service_spec: { spec: {} } };
+// Selector `{}` is selector-less too; a missing spec is UNKNOWN (`service_spec`
+// is nullable on the broker), which must not be reported as "has no selector".
+const emptySelector = { svc_name: 'ext', svc_namespace: 'db', svc_ip: '10.96.0.90', service_spec: { spec: { selector: {} } } };
+const unknownSpec = { svc_name: 'pg', svc_namespace: 'db', svc_ip: '10.96.0.88' };
+const emptyManifest = { svc_name: 'pg2', svc_namespace: 'db', svc_ip: '10.96.0.89', service_spec: {} };
+const useSelectorlessServices = () => {
+  serviceLookup = { ...services, '10.96.0.1': kubeApi, '10.96.0.77': metricsApi, '10.96.0.90': emptySelector, '10.96.0.88': unknownSpec, '10.96.0.89': emptyManifest };
+};
+
+// Cilium's CRD accepts a spec only with at least one of these sections.
+const expectCnpShape = (doc: Record<string, unknown>) => {
+  const s = spec(doc);
+  expect(['ingress', 'ingressDeny', 'egress', 'egressDeny'].some((k) => k in s)).toBe(true);
+};
+const storedKubeApi = { peer_kind: 'service', peer_namespace: 'default', peer_name: 'kubernetes' };
+
+const KUBE_API_IPBLOCK = '# Service default/kubernetes has no selector — ipBlock 10.96.0.1 is its ClusterIP and will not match after DNAT';
+const KUBE_API_ENTITY = '# Service default/kubernetes has no selector — kube-apiserver entity covers its endpoints';
+const METRICS_API_CIDR = '# Service kube-system/metrics-api has no selector — cidr 10.96.0.77 is its ClusterIP and will not match after DNAT';
+
+describe('generateNetworkPolicy — no traffic and selector-less Services', () => {
+  test('(g) no traffic: explicit policyTypes Ingress+Egress and no rules, as the default_deny golden', async () => {
+    useDefaults();
+    const policy = await generateNetworkPolicy(idle);
+    const yaml = policyToYAML(policy);
+    const doc = parse(yaml);
+    expect(spec(doc).policyTypes).toEqual(spec(golden('standard_default_deny.golden.yaml')).policyTypes);
+    expect(spec(doc).ingress).toBeUndefined();
+    expect(spec(doc).egress).toBeUndefined();
+    expect(yaml).toContain('  policyTypes:\n  - Ingress\n  - Egress');
+  });
+
+  test('(h) stored selector-less Service peer keeps its name: ClusterIP ipBlock with the DNAT note, never unattributed', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [
+      { ...egressRow('10.96.0.1', '443'), ...storedKubeApi },
+    ])));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ ipBlock: { cidr: '10.96.0.1/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([KUBE_API_IPBLOCK]);
+    expect(yaml).not.toContain('unattributed');
+    expect(yaml).not.toContain('app: kubernetes');
+  });
+
+  test('(h2) by-IP selector-less Service (no stored peer): the same ipBlock, not a guessed {app: <svc>} selector', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [egressRow('10.96.0.1', '443')])));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ ipBlock: { cidr: '10.96.0.1/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([KUBE_API_IPBLOCK]);
+    expect(yaml).not.toContain('podSelector:\n        matchLabels:\n          app: kubernetes');
+  });
+
+  test('(h3) ingress from the API server (webhook / aggregated API) renders the same way', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(web, [
+      { ...ingressRow('10.96.0.1', '8443'), ...storedKubeApi },
+    ])));
+    expect(spec(parse(yaml)).ingress).toEqual([
+      { from: [{ ipBlock: { cidr: '10.96.0.1/32' } }], ports: [{ protocol: 'TCP', port: 8443 }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([KUBE_API_IPBLOCK]);
+  });
+
+  test('(h5) selector `{}` is selector-less; an unknown spec is not', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const stored = (ns: string, name: string) => ({ peer_kind: 'service', peer_namespace: ns, peer_name: name });
+    // spec.selector {} : known selector-less, same rendering as the API server.
+    let yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [{ ...egressRow('10.96.0.90', '5432'), ...stored('db', 'ext') }])));
+    expect(ruleComments(yaml)).toEqual(['# Service db/ext has no selector — ipBlock 10.96.0.90 is its ClusterIP and will not match after DNAT']);
+    // No service_spec at all, or a manifest without spec: stored ⇒ unattributed as before, never "has no selector".
+    for (const [ip, name] of [['10.96.0.88', 'pg'], ['10.96.0.89', 'pg2']] as const) {
+      yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [{ ...egressRow(ip, '5432'), ...stored('db', name) }])));
+      expect(ruleComments(yaml)).toEqual([`# unattributed peer ${ip} at 2026-09-03T00:00:00`]);
+      expect(yaml).not.toContain('has no selector');
+    }
+    // By IP with an unknown spec: the pre-existing Service path, not a selector-less claim.
+    yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [egressRow('10.96.0.88', '5432')])));
+    expect(yaml).not.toContain('has no selector');
+    expect(yaml).not.toContain('ipBlock');
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'db' } }, podSelector: { matchLabels: { app: 'pg' } } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+    ]);
+  });
+
+  test('a stored Service that is gone from the broker is still unattributed', async () => {
+    useDefaults();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [
+      { ...egressRow('10.96.0.1', '443'), ...storedKubeApi },
+    ])));
+    expect(ruleComments(yaml)).toEqual(['# unattributed peer 10.96.0.1 at 2026-09-03T00:00:00']);
+  });
+});
+
+describe('generateCiliumNetworkPolicy — no traffic and selector-less Services', () => {
+  test('(g) no traffic: enableDefaultDeny both true and no rules, as the default_deny golden', async () => {
+    useDefaults();
+    const policy = await generateCiliumNetworkPolicy(idle);
+    const yaml = ciliumPolicyToYAML(policy);
+    const doc = parse(yaml);
+    expect(spec(doc).enableDefaultDeny).toEqual(spec(golden('cilium_default_deny.golden.yaml')).enableDefaultDeny);
+    // The golden stops there, and Cilium's CRD rejects it (spec needs an
+    // ingress or egress section). Cilium's deny form is one empty rule per
+    // denied direction; the object stays rule-less, only the YAML carries it.
+    expect(spec(doc).ingress).toEqual([{}]);
+    expect(spec(doc).egress).toEqual([{}]);
+    expect(yaml).toContain('  ingress:\n  - {}\n  egress:\n  - {}');
+    expectCnpShape(doc);
+    expect(policy.spec.ingress).toBeUndefined();
+    expect(policy.spec.egress).toBeUndefined();
+  });
+
+  test('(g2) one observed direction with every peer dropped: empty rule for that direction only', async () => {
+    useDefaults();
+    const doc = parse(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(prometheus, [egressRow('not-an-ip', '5432')]))));
+    expect(spec(doc).enableDefaultDeny).toEqual({ ingress: false, egress: true });
+    expect(spec(doc).egress).toEqual([{}]);
+    expect(spec(doc).ingress).toBeUndefined();
+    expectCnpShape(doc);
+  });
+
+  test('(h) the API server Service becomes toEntities: [kube-apiserver], the only form that matches its endpoints', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(prometheus, [
+      { ...egressRow('10.96.0.1', '443'), ...storedKubeApi },
+    ])));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { toEntities: ['kube-apiserver'], toPorts: [{ ports: [{ port: '443', protocol: 'TCP' }] }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([KUBE_API_ENTITY]);
+    expect(yaml).not.toContain('toCIDR');
+    expect(yaml).not.toContain('toEndpoints');
+    expectCnpShape(parse(yaml));
+  });
+
+  test('(h3) ingress from the API server: fromEntities: [kube-apiserver]', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(web, [
+      { ...ingressRow('10.96.0.1', '8443'), ...storedKubeApi },
+    ])));
+    expect(spec(parse(yaml)).ingress).toEqual([
+      { fromEntities: ['kube-apiserver'], toPorts: [{ ports: [{ port: '8443', protocol: 'TCP' }] }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([KUBE_API_ENTITY]);
+  });
+
+  test('(h4) any other selector-less Service: CIDR of the ClusterIP with the DNAT note (no entity stands for it)', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(prometheus, [egressRow('10.96.0.77', '443')])));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { toCIDR: ['10.96.0.77/32'], toPorts: [{ ports: [{ port: '443', protocol: 'TCP' }] }] },
+    ]);
+    expect(ruleComments(yaml)).toEqual([METRICS_API_CIDR]);
+    expect(yaml).not.toContain('app: metrics-api');
+  });
+});
+
+// (i) Listings the caller already holds are used as-is: no second `/pod/info`
+// download, no `/svc/ip` for a Service the listing has, no `/pod/name` for a
+// pod it has — and the same document as the fetching path.
+describe('generators — supplied pod and Service listings', () => {
+  const sources = { pods: Object.values(podsByIp), services: Object.values(services) as ServiceInfo[] };
+
+  test('standard: same rules as the fetching path, with no listing or lookup calls', async () => {
+    useDefaults();
+    useServices();
+    const fetched = policyToYAML(await generateNetworkPolicy(crossNamespace));
+    vi.mocked(apiClient.getAllPods).mockClear();
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    vi.mocked(apiClient.getPodDetailsByName).mockClear();
+    const supplied = policyToYAML(await generateNetworkPolicy(crossNamespace, sources));
+    expect(normaliseStandardRules(spec(parse(supplied)).egress, 'prod')).toEqual(normaliseStandardRules(spec(parse(fetched)).egress, 'prod'));
+    expect(normaliseStandardRules(spec(parse(supplied)).ingress, 'prod')).toEqual(normaliseStandardRules(spec(parse(fetched)).ingress, 'prod'));
+    expect(vi.mocked(apiClient.getAllPods)).not.toHaveBeenCalled();
+    expect(vi.mocked(apiClient.getServiceByIP)).not.toHaveBeenCalled();
+    expect(vi.mocked(apiClient.getPodDetailsByName)).not.toHaveBeenCalled();
+  });
+
+  test('a host-network Service peer still renders its backends from the supplied listing, with the same comment', async () => {
+    useDefaults();
+    useServices();
+    const fetched = policyToYAML(await generateNetworkPolicy(servicePeer));
+    vi.mocked(apiClient.getAllPods).mockClear();
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    const supplied = policyToYAML(await generateNetworkPolicy(servicePeer, sources));
+    expect(normaliseStandardRules(spec(parse(supplied)).egress, 'monitoring')).toEqual(
+      normaliseStandardRules(spec(parse(fetched)).egress, 'monitoring'),
+    );
+    expect(ruleComments(supplied)).toEqual(ruleComments(fetched));
+    expect(vi.mocked(apiClient.getAllPods)).not.toHaveBeenCalled();
+    expect(vi.mocked(apiClient.getServiceByIP)).not.toHaveBeenCalled();
+  });
+
+  test('cilium: same egress as the fetching path, with no listing or lookup calls', async () => {
+    useDefaults();
+    useServices();
+    const fetched = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(crossNamespace));
+    vi.mocked(apiClient.getAllPods).mockClear();
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    vi.mocked(apiClient.getPodDetailsByName).mockClear();
+    const supplied = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(crossNamespace, sources));
+    expect(normaliseCiliumRules(spec(parse(supplied)).egress)).toEqual(normaliseCiliumRules(spec(parse(fetched)).egress));
+    expect(normaliseCiliumRules(spec(parse(supplied)).ingress)).toEqual(normaliseCiliumRules(spec(parse(fetched)).ingress));
+    expect(vi.mocked(apiClient.getAllPods)).not.toHaveBeenCalled();
+    expect(vi.mocked(apiClient.getServiceByIP)).not.toHaveBeenCalled();
+    expect(vi.mocked(apiClient.getPodDetailsByName)).not.toHaveBeenCalled();
+  });
+
+  test('a Service the listing does not have still goes to /svc/ip', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [egressRow('10.96.0.1', '443')]), sources));
+    expect(vi.mocked(apiClient.getServiceByIP)).toHaveBeenCalledWith('10.96.0.1');
+    expect(ruleComments(yaml)).toEqual([KUBE_API_IPBLOCK]);
+  });
+
+  test('an empty pods listing is not a listing: the generator fetches as before', async () => {
+    useDefaults();
+    vi.mocked(apiClient.getAllPods).mockClear();
+    await generateNetworkPolicy(egressPeer, { pods: [], services: [] });
+    expect(vi.mocked(apiClient.getAllPods)).toHaveBeenCalledTimes(1);
+  });
+});

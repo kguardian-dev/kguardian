@@ -1,12 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Trash2, X, ChevronDown, ChevronRight, AlertCircle, RefreshCw } from 'lucide-react';
-import type { PodNodeData } from '../types';
+import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { EntitiesPeer, HostNetworkWarningBanner, RuleComments } from './HostNetworkNotes';
 import { CILIUM_NAMESPACE_LABEL } from '../types/ciliumPolicy';
 import { useClusterEnvironment } from '../hooks/useClusterEnvironment';
 import { PolicyAdvisoryNotice } from './PolicyEditor/CniMismatchNotice';
-import { recommendedPolicyType, enforcementAdvisory } from '../utils/cniPolicySupport';
+import {
+  recommendedPolicyType,
+  enforcementAdvisory,
+  denyAllAdvisory,
+  describeDenied,
+  incompleteTrafficAdvisory,
+  type DeniedDirection,
+  type DenyAllCause,
+} from '../utils/cniPolicySupport';
+import { ipBlockScope } from '../utils/ipBlockScope';
+import type { IdentitySources } from '../utils/trafficIdentity';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
 import { useWorkloadCapture } from '../hooks/useWorkloadCapture';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
@@ -26,18 +36,28 @@ import {
   type SeccompExportFormat,
 } from '../hooks/policyEditor';
 
+/** A workload as the builder receives it. usePodData sets `trafficError` /
+ *  `syscallsError` when a member pod's read failed or timed out: the empty
+ *  list is then unknown, not "no traffic". */
+export type PolicyWorkload = PodNodeData & { trafficError?: boolean; syscallsError?: boolean };
+
 interface NetworkPolicyEditorProps {
   isOpen: boolean;
   onClose: () => void;
-  pod: PodNodeData | null;
+  pod: PolicyWorkload | null;
   allPods?: PodNodeData[];
   /** Tab to open on. Defaults to the network policy. */
   initialPolicyType?: PolicyType;
+  /** The app's pod and Service listings; generation reuses them instead of
+   *  downloading `/pod/info` again. */
+  podsLookup?: PodInfo[];
+  services?: ServiceInfo[];
 }
 
-const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType }) => {
+const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType, podsLookup, services }) => {
   const env = useClusterEnvironment();
   const { cni } = env;
+  const sources = useMemo<IdentitySources>(() => ({ pods: podsLookup, services }), [podsLookup, services]);
 
   // Default to the kind this cluster can actually enforce, rather than
   // always opening on 'network' and warning afterwards. An explicit
@@ -100,7 +120,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     addLabelToPeer,
     removeLabelFromPeer,
     togglePodSelector,
-  } = useNetworkPolicyEditor({ pod, isOpen: isOpen && policyType === 'network' });
+  } = useNetworkPolicyEditor({ pod, isOpen: isOpen && policyType === 'network', sources });
 
   // Cilium policy management
   const {
@@ -135,7 +155,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     addPortToRule: addCiliumPortToRule,
     removePortFromRule: removeCiliumPortFromRule,
     updatePort: updateCiliumPort,
-  } = useCiliumPolicyEditor({ pod, isOpen: isOpen && policyType === 'cilium' });
+  } = useCiliumPolicyEditor({ pod, isOpen: isOpen && policyType === 'cilium', sources });
 
   // Seccomp profile management
   const {
@@ -205,6 +225,21 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     crDefaultAction: seccompActionTouched && seccompProfile ? seccompProfile.defaultAction : undefined,
   });
 
+  // A policy with no rules still denies every direction it covers. Read the
+  // directions off the generated document, not the traffic list, so a
+  // workload whose every row was dropped, or edited away, is caught too.
+  const deniedDirections: DeniedDirection[] =
+    policyType === 'network' && policy && !policy.spec.ingress?.length && !policy.spec.egress?.length
+      ? (['Ingress', 'Egress'] as const).filter((d) => policy.spec.policyTypes.includes(d))
+      : policyType === 'cilium' && ciliumPolicy && !ciliumPolicy.spec.ingress?.length && !ciliumPolicy.spec.egress?.length
+        ? (['Ingress', 'Egress'] as const).filter((d) => ciliumPolicy.spec.defaultDeny[d === 'Ingress' ? 'ingress' : 'egress'])
+        : [];
+  const denyAll = deniedDirections.length > 0;
+  const denyAllCause: DenyAllCause = pod?.trafficError ? 'read-failed' : (pod?.traffic?.length ?? 0) === 0 ? 'no-traffic' : 'no-rules';
+  const denyAllNotice = denyAll ? denyAllAdvisory(denyAllCause, deniedDirections) : null;
+  // Rules exist but a member pod's read failed: peers may be missing.
+  const incompleteNotice = !denyAll && pod?.trafficError && policyType !== 'seccomp' ? incompleteTrafficAdvisory() : null;
+
   if (!isOpen || !pod) return null;
 
   // Show loading state while generating policy
@@ -242,6 +277,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
           />
 
           {advisory && <PolicyAdvisoryNotice advisory={advisory} />}
+          {!isLoading && denyAllNotice && <PolicyAdvisoryNotice advisory={denyAllNotice} />}
+          {!isLoading && incompleteNotice && <PolicyAdvisoryNotice advisory={incompleteNotice} />}
           {!isLoading && (
             <HostNetworkWarningBanner
               warnings={policyType === 'network' ? policy?.warnings : policyType === 'cilium' ? ciliumPolicy?.warnings : undefined}
@@ -274,20 +311,21 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 {policyType !== 'seccomp' && (
                   <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Network policy format">
                     {NETWORK_EXPORT_FORMATS.map((f) => {
-                      const blocked = !!(f.requiresCilium && cniMismatch);
+                      // Selectable on a mismatched CNI: the YAML may be for another
+                      // cluster, and picking it is what surfaces the advisory.
+                      const mismatched = !!(f.requiresCilium && cniMismatch);
                       return (
                         <button
                           key={f.id}
                           role="radio"
                           aria-checked={networkFormat === f.id}
-                          disabled={blocked}
-                          title={blocked ? ciliumWarning ?? f.hint : f.hint}
+                          title={mismatched ? ciliumWarning ?? f.hint : f.hint}
                           onClick={() => selectNetworkFormat(f.id)}
                           className={`px-3 py-1.5 text-xs rounded-control border transition-colors ${
                             networkFormat === f.id
                               ? 'bg-hubble-accent border-hubble-accent text-white'
-                              : blocked
-                                ? 'border-hubble-border text-tertiary opacity-60 cursor-not-allowed'
+                              : mismatched
+                                ? 'border-hubble-warning/50 text-hubble-warning hover:border-hubble-warning'
                                 : 'border-hubble-border text-secondary hover:border-hubble-accent/50'
                           }`}
                         >
@@ -443,7 +481,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
                                                      focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                         >
-                                          <option value="external">External (IP Block)</option>
+                                          <option value="external">{ipBlockScope(rule.comments).label}</option>
                                           <option value="inNamespace">In Namespace (Same Namespace)</option>
                                           <option value="inCluster">In Cluster (Any Namespace)</option>
                                         </select>
@@ -897,7 +935,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
                                                      focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                         >
-                                          <option value="external">External (IP Block)</option>
+                                          <option value="external">{ipBlockScope(rule.comments).label}</option>
                                           <option value="inNamespace">In Namespace (Same Namespace)</option>
                                           <option value="inCluster">In Cluster (Any Namespace)</option>
                                         </select>
@@ -917,9 +955,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               placeholder="0.0.0.0/0 or 10.0.0.0/8"
                                             />
                                           </div>
-                                          <p className="text-xs text-tertiary italic">
-                                            External traffic outside the cluster
-                                          </p>
+                                          {ipBlockScope(rule.comments).hint && (
+                                            <p className="text-xs text-tertiary italic">
+                                              {ipBlockScope(rule.comments).hint}
+                                            </p>
+                                          )}
                                         </div>
                                       )}
 
@@ -2165,9 +2205,19 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     : seccompFormat === 'json'
                       ? 'Generated from observed syscalls, exported as a raw seccomp JSON document.'
                       : 'Generated from observed syscalls, exported as a kguardian.dev SeccompProfile CR. Commit it, apply it, and reference the node path in your pod template — kguardian never applies it for you.'
-                  : networkFormat === 'audit'
-                    ? 'Generated from observed traffic, exported as a kguardian.dev AuditNetworkPolicy: same spec, nothing is dropped; the evaluator reports what it would deny. Promote with kubectl kguardian audit promote when it is quiet.'
-                    : 'This policy was generated from observed network traffic. Review and customize before applying.'}
+                  : denyAll
+                    ? `${
+                      denyAllCause === 'read-failed'
+                        ? 'The traffic read for this workload failed and the policy has no rules'
+                        : denyAllCause === 'no-traffic'
+                          ? 'No traffic was observed for this workload and the policy has no rules'
+                          : `This policy has no rules but still covers ${describeDenied(deniedDirections).replace(/^all /, '')}`
+                    }: applying it denies ${describeDenied(deniedDirections)}.`
+                    : incompleteNotice
+                      ? "This policy was generated from incomplete network traffic: a member pod's read failed, so peers may be missing."
+                      : networkFormat === 'audit'
+                        ? 'Generated from observed traffic, exported as a kguardian.dev AuditNetworkPolicy: same spec, nothing is dropped; the evaluator reports what it would deny. Promote with kubectl kguardian audit promote when it is quiet.'
+                        : 'This policy was generated from observed network traffic. Review and customize before applying.'}
               </p>
               <div className="flex gap-2">
                 <button
@@ -2182,7 +2232,9 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 >
                   {policyType === 'seccomp'
                     ? (seccompFormat === 'spo' ? 'Save SPO CR' : seccompFormat === 'json' ? 'Save JSON' : 'Save CR')
-                    : networkFormat === 'audit' ? 'Save Audit Policy' : 'Save Policy'}
+                    : denyAll
+                      ? `Save Deny-All ${deniedDirections.length === 1 ? `${deniedDirections[0]} ` : ''}${networkFormat === 'audit' ? 'Audit ' : ''}Policy`
+                      : networkFormat === 'audit' ? 'Save Audit Policy' : 'Save Policy'}
                 </button>
               </div>
             </div>

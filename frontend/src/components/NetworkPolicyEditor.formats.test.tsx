@@ -67,14 +67,30 @@ test('the network tab offers Audit, NetworkPolicy and Cilium; Audit only swaps t
   expect(yamlHeader()).toEqual(header('networking.k8s.io/v1', 'NetworkPolicy'));
 });
 
-test('Cilium is offered but disabled, with the reason, when the CNI is known not to be Cilium', async () => {
+// The advisory copy promises "Export stays enabled in case this YAML is
+// destined for a different cluster", and the editor's own default-selection
+// comment says export is never blocked on a mismatch. The radio used to be
+// disabled anyway, which left the Cilium generator unreachable on every
+// non-Cilium cluster and the advisory dead code.
+test('Cilium stays selectable when the CNI is not Cilium: the reason is the title, and picking it shows the warning', async () => {
   cni = 'calico';
   render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
   await screen.findByText((_, el) => el?.tagName === 'PRE' && !!el.textContent?.includes('kind: NetworkPolicy'));
-  // The environment lands asynchronously; wait for the disabled state.
   const cilium = await screen.findByRole('radio', { name: /CiliumNetworkPolicy/ });
-  await vi.waitFor(() => expect((cilium as HTMLButtonElement).disabled).toBe(true));
-  expect(cilium.getAttribute('title')).toMatch(/calico/);
+  // The environment lands asynchronously; wait for the mismatch to be known.
+  await vi.waitFor(() => expect(cilium.getAttribute('title')).toMatch(/calico/));
+  expect((cilium as HTMLButtonElement).disabled).toBe(false);
+  expect(cilium.className).toContain('text-hubble-warning');
+
+  fireEvent.click(cilium);
+  await screen.findByText((_, el) => el?.tagName === 'PRE' && !!el.textContent?.includes('kind: CiliumNetworkPolicy'));
+  // The format strip remounts after the Cilium generation spinner; re-query.
+  expect(screen.getByRole('radio', { name: /CiliumNetworkPolicy/ }).getAttribute('aria-checked')).toBe('true');
+  const note = screen.getByRole('note');
+  expect(note.textContent).toContain('Cluster CNI detected as calico');
+  expect(note.textContent).toContain('Export stays enabled');
+  // A warning, not an error: dismissible, as designed.
+  expect(screen.getByRole('button', { name: 'Dismiss policy notice' })).toBeTruthy();
 });
 
 test('on a Cilium cluster the Cilium format is selectable and the tab strip is Network / Seccomp', async () => {

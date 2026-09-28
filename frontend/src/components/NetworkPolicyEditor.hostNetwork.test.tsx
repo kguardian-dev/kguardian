@@ -74,8 +74,9 @@ test('standard visual editor: host-network peer shows as an ipBlock with its not
   expect(await screen.findByText(NOTE)).toBeTruthy();
   const cidr = screen.getByDisplayValue('10.0.0.20/32') as HTMLInputElement;
   expect(cidr).toBeTruthy();
-  // The scope selector reflects the peer type; nothing asks for pod labels.
-  expect((screen.getByDisplayValue('External (IP Block)') as HTMLSelectElement).value).toBe('external');
+  // The scope names what the generator chose, not "outside the cluster"; nothing asks for pod labels.
+  expect((screen.getByDisplayValue('Node IP (host-network peer)') as HTMLSelectElement).value).toBe('external');
+  expect(screen.queryByText('External traffic outside the cluster')).toBeNull();
   expect(screen.queryByPlaceholderText(/label key/i)).toBeNull();
 });
 

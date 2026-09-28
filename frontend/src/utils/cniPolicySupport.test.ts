@@ -4,6 +4,9 @@ import {
   recommendedPolicyType,
   enforcementAdvisory,
   isDismissible,
+  denyAllAdvisory,
+  describeDenied,
+  incompleteTrafficAdvisory,
   type PolicyType,
 } from './cniPolicySupport';
 
@@ -119,5 +122,65 @@ describe('one rule, one place', () => {
         expect(policyTypeForFinding(kind, cni)).toBe(expected);
       }
     }
+  });
+});
+
+describe('denyAllAdvisory', () => {
+  // A policy with no rule in either direction cuts the workload off. The
+  // generators emit it deliberately for a workload with no observed traffic
+  // (the reference deny-all), so the editor has to say so where the
+  // operator cannot miss it, and cannot wave it away.
+  const both = ['Ingress', 'Egress'] as const;
+
+  it('is an error the operator cannot dismiss, whichever the cause', () => {
+    for (const cause of ['no-traffic', 'read-failed', 'no-rules'] as const) {
+      const a = denyAllAdvisory(cause, both);
+      expect(a.severity).toBe('error');
+      expect(isDismissible(a)).toBe(false);
+      expect(a.detail).toMatch(/denies all ingress and egress/);
+    }
+  });
+
+  it('says the traffic was not observed, not that there is none', () => {
+    const a = denyAllAdvisory('no-traffic', both);
+    expect(a.title).toMatch(/No traffic observed/);
+    expect(a.detail).toMatch(/No connections were recorded/);
+  });
+
+  it('names a failed read as the cause rather than presenting it as zero traffic', () => {
+    const a = denyAllAdvisory('read-failed', both);
+    expect(a.title).toMatch(/Traffic read failed/);
+    expect(a.detail).toMatch(/not evidence/);
+    expect(a.detail).not.toMatch(/No connections were recorded/);
+  });
+
+  it('distinguishes observed traffic that produced no rule from no traffic', () => {
+    const a = denyAllAdvisory('no-rules', both);
+    expect(a.title).toMatch(/has no rules/);
+    expect(a.detail).toMatch(/Traffic was observed/);
+    expect(a.detail).not.toMatch(/No traffic observed/);
+  });
+
+  // policyTypes [Egress] with no rules denies egress and leaves ingress
+  // unrestricted; claiming "ingress and egress" there would be false.
+  it('names only the covered direction', () => {
+    for (const cause of ['no-traffic', 'read-failed', 'no-rules'] as const) {
+      const a = denyAllAdvisory(cause, ['Egress']);
+      expect(a.detail).toMatch(/denies all egress/);
+      expect(a.detail).not.toMatch(/ingress/);
+    }
+    expect(denyAllAdvisory('no-traffic', ['Ingress']).detail).toMatch(/denies all ingress\./);
+    expect(describeDenied(both)).toBe('all ingress and egress');
+    expect(describeDenied(['Ingress'])).toBe('all ingress');
+    expect(describeDenied(['Egress'])).toBe('all egress');
+  });
+});
+
+describe('incompleteTrafficAdvisory', () => {
+  it('is a dismissible warning that says peers may be missing', () => {
+    const a = incompleteTrafficAdvisory();
+    expect(a.severity).toBe('warning');
+    expect(isDismissible(a)).toBe(true);
+    expect(a.detail).toMatch(/peers may be missing/);
   });
 });

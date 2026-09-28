@@ -19,6 +19,10 @@ export interface TrafficIdentity {
   svcName?: string;
   svcNamespace?: string;
   svcSelector?: Record<string, string>;
+  /** The Service exists but has no `spec.selector` (`default/kubernetes`,
+   *  operator-managed Endpoints): nothing selects its backends, so the
+   *  generators pin the ClusterIP with a note, or Cilium's `kube-apiserver` entity. */
+  svcNoSelector?: boolean;
   /** `pod.spec.hostNetwork` of the resolved pod. `true` means the peer IP is a
    *  NODE IP and no podSelector can match it; undefined when the broker did
    *  not report it (legacy) or the peer is a Service / external. */
@@ -51,11 +55,20 @@ function podIdentityFromRecord(podInfo: PodInfo): TrafficIdentity {
   };
 }
 
+/** The Service's `spec` is known and carries no selector. `service_spec` is
+ *  nullable on the broker, so a missing spec is unknown, not selector-less. */
+export function serviceHasNoSelector(serviceInfo: ServiceInfo): boolean {
+  const spec = (serviceInfo.service_spec as Record<string, unknown> | undefined)?.spec;
+  if (!spec || typeof spec !== 'object') return false;
+  return serviceSelector(serviceInfo) === undefined;
+}
+
 function serviceIdentity(serviceInfo: ServiceInfo): TrafficIdentity {
   return {
     svcName: serviceInfo.svc_name ?? undefined,
     svcNamespace: serviceInfo.svc_namespace || undefined,
     svcSelector: serviceSelector(serviceInfo),
+    ...(serviceHasNoSelector(serviceInfo) && { svcNoSelector: true }),
     isExternal: false,
   };
 }
@@ -103,37 +116,53 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
 }
 
 /**
+ * Listings the caller already holds (the map's `/pod/info` and `/svc/info`),
+ * supplied so a policy generation does not download them again. Either may
+ * be absent, in which case the resolver fetches as before.
+ */
+export interface IdentitySources {
+  pods?: readonly PodInfo[] | null;
+  services?: readonly ServiceInfo[] | null;
+}
+
+/**
  * Per-row identity resolution for a policy generation.
  *
- * One `/pod/info` listing is fetched up front and every row is attributed
- * against it (utils/peerResolution): stored `peer_*` first, then the guarded
- * by-IP fallback. Service ClusterIPs are still looked up per IP
- * (`/svc/ip`), cached. When the listing is unavailable the resolver degrades
- * to `resolveTrafficIdentity(ip, row.time_stamp)` per distinct (ip, time),
+ * One `/pod/info` listing is fetched up front (or taken from `sources`) and
+ * every row is attributed against it (utils/peerResolution): stored `peer_*`
+ * first, then the guarded by-IP fallback. Service ClusterIPs come from the
+ * supplied `services` listing when it has them, else from `/svc/ip`, cached.
+ * When the listing is unavailable the resolver degrades to
+ * `resolveTrafficIdentity(ip, row.time_stamp)` per distinct (ip, time),
  * which still applies the guard on whatever the broker returns.
  */
 export interface RowIdentityResolver {
   resolve(row: NetworkTraffic): Promise<TrafficIdentity>;
   /** The listing the rows were attributed against; null when it failed. */
-  pods: PodInfo[] | null;
+  pods: readonly PodInfo[] | null;
   index: PeerIndex | null;
 }
 
-export async function createRowIdentityResolver(): Promise<RowIdentityResolver> {
-  let pods: PodInfo[] | null;
-  try {
-    const listing = await apiClient.getAllPods();
-    pods = Array.isArray(listing) && listing.length > 0 ? listing : null;
-  } catch {
-    pods = null;
+export async function createRowIdentityResolver(sources: IdentitySources = {}): Promise<RowIdentityResolver> {
+  let pods: readonly PodInfo[] | null;
+  if (Array.isArray(sources.pods) && sources.pods.length > 0) {
+    pods = sources.pods;
+  } else {
+    try {
+      const listing = await apiClient.getAllPods();
+      pods = Array.isArray(listing) && listing.length > 0 ? listing : null;
+    } catch {
+      pods = null;
+    }
   }
-  const index = pods ? buildPeerIndex(pods) : null;
+  const index = pods ? buildPeerIndex(pods, Array.isArray(sources.services) ? sources.services : []) : null;
 
   const serviceByIp = new Map<string, Promise<ServiceInfo | null>>();
   const lookupService = (ip: string): Promise<ServiceInfo | null> => {
     let p = serviceByIp.get(ip);
     if (!p) {
-      p = apiClient.getServiceByIP(ip).catch(() => null);
+      const listed = index?.servicesByIp.get(ip);
+      p = listed ? Promise.resolve(listed) : apiClient.getServiceByIP(ip).catch(() => null);
       serviceByIp.set(ip, p);
     }
     return p;
@@ -174,12 +203,13 @@ export async function createRowIdentityResolver(): Promise<RowIdentityResolver> 
       case 'service': {
         if (!peer.stored && peer.svc) return serviceIdentity(peer.svc);
         // The Service of that namespace/name must still front this
-        // ClusterIP with a selector (`/svc/ip`; the listing has no
-        // Services). A different name on the IP means the ClusterIP was
-        // recycled; gone or selector-less ⇒ unattributed.
+        // ClusterIP. A different name on the IP means the ClusterIP was
+        // recycled; gone, or a spec the broker never stored ⇒ unattributed.
+        // A Service known to have no selector is still that Service.
         const svc = await lookupService(ip);
         const same = svc && svc.svc_name === peer.name && (svc.svc_namespace || undefined) === (peer.namespace || undefined);
-        if (!same || !svc || !serviceSelector(svc)) return { isExternal: true, unattributed: { ip, at: row.time_stamp } };
+        if (!same || !svc) return { isExternal: true, unattributed: { ip, at: row.time_stamp } };
+        if (!serviceSelector(svc) && !serviceHasNoSelector(svc)) return { isExternal: true, unattributed: { ip, at: row.time_stamp } };
         return { ...serviceIdentity(svc), stored: true };
       }
       case 'unattributed':

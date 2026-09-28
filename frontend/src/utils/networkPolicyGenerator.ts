@@ -1,9 +1,9 @@
 import type { NetworkTraffic, PodInfo, PodNodeData } from '../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer, NetworkPolicyPort } from '../types/networkPolicy';
 import { apiClient } from '../services/api';
-import { createRowIdentityResolver, type TrafficIdentity } from './trafficIdentity';
+import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
 import { peerCIDR } from './ipCidr';
-import { collapseToServiceIdentity, identityKey, newerRow, unattributedPeerComment } from './peerComments';
+import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import {
   hostNetworkPeerComment,
   hostNetworkServiceBackends,
@@ -15,7 +15,11 @@ import {
   yamlComments,
 } from './hostNetwork';
 
-export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPolicy> {
+/**
+ * `sources` are the listings the caller already holds (the map's pods and
+ * Services); without them the resolver downloads `/pod/info` again.
+ */
+export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentitySources = {}): Promise<NetworkPolicy> {
   const ingressRules: NetworkPolicyRule[] = [];
   const egressRules: NetworkPolicyRule[] = [];
 
@@ -32,7 +36,7 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   // row's stored `peer_*` (resolved by the broker at ingest) wins; a row
   // without one falls back to a by-IP lookup guarded by the flow time
   // (utils/peerResolution).
-  const resolver = await createRowIdentityResolver();
+  const resolver = await createRowIdentityResolver(sources);
   const rows: NetworkTraffic[] = pod.traffic ?? [];
   const identities = await Promise.all(rows.map((t) => resolver.resolve(t)));
   const rowIdentity = new Map<NetworkTraffic, TrafficIdentity>();
@@ -101,8 +105,8 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
 
   // One pod listing per generation, fetched lazily and only when a Service
   // peer needs its backends inspected. null = listing failed (unknown).
-  let allPods: Promise<PodInfo[] | null> | undefined;
-  const listPods = (): Promise<PodInfo[] | null> => {
+  let allPods: Promise<readonly PodInfo[] | null> | undefined;
+  const listPods = (): Promise<readonly PodInfo[] | null> => {
     if (resolver.pods) return Promise.resolve(resolver.pods);
     if (!allPods) {
       allPods = (async () => {
@@ -120,7 +124,8 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   const getPeerPodFacts = async (podName: string): Promise<PeerPodFacts> => {
     const facts: PeerPodFacts = { labels: null, hostNetwork: undefined };
     try {
-      const podInfo = await apiClient.getPodDetailsByName(podName);
+      // The listing keys pods by name exactly as `/pod/name/{name}` does.
+      const podInfo = resolver.index?.podsByName.get(podName) ?? (await apiClient.getPodDetailsByName(podName));
       if (!podInfo) return facts;
 
       // First try workload selector labels
@@ -176,6 +181,18 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
     const { identity } = peerInfo;
 
     if (identity.svcName) {
+      // No selector means no backend labels, and the ClusterIP is gone after
+      // DNAT: pin the observed address with a comment saying so, rather than
+      // a guessed `{app: <svc>}` selector that matches nothing silently.
+      if (identity.svcNoSelector) {
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return null;
+        return {
+          peers: [{ ipBlock: { cidr } }],
+          comment: selectorlessServiceComment(identity.svcNamespace || 'default', identity.svcName, peerInfo.ip, 'ipBlock'),
+        };
+      }
+
       // Service - use podSelector with service label
       // Try to get labels (workload or pod labels) for pods behind this service
       // A Service fronting host-network pods fronts node IPs: its selector
@@ -390,6 +407,12 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   }
   if (egressMap.size > 0) {
     policy.spec.policyTypes.push('Egress');
+  }
+  // Nothing observed in either direction is the reference deny-all (advisor,
+  // llm-bridge, standard_default_deny golden). Left empty, the API server
+  // defaults policyTypes to [Ingress]: deny-all ingress, said nowhere.
+  if (policy.spec.policyTypes.length === 0) {
+    policy.spec.policyTypes.push('Ingress', 'Egress');
   }
 
   return policy;

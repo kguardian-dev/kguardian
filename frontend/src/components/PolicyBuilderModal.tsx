@@ -1,19 +1,26 @@
 import { useMemo, useRef, useState } from 'react';
-import { FileCode, Search, Server, Network, Activity, ChevronRight, Boxes } from 'lucide-react';
-import type { PodNodeData } from '../types';
+import { FileCode, Search, Server, Network, Activity, ChevronRight, Boxes, AlertTriangle, RefreshCw } from 'lucide-react';
+import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { Modal } from './ui/Modal';
 import { EmptyState } from './ui/EmptyState';
-import NetworkPolicyEditor from './NetworkPolicyEditor';
+import NetworkPolicyEditor, { type PolicyWorkload } from './NetworkPolicyEditor';
 import type { PolicyType } from '../hooks/policyEditor';
 
 interface PolicyBuilderModalProps {
   onClose: () => void;
   /** Non-external workloads that can have a policy generated. */
-  workloads: PodNodeData[];
+  workloads: PolicyWorkload[];
   /** Pre-selected workload (contextual "Build Policy") — skips the picker. */
-  initialPod: PodNodeData | null;
+  initialPod: PolicyWorkload | null;
   /** Tab to open on (a finding's "Policy" action picks the relevant one). */
   initialPolicyType?: PolicyType;
+  /** The app's pod and Service listings, so generation does not download
+   *  `/pod/info` again. Absent ⇒ the generator fetches as before. */
+  podsLookup?: PodInfo[];
+  services?: ServiceInfo[];
+  /** The pod listing is still loading: the picker shows a loading row, not
+   *  "No workloads in this namespace" with advice to switch namespaces. */
+  loading?: boolean;
 }
 
 function label(pod: PodNodeData): string {
@@ -31,25 +38,47 @@ function syscallCount(pod: PodNodeData): number {
  * picker — a workload-first path to the same editor, rather than requiring you
  * to find the node on the map. The heavy editor stays behind this lazy chunk.
  */
-export function PolicyBuilderModal({ onClose, workloads, initialPod, initialPolicyType }: PolicyBuilderModalProps) {
-  const [chosen, setChosen] = useState<PodNodeData | null>(initialPod);
+export function PolicyBuilderModal({
+  onClose,
+  workloads,
+  initialPod,
+  initialPolicyType,
+  podsLookup,
+  services,
+  loading = false,
+}: PolicyBuilderModalProps) {
+  const [chosen, setChosen] = useState<PolicyWorkload | null>(initialPod);
 
   if (chosen) {
-    return <NetworkPolicyEditor isOpen onClose={onClose} pod={chosen} allPods={workloads} initialPolicyType={initialPolicyType} />;
+    return (
+      <NetworkPolicyEditor
+        isOpen
+        onClose={onClose}
+        pod={chosen}
+        allPods={workloads}
+        initialPolicyType={initialPolicyType}
+        podsLookup={podsLookup}
+        services={services}
+      />
+    );
   }
-  return <WorkloadPicker workloads={workloads} onPick={setChosen} onClose={onClose} />;
+  return <WorkloadPicker workloads={workloads} onPick={setChosen} onClose={onClose} loading={loading} />;
 }
 
 function WorkloadPicker({
   workloads,
   onPick,
   onClose,
+  loading,
 }: {
-  workloads: PodNodeData[];
-  onPick: (pod: PodNodeData) => void;
+  workloads: PolicyWorkload[];
+  onPick: (pod: PolicyWorkload) => void;
   onClose: () => void;
+  loading: boolean;
 }) {
   const [query, setQuery] = useState('');
+  // Workloads with at least one failed traffic read: their "0 conns" is unknown, not zero.
+  const failedTrafficReads = useMemo(() => workloads.filter((w) => w.trafficError).length, [workloads]);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -104,15 +133,30 @@ function WorkloadPicker({
           />
           <span className="text-[11px] text-tertiary tabular-nums shrink-0">{matches.length}</span>
         </div>
+        {failedTrafficReads > 0 && (
+          <p role="status" className="mt-2 flex items-center gap-1.5 text-[11px] text-hubble-warning">
+            <AlertTriangle className="w-3 h-3 shrink-0" />
+            Traffic reads failed for {failedTrafficReads} {failedTrafficReads === 1 ? 'workload' : 'workloads'}; their connection counts are unknown, not zero.
+          </p>
+        )}
       </div>
 
       {matches.length === 0 ? (
-        <EmptyState
-          icon={Server}
-          title={query ? 'No matching workloads' : 'No workloads in this namespace'}
-          description={query ? 'Try a different search term.' : 'Switch namespaces to find a workload to build a policy for.'}
-          compact
-        />
+        // Only when nothing is listed yet: a search that filters a present
+        // listing to nothing is "No matching workloads", refresh or not.
+        loading && workloads.length === 0 ? (
+          <div role="status" className="flex flex-1 items-center justify-center gap-2 py-8 text-sm text-tertiary">
+            <RefreshCw className="w-4 h-4 animate-spin" />
+            Loading workloads…
+          </div>
+        ) : (
+          <EmptyState
+            icon={Server}
+            title={query ? 'No matching workloads' : 'No workloads in this namespace'}
+            description={query ? 'Try a different search term.' : 'Switch namespaces to find a workload to build a policy for.'}
+            compact
+          />
+        )
       ) : (
         <ul ref={listRef} className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
           {matches.map((pod, i) => {
@@ -135,8 +179,20 @@ function WorkloadPicker({
                     <span className="block text-sm font-medium text-primary truncate">{label(pod)}</span>
                     <span className="flex items-center gap-3 text-[11px] text-tertiary">
                       <span className="flex items-center gap-1"><Boxes className="w-3 h-3" />{ns}</span>
-                      <span className="flex items-center gap-1"><Network className="w-3 h-3" />{conns} conns</span>
-                      {sys > 0 && <span className="flex items-center gap-1"><Activity className="w-3 h-3" />{sys} syscalls</span>}
+                      {pod.trafficError ? (
+                        <span className="flex items-center gap-1 text-hubble-warning" title="The traffic read for this workload failed or timed out; a policy built now would allow nothing">
+                          <AlertTriangle className="w-3 h-3" />traffic read failed
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1"><Network className="w-3 h-3" />{conns} conns</span>
+                      )}
+                      {pod.syscallsError ? (
+                        <span className="flex items-center gap-1 text-hubble-warning" title="The syscall read for this workload failed or timed out; a seccomp profile built now would be incomplete">
+                          <AlertTriangle className="w-3 h-3" />syscall read failed
+                        </span>
+                      ) : (
+                        sys > 0 && <span className="flex items-center gap-1"><Activity className="w-3 h-3" />{sys} syscalls</span>
+                      )}
                     </span>
                   </span>
                   <FileCode className="w-4 h-4 shrink-0 text-tertiary" />
