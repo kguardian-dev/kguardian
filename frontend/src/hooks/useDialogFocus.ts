@@ -10,11 +10,17 @@ const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabi
  * focus returns to `returnFocusRef`, read after the close renders so an
  * element that remounted in the meantime is found.
  */
-/** Another open aria-modal dialog, outside `d` and not hidden (a closing Modal keeps its node under aria-hidden). */
-function otherModalOpen(d: HTMLElement | null): boolean {
-  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].some(
-    (el) => el !== d && !(d && d.contains(el)) && !el.closest('[aria-hidden="true"]'),
+/** Open aria-modal dialogs in document order, so the last one is on top. Skips
+ *  any under aria-hidden: a closing Modal keeps its node there while it fades out. */
+export function openModalDialogs(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].filter(
+    (el) => !el.closest('[aria-hidden="true"]'),
   );
+}
+
+/** Another open aria-modal dialog, outside `d`. */
+function otherModalOpen(d: HTMLElement | null): boolean {
+  return openModalDialogs().some((el) => el !== d && !(d && d.contains(el)));
 }
 
 export function useDialogFocus(opts: {

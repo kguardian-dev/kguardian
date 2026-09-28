@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { X, Send, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
+import { X, Send, Square, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
 import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 import { initialViewMode, storeViewMode, type AssistantViewMode } from '../utils/assistantViewMode';
@@ -49,6 +49,78 @@ const EXAMPLE_PROMPTS = [
   'Show me any suspicious system calls',
   'Summarize security events in the last hour',
 ];
+
+// A reply that has shown no progress for this long says how long it has been.
+const SLOW_REPLY_AFTER_S = 5;
+
+// Docked, the panel takes 448px next to the 224px rail; the map needs about
+// 600px for its toolbar and summary to fit on one row. Below this the
+// assistant opens as a modal and the stored preference is kept for wider screens.
+const DOCK_MIN_WIDTH_PX = 1280;
+
+// The conversation outlives the panel for the tab's session: the app unmounts
+// the panel on close, and a reply that took a minute to arrive should not go
+// with it. Replies still in flight are stored as far as they got.
+const CONVERSATION_KEY = 'kguardian.ai-assistant.conversation';
+// Older turns go first, also when the browser refuses the write for size.
+const MAX_STORED_MESSAGES = 50;
+
+interface StoredMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+function isStoredMessage(m: unknown): m is StoredMessage {
+  if (!m || typeof m !== 'object') return false;
+  const r = m as Record<string, unknown>;
+  return (
+    typeof r.id === 'string' &&
+    (r.role === 'user' || r.role === 'assistant') &&
+    typeof r.content === 'string' &&
+    typeof r.timestamp === 'string' &&
+    !Number.isNaN(Date.parse(r.timestamp))
+  );
+}
+
+function readConversation(): Message[] {
+  try {
+    const parsed: unknown = JSON.parse(sessionStorage.getItem(CONVERSATION_KEY) ?? '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isStoredMessage)
+      .slice(-MAX_STORED_MESSAGES)
+      .map((m) => ({ ...m, timestamp: new Date(m.timestamp) }));
+  } catch {
+    return [];
+  }
+}
+
+function storeConversation(messages: Message[]): void {
+  try {
+    let stored: StoredMessage[] = messages
+      .filter((m) => m.content)
+      .slice(-MAX_STORED_MESSAGES)
+      .map(({ id, role, content, timestamp }) => ({ id, role, content, timestamp: timestamp.toISOString() }));
+    if (stored.length === 0) {
+      sessionStorage.removeItem(CONVERSATION_KEY);
+      return;
+    }
+    for (;;) {
+      try {
+        sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify(stored));
+        return;
+      } catch (e) {
+        // Over quota: keep the newest half and try again.
+        if (stored.length <= 1) throw e;
+        stored = stored.slice(Math.ceil(stored.length / 2));
+      }
+    }
+  } catch {
+    /* storage blocked: the conversation lasts while the panel is mounted */
+  }
+}
 
 // Renders a fenced markdown code block with a Copy button. Used as the custom
 // `pre` renderer for assistant markdown so generated NetworkPolicy/seccomp
@@ -120,7 +192,9 @@ const ChatMessages: React.FC<{
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
   /** The side panel constrains the example-prompt list; the modal doesn't. */
   examplesClassName: string;
-}> = ({ messages, isTyping, onPromptClick, messagesEndRef, examplesClassName }) => (
+  /** Shown after the activity line once a reply has been a while coming. */
+  slowHint?: string;
+}> = ({ messages, isTyping, onPromptClick, messagesEndRef, examplesClassName, slowHint }) => (
   <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
     {messages.length === 0 ? (
       <div className={`h-full flex flex-col justify-center ${examplesClassName}`}>
@@ -165,6 +239,7 @@ const ChatMessages: React.FC<{
                   <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                 </span>
                 <span>{message.activity}</span>
+                {message.streaming && slowHint && <span>· {slowHint}</span>}
               </div>
             )}
           </div>
@@ -191,8 +266,11 @@ const ChatInput: React.FC<{
   onInputChange: (value: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onSend: () => void;
+  /** Cancels the reply in flight. The one button reads Stop while a reply is
+   *  in flight, so a keyboard user's focus is not lost to a swapped element. */
+  onStop: () => void;
   isTyping: boolean;
-}> = ({ inputRef, inputValue, onInputChange, onKeyDown, onSend, isTyping }) => (
+}> = ({ inputRef, inputValue, onInputChange, onKeyDown, onSend, onStop, isTyping }) => (
   <div className="border-t border-hubble-border p-3 shrink-0">
     <div className="flex items-end gap-2">
       <textarea
@@ -205,8 +283,14 @@ const ChatInput: React.FC<{
                    focus:outline-none focus:border-hubble-accent resize-none min-h-[60px] max-h-[140px]"
         rows={2}
       />
-      <Button variant="primary" leftIcon={Send} onClick={onSend} disabled={!inputValue.trim() || isTyping} aria-label="Send message">
-        <span className="hidden sm:inline">Send</span>
+      <Button
+        variant={isTyping ? 'secondary' : 'primary'}
+        leftIcon={isTyping ? Square : Send}
+        onClick={isTyping ? onStop : onSend}
+        disabled={!isTyping && !inputValue.trim()}
+        aria-label={isTyping ? 'Stop generating' : 'Send message'}
+      >
+        <span className="hidden sm:inline">{isTyping ? 'Stop' : 'Send'}</span>
       </Button>
     </div>
     <p className="mt-2 text-[11px] text-tertiary">
@@ -232,14 +316,13 @@ interface AIAssistantProps {
 type ViewMode = AssistantViewMode;
 
 const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange, namespace, podNames, prefill }) => {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(readConversation);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  // Seconds since the reply in flight was sent, for the slow-reply hint.
+  const [elapsed, setElapsed] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
-  // Docked, the panel takes 448px: below 1024px that leaves the map ~100-450px
-  // (measured with the rail open), too narrow for its toolbar and summary. There
-  // the assistant opens as a modal; the stored preference is kept for wider screens.
-  const tooNarrowToDock = useMediaQuery('(max-width: 1023px)');
+  const tooNarrowToDock = useMediaQuery(`(max-width: ${DOCK_MIN_WIDTH_PX - 1}px)`);
   const mode: ViewMode = tooNarrowToDock ? 'modal' : viewMode;
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [panelWidth, setPanelWidth] = useState<number>(UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH);
@@ -281,6 +364,22 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Stored once a turn settles rather than on every streamed delta, and on
+  // unmount so a reply cut off by closing the panel keeps what had arrived.
+  const latestMessages = useRef(messages);
+  useEffect(() => {
+    latestMessages.current = messages;
+    if (!messages.some((m) => m.streaming)) storeConversation(messages);
+  }, [messages]);
+  useEffect(() => () => storeConversation(latestMessages.current), []);
+
+  useEffect(() => {
+    if (!isTyping) return;
+    const started = Date.now();
+    const tick = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(tick);
+  }, [isTyping]);
+
   // Focus input when modal opens
   useEffect(() => {
     if (isOpen) {
@@ -318,6 +417,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
     const currentMessage = inputValue;
     setInputValue('');
+    setElapsed(0);
     setIsTyping(true);
 
     // Immutably patch the in-flight assistant message by id.
@@ -394,6 +494,28 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     setMessages([]);
   };
 
+  const handleStop = () => {
+    abortRef.current?.abort();
+    // The button becomes a disabled Send once the turn ends and would drop focus.
+    inputRef.current?.focus();
+    // The stream's finally clears the in-flight state; the bubble says why it ends here.
+    setMessages(prev =>
+      prev.map(m =>
+        m.streaming
+          ? { ...m, streaming: false, activity: undefined, content: m.content ? `${m.content}\n\n_Stopped._` : '_Stopped before an answer arrived._' }
+          : m,
+      ),
+    );
+  };
+
+  // Docked, the panel is a landmark, not a dialog, so it has no Modal to close
+  // it on Escape; Escape from inside it closes it like every other overlay.
+  const onDockedKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    onClose();
+  };
+
   const toggleViewMode = () => {
     const next: ViewMode = viewMode === 'modal' ? 'side-panel' : 'modal';
     storeViewMode(next);
@@ -463,6 +585,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       onPromptClick={setInputValue}
       messagesEndRef={messagesEndRef}
       examplesClassName={examplesClassName}
+      slowHint={isTyping && elapsed >= SLOW_REPLY_AFTER_S ? `still working, ${elapsed}s` : undefined}
     />
   );
 
@@ -473,6 +596,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       onInputChange={setInputValue}
       onKeyDown={handleKeyDown}
       onSend={handleSendMessage}
+      onStop={handleStop}
       isTyping={isTyping}
     />
   );
@@ -501,7 +625,12 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Collapsed state - show just a thin vertical bar
   if (isCollapsed) {
     return (
-      <div className="fixed top-0 right-0 bottom-0 z-50 w-12 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl items-center justify-center">
+      <div
+        role="complementary"
+        aria-label="AI Assistant"
+        onKeyDown={onDockedKeyDown}
+        className="fixed top-0 right-0 bottom-0 z-50 w-12 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl items-center justify-center"
+      >
         <Button variant="ghost" iconOnly leftIcon={ChevronLeft} onClick={toggleCollapse} aria-label="Expand AI Assistant" title="Expand AI Assistant" />
         <div className="flex-1 flex items-center justify-center">
           <div className="transform -rotate-90 whitespace-nowrap text-sm text-tertiary font-medium">
@@ -520,6 +649,9 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Expanded side panel
   return (
     <div
+      role="complementary"
+      aria-label="AI Assistant"
+      onKeyDown={onDockedKeyDown}
       className="fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl"
       style={{ width: `${panelWidth}px` }}
     >

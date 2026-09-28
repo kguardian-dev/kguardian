@@ -1,0 +1,181 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import AIAssistant from './AIAssistant';
+import { streamChatMessage, type StreamHandlers, type StreamOptions } from '../services/aiApi';
+
+vi.mock('../services/aiApi', () => ({ streamChatMessage: vi.fn() }));
+
+interface Stream {
+  handlers: StreamHandlers;
+  signal: AbortSignal | undefined;
+  /** Ends the stream the way the bridge's final frame does. */
+  finish: () => void;
+}
+
+// A reply that stays in flight until the test ends it or Stop aborts it.
+function pendingStream(): Promise<Stream> {
+  return new Promise<Stream>((started) => {
+    vi.mocked(streamChatMessage).mockImplementation(
+      (_message, _history, _context, handlers: StreamHandlers, opts: StreamOptions = {}) =>
+        new Promise<void>((finish) => {
+          opts.signal?.addEventListener('abort', () => finish());
+          started({ handlers, signal: opts.signal, finish });
+        }),
+    );
+  });
+}
+
+const CONVERSATION_KEY = 'kguardian.ai-assistant.conversation';
+const QUESTION = 'Which namespaces have the most workloads?';
+
+beforeEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+  localStorage.setItem('kguardian.ai-assistant.view-mode', 'side-panel');
+  Element.prototype.scrollIntoView = vi.fn();
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.mocked(streamChatMessage).mockReset();
+});
+
+function send(text: string): HTMLElement {
+  fireEvent.change(screen.getByPlaceholderText(/Ask about traffic/), { target: { value: text } });
+  const button = screen.getByRole('button', { name: 'Send message' });
+  fireEvent.click(button);
+  return button;
+}
+
+const storedMessages = (n: number, pad = '') =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `m-${i}`,
+    role: i % 2 ? 'assistant' : 'user',
+    content: `message ${i}${pad}`,
+    timestamp: '2026-09-28T10:00:00.000Z',
+  }));
+
+it('offers Stop while a reply is in flight; Stop aborts the stream and the bubble says so', async () => {
+  const started = pendingStream();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  const sendButton = send(QUESTION);
+  const stream = await started;
+  expect(screen.getByText('Thinking…')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Send message' })).toBeNull();
+  // The same element reads Stop, so focus left on Send is not dropped.
+  const stop = screen.getByRole('button', { name: 'Stop generating' });
+  expect(stop).toBe(sendButton);
+
+  stop.focus();
+  fireEvent.click(stop);
+  expect(stream.signal?.aborted).toBe(true);
+  expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about traffic/));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBe(stop));
+  expect(screen.queryByText('Thinking…')).toBeNull();
+  expect(screen.getByText('Stopped before an answer arrived.')).toBeTruthy();
+});
+
+it('says how long a reply has been coming once it passes 5 s, until text arrives', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const started = pendingStream();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const stream = await started;
+  expect(screen.queryByText(/still working/)).toBeNull();
+
+  await act(async () => {
+    vi.advanceTimersByTime(6000);
+  });
+  expect(screen.getByText(/still working, 6s/)).toBeTruthy();
+
+  act(() => stream.handlers.onText?.('argocd has the most.'));
+  expect(screen.queryByText(/still working/)).toBeNull();
+  act(() => {
+    stream.handlers.onDone?.({ model: 'm' });
+    stream.finish();
+  });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeTruthy());
+});
+
+it('docked, the panel is a complementary landmark named AI Assistant and Escape inside it closes it', () => {
+  const onClose = vi.fn();
+  render(<AIAssistant isOpen onClose={onClose} namespace="argocd" podNames={[]} />);
+  const panel = screen.getByRole('complementary', { name: 'AI Assistant' });
+  const textarea = screen.getByPlaceholderText(/Ask about traffic/);
+  expect(panel.contains(textarea)).toBe(true);
+  fireEvent.keyDown(textarea, { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse panel' }));
+  const bar = screen.getByRole('complementary', { name: 'AI Assistant' });
+  fireEvent.keyDown(screen.getByRole('button', { name: 'Expand AI Assistant' }), { key: 'Escape' });
+  expect(bar).toBeTruthy();
+  expect(onClose).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the conversation for the session: reopening shows it, Clear forgets it', async () => {
+  const started = pendingStream();
+  const first = render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const stream = await started;
+  act(() => {
+    stream.handlers.onText?.('argocd has the most.');
+    stream.handlers.onDone?.({ model: 'm' });
+    stream.finish();
+  });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeTruthy());
+
+  // The app unmounts the panel on close.
+  first.unmount();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  expect(screen.getByText(QUESTION)).toBeTruthy();
+  expect(screen.getByText('argocd has the most.')).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  expect(screen.getByText('Ask about your cluster')).toBeTruthy();
+  expect(sessionStorage.getItem(CONVERSATION_KEY)).toBeNull();
+});
+
+it('starts empty when the stored conversation cannot be read', () => {
+  sessionStorage.setItem(CONVERSATION_KEY, '{not json');
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  expect(screen.getByText('Ask about your cluster')).toBeTruthy();
+  sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify([{ id: 1, role: 'system', content: 'x' }]));
+  cleanup();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  expect(screen.getByText('Ask about your cluster')).toBeTruthy();
+  sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify([{ id: 'a', role: 'user', content: 'x', timestamp: 'not a date' }]));
+  cleanup();
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  expect(screen.getByText('Ask about your cluster')).toBeTruthy();
+});
+
+it('keeps the last 50 messages of a long conversation, on screen and in storage', () => {
+  sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify(storedMessages(60)));
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  expect(screen.queryByText('message 9')).toBeNull();
+  expect(screen.getByText('message 10')).toBeTruthy();
+  expect(screen.getByText('message 59')).toBeTruthy();
+  const kept = JSON.parse(sessionStorage.getItem(CONVERSATION_KEY)!) as { id: string }[];
+  expect(kept.length).toBe(50);
+  expect(kept[0].id).toBe('m-10');
+});
+
+it('drops the oldest turns when the browser refuses the write for size, so what is stored is what is newest', () => {
+  sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify(storedMessages(16, ' ' + 'x'.repeat(200))));
+  const setItem = Storage.prototype.setItem;
+  const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+    if (value.length > 1500) throw new DOMException('quota', 'QuotaExceededError');
+    setItem.call(this, key, value);
+  });
+  try {
+    render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+    const kept = JSON.parse(sessionStorage.getItem(CONVERSATION_KEY)!) as { id: string }[];
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(16);
+    expect(kept.at(-1)?.id).toBe('m-15');
+  } finally {
+    spy.mockRestore();
+  }
+});

@@ -156,6 +156,9 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
       ariaLabel="Audit verdicts"
       size="full"
       contentClassName="flex-1 min-h-0 flex flex-col"
+      // The first focusable is Refresh, which loading disables a moment later
+      // and drops focus on the body; start on the Would-Deny tab instead.
+      initialFocus='nav[aria-label="Verdict filter"] button'
     >
       <>
         {/* Header */}
@@ -209,7 +212,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               active={verdictTab === 'Allow'}
               onClick={() => setVerdictTab('Allow')}
               icon={<CheckCircle2 className="w-4 h-4" />}
-              color="text-hubble-accent"
+              color="text-accent-fg"
               label="Allow"
               count={counts.allow}
             />
@@ -271,7 +274,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               onClick={() => setPolicyFilter('')}
               className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors ${
                 policyFilter === ''
-                  ? 'bg-hubble-accent/20 text-hubble-accent'
+                  ? 'bg-hubble-accent/20 text-accent-fg'
                   : 'text-secondary hover:bg-hubble-card'
               }`}
             >
@@ -285,7 +288,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                   onClick={() => setPolicyFilter(key)}
                   className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors mt-1 ${
                     policyFilter === key
-                      ? 'bg-hubble-accent/20 text-hubble-accent'
+                      ? 'bg-hubble-accent/20 text-accent-fg'
                       : 'text-secondary hover:bg-hubble-card'
                   }`}
                   title={key}
@@ -294,7 +297,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                   <span className="text-[11px] text-tertiary tabular-nums">
                     {c.deny > 0 && <span className="text-hubble-warning">{c.deny} deny</span>}
                     {c.deny > 0 && c.allow > 0 && <span> · </span>}
-                    {c.allow > 0 && <span className="text-hubble-accent">{c.allow} allow</span>}
+                    {c.allow > 0 && <span className="text-accent-fg">{c.allow} allow</span>}
                   </span>
                 </button>
               ))}
@@ -358,7 +361,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                         <td className="px-4 py-2 font-mono text-xs">
                           {policyKey}
                           {!v.policy_namespace && (
-                            <span className="ml-1 text-xs text-hubble-accent">(cluster)</span>
+                            <span className="ml-1 text-xs text-accent-fg">(cluster)</span>
                           )}
                         </td>
                         <td className="px-4 py-2 text-secondary">{v.direction}</td>
@@ -383,7 +386,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
             : `Showing ${visible.length} of ${verdicts.length} most recent verdict${verdicts.length === 1 ? '' : 's'} ·`}
           {' '}<span className="text-hubble-warning">{counts.deny} deny</span>
           {' '}·
-          {' '}<span className="text-hubble-accent">{counts.allow} allow</span>.
+          {' '}<span className="text-accent-fg">{counts.allow} allow</span>.
           Backed by <code className="font-mono">audit_verdicts</code>; rotated by the broker's retention loop.
         </footer>
       </>
@@ -427,7 +430,7 @@ const DirectionButton: React.FC<DirectionButtonProps> = ({ active, onClick, labe
     aria-pressed={active}
     className={`px-2.5 py-1 text-xs font-medium transition-colors border-r border-hubble-border last:border-r-0 ${
       active
-        ? 'bg-hubble-accent/20 text-hubble-accent'
+        ? 'bg-hubble-accent/20 text-accent-fg'
         : 'text-secondary hover:bg-hubble-card hover:text-primary'
     }`}
   >
@@ -445,7 +448,7 @@ const VerdictBadge: React.FC<{ verdict: AuditVerdictKind | string }> = ({ verdic
   }
   if (verdict === 'Allow') {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-hubble-accent/20 text-hubble-accent">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-hubble-accent/20 text-accent-fg">
         <CheckCircle2 className="w-3 h-3" /> Allow
       </span>
     );

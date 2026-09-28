@@ -10,7 +10,8 @@ export interface Command {
   hint?: string;
   group: string;
   icon: LucideIcon;
-  /** Extra terms to match on beyond the label. */
+  /** Extra terms to match on beyond the label, space separated (a workload's
+   *  member pod names, aliases). Matched as a substring, not fuzzily. */
   keywords?: string;
   run: () => void;
 }
@@ -28,6 +29,11 @@ interface CommandPaletteProps {
 
 // Fixed group order so results read predictably regardless of input order.
 const GROUP_ORDER = ['Jump to', 'Views', 'Tools', 'Namespaces', 'Workloads'];
+
+// Cap workloads/namespaces so a huge cluster doesn't flood the list.
+function groupCap(group: string): number {
+  return group === 'Views' || group === 'Tools' ? 99 : 8;
+}
 
 /** Subsequence match (fuzzy) — "qbt" matches "qbittorrent". */
 function fuzzy(haystack: string, needle: string): boolean {
@@ -50,25 +56,25 @@ export function CommandPalette({ onClose, commands, dynamic }: CommandPalettePro
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
 
-  const results = useMemo(() => {
+  const { results, more } = useMemo(() => {
     const q = query.trim().toLowerCase();
     const jumps = (dynamic?.(query.trim()) ?? []).map((c) => ({ ...c, group: 'Jump to' }));
     const matched = [...jumps, ...commands.filter((c) => {
       const hay = `${c.label} ${c.hint ?? ''} ${c.keywords ?? ''} ${c.group}`.toLowerCase();
       return q ? hay.includes(q) || fuzzy(c.label.toLowerCase(), q) : true;
     })];
-    // Cap workloads/namespaces so a huge cluster doesn't flood the list.
     const capped: Command[] = [];
-    const perGroup: Record<string, number> = {};
+    // How many matches each capped group is hiding, so the list says so.
+    const more: Record<string, number> = {};
     for (const g of GROUP_ORDER) {
-      for (const c of matched.filter((m) => m.group === g)) {
-        perGroup[g] = (perGroup[g] ?? 0) + 1;
-        if (perGroup[g] <= (g === 'Views' || g === 'Tools' ? 99 : 8)) capped.push(c);
-      }
+      const inGroup = matched.filter((m) => m.group === g);
+      const cap = groupCap(g);
+      capped.push(...inGroup.slice(0, cap));
+      if (inGroup.length > cap) more[g] = inGroup.length - cap;
     }
     // Any groups not in GROUP_ORDER, appended.
     for (const c of matched.filter((m) => !GROUP_ORDER.includes(m.group))) capped.push(c);
-    return capped;
+    return { results: capped, more };
   }, [commands, query, dynamic]);
 
   const activeIdx = Math.min(active, Math.max(0, results.length - 1));
@@ -140,13 +146,18 @@ export function CommandPalette({ onClose, commands, dynamic }: CommandPalettePro
                       idx === activeIdx ? 'bg-hubble-accent/15' : 'hover:bg-hubble-hover'
                     }`}
                   >
-                    <Icon className={`w-4 h-4 shrink-0 ${idx === activeIdx ? 'text-hubble-accent' : 'text-tertiary'}`} />
+                    <Icon className={`w-4 h-4 shrink-0 ${idx === activeIdx ? 'text-accent-fg' : 'text-tertiary'}`} />
                     <span className="flex-1 min-w-0 text-sm text-primary truncate">{cmd.label}</span>
                     {cmd.hint && <span className="text-[11px] text-tertiary font-mono truncate max-w-[40%]">{cmd.hint}</span>}
                     {idx === activeIdx && <CornerDownLeft className="w-3.5 h-3.5 shrink-0 text-tertiary" />}
                   </button>
                 );
               })}
+              {more[group] && (
+                <div className="px-4 py-1.5 pl-11 text-[11px] text-tertiary">
+                  {more[group]} more, keep typing to narrow the list
+                </div>
+              )}
             </div>
           ))
         )}

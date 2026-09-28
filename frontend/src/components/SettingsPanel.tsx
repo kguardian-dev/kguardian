@@ -1,3 +1,4 @@
+import { useId, type ReactNode } from 'react';
 import { useSettings } from '../contexts/SettingsContext';
 import { useCluster } from '../contexts/ClusterContext';
 import { Button } from './ui/Button';
@@ -9,11 +10,19 @@ interface SettingsPanelProps {
   namespaces: string[];
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+/** Ids of a row's label and hint, for the control to name itself with. */
+interface RowIds {
+  labelId: string;
+  hintId?: string;
+}
+
+function Toggle({ checked, onChange, ids }: { checked: boolean; onChange: (v: boolean) => void; ids: RowIds }) {
   return (
     <button
       role="switch"
       aria-checked={checked}
+      aria-labelledby={ids.labelId}
+      aria-describedby={ids.hintId}
       onClick={() => onChange(!checked)}
       className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${checked ? 'bg-hubble-accent' : 'bg-hubble-border'}`}
     >
@@ -22,14 +31,17 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode | ((ids: RowIds) => ReactNode) }) {
+  const labelId = useId();
+  const hintId = useId();
+  const ids: RowIds = { labelId, hintId: hint ? hintId : undefined };
   return (
     <div className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0">
-        <div className="text-sm text-primary">{label}</div>
-        {hint && <div className="text-xs text-tertiary mt-0.5">{hint}</div>}
+        <div id={labelId} className="text-sm text-primary">{label}</div>
+        {hint && <div id={ids.hintId} className="text-xs text-tertiary mt-0.5">{hint}</div>}
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="shrink-0">{typeof children === 'function' ? children(ids) : children}</div>
     </div>
   );
 }
@@ -62,39 +74,46 @@ export function SettingsPanel({ isOpen, onClose, namespaces }: SettingsPanelProp
             <span className="text-sm text-secondary">{activeCluster.name}</span>
           </Row>
           <Row label="Default namespace" hint="Namespace to open on">
-            <select
-              className={selectCls}
-              value={settings.defaultNamespace ?? ''}
-              onChange={(e) => updateSettings({ defaultNamespace: e.target.value || null })}
-            >
-              <option value="">Auto (first with pods)</option>
-              {namespaces.map((ns) => (
-                <option key={ns} value={ns}>{ns}</option>
-              ))}
-            </select>
+            {(ids) => (
+              <select
+                className={selectCls}
+                aria-labelledby={ids.labelId}
+                aria-describedby={ids.hintId}
+                value={settings.defaultNamespace ?? ''}
+                onChange={(e) => updateSettings({ defaultNamespace: e.target.value || null })}
+              >
+                <option value="">Auto (first with pods)</option>
+                {namespaces.map((ns) => (
+                  <option key={ns} value={ns}>{ns}</option>
+                ))}
+              </select>
+            )}
           </Row>
         </div>
 
         <div className="pt-4 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">Graph defaults</div>
         <div className="divide-y divide-hubble-border">
           <Row label="Show external endpoints" hint="Internet / cross-cluster traffic nodes">
-            <Toggle checked={settings.showExternalNodes} onChange={(v) => updateSettings({ showExternalNodes: v })} />
+            {(ids) => <Toggle ids={ids} checked={settings.showExternalNodes} onChange={(v) => updateSettings({ showExternalNodes: v })} />}
           </Row>
           <Row label="Show DaemonSet peers" hint="node-exporter, CNI and CSI agents — hidden by default to declutter the map">
-            <Toggle checked={settings.showDaemonSetNodes} onChange={(v) => updateSettings({ showDaemonSetNodes: v })} />
+            {(ids) => <Toggle ids={ids} checked={settings.showDaemonSetNodes} onChange={(v) => updateSettings({ showDaemonSetNodes: v })} />}
           </Row>
           <Row label="Show traffic edges">
-            <Toggle checked={settings.showTraffic} onChange={(v) => updateSettings({ showTraffic: v })} />
+            {(ids) => <Toggle ids={ids} checked={settings.showTraffic} onChange={(v) => updateSettings({ showTraffic: v })} />}
           </Row>
           <Row label="Layout direction">
-            <select
-              className={selectCls}
-              value={settings.layoutDirection}
-              onChange={(e) => updateSettings({ layoutDirection: e.target.value as 'LR' | 'TB' })}
-            >
-              <option value="LR">Left → Right</option>
-              <option value="TB">Top → Bottom</option>
-            </select>
+            {(ids) => (
+              <select
+                className={selectCls}
+                aria-labelledby={ids.labelId}
+                value={settings.layoutDirection}
+                onChange={(e) => updateSettings({ layoutDirection: e.target.value as 'LR' | 'TB' })}
+              >
+                <option value="LR">Left → Right</option>
+                <option value="TB">Top → Bottom</option>
+              </select>
+            )}
           </Row>
         </div>
       </div>
