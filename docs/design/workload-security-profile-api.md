@@ -50,16 +50,24 @@ error.
 
 Query (all optional): `namespace` (exact), `kind` (exact), `status` (`ok|warn|risk|unknown`, filters on
 `posture.status`), `search` (case-insensitive substring of the workload name, max 253 chars), `limit`
-(default 100, max 500, clamped), `after` (the previous page's `nextAfter`, opaque).
+(default 100, max 500, clamped), `after` (the previous page's `nextAfter`, opaque), `include_gone`
+(`true` also lists workloads none of whose pods are alive: finished Jobs, replaced ReplicaSets and deleted
+Deployments still in the read model; default `false`).
 
 Order: `(namespace, kind, name)` ascending. `nextAfter` is `null` on the last page.
 
 Source: the `workload_profile_latest` read model, refreshed by a background snapshotter (every
-`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, floor 60; `PROFILE_SNAPSHOT_BATCH` workloads per tick,
-default 200, least recently computed first). A workload appears after its first snapshot (the first tick
-runs ~60 s after broker start); `computedAt` says how fresh each row is. The detail endpoint (section 2)
-is always computed live. Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`,
-`list-search-ledger`, `list-status-risk`.
+`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, floor 60). A tick takes batches of
+`PROFILE_SNAPSHOT_BATCH` (default 200) candidates until none are left or
+`PROFILE_SNAPSHOT_TICK_BUDGET_SECS` (default: the interval; 0 = one batch) has passed; workloads with
+alive pods come first, then the least recently attempted. A workload appears after its first snapshot
+(the first tick runs ~60 s after broker start); `computedAt` says how fresh each row is. When the most
+recent attempt failed, `lastError` and `failedAt` say so and the last good profile stays beside them; a
+workload that failed before it was ever computed is listed with `revision`, `contentHash`, `computedAt`,
+`lastChangedAt` and the posture fields `null`, so a client can say "profile failed" rather than "not
+computed yet". Both are `null` otherwise. The detail endpoint (section 2) is always computed live.
+Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`, `list-search-ledger`,
+`list-status-risk`.
 
 From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
 
@@ -70,6 +78,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
       "clusterId": "primary",
       "computedAt": "2026-09-26T03:05:49.483524Z",
       "contentHash": "fnv1a64:5ba183ed9b98a6fa",
+      "failedAt": null,
       "dimensions": {
         "compute": {
           "status": "unknown"
@@ -104,6 +113,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
       },
       "kind": "Deployment",
       "lastChangedAt": "2026-09-26T03:05:49.483524Z",
+      "lastError": null,
       "name": "source-controller",
       "namespace": "flux-system",
       "posture": {
@@ -1739,9 +1749,13 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
   unique `(cluster_id, pod_namespace, workload_kind, workload_name, revision)`.
 - `workload_profile_latest(cluster_id, pod_namespace, workload_kind, workload_name PK, revision,
   content_hash, posture_status, summary jsonb, computed_at, last_changed_at)`, backing `GET /workloads`.
+- `workload_profile_failures(cluster_id, pod_namespace, workload_kind, workload_name PK, last_error,
+  failed_at)`: the snapshotter's most recent failed attempt per workload, deleted by its next successful
+  snapshot (list `lastError` / `failedAt`).
 - `workload_profile_exports(id, cluster_id, pod_namespace, workload_kind, workload_name, revision, content_hash,
   mode, artifacts text[], baseline jsonb, exported_at)` (section 4).
-- Migrations `2026-09-27-100000_workload_profiles`, `2026-09-27-300000_workload_profile_exports`.
+- Migrations `2026-09-27-100000_workload_profiles`, `2026-09-27-300000_workload_profile_exports`,
+  `2026-09-30-230000_workload_profile_failures`.
 
 ## CHANGELOG
 
@@ -1873,3 +1887,10 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     for the workload, read live by the profile GET (1 MiB, 2 s, cached per namespace 30 s / 10 s when unavailable), `null`
     where not read. Unavailable is
     `available: false` with the reason. Outside posture, statuses, readiness and the snapshot hash.
+- 2026-09-29 (**v1.10**, an honest list; additive):
+  - `GET /workloads` lists only workloads with an alive pod unless `include_gone=true`.
+  - List items gain `lastError` / `failedAt`, the snapshotter's most recent failed attempt
+    (`workload_profile_failures`); a workload that failed before its first snapshot is listed with the
+    profile fields `null`.
+  - The snapshotter takes batches until `PROFILE_SNAPSHOT_TICK_BUDGET_SECS` (default: the interval) is
+    spent, workloads with alive pods and never-attempted ones first.

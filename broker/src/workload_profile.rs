@@ -136,11 +136,23 @@ pub fn snapshot_interval() -> Duration {
     )
 }
 
-/// `PROFILE_SNAPSHOT_BATCH` workloads per tick (default 200, [1, 5000]).
+/// `PROFILE_SNAPSHOT_BATCH` workloads per candidate query (default 200,
+/// [1, 5000]); a tick takes batches until its budget is spent.
 pub fn snapshot_batch() -> i64 {
     env_num("PROFILE_SNAPSHOT_BATCH")
         .unwrap_or(200)
         .clamp(1, 5_000)
+}
+
+/// `PROFILE_SNAPSHOT_TICK_BUDGET_SECS`: a tick keeps taking batches while
+/// candidates remain and this much time has not passed (default: the
+/// interval; 0 = one batch per tick).
+pub fn snapshot_tick_budget(interval: Duration) -> Duration {
+    Duration::from_secs(
+        env_num("PROFILE_SNAPSHOT_TICK_BUDGET_SECS")
+            .map(|v| v.clamp(0, 86_400) as u64)
+            .unwrap_or(interval.as_secs()),
+    )
 }
 
 /// `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50, [1, 1000]).
@@ -3298,18 +3310,114 @@ struct KeyRow {
     name: String,
 }
 
-/// Workloads with any source data, least recently computed first.
-const CANDIDATES_SQL: &str = "\
-SELECT k.ns, k.kind, k.name FROM ( \
-    SELECT pod_namespace AS ns, workload_kind AS kind, workload_name AS name FROM workload_containers \
-    UNION SELECT pod_namespace, workload_kind, workload_name FROM workload_syscalls \
-    UNION SELECT pod_namespace, workload_kind, workload_name FROM pod_details \
-          WHERE NOT is_dead AND pod_namespace IS NOT NULL AND workload_kind IS NOT NULL AND workload_name IS NOT NULL \
-) k \
-LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.ns \
-     AND l.workload_kind = k.kind AND l.workload_name = k.name \
-ORDER BY l.computed_at ASC NULLS FIRST, k.ns, k.kind, k.name \
-LIMIT $2";
+/// `EXISTS`: the workload keyed by the three SQL expressions has a pod the
+/// controller still reports (an ownerless pod is keyed `("Pod", name)`).
+macro_rules! alive_sql {
+    ($ns:expr, $kind:expr, $name:expr) => {
+        concat!(
+            "EXISTS (SELECT 1 FROM pod_details pd WHERE NOT pd.is_dead \
+               AND pd.pod_namespace = ",
+            $ns,
+            " AND ((pd.workload_kind = ",
+            $kind,
+            " AND pd.workload_name = ",
+            $name,
+            ") OR (",
+            $kind,
+            " = 'Pod' AND pd.pod_name = ",
+            $name,
+            " AND pd.workload_kind IS NULL)))"
+        )
+    };
+}
+
+/// Workloads with any source data, minus `$3..$5` (visited this tick):
+/// those with alive pods first, then by last attempt (never attempted
+/// first), so finished Jobs and replaced ReplicaSets cannot keep live
+/// workloads waiting.
+const CANDIDATES_SQL: &str = concat!(
+    "WITH k AS ( \
+        SELECT pod_namespace AS ns, workload_kind AS kind, workload_name AS name FROM workload_containers \
+        UNION SELECT pod_namespace, workload_kind, workload_name FROM workload_syscalls \
+        UNION SELECT pod_namespace, workload_kind, workload_name FROM pod_details \
+              WHERE NOT is_dead AND pod_namespace IS NOT NULL AND workload_kind IS NOT NULL AND workload_name IS NOT NULL \
+    ) \
+    SELECT k.ns, k.kind, k.name FROM k \
+    LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.ns \
+         AND l.workload_kind = k.kind AND l.workload_name = k.name \
+    LEFT JOIN workload_profile_failures f ON f.cluster_id = $1 AND f.pod_namespace = k.ns \
+         AND f.workload_kind = k.kind AND f.workload_name = k.name \
+    WHERE NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[], $5::text[]) AS s(ns, kind, name) \
+                      WHERE s.ns = k.ns AND s.kind = k.kind AND s.name = k.name) \
+    ORDER BY ",
+    alive_sql!("k.ns", "k.kind", "k.name"),
+    " DESC, GREATEST(l.computed_at, f.failed_at) ASC NULLS FIRST, k.ns, k.kind, k.name \
+    LIMIT $2"
+);
+
+/// The next `batch` candidates after `seen`.
+fn candidates(conn: &mut PgConnection, batch: i64, seen: &[KeyRow]) -> QueryResult<Vec<KeyRow>> {
+    sql_query(CANDIDATES_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .bind::<BigInt, _>(batch)
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.ns.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(seen.iter().map(|k| k.name.as_str()).collect::<Vec<_>>())
+        .load(conn)
+}
+
+/// Longest `lastError` kept (the database's message, never a statement).
+pub const FAILURE_MESSAGE_MAX: usize = 512;
+
+/// Remember that the last snapshot attempt for `key` failed and why.
+fn record_failure(conn: &mut PgConnection, key: &Key, error: &str) -> QueryResult<()> {
+    let mut msg = error.to_string();
+    if msg.len() > FAILURE_MESSAGE_MAX {
+        let mut cut = FAILURE_MESSAGE_MAX;
+        while !msg.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        msg.truncate(cut);
+    }
+    sql_query(
+        "INSERT INTO workload_profile_failures \
+         (cluster_id, pod_namespace, workload_kind, workload_name, last_error, failed_at) \
+         VALUES ($1, $2, $3, $4, $5, timezone('UTC', NOW())) \
+         ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name) DO UPDATE SET \
+           last_error = EXCLUDED.last_error, failed_at = EXCLUDED.failed_at",
+    )
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+    .bind::<Text, _>(&key.namespace)
+    .bind::<Text, _>(&key.kind)
+    .bind::<Text, _>(&key.name)
+    .bind::<Text, _>(&msg)
+    .execute(conn)
+    .map(|_| ())
+}
+
+fn clear_failure(conn: &mut PgConnection, key: &Key) -> QueryResult<usize> {
+    sql_query(
+        "DELETE FROM workload_profile_failures WHERE cluster_id = $1 AND pod_namespace = $2 \
+         AND workload_kind = $3 AND workload_name = $4",
+    )
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+    .bind::<Text, _>(&key.namespace)
+    .bind::<Text, _>(&key.kind)
+    .bind::<Text, _>(&key.name)
+    .execute(conn)
+}
+
+/// Failure rows of workloads with no source data left: never visited
+/// again, so they would otherwise stay forever.
+const FAILURES_PRUNE_SQL: &str = concat!(
+    "DELETE FROM workload_profile_failures f WHERE f.cluster_id = $1 \
+       AND NOT EXISTS (SELECT 1 FROM workload_containers wc WHERE wc.pod_namespace = f.pod_namespace \
+             AND wc.workload_kind = f.workload_kind AND wc.workload_name = f.workload_name) \
+       AND NOT EXISTS (SELECT 1 FROM workload_syscalls ws WHERE ws.pod_namespace = f.pod_namespace \
+             AND ws.workload_kind = f.workload_kind AND ws.workload_name = f.workload_name) \
+       AND NOT ",
+    alive_sql!("f.pod_namespace", "f.workload_kind", "f.workload_name")
+);
 
 /// Compute and store one workload's profile.
 pub fn snapshot_one(
@@ -3325,36 +3433,69 @@ pub fn snapshot_one(
     store_snapshot(conn, key, &p, cap).map(Some)
 }
 
-/// One snapshotter tick. Sequential: one workload's reads at a time.
+/// What one tick did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TickStats {
+    pub computed: usize,
+    pub new_versions: usize,
+    pub failed: usize,
+    pub batches: usize,
+}
+
+/// One snapshotter tick. Sequential: one workload's reads at a time. Takes
+/// batches of `batch` candidates until none are left or `budget` has
+/// passed (the first batch always runs). A failed workload gets a
+/// `workload_profile_failures` row; a computed one loses it.
 pub fn snapshot_tick(
     conn: &mut PgConnection,
     batch: i64,
     cap: i64,
-) -> Result<(usize, usize), DbError> {
-    let keys: Vec<KeyRow> = sql_query(CANDIDATES_SQL)
-        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
-        .bind::<BigInt, _>(batch)
-        .load(conn)?;
-    let (mut done, mut new) = (0, 0);
-    for k in keys {
-        let key = Key {
-            namespace: k.ns,
-            kind: k.kind,
-            name: k.name,
-        };
-        match snapshot_one(conn, &key, cap) {
-            Ok(Some(SnapshotOutcome::NewVersion(_))) => {
-                done += 1;
-                new += 1;
+    budget: Duration,
+) -> Result<TickStats, DbError> {
+    let started = std::time::Instant::now();
+    let mut stats = TickStats::default();
+    let mut seen: Vec<KeyRow> = Vec::new();
+    loop {
+        let keys = candidates(conn, batch, &seen)?;
+        if keys.is_empty() {
+            break;
+        }
+        let full = keys.len() as i64 >= batch;
+        stats.batches += 1;
+        for k in keys {
+            let key = Key {
+                namespace: k.ns.clone(),
+                kind: k.kind.clone(),
+                name: k.name.clone(),
+            };
+            match snapshot_one(conn, &key, cap) {
+                Ok(outcome) => {
+                    stats.computed += 1;
+                    if matches!(outcome, Some(SnapshotOutcome::NewVersion(_))) {
+                        stats.new_versions += 1;
+                    }
+                    clear_failure(conn, &key)?;
+                }
+                Err(e) => {
+                    stats.failed += 1;
+                    warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
+                        "workload profile snapshot failed");
+                    if let Err(e) = record_failure(conn, &key, &e.to_string()) {
+                        warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
+                            "could not record the snapshot failure");
+                    }
+                }
             }
-            Ok(_) => done += 1,
-            Err(e) => {
-                warn!(namespace = %key.namespace, kind = %key.kind, name = %key.name, error = %e,
-                "workload profile snapshot failed")
-            }
+            seen.push(k);
+        }
+        if !full || started.elapsed() >= budget {
+            break;
         }
     }
-    Ok((done, new))
+    sql_query(FAILURES_PRUNE_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .execute(conn)?;
+    Ok(stats)
 }
 
 /// Spawn the snapshotter loop.
@@ -3362,29 +3503,39 @@ pub fn spawn(pool: DbPool) {
     let interval = snapshot_interval();
     let batch = snapshot_batch();
     let cap = max_versions_per_workload();
+    let budget = snapshot_tick_budget(interval);
     info!(
         interval_secs = interval.as_secs(),
-        batch, cap, "workload profile snapshotter scheduled"
+        batch,
+        budget_secs = budget.as_secs(),
+        cap,
+        "workload profile snapshotter scheduled"
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             let pool = pool.clone();
-            let r = tokio::task::spawn_blocking(move || -> Result<(usize, usize), DbError> {
+            let r = tokio::task::spawn_blocking(move || -> Result<TickStats, DbError> {
                 let mut conn = pool.get()?;
-                snapshot_tick(&mut conn, batch, cap)
+                snapshot_tick(&mut conn, batch, cap, budget)
             })
             .await;
             match r {
-                Ok(Ok((done, new))) => {
-                    if new > 0 {
+                Ok(Ok(t)) => {
+                    if t.new_versions > 0 || t.failed > 0 {
                         info!(
-                            computed = done,
-                            new_versions = new,
+                            computed = t.computed,
+                            new_versions = t.new_versions,
+                            failed = t.failed,
+                            batches = t.batches,
                             "workload profiles snapshotted"
                         );
                     } else {
-                        debug!(computed = done, "workload profiles snapshotted; no changes");
+                        debug!(
+                            computed = t.computed,
+                            batches = t.batches,
+                            "workload profiles snapshotted; no changes"
+                        );
                     }
                 }
                 Ok(Err(e)) => warn!(error = %e, "workload profile snapshotter tick failed"),
@@ -3408,10 +3559,17 @@ pub struct ListQuery {
     pub search: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
+    /// `true` also lists workloads none of whose pods are alive (finished
+    /// Jobs, replaced ReplicaSets, deleted Deployments still in the read
+    /// model). Default `false`.
+    pub include_gone: Option<bool>,
 }
 
+/// A list row: the last good profile (null fields when the workload has
+/// never been computed) and the last failure, if the most recent attempt
+/// failed.
 #[derive(Debug, Clone, QueryableByName)]
-struct LatestRow {
+struct ListRow {
     #[diesel(sql_type = Text)]
     cluster_id: String,
     #[diesel(sql_type = Text)]
@@ -3420,30 +3578,49 @@ struct LatestRow {
     workload_kind: String,
     #[diesel(sql_type = Text)]
     workload_name: String,
-    #[diesel(sql_type = Integer)]
-    revision: i32,
-    #[diesel(sql_type = Text)]
-    content_hash: String,
-    #[diesel(sql_type = Jsonb)]
-    summary: Value,
-    #[diesel(sql_type = Timestamp)]
-    computed_at: NaiveDateTime,
-    #[diesel(sql_type = Timestamp)]
-    last_changed_at: NaiveDateTime,
+    #[diesel(sql_type = Nullable<Integer>)]
+    revision: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    content_hash: Option<String>,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    summary: Option<Value>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    computed_at: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    last_changed_at: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Text>)]
+    last_error: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    failed_at: Option<NaiveDateTime>,
 }
 
-const LIST_SQL: &str = "\
-SELECT cluster_id, pod_namespace, workload_kind, workload_name, revision, content_hash, summary, \
-       computed_at, last_changed_at \
-FROM workload_profile_latest \
-WHERE cluster_id = $1 \
-  AND ($2::text IS NULL OR pod_namespace = $2) \
-  AND ($3::text IS NULL OR workload_kind = $3) \
-  AND ($4::text IS NULL OR posture_status = $4) \
-  AND ($5::text IS NULL OR (pod_namespace, workload_kind, workload_name) > ($5, $6, $7)) \
-  AND ($9::text IS NULL OR strpos(lower(workload_name), lower($9)) > 0) \
-ORDER BY pod_namespace, workload_kind, workload_name \
-LIMIT $8";
+/// Computed and failed workloads, one row each; `$10` (include_gone) false
+/// keeps only workloads with an alive pod.
+const LIST_SQL: &str = concat!(
+    "WITH k AS ( \
+        SELECT pod_namespace, workload_kind, workload_name FROM workload_profile_latest WHERE cluster_id = $1 \
+        UNION \
+        SELECT pod_namespace, workload_kind, workload_name FROM workload_profile_failures WHERE cluster_id = $1 \
+    ) \
+    SELECT $1::text AS cluster_id, k.pod_namespace, k.workload_kind, k.workload_name, \
+           l.revision, l.content_hash, l.summary, l.computed_at, l.last_changed_at, \
+           f.last_error, f.failed_at \
+    FROM k \
+    LEFT JOIN workload_profile_latest l ON l.cluster_id = $1 AND l.pod_namespace = k.pod_namespace \
+         AND l.workload_kind = k.workload_kind AND l.workload_name = k.workload_name \
+    LEFT JOIN workload_profile_failures f ON f.cluster_id = $1 AND f.pod_namespace = k.pod_namespace \
+         AND f.workload_kind = k.workload_kind AND f.workload_name = k.workload_name \
+    WHERE ($2::text IS NULL OR k.pod_namespace = $2) \
+      AND ($3::text IS NULL OR k.workload_kind = $3) \
+      AND ($4::text IS NULL OR l.posture_status = $4) \
+      AND ($5::text IS NULL OR (k.pod_namespace, k.workload_kind, k.workload_name) > ($5, $6, $7)) \
+      AND ($9::text IS NULL OR strpos(lower(k.workload_name), lower($9)) > 0) \
+      AND ($10 OR ",
+    alive_sql!("k.pod_namespace", "k.workload_kind", "k.workload_name"),
+    ") \
+    ORDER BY k.pod_namespace, k.workload_kind, k.workload_name \
+    LIMIT $8"
+);
 
 fn empty_to_none(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -3456,6 +3633,7 @@ fn parse_after(s: &str) -> Option<(String, String, String)> {
     ([a, b, c].iter().all(|x| valid_segment(x))).then(|| (a.into(), b.into(), c.into()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn list_workloads(
     conn: &mut PgConnection,
     namespace: Option<&str>,
@@ -3463,9 +3641,10 @@ pub fn list_workloads(
     status: Option<&str>,
     search: Option<&str>,
     after: Option<&(String, String, String)>,
+    include_gone: bool,
     limit: i64,
 ) -> Result<Value, DbError> {
-    let mut rows: Vec<LatestRow> = sql_query(LIST_SQL)
+    let mut rows: Vec<ListRow> = sql_query(LIST_SQL)
         .bind::<Text, _>(DEFAULT_CLUSTER_ID)
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Nullable<Text>, _>(kind)
@@ -3475,6 +3654,7 @@ pub fn list_workloads(
         .bind::<Nullable<Text>, _>(after.map(|a| a.2.as_str()))
         .bind::<BigInt, _>(limit + 1)
         .bind::<Nullable<Text>, _>(search)
+        .bind::<diesel::sql_types::Bool, _>(include_gone)
         .load(conn)?;
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -3496,10 +3676,12 @@ pub fn list_workloads(
                 "name": r.workload_name,
                 "revision": r.revision,
                 "contentHash": r.content_hash,
-                "computedAt": utc(r.computed_at),
-                "lastChangedAt": utc(r.last_changed_at),
+                "computedAt": r.computed_at.map(utc),
+                "lastChangedAt": r.last_changed_at.map(utc),
+                "lastError": r.last_error,
+                "failedAt": r.failed_at.map(utc),
             });
-            if let (Value::Object(m), Value::Object(s)) = (&mut item, r.summary) {
+            if let (Value::Object(m), Some(Value::Object(s))) = (&mut item, r.summary) {
                 m.extend(s);
             }
             item
@@ -3548,6 +3730,7 @@ pub async fn get_workloads(
     let namespace = empty_to_none(q.namespace);
     let kind = empty_to_none(q.kind);
     let search = empty_to_none(q.search).filter(|x| x.len() <= MAX_SEGMENT);
+    let include_gone = q.include_gone.unwrap_or(false);
     let _permit = match budget
         .acquire(cost_kib(limit + 1, LIST_ROW_COST_BYTES))
         .await
@@ -3564,6 +3747,7 @@ pub async fn get_workloads(
             status.as_deref(),
             search.as_deref(),
             after.as_ref(),
+            include_gone,
             limit,
         )
     })
@@ -5311,6 +5495,15 @@ mod tests {
     }
 
     #[test]
+    fn list_query_parses_include_gone() {
+        let q: ListQuery = serde_urlencoded::from_str("limit=5&include_gone=true").unwrap();
+        assert_eq!((q.limit, q.include_gone), (Some(5), Some(true)));
+        let q: ListQuery = serde_urlencoded::from_str("namespace=shop").unwrap();
+        assert_eq!(q.include_gone, None);
+        assert!(serde_urlencoded::from_str::<ListQuery>("include_gone=maybe").is_err());
+    }
+
+    #[test]
     fn snapshot_hash_ignores_timestamps_and_counts() {
         let mut s = Sources {
             containers: vec![container("app", restricted())],
@@ -6013,6 +6206,7 @@ mod live_tests {
              DELETE FROM pod_details WHERE pod_namespace = '{ns}'; \
              DELETE FROM audit_verdicts WHERE policy_namespace = '{ns}'; \
              DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_failures WHERE pod_namespace = '{ns}'; \
              DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
         ))
         .expect("reset");
@@ -6662,12 +6856,13 @@ mod live_tests {
         );
 
         // The snapshotter tick picks the workload up and fills the read model.
-        let (done, _) = snapshot_tick(&mut conn, 100_000, 50).unwrap();
-        assert!(done >= 1);
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let t = snapshot_tick(&mut conn, 100_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 1);
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["name"], json!("checkout"));
         assert_eq!(l["items"][0]["posture"]["status"], json!("risk"));
-        let l = list_workloads(&mut conn, Some(ns), None, Some("ok"), None, None, 10).unwrap();
+        let l =
+            list_workloads(&mut conn, Some(ns), None, Some("ok"), None, None, false, 10).unwrap();
         assert_eq!(l["items"], json!([]));
 
         // Unknown workload: nothing at all.
@@ -6776,7 +6971,7 @@ mod live_tests {
         ));
 
         // List endpoint reads the latest row.
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"].as_array().unwrap().len(), 1);
         assert_eq!(l["items"][0]["revision"], json!(4));
         assert_eq!(
@@ -6817,7 +7012,7 @@ mod live_tests {
             store_with_head(&mut conn, &k, &p, 50, Some(stale_head.clone())).unwrap(),
             SnapshotOutcome::LostRace(5)
         );
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["revision"], json!(4));
         // An identical row at that revision is not a conflict.
         conn.batch_execute(&format!(
@@ -6836,7 +7031,7 @@ mod live_tests {
         ))
         .unwrap();
         store_snapshot(&mut conn, &k, &p, 50).unwrap();
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
         assert_eq!(l["items"][0]["revision"], json!(99));
 
         // Unknown workload.
@@ -6851,6 +7046,216 @@ mod live_tests {
             diff_versions(&mut conn, &unknown, None, None).unwrap(),
             DiffResult::NoVersions
         ));
+        reset(&mut conn, ns);
+    }
+    /// `GET /workloads` lists workloads with alive pods unless
+    /// `include_gone`; a failed attempt is carried as `lastError` /
+    /// `failedAt` beside the last good profile, a failed-only workload is
+    /// listed with null profile fields, and a computed profile clears it.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_list_hides_gone_workloads_and_reports_failures() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-gone";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, 'c', "{}");
+        let d = format!("sha256:{}", "d".repeat(64));
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) \
+             VALUES ('retired-1', '10.0.0.31', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'retired'), \
+                    ('ghost-1', '10.0.0.32', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'ghost') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = EXCLUDED.is_dead, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name; \
+             INSERT INTO images (digest, repository, tags, digest_kind) VALUES ('{d}', 'ghcr.io/example/retired', '{{1}}', 'repo') \
+             ON CONFLICT (digest) DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, image_digest, \
+               container_kind, image_ref, last_pod_name, state, state_reason, last_seen) \
+             VALUES ('{ns}', 'Deployment', 'retired', 'app', '{d}', 'regular', 'ghcr.io/example/retired:1', 'retired-1', \
+               'terminated', 'Completed', timezone('UTC', NOW()) - INTERVAL '1 day');"
+        ))
+        .unwrap();
+        let k = |n: &str| Key {
+            namespace: ns.into(),
+            kind: "Deployment".into(),
+            name: n.into(),
+        };
+        let names = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = |conn: &mut PgConnection, gone: bool, limit: i64| {
+            list_workloads(conn, Some(ns), None, None, None, None, gone, limit).unwrap()
+        };
+
+        // Nothing computed yet: a failure alone puts the workload on the list.
+        record_failure(&mut conn, &k("ghost"), "boom").unwrap();
+        let l = list(&mut conn, false, 10);
+        assert_eq!(names(&l), vec!["ghost"]);
+        let g = &l["items"][0];
+        assert_eq!(g["lastError"], json!("boom"));
+        assert!(g["failedAt"].is_string());
+        assert!(
+            g["revision"].is_null() && g["computedAt"].is_null() && g["posture"].is_null(),
+            "{g}"
+        );
+
+        // A tick computes checkout, ghost (pod only) and retired (inventory only).
+        let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 3, "{t:?}");
+        let l = list(&mut conn, false, 10);
+        assert_eq!(
+            names(&l),
+            vec!["checkout", "ghost"],
+            "no alive pod: not listed"
+        );
+        let g = &l["items"][1];
+        assert!(
+            g["lastError"].is_null() && g["failedAt"].is_null(),
+            "a computed profile clears the failure: {g}"
+        );
+        assert_eq!(g["revision"], json!(1));
+        assert_eq!(
+            names(&list(&mut conn, true, 10)),
+            vec!["checkout", "ghost", "retired"]
+        );
+
+        // A later failure sits beside the last good profile, cut to size.
+        record_failure(
+            &mut conn,
+            &k("checkout"),
+            &"x".repeat(FAILURE_MESSAGE_MAX + 50),
+        )
+        .unwrap();
+        let l = list(&mut conn, false, 10);
+        let c = &l["items"][0];
+        assert_eq!(c["name"], json!("checkout"));
+        assert_eq!(c["revision"], json!(1));
+        assert!(c["posture"]["status"].is_string());
+        assert_eq!(c["lastError"].as_str().unwrap().len(), FAILURE_MESSAGE_MAX);
+        assert!(c["failedAt"].is_string());
+
+        // The cursor walks computed and failed-only rows in one key order.
+        let p1 = list_workloads(&mut conn, Some(ns), None, None, None, None, true, 1).unwrap();
+        assert_eq!(names(&p1), vec!["checkout"]);
+        let after = parse_after(p1["nextAfter"].as_str().unwrap()).unwrap();
+        let p2 =
+            list_workloads(&mut conn, Some(ns), None, None, None, Some(&after), true, 1).unwrap();
+        assert_eq!(names(&p2), vec!["ghost"]);
+
+        // A failure row with no source data behind it is pruned; the
+        // recompute clears checkout's.
+        record_failure(&mut conn, &k("vanished"), "gone").unwrap();
+        snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        let l = list(&mut conn, true, 10);
+        assert_eq!(names(&l), vec!["checkout", "ghost", "retired"]);
+        assert!(l["items"][0]["lastError"].is_null());
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name IN ('retired-1', 'ghost-1')")
+            .unwrap();
+        reset(&mut conn, ns);
+    }
+
+    /// Candidates: alive workloads before gone ones, never attempted
+    /// before least recently attempted (computed or failed), and the keys
+    /// already visited this tick left out.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_snapshot_candidates_put_alive_workloads_first() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-order";
+        reset(&mut conn, ns);
+        // a: alive, never attempted; c: alive, computed an hour ago; e:
+        // alive, failed half an hour ago; b: gone, never attempted; d:
+        // gone, computed two hours ago.
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) VALUES \
+               ('ord-a-1', '10.0.1.1', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'a'), \
+               ('ord-c-1', '10.0.1.3', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'c'), \
+               ('ord-e-1', '10.0.1.5', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'e'), \
+               ('ord-b-1', '10.0.1.2', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'b'), \
+               ('ord-d-1', '10.0.1.4', '{ns}', timezone('UTC', NOW()), 'n1', true, 'Deployment', 'd') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = EXCLUDED.is_dead, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name; \
+             INSERT INTO workload_syscalls (pod_namespace, workload_kind, workload_name, syscalls, arches, hash, updated_at, syscall_count) VALUES \
+               ('{ns}', 'Deployment', 'b', 'exit', 'x86_64', 'b', timezone('UTC', NOW()), 1), \
+               ('{ns}', 'Deployment', 'd', 'exit', 'x86_64', 'd', timezone('UTC', NOW()), 1);"
+        ))
+        .unwrap();
+        let k = |n: &str| Key {
+            namespace: ns.into(),
+            kind: "Deployment".into(),
+            name: n.into(),
+        };
+        snapshot_one(&mut conn, &k("c"), 50).unwrap();
+        snapshot_one(&mut conn, &k("d"), 50).unwrap();
+        record_failure(&mut conn, &k("e"), "timeout").unwrap();
+        conn.batch_execute(&format!(
+            "UPDATE workload_profile_latest SET computed_at = timezone('UTC', NOW()) - INTERVAL '1 hour' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'c'; \
+             UPDATE workload_profile_latest SET computed_at = timezone('UTC', NOW()) - INTERVAL '2 hours' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'd'; \
+             UPDATE workload_profile_failures SET failed_at = timezone('UTC', NOW()) - INTERVAL '30 minutes' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'e';"
+        ))
+        .unwrap();
+        let ours = |rows: &[KeyRow]| -> Vec<String> {
+            rows.iter()
+                .filter(|r| r.ns == ns)
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let all = candidates(&mut conn, 100_000, &[]).unwrap();
+        assert_eq!(ours(&all), vec!["a", "c", "e", "b", "d"]);
+        let seen: Vec<KeyRow> = all
+            .into_iter()
+            .filter(|r| r.ns == ns && (r.name == "a" || r.name == "c"))
+            .collect();
+        assert_eq!(
+            ours(&candidates(&mut conn, 100_000, &seen).unwrap()),
+            vec!["e", "b", "d"]
+        );
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name LIKE 'ord-%'")
+            .unwrap();
+        reset(&mut conn, ns);
+    }
+
+    /// A tick takes one batch with no budget, and batches until no
+    /// candidate is left with one.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_snapshot_tick_takes_batches_until_the_budget_is_spent() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-tick";
+        reset(&mut conn, ns);
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, workload_kind, workload_name) VALUES \
+               ('bud-1-1', '10.0.2.1', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-1'), \
+               ('bud-2-1', '10.0.2.2', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-2'), \
+               ('bud-3-1', '10.0.2.3', '{ns}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'bud-3') \
+             ON CONFLICT (pod_name) DO UPDATE SET pod_namespace = EXCLUDED.pod_namespace, is_dead = false, \
+               workload_kind = EXCLUDED.workload_kind, workload_name = EXCLUDED.workload_name;"
+        ))
+        .unwrap();
+        let t = snapshot_tick(&mut conn, 1, 50, Duration::ZERO).unwrap();
+        assert_eq!((t.batches, t.computed + t.failed), (1, 1), "{t:?}");
+        let t = snapshot_tick(&mut conn, 1, 50, Duration::from_secs(600)).unwrap();
+        assert!(
+            t.batches >= 2 && t.batches == t.computed + t.failed,
+            "{t:?}"
+        );
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let names: Vec<&str> = l["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["bud-1", "bud-2", "bud-3"]);
+        conn.batch_execute("DELETE FROM pod_details WHERE pod_name LIKE 'bud-%'")
+            .unwrap();
         reset(&mut conn, ns);
     }
 }
