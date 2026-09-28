@@ -5,6 +5,7 @@ import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 import { resolveBaseUrl, endpointHint } from "./baseUrl.js";
+import type { Emit } from "./events.js";
 
 const MAX_TOOL_ROUNDS = 10;
 
@@ -28,9 +29,15 @@ function toGeminiError(url: string, error: any): Error {
   return new Error(`Gemini API error: ${detail}${hint}`, { cause: error });
 }
 
+/**
+ * Drive a chat turn against Gemini. There is no streaming path yet; when
+ * `emit` is supplied the tool rounds still surface tool_use/tool_result
+ * activity so the caller can show progress while the answer is produced.
+ */
 export async function callGemini(
   request: ChatRequest,
-  mcpClient: McpClient
+  mcpClient: McpClient,
+  emit?: Emit,
 ): Promise<ChatResponse> {
   // Trim before empty-check; whitespace-only counts as not-configured.
   const apiKey = process.env.GOOGLE_API_KEY?.trim();
@@ -122,6 +129,15 @@ export async function callGemini(
       parts: content.parts,
     });
 
+    // Gemini function calls carry an id only on some models; synthesise one
+    // so the activity events always identify the call.
+    const callId = (part: any, i: number): string => part.functionCall.id || `call_${round}_${i}`;
+    if (emit) {
+      functionCalls.forEach((part: any, i: number) => {
+        emit({ type: "tool_use", name: part.functionCall.name, id: callId(part, i) });
+      });
+    }
+
     // Execute function calls and build responses
     const functionResponses = await Promise.all(
       functionCalls.map(async (part: any) => {
@@ -129,6 +145,7 @@ export async function callGemini(
           name: part.functionCall.name,
           arguments: part.functionCall.args,
         });
+        emit?.({ type: "tool_result", name: part.functionCall.name, ok: !result.error });
         return {
           functionResponse: {
             name: part.functionCall.name,

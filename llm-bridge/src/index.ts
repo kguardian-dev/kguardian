@@ -8,12 +8,12 @@ import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
 import { McpClient } from "./mcpClient.js";
 import { log } from "./logger.js";
-import { callOpenAI, callCopilot } from "./providers/openai.js";
-import { callAnthropic, streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
+import { streamOpenAI, streamCopilot } from "./providers/openai.js";
+import { streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
 import { MCP_PATH, mcpConfigFromEnv } from "./mcp/config.js";
 import { createMcpRouter } from "./mcp/router.js";
-import type { ChatRequest, ChatResponse } from "./types/index.js";
+import type { ChatRequest } from "./types/index.js";
 
 // Load environment variables
 dotenv.config();
@@ -112,23 +112,6 @@ function resolveProvider(chatRequest: ChatRequest): ProviderResolution {
   return { ok: true, provider };
 }
 
-// Non-streaming dispatch to a provider. Used by the JSON route directly and by
-// the SSE route for providers that don't have a native streaming path yet.
-function callProvider(provider: LLMProvider, chatRequest: ChatRequest): Promise<ChatResponse> {
-  switch (provider) {
-    case LLMProvider.OPENAI:
-      return callOpenAI(chatRequest, mcpClient);
-    case LLMProvider.ANTHROPIC:
-      return callAnthropic(chatRequest, mcpClient);
-    case LLMProvider.GEMINI:
-      return callGemini(chatRequest, mcpClient);
-    case LLMProvider.COPILOT:
-      return callCopilot(chatRequest, mcpClient);
-    default:
-      return Promise.reject(new Error(`Unknown provider: ${provider}`));
-  }
-}
-
 // Health check endpoint. `status` and `hasProvider` are load-bearing — the
 // chart's liveness/readiness probes and the frontend's provider gate read
 // them — so `mcp` is added alongside rather than reshaping the body.
@@ -160,9 +143,9 @@ const chatLimiter = rateLimit({
 
 // Streaming chat endpoint (Server-Sent Events). Emits incremental `text`,
 // summarized `thinking`, and `tool_use`/`tool_result` activity events, then a
-// terminal `done` (or `error`). Anthropic streams natively; other providers
-// run non-streaming and arrive as a single `text` chunk, so the frontend can
-// use one consistent stream transport for every provider.
+// terminal `done` (or `error`). Anthropic, OpenAI and Copilot stream natively;
+// Gemini runs non-streaming and arrives as a single `text` chunk after its
+// tool activity, so the frontend uses one stream transport for every provider.
 app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) => {
   let chatRequest: ChatRequest;
   let provider: LLMProvider;
@@ -216,19 +199,29 @@ app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) =>
   log.debug(`Processing streaming chat request with provider: ${provider}`);
 
   try {
-    if (provider === LLMProvider.ANTHROPIC) {
-      await streamAnthropic(chatRequest, mcpClient, emit, abort.signal);
-    } else {
-      // Providers without a native streaming path: run to completion and emit
-      // the answer as a single text chunk plus the terminal done event.
-      const response = await callProvider(provider, chatRequest);
-      emit({ type: "text", delta: response.message });
-      emit({ type: "done", model: response.model });
+    switch (provider) {
+      case LLMProvider.ANTHROPIC:
+        await streamAnthropic(chatRequest, mcpClient, emit, abort.signal);
+        break;
+      case LLMProvider.OPENAI:
+        await streamOpenAI(chatRequest, mcpClient, emit, abort.signal);
+        break;
+      case LLMProvider.COPILOT:
+        await streamCopilot(chatRequest, mcpClient, emit, abort.signal);
+        break;
+      case LLMProvider.GEMINI: {
+        // No native streaming path yet: tool activity is emitted as it
+        // happens and the answer arrives as one text chunk.
+        const response = await callGemini(chatRequest, mcpClient, emit);
+        emit({ type: "text", delta: response.message });
+        emit({ type: "done", model: response.model });
+        break;
+      }
     }
   } catch (error) {
     // Map upstream rate-limit / overload to a clear, actionable message rather
     // than leaking a raw SDK string. A client disconnect does NOT reach here —
-    // streamAnthropic returns cleanly on abort.
+    // the streaming providers return cleanly on abort.
     const status = (error as { status?: number })?.status;
     const detail =
       status === 429
