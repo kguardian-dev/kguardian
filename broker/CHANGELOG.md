@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.4](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.3...broker/v1.19.4) (2026-09-28)
+
+
+### Bug Fixes
+
+* **broker:** 503 on statement timeouts; cheaper policy and list reads ([#1781](https://github.com/kguardian-dev/kguardian/issues/1781)) ([dd65287](https://github.com/kguardian-dev/kguardian/commit/dd65287f547ee76e227ea8491221aba7de1321b7))
+* **broker:** add GET /node/status and name the nodes the stale sweep marks dead ([53119a2](https://github.com/kguardian-dev/kguardian/commit/53119a2d48d3f3f7f95641873b1f2c0d1b99436a))
+* **broker:** emit the Cilium deny-all with one empty rule per direction ([bb24a48](https://github.com/kguardian-dev/kguardian/commit/bb24a4862ae57599a795a701298dff6171294975))
+* **broker:** node-only ingress is not exposed; gone workloads leave the list; partial profiles instead of 500s; SBOMs follow their reports ([#1780](https://github.com/kguardian-dev/kguardian/issues/1780)) ([7f8a10f](https://github.com/kguardian-dev/kguardian/commit/7f8a10fc7c8fe05b008b890afbb597c90fe0c752))
+* **controller:** budget the pod loops and surface nodes that stop reporting pods ([43cbb55](https://github.com/kguardian-dev/kguardian/commit/43cbb55eda9c9a111464819924bf7d90c4284285))
+* emit Cilium deny-all policies with the rule sections the CRD requires ([4a56e7f](https://github.com/kguardian-dev/kguardian/commit/4a56e7fe8be6889fc593a26865428e109f6a9831))
+
 ## [1.19.3](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.2...broker/v1.19.3) (2026-09-28)
 
 
