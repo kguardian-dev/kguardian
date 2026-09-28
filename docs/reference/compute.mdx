@@ -51,7 +51,9 @@ and no `/sys/fs/cgroup` mount.
 **Broker** (`kguardian-broker` Deployment) — rendered regardless of
 `compute.enabled`, so a cluster that turns the feature off still prunes what
 it collected. Two windows are fixed and run whatever `retentionDays` is: a
-container's live row goes 10 minutes after its node last reported it, and a
+container's live row goes 10 minutes after its node last reported it (in
+batches of `AUDIT_VERDICTS_RETENTION_BATCH_SIZE` rows, so a backlog of dead
+containers is worked off across a pass rather than one batch per pass), and a
 node's row goes about an hour after the node last reported at all (the pass
 runs every 600 s), so a node that left the cluster drops out of
 `GET /compute/nodes` about an hour after its last report.
