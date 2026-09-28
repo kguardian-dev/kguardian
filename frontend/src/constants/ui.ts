@@ -20,12 +20,18 @@ export const UI_DIMENSIONS = {
   TABLE_DEFAULT_HEIGHT: 320, // h-80
   TABLE_MIN_HEIGHT: 100,
   TABLE_MAX_HEIGHT_RATIO: 0.8, // 80% of available height
+
+  // Network map: React Flow's `.react-flow__panel` margin. The overlays
+  // (toolbar, summary, legend) sit this far inside the pane, and the fit
+  // keeps their strips clear.
+  MAP_PANEL_MARGIN: 15,
+  // The map may zoom out this far so a wide namespace's extremes still fit.
+  MAP_MIN_ZOOM: 0.2,
 } as const;
 
 // Animation durations (in milliseconds)
 export const UI_TIMING = {
   RESIZE_DEBOUNCE: 100,
-  FIT_VIEW_DELAY: 100,
   FIT_VIEW_DURATION: 400,
   TRANSITION_DURATION: 300,
 } as const;

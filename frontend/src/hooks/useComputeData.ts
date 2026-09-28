@@ -50,11 +50,25 @@ export const COMPUTE_SEED_MAX_BACKOFF_MS = 300_000;
  */
 export const COMPUTE_MISSED_POLLS_BEFORE_DROP = 3;
 
+/**
+ * Cap on the back-off after a failed `/compute/latest` poll.
+ *
+ * The interval doubles per consecutive failure (10 s, 20 s, 40 s, ...) up to
+ * this. A broker hitting its statement timeout answered every poll with a
+ * 30 s statement it never finished; re-polling on the interval stacked those
+ * statements up. One good poll resets the interval.
+ */
+export const COMPUTE_POLL_MAX_BACKOFF_MS = 300_000;
+
 export interface UseComputeDataOptions {
   /** Latest-rows poll interval; ≤ 0 disables polling (fetch once). */
   pollMs?: number;
   /** Findings poll interval. */
   findingsPollMs?: number;
+  /** False while no mounted view reads compute data (the Images view): no
+   *  requests, no timers. Polling starts, with an immediate refresh, when it
+   *  turns true. Default true. */
+  enabled?: boolean;
   /** Test hook: the API to call. */
   api?: Pick<typeof apiClient, 'getComputeLatest' | 'getComputeFindings' | 'getComputeNodes' | 'getComputeHistory'>;
 }
@@ -84,6 +98,10 @@ export interface ComputeData {
   /** Last transient failure (network, 5xx). Cleared by the next good poll;
    *  polling continues. Never set for `unsupported`. */
   error: string | null;
+  /** True while the live `/compute/latest` poll is failing (timeout, 5xx,
+   *  network) and being retried with back-off: the gauges on screen are stale
+   *  or absent. Cleared by the next good poll. Never set for `unsupported`. */
+  unavailable: boolean;
   /** When the last successful `/compute/latest` landed. The sparklines end
    *  their window here rather than at a `Date.now()` read per card, so every
    *  chart in a render pass puts the same instant at the same x — and render
@@ -114,6 +132,7 @@ function describe(err: unknown): string {
 export function useComputeData(namespace: string, opts: UseComputeDataOptions = {}): ComputeData {
   const pollMs = opts.pollMs ?? COMPUTE_POLL_MS;
   const findingsPollMs = opts.findingsPollMs ?? COMPUTE_FINDINGS_POLL_MS;
+  const polling = opts.enabled ?? true;
   const api = opts.api ?? apiClient;
 
   const [containers, setContainers] = useState<ComputeContainer[]>([]);
@@ -121,8 +140,12 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   const [findings, setFindings] = useState<ComputeFinding[]>([]);
   const [findingsMeta, setFindingsMeta] = useState<ComputeFindingsMeta>(NO_META);
   const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
   const [supported, setSupported] = useState(true);
   const [polledAt, setPolledAt] = useState(0);
+  /** Consecutive failed latest polls, and the earliest time to poll again. */
+  const latestFailures = useRef(0);
+  const latestNotBefore = useRef(0);
 
   // Request generation: bumped on every namespace change. A response whose
   // generation is no longer current (the user switched namespace while it
@@ -253,13 +276,16 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   }, [api]);
 
   const refreshLatest = useCallback(async () => {
-    if (inflightLatest.current) return;
+    // One poll at a time, and none inside the back-off window after a failure.
+    if (inflightLatest.current || Date.now() < latestNotBefore.current) return;
     inflightLatest.current = true;
     const gen = generation.current;
     try {
       const res = await api.getComputeLatest(namespace);
       if (gen !== generation.current) return; // stale: namespace changed while in flight
       const now = Date.now();
+      latestFailures.current = 0;
+      latestNotBefore.current = 0;
       const byUid = new Map<string, ComputeContainer[]>();
       for (const c of res.containers) {
         const list = byUid.get(c.pod_uid);
@@ -308,14 +334,21 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       setHistory(new Map(history));
       setPolledAt(now);
       setError(null);
+      setUnavailable(false);
     } catch (err) {
       if (gen !== generation.current) return;
-      if (err instanceof ComputeUnsupportedError) markUnsupported(err);
-      else setError(describe(err));
+      if (err instanceof ComputeUnsupportedError) {
+        markUnsupported(err);
+      } else {
+        latestFailures.current += 1;
+        latestNotBefore.current = Date.now() + Math.min(Math.max(pollMs, 0) * 2 ** latestFailures.current, COMPUTE_POLL_MAX_BACKOFF_MS);
+        setError(describe(err));
+        setUnavailable(true);
+      }
     } finally {
       if (gen === generation.current) inflightLatest.current = false;
     }
-  }, [api, namespace, markUnsupported]);
+  }, [api, namespace, pollMs, markUnsupported]);
 
   const refreshFindings = useCallback(async () => {
     if (inflightFindings.current) return;
@@ -376,6 +409,8 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     historyDisabledRef.current = false;
     inflightLatest.current = false;
     inflightFindings.current = false;
+    latestFailures.current = 0;
+    latestNotBefore.current = 0;
     /* eslint-disable react-hooks/set-state-in-effect -- reset-on-namespace, same shape as DataTable's reset-on-pod */
     setContainers([]);
     setNodes([]);
@@ -383,6 +418,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     setFindingsMeta(NO_META);
     setHistory(new Map());
     setError(null);
+    setUnavailable(false);
     setSupported(true);
     setPolledAt(0);
     /* eslint-enable react-hooks/set-state-in-effect */
@@ -390,6 +426,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
 
   useEffect(() => {
     if (!supported) return; // an older broker: no timers, no listeners, nothing to clean up
+    if (!polling) return; // no mounted view reads compute data: nothing is fetched
     if (!hidden()) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, same as useSeccompProfiles
       void loadNodes();
@@ -414,7 +451,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       timers.forEach(clearInterval);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [refreshLatest, refreshFindings, loadNodes, pollMs, findingsPollMs, supported]);
+  }, [refreshLatest, refreshFindings, loadNodes, pollMs, findingsPollMs, supported, polling]);
 
   const containersByPodUid = useMemo(() => {
     const m = new Map<string, ComputeContainer[]>();
@@ -451,6 +488,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     enabled,
     supported,
     error,
+    unavailable,
     polledAt,
     seedPod,
   };

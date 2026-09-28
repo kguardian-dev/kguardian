@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
+import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge, TriangleAlert } from 'lucide-react';
 import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import { cardPods, countSyscalls, podNodePropsEqual, type PodNodeRenderData } from './podNodeMemo';
 import type { PodComputeData } from '../types/compute';
@@ -54,6 +54,29 @@ const LENS_TONE_CLASS: Record<LensBadge['tone'], string> = {
   neutral: 'bg-hubble-border/30 text-secondary border-hubble-border',
   unknown: 'text-tertiary border-dashed border-hubble-border-strong',
 };
+
+/** What failed, for the card badge; null when every read answered. */
+function readFailureLabel(trafficError: boolean | undefined, syscallsError: boolean | undefined): string | null {
+  if (trafficError && syscallsError) return 'traffic and syscall reads failed';
+  if (trafficError) return 'traffic read failed';
+  if (syscallsError) return 'syscall read failed';
+  return null;
+}
+
+/** Amber, not the lens "unknown" tone: a failed read is an event to act on
+ *  (Refresh retries it), not an absence of data. */
+const ReadFailedBadge: React.FC<{ label: string }> = ({ label }) => (
+  <div
+    className="mt-1 inline-flex items-center gap-1 rounded border border-hubble-warning/40 bg-hubble-warning/10 px-1 text-[10px] font-mono font-semibold leading-4 text-hubble-warning"
+    title={`${label[0].toUpperCase()}${label.slice(1)}: the broker did not answer within the client timeout, so this card may be missing flows. Refresh to retry.`}
+    role="img"
+    aria-label={`${label}; flows may be missing, refresh to retry`}
+    data-testid="read-failed-badge"
+  >
+    <TriangleAlert className="w-3 h-3" />
+    {label}
+  </div>
+);
 
 const LensBadgeChip: React.FC<{ badge: LensBadge }> = ({ badge }) => (
   <span
@@ -195,6 +218,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const compute = data.compute;
   const lensBadge = data.lensBadge;
   const gauged = compute !== undefined && hasComputeGauges(compute);
+  const readFailure = readFailureLabel(data.trafficError, data.syscallsError);
   // DaemonSet / host-network peers (see utils/daemonSetPeers) take the same
   // teal as their toolbar toggle and their edges — colour alone carries the
   // association, no tag text on the card.
@@ -263,6 +287,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
                 {podCount} {isExternal ? (AGGREGATE_NAMESPACES.has(data.externalNamespace ?? '') ? 'IPs' : 'pods') : 'replicas'}
               </div>
             )}
+            {readFailure && <ReadFailedBadge label={readFailure} />}
             {gauged && <ComputeMicroBar compute={compute} />}
           </div>
         </div>
@@ -279,7 +304,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
           {gauged && <ComputeDetail compute={compute} />}
           {trafficCount === 0 && syscallCount === 0 ? (
             <div className="text-xs text-tertiary italic">
-              No traffic or syscalls recorded yet
+              {readFailure ? 'Traffic unknown: the read failed' : 'No traffic or syscalls recorded yet'}
             </div>
           ) : (
             <div className="flex gap-3 text-xs">

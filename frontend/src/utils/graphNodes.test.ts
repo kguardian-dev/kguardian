@@ -19,6 +19,17 @@ describe('placeNodes (a layout result)', () => {
     const out = placeNodes([node('a'), node('b')], new Map([['a', { x: 10, y: 20 }]]));
     expect(out.map((n) => n.position)).toEqual([{ x: 10, y: 20 }, UNPLACED]);
   });
+  // React Flow keeps a node's handle bounds per id but not its width and
+  // height, so a re-placed node read as "initialized" while unmeasured and the
+  // fit that followed a focus, a layout toggle or a filter change was lost.
+  test('a re-placed node keeps its measured size; a new id has none until React Flow measures it', () => {
+    const laid = placeNodes([node('a')], new Map([['a', { x: 1, y: 1 }]]));
+    const measured = laid.map((n) => ({ ...n, width: 240, height: 96 }));
+    const out = placeNodes([node('a'), node('b')], new Map([['a', { x: 5, y: 5 }], ['b', { x: 9, y: 9 }]]), measured);
+    expect(out[0]).toMatchObject({ position: { x: 5, y: 5 }, width: 240, height: 96 });
+    expect(out[1].width).toBeUndefined();
+    expect(out[1].height).toBeUndefined();
+  });
 });
 
 describe('pruneNodes (a layout-signature change)', () => {
@@ -152,6 +163,61 @@ describe('keepOnMap (Traffic filter)', () => {
   });
   test('a pod on a contention edge stays', () => {
     expect(keepOnMap({ id: 'v', traffic: [] }, true, new Set(['v']), gauges)).toBe(true);
+  });
+  // MAP-03: a timed-out read used to come back as no flows and the card vanished.
+  test('a pod whose traffic read failed is never hidden: unknown is not flow-less', () => {
+    expect(keepOnMap({ id: 'a', traffic: [], trafficError: true }, true, null, gauges)).toBe(true);
+    expect(keepOnMap({ id: 'a', traffic: [], trafficError: false }, true, null, gauges)).toBe(false);
+  });
+});
+
+import { viewportForBounds } from './graphNodes';
+
+describe('viewportForBounds (fit with the overlay strips kept clear)', () => {
+  const pane = { width: 1000, height: 800 };
+  const none = { top: 0, right: 0, bottom: 0, left: 0 };
+  const opts = { padding: 0.2, minZoom: 0.2, maxZoom: 1 };
+  const screenRect = (b: { x: number; y: number; width: number; height: number }, v: { x: number; y: number; zoom: number }) => ({
+    left: b.x * v.zoom + v.x,
+    top: b.y * v.zoom + v.y,
+    right: (b.x + b.width) * v.zoom + v.x,
+    bottom: (b.y + b.height) * v.zoom + v.y,
+  });
+
+  test('with no insets it is React Flow\'s own fit: centred, padded, zoom capped', () => {
+    const bounds = { x: 0, y: 0, width: 500, height: 400 };
+    const v = viewportForBounds(bounds, pane, none, opts);
+    expect(v.zoom).toBe(1); // 1000/600 and 800/480 both exceed the cap
+    expect(v).toEqual({ x: 250, y: 200, zoom: 1 });
+  });
+
+  test('a top inset keeps the top row of cards below the toolbar strip', () => {
+    const bounds = { x: 0, y: 0, width: 500, height: 400 };
+    const v = viewportForBounds(bounds, pane, { ...none, top: 62 }, opts);
+    const r = screenRect(bounds, v);
+    expect(r.top).toBeGreaterThanOrEqual(62);
+    expect(r.bottom).toBeLessThanOrEqual(pane.height);
+    // Still centred in what is left of the pane.
+    expect(r.top - 62).toBeCloseTo(pane.height - r.bottom, 5);
+  });
+
+  test('a wide graph zooms out until its extremes are on screen', () => {
+    // MAP-11: at 1280x800 the Internet cards, placed at the extremes, fell
+    // off both sides.
+    const wide = { x: -360, y: 0, width: 3000, height: 600 };
+    const v = viewportForBounds(wide, { width: 1280, height: 800 }, { ...none, top: 62 }, opts);
+    const r = screenRect(wide, v);
+    expect(r.left).toBeGreaterThanOrEqual(0);
+    expect(r.right).toBeLessThanOrEqual(1280);
+    expect(r.top).toBeGreaterThanOrEqual(62);
+    expect(v.zoom).toBeLessThan(0.5); // React Flow's default minZoom would not have fitted this
+  });
+
+  test('zoom never drops below minZoom, and a degenerate pane does not divide by zero', () => {
+    const v = viewportForBounds({ x: 0, y: 0, width: 50_000, height: 10 }, pane, none, opts);
+    expect(v.zoom).toBe(0.2);
+    const tiny = viewportForBounds({ x: 0, y: 0, width: 0, height: 0 }, { width: 10, height: 10 }, { top: 20, right: 20, bottom: 20, left: 20 }, opts);
+    expect(Number.isFinite(tiny.x) && Number.isFinite(tiny.y) && Number.isFinite(tiny.zoom)).toBe(true);
   });
 });
 

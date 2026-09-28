@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef, Suspense } from 'react';
 import { lazyRetry } from './utils/lazyRetry';
-import { Bot, RefreshCw, Share2, ShieldAlert, FileCode, Boxes, Search, Lock, Layers, TriangleAlert, Package, Bug } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, FileCode, Boxes, Search, Lock, Layers, TriangleAlert, Package, Bug, X } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { RisksRoute } from './components/RisksView';
 import { ScopeChip } from './components/ScopeChip';
@@ -47,6 +47,8 @@ import type { MapLens, PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
 
 const MAP_LENSES: readonly MapLens[] = ['traffic', 'vulns', 'supply', 'coverage'];
+/** Views whose data is the resolved namespace's, so an unknown URL namespace is corrected there. */
+const NAMESPACE_DATA_VIEWS: ReadonlySet<View> = new Set<View>(['map', 'risks']);
 
 function App() {
   const { settings, updateSettings, toggleSetting } = useSettings();
@@ -84,8 +86,12 @@ function App() {
       navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, lens: v === 'map' ? loc.params.lens : undefined, ...extra }),
     [navigate, loc.params.ns, loc.params.pod, loc.params.focus, loc.params.lens],
   );
+  // Set when a deep link named a namespace with no monitored pods or an
+  // unknown lens: the URL is rewritten to what is shown, and this says so.
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
   const setNamespace = useCallback(
     (ns: string) => {
+      setRouteNotice(null);
       setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns }));
       // A namespace change clears the workload + focus. On a cluster-wide
       // view, picking a namespace is a filter: narrow to it (scope=ns). The
@@ -156,7 +162,7 @@ function App() {
   // `narrow` below), so a phone-first visit cannot leave desktop collapsed.
   const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
-  const { namespaces } = useNamespaces();
+  const { namespaces, loading: namespacesLoading, error: namespacesError } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
   // (the hardcoded 'default' usually isn't), resolve to the first real one so
   // the graph isn't empty on first paint. Derived rather than synced via an
@@ -167,7 +173,23 @@ function App() {
   // hook because the hook needs it: selection is what opens a card, and an
   // open card is the only thing that reads stored compute history.
   const selectedPodId = loc.params.pod ?? null;
-  const { pods: rawPods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId);
+  // Pod data is read by the map, Risks, Workloads and the workload page, and
+  // by the Policy Builder and AI Assistant wherever they open. The Images
+  // view reads none of it and used to pay the whole namespace load plus a
+  // 5 s compute poll for nothing; only the map and Risks draw gauges.
+  // Without a URL namespace the first run also waits for the namespace list,
+  // or it would fetch for the hardcoded default and race the real one.
+  const namespaceKnown = loc.params.ns !== undefined || !namespacesLoading;
+  const podDataEnabled = namespaceKnown && (view !== 'images' || isPolicyBuilderOpen || isAIAssistantOpen);
+  const computeEnabled = namespaceKnown && (view === 'map' || view === 'risks');
+  const { pods: rawPods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
+    enabled: podDataEnabled,
+    compute: computeEnabled,
+  });
+  // The map has nothing to show yet while the namespace list is still on its
+  // way: that wait is loading too, or `#/map` would flash "No workloads in
+  // default" for the whole of it.
+  const podsSettling = loading || !namespaceKnown;
   // The header Refresh is the one refresh control. Views with their own
   // broker data (seccomp profiles, audit verdicts) reload when this ticks.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -206,10 +228,19 @@ function App() {
   // the Policy Builder get the resolved pod, which genuinely needs a local
   // workload's traffic and syscalls. Passing the resolved id to the graph
   // would collapse every card the moment an external peer was selected.
-  const selectedPod = useMemo(
-    () => (selectedPodId ? pods.find((p) => p.id === selectedPodId) ?? null : null),
-    [pods, selectedPodId],
-  );
+  //
+  // A synthesised card (Service, Unattributed, Internet) is reported back by
+  // the graph, so the panel can show its traffic profile; the Policy Builder
+  // still ignores it (`isExternal`).
+  const [selectedExternal, setSelectedExternal] = useState<PodNodeData | null>(null);
+  const handleSelectedExternal = useCallback((node: PodNodeData | null) => {
+    // Reported on every data tick: keep the object while the rows the panel reads are the same ones.
+    setSelectedExternal((prev) => (prev && node && prev.id === node.id && prev.traffic === node.traffic ? prev : node));
+  }, []);
+  const selectedPod = useMemo(() => {
+    if (!selectedPodId) return null;
+    return pods.find((p) => p.id === selectedPodId) ?? (selectedExternal?.id === selectedPodId ? selectedExternal : null);
+  }, [pods, selectedPodId, selectedExternal]);
   // Selecting a card focuses it as well as opening it: one click means "show
   // me this workload", and the map isolates it with its direct peers.
   //
@@ -249,6 +280,30 @@ function App() {
       navigate(view, { ...loc.params, ns: effectiveNamespace }, { replace: true });
     }
   }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, navigate]);
+
+  // A deep link to a namespace with no monitored pods showed the first real
+  // one under the requested URL without a word; an unknown lens was dropped
+  // the same way. Rewrite the URL to what is shown and say so, once the
+  // namespace list is known (until then the requested one may yet be real;
+  // a list that failed to load is not authoritative either, and the link is
+  // left alone for Refresh to recover). Only where the substituted namespace
+  // IS what is shown: the workload page reads the URL's namespace as is (a
+  // profile-only workload can live in one with no live pods), and the
+  // cluster-wide views carry it as a filter.
+  const unknownLens = view === 'map' && loc.params.lens !== undefined && !(MAP_LENSES as readonly string[]).includes(loc.params.lens);
+  useEffect(() => {
+    if (redirect || namespacesLoading || namespacesError || namespaces.length === 0) return;
+    if (!NAMESPACE_DATA_VIEWS.has(view)) return;
+    const requested = loc.params.ns;
+    const unknownNamespace = requested !== undefined && requested !== effectiveNamespace;
+    if (!unknownNamespace && !unknownLens) return;
+    const notes: string[] = [];
+    if (unknownNamespace) notes.push(`Namespace "${requested}" has no monitored pods; showing ${effectiveNamespace}.`);
+    if (unknownLens) notes.push(`Unknown lens "${loc.params.lens}" ignored.`);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the notice records the URL rewrite made right below
+    setRouteNotice(notes.join(' '));
+    navigate(view, { ...loc.params, ns: effectiveNamespace, lens: unknownLens ? undefined : loc.params.lens }, { replace: true });
+  }, [redirect, namespacesLoading, namespacesError, namespaces.length, loc.params, effectiveNamespace, unknownLens, view, navigate]);
 
   // Narrow screens (below md, live on resize / rotation): the rail is a
   // 56px icon column, and expanding it opens an overlay over the content
@@ -394,6 +449,12 @@ function App() {
     navigate('map', { ns: loc.params.ns, pod: pod.id });
   }, [navigate, loc.params.ns]);
 
+  // A palette pick behaves like a click on the card: it opens AND focuses
+  // the workload (utils/mapSelection), with one history entry for the jump.
+  const handlePaletteSelect = useCallback((pod: PodNodeData) => {
+    navigate('map', paramsForSelection(pod.id, loc.params.ns));
+  }, [navigate, loc.params.ns]);
+
   // "View workload" on a compute finding (D7): the pod may live in another
   // namespace (a noisy neighbour is cross-namespace by nature), so resolve
   // its identity from the cluster-wide pod list and switch namespace with it.
@@ -431,20 +492,26 @@ function App() {
     namespaces.forEach((ns) =>
       list.push({ id: `ns-${ns}`, group: 'Namespaces', label: ns, icon: Boxes, keywords: 'namespace switch', run: () => setNamespace(ns) }),
     );
-    pods
-      .filter((p) => !p.isExternal)
-      .forEach((p) =>
-        list.push({
-          id: `pod-${p.id}`,
-          group: 'Workloads',
-          label: p.label || p.pod.pod_identity || p.pod.pod_name,
-          hint: p.pod.pod_namespace ?? undefined,
-          icon: Server,
-          run: () => handleFindingSelect(p),
-        }),
-      );
+    // While pod data is off (the Images view) `pods` is whatever loaded last,
+    // not the current namespace's workloads, so the group is not offered.
+    if (podDataEnabled) {
+      pods
+        .filter((p) => !p.isExternal)
+        .forEach((p) =>
+          list.push({
+            id: `pod-${p.id}`,
+            group: 'Workloads',
+            label: p.label || p.pod.pod_identity || p.pod.pod_name,
+            hint: p.pod.pod_namespace ?? undefined,
+            icon: Server,
+            // Member pod names, so a real pod name finds its workload.
+            keywords: (p.pods.length > 0 ? p.pods : [p.pod]).map((m) => m.pod_name).join(' '),
+            run: () => handlePaletteSelect(p),
+          }),
+        );
+    }
     return list;
-  }, [namespaces, pods, setView, openPolicyBuilder, setNamespace, handleFindingSelect]);
+  }, [namespaces, pods, podDataEnabled, setView, openPolicyBuilder, setNamespace, handlePaletteSelect]);
 
   // ⌘K jumps from what was typed: a CVE id opens its drawer, a full digest
   // its image.
@@ -508,9 +575,14 @@ function App() {
 
   const SECTION_TITLE: Record<View, string> = { map: 'Network Map', risks: 'Risks', workloads: 'Workloads', workload: 'Workload', images: 'Images' };
   const sectionTitle = view === 'workload' && loc.params.name ? loc.params.name : SECTION_TITLE[view];
+  // `pods` is one entry per workload identity; the pod count is its members.
+  const podTotal = useMemo(() => pods.reduce((n, p) => n + (p.pods?.length || 1), 0), [pods]);
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const sectionSubtitle =
     view === 'map'
-      ? `${pods.length} pods`
+      ? podsSettling && pods.length === 0
+        ? 'Loading…'
+        : `${plural(pods.length, 'workload')} · ${plural(podTotal, 'pod')}`
       : view === 'workload'
         ? loc.params.kind ?? ''
         : '';
@@ -605,6 +677,18 @@ function App() {
 
         {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {routeNotice && (
+          <div
+            role="status"
+            data-testid="route-notice"
+            className="shrink-0 flex items-center justify-between gap-3 px-6 py-2 text-xs bg-hubble-warning/10 border-b border-hubble-warning/30 text-primary"
+          >
+            <span>{routeNotice}</span>
+            <button type="button" onClick={() => setRouteNotice(null)} aria-label="Dismiss" className="text-tertiary hover:text-primary transition-colors">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         {view === 'workloads' ? (
           <Suspense fallback={null}>
             <WorkloadsView
@@ -668,6 +752,7 @@ function App() {
             computeFindings={compute.findings}
             computeEnabled={compute.enabled}
             computeMeta={compute.findingsMeta}
+            computeUnavailable={compute.supported && compute.unavailable}
             onViewWorkload={handleViewWorkload}
           />
         ) : (
@@ -678,7 +763,7 @@ function App() {
           </div>
         )}
 
-        {loading && pods.length === 0 ? (
+        {podsSettling && pods.length === 0 ? (
           <div className="flex-1 min-h-0">
             <GraphSkeleton />
           </div>
@@ -703,6 +788,8 @@ function App() {
                 pods={pods}
                 onPodSelect={handlePodSelect}
                 selectedPodId={selectedPodId}
+                onSelectedExternal={handleSelectedExternal}
+                computeUnavailable={compute.supported && compute.unavailable}
                 onBuildPolicy={handleBuildPolicy}
                 focusedNodeId={focusedNodeId}
                 onFocusChange={setFocusedNodeId}
@@ -795,6 +882,12 @@ function App() {
             workloads={pods.filter((p) => !p.isExternal)}
             initialPod={policyBuilderInitialPod}
             initialPolicyType={policyBuilderInitialType}
+            // The listings App already holds, so generation does not re-download
+            // the inventory; `loading` so the picker never reads "No workloads"
+            // while the namespace is still on its way.
+            podsLookup={allPodsLookup}
+            services={services}
+            loading={podsSettling}
           />
         </Suspense>
       )}

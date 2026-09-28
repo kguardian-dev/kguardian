@@ -5,15 +5,21 @@ import ReactFlow, {
   useEdgesState,
   MarkerType,
   useReactFlow,
+  useNodesInitialized,
+  useStoreApi,
+  getRectOfNodes,
   ReactFlowProvider,
   Panel,
 } from 'reactflow';
 import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
+import { Activity, ShieldAlert, Server, Crosshair, X, EyeOff, Gauge } from 'lucide-react';
 import PodNode from './PodNode';
 import ContentionEdge from './ContentionEdge';
+import TrafficEdge, { type TrafficEdgeData } from './TrafficEdge';
+import { Button } from './ui/Button';
+import { EmptyState } from './ui/EmptyState';
 import { EDGE_COLOR_CONTENTION, buildContentionEdges } from '../utils/contentionEdges';
 import { focusEdges, focusNeighborhood as focusNeighborhoodOf } from '../utils/focus';
 import { hasComputeGauges, nodeHeight } from '../utils/compute';
@@ -26,6 +32,7 @@ import {
   mergeNodeData,
   placeNodes,
   pruneNodes,
+  viewportForBounds,
   type LayoutIntent,
   type LayoutParts,
 } from '../utils/graphNodes';
@@ -36,7 +43,7 @@ import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, localWorkloadIndex, remoteNodeForRow } from '../utils/externalPeers';
 import type { MapLens, PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
-import { UI_TIMING } from '../constants/ui';
+import { UI_DIMENSIONS, UI_TIMING } from '../constants/ui';
 
 const elk = new ELK();
 
@@ -65,6 +72,12 @@ interface NetworkGraphProps {
   onToggleLayoutDirection: () => void;
   onPodSelect: (pod: PodNodeData | null) => void;
   selectedPodId: string | null;
+  /** The selected node's data when it is one the graph synthesises (a
+   *  Service, Unattributed or Internet card), else null. The caller's own
+   *  pod list never holds those, and the traffic panel needs the data. */
+  onSelectedExternal?: (pod: PodNodeData | null) => void;
+  /** The live compute poll is failing and backing off (hooks/useComputeData). */
+  computeUnavailable?: boolean;
   onBuildPolicy?: (pod: PodNodeData) => void;
   /** Focused node (URL `?focus=`), or null. Controlled by the caller so a
    *  focused view is shareable; the graph reports every change back. */
@@ -82,6 +95,7 @@ const nodeTypes = {
   podNode: PodNode,
 } as const;
 const edgeTypes = {
+  traffic: TrafficEdge,
   contention: ContentionEdge,
 } as const;
 
@@ -104,6 +118,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onToggleLayoutDirection,
   onPodSelect,
   selectedPodId,
+  onSelectedExternal,
+  computeUnavailable = false,
   onBuildPolicy,
   focusedNodeId,
   onFocusChange,
@@ -111,8 +127,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onLensChange,
   lensLegend,
 }) => {
-  const { fitView, setCenter, getViewport } = useReactFlow();
+  const { fitView, setCenter, setViewport, getViewport } = useReactFlow();
+  const store = useStoreApi();
+  // True once React Flow has measured every current node; a fit before that
+  // ignores the unmeasured ones (the Internet cards, placed last).
+  const nodesInitialized = useNodesInitialized();
   const paneRef = useRef<HTMLDivElement>(null);
+  // The overlay strips the fit keeps clear (measured at fit time).
+  const topLeftRef = useRef<HTMLDivElement>(null);
+  const topRightRef = useRef<HTMLDivElement>(null);
+  const bottomLeftRef = useRef<HTMLDivElement>(null);
 
   // Focus mode: isolate a node + its direct upstream/downstream, hide the rest,
   // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
@@ -258,14 +282,31 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   );
   const contentionCount = contention.edges.length;
 
-  const allDisplayPods = useMemo(() => {
+  const visiblePods = useMemo(() => {
     // A pod with an active contention edge stays on the map even when the
     // traffic filter would hide it: an edge to nothing explains nothing.
     const contentionIds = showContention ? new Set(contention.edges.flatMap((e) => [e.source, e.target])) : null;
-    const visiblePods = pods.filter((pod) => keepOnMap(pod, showTraffic, contentionIds, hasComputeGauges));
+    return pods.filter((pod) => keepOnMap(pod, showTraffic, contentionIds, hasComputeGauges));
+  }, [pods, showTraffic, showContention, contention]);
+  // Workloads the Traffic filter is hiding. When that is every workload the
+  // canvas is blank with "N pods" in the header, and nothing distinguished
+  // that from a namespace with no pods (the kguardian namespace itself, which
+  // the controller ignores, hits this on every install).
+  const hiddenByTrafficFilter = pods.length - visiblePods.length;
+
+  const allDisplayPods = useMemo(() => {
     const culprits = showContention ? contention.externalCulprits : [];
     return [...visiblePods, ...daemonSetPartition.visible, ...culprits];
-  }, [pods, daemonSetPartition, showTraffic, showContention, contention]);
+  }, [visiblePods, daemonSetPartition, showContention, contention]);
+
+  // The traffic panel lives in App and resolves the selection against the
+  // namespace's own pods; a Service, Unattributed or Internet card exists
+  // only here, so its data is reported back or the panel can never open.
+  useEffect(() => {
+    if (!onSelectedExternal) return;
+    const node = selectedPodId ? allDisplayPods.find((p) => p.id === selectedPodId && p.isExternal) ?? null : null;
+    onSelectedExternal(node);
+  }, [selectedPodId, allDisplayPods, onSelectedExternal]);
 
   // Focus is only meaningful while the focused node exists in the current
   // node set. Switching namespace (or the pod being deleted) used to leave
@@ -444,26 +485,21 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         label += ` (${dropCount} drop${dropCount > 1 ? 's' : ''})`;
       }
 
+      // The label is drawn by TrafficEdge through the label renderer, so a
+      // drop label can sit above the cards instead of being clipped by them.
+      const data: TrafficEdgeData = { label, isDrop };
       edges.push({
         id: key,
         source,
         target,
+        type: 'traffic',
         animated: true,
         style: {
           stroke: strokeColor,
           strokeWidth: isDrop ? Math.min(count / 2 + 2.5, 5) : Math.min(count / 2 + 1, 4),
           strokeDasharray: isExternal && !isDrop ? '5 5' : undefined,
         },
-        label,
-        labelStyle: {
-          fill: isDrop ? '#EF4444' : 'var(--theme-text-secondary)',
-          fontSize: 11,
-          fontFamily: 'var(--font-mono)',
-          fontWeight: isDrop ? 600 : 400,
-        },
-        labelBgStyle: {
-          fill: 'var(--theme-bg-card)',
-        },
+        data,
         markerEnd: {
           type: MarkerType.ArrowClosed,
           color: strokeColor,
@@ -677,8 +713,14 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const currentIds = new Set(displayNodesRef.current.map((n) => n.id));
     setNodes((prev) => pruneNodes(prev, currentIds));
   }, [layoutSignature, setNodes]);
+  // The layout written to the nodes that the viewport has not reacted to
+  // yet; consumed by the fit effect below once the nodes are measured. A ref,
+  // not a dependency: the fit must run after `setNodes` has landed in React
+  // Flow's store, not in the same commit that issues it.
+  const pendingLayout = useRef<Map<string, { x: number; y: number }> | null>(null);
   useEffect(() => {
-    setNodes(placeNodes(displayNodesRef.current, elkPositions));
+    setNodes((prev) => placeNodes(displayNodesRef.current, elkPositions, prev));
+    if (elkPositions.size > 0) pendingLayout.current = elkPositions;
   }, [elkPositions, setNodes]);
   useEffect(() => {
     setNodes((prev) => mergeNodeData(prev, displayNodes));
@@ -699,45 +741,73 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [focusedNodeId]);
 
-  // After ELK lands: refit for a new node set; otherwise leave the viewport
-  // alone (expanding a card must not yank the screen back to the centre) and
-  // only pan to the toggled card if its new size pushed it out of view.
+  /** Height of an overlay strip plus the panel margin above and below it; 0 when hidden. */
+  const overlayInset = (el: HTMLElement | null): number => {
+    if (!el || (el.offsetHeight === 0 && el.getClientRects().length === 0)) return 0;
+    return el.offsetHeight + 2 * UI_DIMENSIONS.MAP_PANEL_MARGIN;
+  };
+
+  // After a layout has landed AND React Flow has measured the nodes: refit
+  // for a new node set; otherwise leave the viewport alone (expanding a card
+  // must not yank the screen back to the centre) and only pan to the toggled
+  // card if its new size pushed it out of view. Waiting for the measurement
+  // matters: a fit on a timer ran before the re-placed Internet cards were
+  // measured, so it ignored them and they landed off screen.
   useEffect(() => {
-    if (elkPositions.size === 0) return;
-    const timer = setTimeout(() => {
-      // Read at fire time, not at effect time: a second layout landing
-      // inside the delay cancels this timer and its own effect acts on the
-      // (still pending, still sticky) intent instead.
-      const intent = pendingIntent.current;
-      pendingIntent.current = null;
-      if (!intent) return;
-      if (intent.kind === 'refit') {
-        // `maxZoom` because focus can cut the graph down to two or three
-        // cards, and an uncapped fit scales those up to fill the pane.
+    const positions = pendingLayout.current;
+    // "Every node measured" is checked on our own nodes, not on React Flow's
+    // initialized flag alone: that flag is satisfied by handle bounds it keeps
+    // per id, so it stays true across a re-placement whose fresh node objects
+    // have not been measured yet. Consuming the layout then lost the fit.
+    if (!positions || !nodesInitialized || nodes.length === 0 || !nodes.every((n) => n.width && n.height)) return;
+    pendingLayout.current = null;
+    const intent = pendingIntent.current;
+    pendingIntent.current = null;
+    if (!intent) return;
+    const pane = paneRef.current;
+    if (intent.kind === 'refit') {
+      // `maxZoom` because focus can cut the graph down to two or three
+      // cards, and an uncapped fit scales those up to fill the pane.
+      if (!pane) {
         fitView({ padding: 0.2, maxZoom: 1, duration: UI_TIMING.FIT_VIEW_DURATION });
         return;
       }
-      if (!intent.toggledId) return;
-      const pos = elkPositions.get(intent.toggledId);
-      const node = displayNodesRef.current.find((n) => n.id === intent.toggledId);
-      const pane = paneRef.current;
-      if (!pos || !node || !pane) return;
-      const data = node.data as PodNodeData;
-      const rect = {
-        x: pos.x,
-        y: pos.y,
-        width: NODE_WIDTH,
-        height: nodeHeight({ isExpanded: !!data.isExpanded, hasCompute: hasComputeGauges(data.compute) }),
+      // The toolbar and summary sit over the top of the pane, the legend
+      // over the bottom: fit into what is left so no card starts under them.
+      const insets = {
+        top: Math.max(overlayInset(topLeftRef.current), overlayInset(topRightRef.current)),
+        bottom: overlayInset(bottomLeftRef.current),
+        left: 0,
+        right: 0,
       };
-      const viewport = getViewport();
-      if (isRectInView(rect, viewport, { width: pane.clientWidth, height: pane.clientHeight })) return;
-      setCenter(rect.x + rect.width / 2, rect.y + rect.height / 2, {
-        zoom: viewport.zoom,
-        duration: UI_TIMING.FIT_VIEW_DURATION,
-      });
-    }, UI_TIMING.FIT_VIEW_DELAY);
-    return () => clearTimeout(timer);
-  }, [elkPositions, fitView, setCenter, getViewport]);
+      setViewport(
+        viewportForBounds(getRectOfNodes(nodes), { width: pane.clientWidth, height: pane.clientHeight }, insets, {
+          padding: 0.2,
+          minZoom: store.getState().minZoom,
+          maxZoom: 1,
+        }),
+        { duration: UI_TIMING.FIT_VIEW_DURATION },
+      );
+      return;
+    }
+    if (!intent.toggledId) return;
+    const pos = positions.get(intent.toggledId);
+    const node = displayNodesRef.current.find((n) => n.id === intent.toggledId);
+    if (!pos || !node || !pane) return;
+    const data = node.data as PodNodeData;
+    const rect = {
+      x: pos.x,
+      y: pos.y,
+      width: NODE_WIDTH,
+      height: nodeHeight({ isExpanded: !!data.isExpanded, hasCompute: hasComputeGauges(data.compute) }),
+    };
+    const viewport = getViewport();
+    if (isRectInView(rect, viewport, { width: pane.clientWidth, height: pane.clientHeight })) return;
+    setCenter(rect.x + rect.width / 2, rect.y + rect.height / 2, {
+      zoom: viewport.zoom,
+      duration: UI_TIMING.FIT_VIEW_DURATION,
+    });
+  }, [nodes, nodesInitialized, store, fitView, setViewport, setCenter, getViewport]);
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
@@ -765,26 +835,45 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   const summaryStats = useMemo(() => {
     let totalFlows = 0;
     let totalDrops = 0;
+    let podTotal = 0;
 
     pods.forEach((pod) => {
+      podTotal += pod.pods?.length || 1;
       totalFlows += pod.traffic?.length || 0;
       pod.traffic?.forEach((t) => {
         if (t.decision?.toUpperCase() === 'DROP') totalDrops++;
       });
     });
 
-    return { podCount: pods.length, totalFlows, totalDrops };
+    return { podCount: pods.length, podTotal, totalFlows, totalDrops };
   }, [pods]);
 
-  // Nodes / flows / drops. Where it sits depends on the MAP width, not the
-  // viewport (the rail and a docked AI panel both narrow the map): beside the
-  // toolbar when there is room, stacked under it otherwise.
+  // Workloads / flows / drops. Where it sits depends on the MAP width, not
+  // the viewport (the rail and a docked AI panel both narrow the map): beside
+  // the toolbar when there is room, stacked under it otherwise.
   const summaryBadge = (
     <div className="flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
-      <div className="flex items-center gap-1.5 text-secondary" title="Total workload identities in the current namespace">
+      <div
+        className="flex items-center gap-1.5 text-secondary"
+        title={`${summaryStats.podCount} workloads (${summaryStats.podTotal} pods) in the current namespace`}
+        data-testid="summary-workloads"
+      >
         <Server className="w-3.5 h-3.5 text-hubble-accent" />
         <span className="font-medium font-mono tabular-nums">{summaryStats.podCount}</span>
       </div>
+      {computeUnavailable && (
+        <>
+          <div className="w-px h-4 bg-hubble-border" />
+          <div
+            className="flex items-center gap-1.5 text-hubble-warning"
+            title="Live compute gauges are unavailable: the broker's compute read keeps failing and is retried with back-off"
+            data-testid="compute-unavailable"
+          >
+            <Gauge className="w-3.5 h-3.5" />
+            <span>compute unavailable</span>
+          </div>
+        </>
+      )}
       <div className="w-px h-4 bg-hubble-border" />
       <div className="flex items-center gap-1.5 text-secondary" title="Total observed network flows (ingress + egress) across all pods">
         <Activity className="w-3.5 h-3.5 text-hubble-accent" />
@@ -802,7 +891,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   );
 
   return (
-    <div ref={paneRef} className="@container w-full h-full">
+    <div ref={paneRef} className="@container relative w-full h-full">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -813,7 +902,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitView
+        minZoom={UI_DIMENSIONS.MAP_MIN_ZOOM}
         attributionPosition="bottom-right"
       >
         <Controls className="bg-hubble-card border-hubble-border" />
@@ -841,13 +930,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         {/* Security Summary Panel */}
         {/* Summary, top-left, only when the map is wide enough for it beside the toolbar. */}
         <Panel position="top-left" className="hidden @xl:block">
-          {summaryBadge}
+          <div ref={topLeftRef}>{summaryBadge}</div>
         </Panel>
 
         {/* Edge legend — decode the trust-state colors */}
         {showTraffic && (
           <Panel position="bottom-left">
-            <div className="flex items-center gap-3 px-3 py-1.5 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-[11px] text-secondary">
+            <div ref={bottomLeftRef} className="flex items-center gap-3 px-3 py-1.5 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-[11px] text-secondary">
               <span className="flex items-center gap-1.5"><span className="w-3.5 h-0.5 rounded-full" style={{ background: '#4E3AD9' }} />Trusted</span>
               <span className="flex items-center gap-1.5"><span className="w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: '#F59E0B' }} />Egress</span>
               {showDaemonSetNodes && daemonSetCount > 0 && (
@@ -863,6 +952,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
         {/* Graph controls */}
         <Panel position="top-right">
+          <div ref={topRightRef}>
           <GraphControls
             showTraffic={showTraffic}
             onToggleTraffic={onToggleTraffic}
@@ -883,8 +973,28 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           {/* Narrow map: the summary stacks under the toolbar, so no number of toolbar rows can cover it. */}
           <div className="mt-2 flex justify-end @xl:hidden">{summaryBadge}</div>
           {lensLegend && <div className="mt-2 flex justify-end">{lensLegend}</div>}
+          </div>
         </Panel>
       </ReactFlow>
+
+      {/* Every workload hidden by the Traffic filter: say so instead of a blank canvas. */}
+      {hiddenByTrafficFilter > 0 && allDisplayPods.length === 0 && (
+        <div className="absolute inset-0 z-[6] flex items-center justify-center pointer-events-none" data-testid="traffic-filter-empty">
+          <div className="pointer-events-auto rounded-surface border border-hubble-border bg-hubble-card/95 shadow-lg backdrop-blur-sm">
+            <EmptyState
+              compact
+              icon={EyeOff}
+              title={`${hiddenByTrafficFilter} ${hiddenByTrafficFilter === 1 ? 'workload has' : 'workloads have'} no recorded flows`}
+              description="The Traffic filter hides workloads without flows. Turn it off to draw them as unconnected cards."
+              action={
+                <Button variant="secondary" size="sm" leftIcon={EyeOff} onClick={onToggleTraffic}>
+                  Show them
+                </Button>
+              }
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

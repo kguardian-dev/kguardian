@@ -1,10 +1,32 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
 import { useComputeData } from './useComputeData';
 import { buildPodComputeData, containersForNode, nodeComputeState } from '../utils/compute';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ComputeFinding } from '../types/compute';
+
+export interface UsePodDataOptions {
+  /** False while no mounted view reads pod data (the Images view): nothing is
+   *  fetched, and pods already loaded are kept for the next view that needs
+   *  them. Default true. */
+  enabled?: boolean;
+  /** The compute poll's own gate, for views that read pods but draw no
+   *  gauges. Defaults to `enabled`. */
+  compute?: boolean;
+}
+
+/** Per-pod reads the broker did not answer in this namespace's last load. */
+export interface FailedReads {
+  traffic: number;
+  syscalls: number;
+}
+
+const NO_FAILURES: FailedReads = { traffic: 0, syscalls: 0 };
+
+/** A failed per-pod read is a marker, never an empty list (see api.ts). */
+const settle = <T,>(read: Promise<T[]>): Promise<{ rows: T[]; failed: boolean }> =>
+  read.then((rows) => ({ rows, failed: false }), () => ({ rows: [], failed: true }));
 
 /**
  * @param selectedPodId The open card, or null. Selection is what opens a card
@@ -14,14 +36,34 @@ import type { ComputeFinding } from '../types/compute';
  *   pod object is no longer authoritative, and seeding off it would silently
  *   read nothing.
  */
-export const usePodData = (namespace: string, selectedPodId: string | null = null) => {
+export const usePodData = (namespace: string, selectedPodId: string | null = null, opts: UsePodDataOptions = {}) => {
+  const enabled = opts.enabled ?? true;
+  const computeEnabled = opts.compute ?? enabled;
   const [basePods, setPods] = useState<PodNodeData[]>([]);
   const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
   const [services, setServices] = useState<ServiceInfo[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [failedReads, setFailedReads] = useState<FailedReads>(NO_FAILURES);
+  const [loading, setLoading] = useState<boolean>(enabled);
   const [error, setError] = useState<string | null>(null);
+  // The namespace whose run has settled (loaded or failed), or null. Read
+  // during render so the first render after enabling, or after a namespace
+  // change, already reports loading: the effect that starts the run has not
+  // run yet in that render, and without this React painted one frame of
+  // "No workloads" between the namespace list arriving and the run starting.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+
+  // Run sequencing. Every fetch takes the next id; a run that is no longer
+  // current writes nothing, and only the current run may clear `loading`.
+  // Without this a namespace switch mid-load let the superseded run's
+  // `finally` clear the flag while the real one still had its traffic reads
+  // in flight, and the map showed "No workloads" for a namespace that had 20.
+  const generation = useRef(0);
+  /** The namespace the current run was issued for (loaded or loading). */
+  const runFor = useRef<string | null>(null);
 
   const fetchPodData = useCallback(async () => {
+    const gen = ++generation.current;
+    const current = () => gen === generation.current;
     setLoading(true);
     setError(null);
 
@@ -31,6 +73,7 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
         apiClient.getAllPods(),
         apiClient.getAllServices(),
       ]);
+      if (!current()) return;
 
       setServices(allServices);
 
@@ -63,18 +106,20 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
         const identity = primaryPod.pod_identity || primaryPod.pod_name;
 
         // Fetch traffic and syscalls for all pods in the group with concurrency limit
-        const trafficTasks = podsInGroup.map(pod => () => apiClient.getPodTrafficByName(pod.pod_name));
-        const syscallTasks = podsInGroup.map(pod => () => apiClient.getPodSyscalls(pod.pod_name));
+        const trafficTasks = podsInGroup.map(pod => () => settle(apiClient.getPodTrafficByName(pod.pod_name)));
+        const syscallTasks = podsInGroup.map(pod => () => settle(apiClient.getPodSyscalls(pod.pod_name)));
 
         return Promise.all([
           withConcurrencyLimit(trafficTasks, 10),
           withConcurrencyLimit(syscallTasks, 10),
         ]).then(([allTraffic, allSyscalls]) => {
           // Merge all traffic and syscalls
-          const mergedTraffic = allTraffic.flat();
-          const mergedSyscalls = allSyscalls.flat();
+          const mergedTraffic = allTraffic.flatMap((r) => r.rows);
+          const mergedSyscalls = allSyscalls.flatMap((r) => r.rows);
+          const trafficFailed = allTraffic.filter((r) => r.failed).length;
+          const syscallsFailed = allSyscalls.filter((r) => r.failed).length;
 
-          return {
+          const node = {
             id: key,
             label: identity,
             pod: primaryPod, // Primary pod for backward compatibility
@@ -82,32 +127,53 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
             traffic: mergedTraffic,
             syscalls: mergedSyscalls.length > 0 ? mergedSyscalls : undefined,
             isExpanded: false,
+            trafficError: trafficFailed > 0,
+            syscallsError: syscallsFailed > 0,
           } as PodNodeData;
+          return { node, trafficFailed, syscallsFailed };
         });
       });
 
-      const podData = await withConcurrencyLimit(podDataTasks, 10);
-      setPods(podData);
+      const results = await withConcurrencyLimit(podDataTasks, 10);
+      if (!current()) return;
+      setPods(results.map((r) => r.node));
+      setFailedReads({
+        traffic: results.reduce((n, r) => n + r.trafficFailed, 0),
+        syscalls: results.reduce((n, r) => n + r.syscallsFailed, 0),
+      });
     } catch (err) {
+      if (!current()) return;
       setError(err instanceof Error ? err.message : 'Unknown error occurred');
     } finally {
-      setLoading(false);
+      if (current()) {
+        setLoadedFor(namespace);
+        setLoading(false);
+      }
     }
   }, [namespace]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchPodData();
-  }, [fetchPodData]);
+    if (!enabled) return; // no mounted view reads pod data: fetch nothing
+    if (runFor.current === namespace) return; // already loaded, or loading, for this namespace
+    runFor.current = namespace;
+    // The previous namespace's cards must not stand in for this one while it loads.
+    setPods([]);
+    setFailedReads(NO_FAILURES);
+    void fetchPodData();
+  }, [enabled, namespace, fetchPodData]);
 
+  // A refresh reloads in place: the current graph stays on screen while the
+  // new run is in flight (only a namespace change blanks it).
   const refreshData = useCallback(() => {
-    fetchPodData();
-  }, [fetchPodData]);
+    if (!enabled) return;
+    runFor.current = namespace;
+    void fetchPodData();
+  }, [enabled, namespace, fetchPodData]);
 
   // Live compute gauges (design D8): the only polled data on the map. Merged
   // here — not fetched with traffic — so the 5 s poll never re-fetches
   // traffic or syscalls, and a pod without compute rows is left untouched.
-  const compute = useComputeData(namespace);
+  const compute = useComputeData(namespace, { enabled: computeEnabled });
   // Seed the open card's sparkline from stored history (design D8).
   //
   // Selecting a card is the only signal that its history is worth a read: the
@@ -188,7 +254,11 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
     compute,
     allPodsLookup,
     services,
-    loading,
+    /** Per-pod reads that failed in the last load, so a consumer (the Policy
+     *  Builder picker) can say "N reads failed" instead of "0 conns". */
+    failedReads,
+    /** True from the render that asks for a namespace until its run settles. */
+    loading: loading || (enabled && loadedFor !== namespace),
     error,
     refreshData,
   };

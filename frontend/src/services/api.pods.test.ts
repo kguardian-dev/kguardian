@@ -122,9 +122,11 @@ test('a broker without /pod/namespaces falls back to deriving them from live pod
   expect(urls).toEqual(['/pod/namespaces', '/pod/info']);
 });
 
-test('any other failure of /pod/namespaces keeps the default placeholder', async () => {
+test('any other failure of /pod/namespaces is rethrown, so the caller keeps the namespace it had', async () => {
+  // A 503 shed or a statement timeout used to come back as `['default']`,
+  // which replaced a deep link's namespace and rewrote its URL to default.
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(axiosOf(apiClient), 'get').mockRejectedValue(new Error('broker down') as never);
 
-  await expect(apiClient.getNamespaces()).resolves.toEqual(['default']);
+  await expect(apiClient.getNamespaces()).rejects.toThrow('broker down');
 });
