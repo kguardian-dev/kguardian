@@ -181,10 +181,16 @@ inventory digests with the first rule that matches, and records which one:
 | `workload_tag` | Only when neither digest rule matched the payload, and only for an inventory digest that has no exact link from **any** source: same namespace, workload and container as a report's `observed_in`, and the same `repository:tag`. Trivy's ReplicaSet (`api-7c9d8f6b5`) or Job (`backup-29012345`) matches the inventory's Deployment (`api`) or CronJob (`backup`). | Tag only: the tag may have moved since the scan |
 | `report_digest` | Reads only: you asked for the payload's own digest and nothing in the inventory links to it. | Exact, but not known to run here |
 
-An exact link retires any tag guess on the same image. Links are refreshed
-at ingest and by the retention pass
-(`broker.supplychain.retention.intervalSeconds`, default 300 s), so a pod
-that starts after its image was scanned is matched within one interval.
+An exact link retires any tag guess on the same image. An SBOM also
+carries the exact links of every vulnerability report matched from it
+(one whose `sbomSources` names the SBOM's source, under the SBOM's digest
+or the index it belongs to): a registry SBOM is attached to one platform
+manifest while a node may run another platform of the same index, and the
+matcher reports under the index, so the SBOM a report came from is served
+under every running digest the report is. Links are refreshed at ingest
+and by the retention pass (`broker.supplychain.retention.intervalSeconds`,
+default 300 s), so a pod that starts after its image was scanned is
+matched within one interval.
 
 ## Ingest (supplychain token)
 
@@ -197,8 +203,12 @@ The payload schema is in `supplychain/README.md`. `{digest}` must equal
 `image.digest`.
 
 - **Scoped auth only.** These routes need a token with the `supplychain`
-  scope (`BROKER_TOKEN_SUPPLYCHAIN`). With broker auth off, or with only
-  the legacy shared token, they answer `403`.
+  scope (`BROKER_TOKEN_SUPPLYCHAIN`); a token without it answers `403`.
+  While the broker has no `supplychain` token at all (auth off, or only
+  the legacy shared token) they answer `503` with `Retry-After`, so a
+  component that starts before the broker's scoped auth is in place keeps
+  its payloads queued instead of dropping them; nothing is stored either
+  way.
 - **Bodies.** `Content-Encoding: gzip` (or none), at most 1 MiB on the
   wire, received within 30 s (`408` otherwise). A gzip body is inflated
   into at most `broker.supplychain.maxDecompressedBytes` (default 8 MiB)

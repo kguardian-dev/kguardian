@@ -183,7 +183,9 @@ POST /images/{digest}/attestation
 ```
 
 - **Scoped auth only**, like the vulnerability ingest: a token with the
-  `supplychain` scope, `403` otherwise (also with broker auth off).
+  `supplychain` scope, `403` for a token without it, and `503` with
+  `Retry-After` while the broker has no `supplychain` token at all (auth
+  off, or only the legacy shared token).
 - Plain JSON (no `Content-Encoding`), at most 256 KiB, received within
   30 s. At most 32 signatures and 64 attestations (`413`); long strings
   are truncated.
