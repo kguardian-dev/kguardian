@@ -80,6 +80,14 @@ Sibling rules for one IP are ordered by identity key (`cidr`, `unattributed`,
 `host:<ns>/<who>`, `sel:<ns>:k=v,...`); with one identity per IP the order is
 the pre-existing IP order. Full algorithm and inputs: the v4 generators handoff.
 
+## Default deny
+
+`cilium_default_deny` keeps `enableDefaultDeny: {ingress: true, egress: true}` and
+carries one empty rule per direction (`ingress: [{}]`, `egress: [{}]`): the CRD's
+`spec` needs an `ingress` or `egress` section (`anyOf`), and the empty rule is
+Cilium's documented "deny this direction" form. A policy with rules in one
+direction only has no section for the other and does not restrict it.
+
 ## Cross-namespace peers
 
 A CiliumNetworkPolicy endpoint selector with no namespace label is scoped to
