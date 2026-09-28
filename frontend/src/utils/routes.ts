@@ -65,12 +65,14 @@ export function resolveRoute(loc: HashLocation): ResolvedRoute {
 export const CLUSTER_SCOPED_VIEWS: ReadonlySet<View> = new Set<View>(['workloads', 'images']);
 
 /**
- * Whether a view is showing all namespaces. Cluster-scoped views default to
- * all namespaces (`scope=ns` narrows them to the header namespace); the rest
- * are always scoped to one namespace.
+ * Whether a view is showing all namespaces. Cluster-scoped views show all
+ * namespaces unless the link names one: `ns=` narrows them to it, so a shared
+ * link shows the namespace it carries, and the older `scope=ns` still narrows
+ * to the header namespace. The rest are always scoped to one namespace. The
+ * app therefore writes no `ns` into an unscoped cluster-view URL.
  */
 export function isAllNamespaces(view: View, params: Params): boolean {
-  return CLUSTER_SCOPED_VIEWS.has(view) && params.scope !== 'ns';
+  return CLUSTER_SCOPED_VIEWS.has(view) && params.scope !== 'ns' && !params.ns;
 }
 
 /** Where a workload page was opened from, so Back can return there. */
@@ -91,10 +93,10 @@ export function workloadParams(ns: string, kind: string, name: string, from: Wor
   return p;
 }
 
-/** Params for Back from a workload page: the list it came from. */
+/** Params for Back from a workload page: the list it came from. The namespace rides along only when that list was narrowed to it. */
 export function workloadsBackParams(params: Params): Params {
   const p: Params = {};
-  if (params.ns) p.ns = params.ns;
+  if (params.ns && params.scope === 'ns') p.ns = params.ns;
   if (params.scope) p.scope = params.scope;
   if (params.control) p.control = params.control;
   return p;

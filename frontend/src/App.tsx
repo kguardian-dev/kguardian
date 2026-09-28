@@ -81,9 +81,11 @@ function App() {
 
   // Map-only params (selected workload, focused node) travel with the map view
   // and are dropped when leaving it.
+  // A cluster-wide view opens on all namespaces: `ns` would narrow it, so it
+  // stays behind (nsByCluster remembers it for the map).
   const setView = useCallback(
     (v: View, extra: Record<string, string | undefined> = {}) =>
-      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, lens: v === 'map' ? loc.params.lens : undefined, ...extra }),
+      navigate(v, { ns: CLUSTER_SCOPED_VIEWS.has(v) ? undefined : loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, lens: v === 'map' ? loc.params.lens : undefined, ...extra }),
     [navigate, loc.params.ns, loc.params.pod, loc.params.focus, loc.params.lens],
   );
   // Set when a deep link named a namespace with no monitored pods or an
@@ -103,7 +105,7 @@ function App() {
     [navigate, view, activeCluster.id, loc.params.control, loc.params.lens, loc.params.tab],
   );
   const showAllNamespaces = useCallback(
-    () => navigate(view, { ...loc.params, scope: undefined }),
+    () => navigate(view, { ...loc.params, ns: undefined, scope: undefined }),
     [navigate, view, loc.params],
   );
   // True while the workload page sits directly on top of the Workloads list
@@ -269,17 +271,22 @@ function App() {
   useEffect(() => {
     if (prevCluster.current === activeCluster.id) return;
     prevCluster.current = activeCluster.id;
-    // A single-workload page is meaningless in another cluster: land on the list.
-    navigate(view === 'workload' ? 'workloads' : view, { ns: nsByCluster[activeCluster.id], pod: undefined, focus: undefined }, { replace: true });
-  }, [activeCluster.id, nsByCluster, view, navigate]);
+    // A single-workload page is meaningless in another cluster: land on the
+    // cluster-wide list. A cluster-wide view showing all namespaces keeps
+    // showing all: `ns` would narrow it.
+    const target = view === 'workload' ? 'workloads' : view;
+    const clusterWide = view === 'workload' || allNamespaces;
+    navigate(target, { ns: clusterWide ? undefined : nsByCluster[activeCluster.id], pod: undefined, focus: undefined }, { replace: true });
+  }, [activeCluster.id, nsByCluster, view, allNamespaces, navigate]);
 
   // Keep the resolved namespace in the URL so the link is always shareable,
-  // even before the user has explicitly picked one.
+  // even before the user has explicitly picked one. Not on a cluster-wide
+  // view showing all namespaces: there `ns` would narrow it (IMG-08).
   useEffect(() => {
-    if (!redirect && !loc.params.ns && namespaces.length > 0) {
+    if (!redirect && !loc.params.ns && namespaces.length > 0 && !allNamespaces) {
       navigate(view, { ...loc.params, ns: effectiveNamespace }, { replace: true });
     }
-  }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, navigate]);
+  }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, allNamespaces, navigate]);
 
   // A deep link to a namespace with no monitored pods showed the first real
   // one under the requested URL without a word; an unknown lens was dropped
@@ -520,14 +527,14 @@ function App() {
       const t = jumpTarget(query);
       if (!t) return [];
       if (t.kind === 'cve') {
-        return [{ id: `cve-${t.id}`, group: 'Jump to', label: `Open ${t.id}`, hint: 'CVE triage', icon: Bug, run: () => navigate('images', { ns: loc.params.ns, cve: t.id }) }];
+        return [{ id: `cve-${t.id}`, group: 'Jump to', label: `Open ${t.id}`, hint: 'CVE triage', icon: Bug, run: () => navigate('images', { cve: t.id }) }];
       }
       if (t.kind === 'digest') {
-        return [{ id: `img-${t.digest}`, group: 'Jump to', label: 'Open image', hint: `${t.digest.slice(0, 19)}…`, icon: Package, run: () => navigate('images', { ns: loc.params.ns, tab: 'images', digest: t.digest }) }];
+        return [{ id: `img-${t.digest}`, group: 'Jump to', label: 'Open image', hint: `${t.digest.slice(0, 19)}…`, icon: Package, run: () => navigate('images', { tab: 'images', digest: t.digest }) }];
       }
-      return [{ id: 'img-partial', group: 'Jump to', label: 'Paste the full digest to open an image', hint: 'images are keyed by full digest', icon: Package, run: () => navigate('images', { ns: loc.params.ns, tab: 'images' }) }];
+      return [{ id: 'img-partial', group: 'Jump to', label: 'Paste the full digest to open an image', hint: 'images are keyed by full digest', icon: Package, run: () => navigate('images', { tab: 'images' }) }];
     },
-    [navigate, loc.params.ns],
+    [navigate],
   );
 
   const navItems: NavItem[] = [
