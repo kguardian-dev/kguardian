@@ -710,6 +710,13 @@ From `GET /workloads/observability/DaemonSet/node-exporter/profile` -> 200 (capt
 - `peer.kind`: `"pod" | "service" | "node" | "external" | "unresolved"` (`external` = a public IP;
   `unresolved` = a private IP with no resolved identity).
 - `peers[]`: at most 200 groups from the newest 50 000 flow rows; `truncated: true` if either bound hit.
+- The two flow aggregates run under their own statement timeout, `PROFILE_NETWORK_READ_TIMEOUT_MS`
+  (default 10 000; 0 leaves only the pool's backstop). When it runs out the profile is still served:
+  `status` `unknown` with reason `network_unread`, `coverage.level` `none` and `coverage.note` saying
+  what happened, `peers` empty, `snapshot.network` `null`; every other dimension is complete. The
+  snapshotter never versions such a profile: it records the failure (list `lastError`) and tries again
+  next tick. An enforcing export (section 4) is refused with the same message unless
+  `acknowledgePartial=true`.
   `port` = the pod's own port for ingress, the peer's port for egress; `null` if unparseable.
 - `policy.audit`: `null` when no AuditNetworkPolicy verdict mentions the workload's pods in the last 24 h.
   `policy.enforced`: always `null` (applied NetworkPolicies are not mirrored).
@@ -1894,3 +1901,7 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     profile fields `null`.
   - The snapshotter takes batches until `PROFILE_SNAPSHOT_TICK_BUDGET_SECS` (default: the interval) is
     spent, workloads with alive pods and never-attempted ones first.
+  - The profile's two flow aggregates are bounded by `PROFILE_NETWORK_READ_TIMEOUT_MS` (default 10 s,
+    section 2.4). Past it the profile is served with `network` `unknown` (reason `network_unread`,
+    `snapshot.network` `null`) instead of a 500 at the pool's statement timeout; the snapshotter records
+    the failure rather than versioning a partial profile.

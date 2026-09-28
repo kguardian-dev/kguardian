@@ -48,7 +48,9 @@
 //! per profile ([`NETWORK_SCAN_ROWS`]), peers returned
 //! ([`NETWORK_PEERS_MAX`]), pods ([`PODS_MAX`]), compute rows
 //! ([`COMPUTE_ROWS_MAX`]), verdict groups ([`AUDIT_POLICIES_MAX`]), list and
-//! version page sizes.
+//! version page sizes. The two flow aggregates also run under their own
+//! statement timeout ([`network_read_timeout_ms`]); past it the profile is
+//! served without its network dimension rather than failing.
 
 use crate::image_inventory::{
     self, ContainerDigest, ContainerImages, ContainerSecurity, PodSecurity, WorkloadContainers,
@@ -153,6 +155,16 @@ pub fn snapshot_tick_budget(interval: Duration) -> Duration {
             .map(|v| v.clamp(0, 86_400) as u64)
             .unwrap_or(interval.as_secs()),
     )
+}
+
+/// `PROFILE_NETWORK_READ_TIMEOUT_MS`: statement timeout of the profile's
+/// two `pod_traffic` aggregates together (default 10 000; 0 = only the
+/// pool's backstop). Past it the profile is served without its network
+/// dimension, `coverage.note` saying so, instead of failing whole.
+pub fn network_read_timeout_ms() -> u64 {
+    env_num("PROFILE_NETWORK_READ_TIMEOUT_MS")
+        .map(|v| v.clamp(0, 600_000) as u64)
+        .unwrap_or(10_000)
 }
 
 /// `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50, [1, 1000]).
@@ -586,6 +598,9 @@ pub struct Sources {
     pub network_truncated: bool,
     /// Distinct rule set for the snapshot (see [`NetRuleRow`]).
     pub network_rules: Vec<NetRuleRow>,
+    /// Why the flow aggregates were not read (their statement timeout ran
+    /// out): `network` and `network_rules` are then empty and say nothing.
+    pub network_unread: Option<String>,
     /// `None` = no verdict in the window mentions the pods.
     pub audit: Vec<AuditRow>,
     pub compute: Vec<ComputeRow>,
@@ -622,8 +637,93 @@ impl Sources {
     }
 }
 
+/// The two `pod_traffic` aggregates, `Err(why)` when their statement
+/// timeout ran out: the profile is then served without its network
+/// dimension instead of failing whole (a busy namespace's flow rows can
+/// outlast the pool's 30 s backstop).
+type NetworkRead = Result<(Vec<NetRow>, bool, Vec<NetRuleRow>), String>;
+
+fn read_network(
+    conn: &mut PgConnection,
+    key: &Key,
+    pods: &[String],
+    timeout_ms: u64,
+) -> Result<NetworkRead, DbError> {
+    let started = std::time::Instant::now();
+    let out = conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        bound_statement(conn, timeout_ms)?;
+        let mut rows: Vec<NetRow> = sql_query(NETWORK_SQL)
+            .bind::<Text, _>(&key.namespace)
+            .bind::<Array<Text>, _>(pods)
+            .bind::<BigInt, _>(NETWORK_SCAN_ROWS)
+            .bind::<BigInt, _>(NETWORK_PEERS_MAX + 1)
+            .load(conn)?;
+        let scanned = rows.first().map(|r| r.scanned).unwrap_or(0);
+        let truncated = rows.len() as i64 > NETWORK_PEERS_MAX || scanned >= NETWORK_SCAN_ROWS;
+        rows.truncate(NETWORK_PEERS_MAX as usize);
+        // The rules query gets what is left of the bound.
+        if timeout_ms > 0 {
+            let left = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+            bound_statement(conn, left.max(1))?;
+        }
+        let mut rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
+            .bind::<Text, _>(&key.namespace)
+            .bind::<Text, _>(&key.kind)
+            .bind::<Text, _>(&key.name)
+            .bind::<BigInt, _>(NETWORK_RULES_MAX)
+            .load(conn)?;
+        rules.dedup();
+        Ok((rows, truncated, rules))
+    });
+    match out {
+        Ok(v) => Ok(Ok(v)),
+        Err(e) if is_statement_timeout(&e) => Ok(Err(if timeout_ms > 0 {
+            format!(
+                "the flow aggregate was not read: the pod_traffic query exceeded {timeout_ms} ms"
+            )
+        } else {
+            "the flow aggregate was not read: the pod_traffic query exceeded the database \
+             statement timeout"
+                .into()
+        })),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `SET LOCAL statement_timeout`, never above the session's own.
+fn bound_statement(conn: &mut PgConnection, ms: u64) -> QueryResult<()> {
+    if ms == 0 {
+        return Ok(());
+    }
+    let v = format!("{ms}ms");
+    sql_query(
+        "SELECT set_config('statement_timeout', $1, true) \
+         WHERE current_setting('statement_timeout') = '0' \
+            OR current_setting('statement_timeout')::interval > $2::interval",
+    )
+    .bind::<Text, _>(&v)
+    .bind::<Text, _>(&v)
+    .execute(conn)
+    .map(|_| ())
+}
+
+fn is_statement_timeout(e: &diesel::result::Error) -> bool {
+    matches!(e, diesel::result::Error::DatabaseError(_, info)
+        if info.message().contains("statement timeout"))
+}
+
 /// Read every source for one workload.
 pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbError> {
+    load_sources_bounded(conn, key, network_read_timeout_ms())
+}
+
+/// [`load_sources`] with an explicit statement timeout (ms) for the flow
+/// aggregates; 0 leaves only the pool's backstop.
+pub fn load_sources_bounded(
+    conn: &mut PgConnection,
+    key: &Key,
+    network_timeout_ms: u64,
+) -> Result<Sources, DbError> {
     let WorkloadContainers {
         containers,
         truncated,
@@ -655,28 +755,15 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         .map(|p| p.pod_name.clone())
         .collect();
 
-    let (network, network_truncated) = if all_pods.is_empty() {
-        (Vec::new(), false)
+    // The rules query joins through pod_details too: no pods, no rows.
+    let (network, network_truncated, network_rules, network_unread) = if all_pods.is_empty() {
+        (Vec::new(), false, Vec::new(), None)
     } else {
-        let mut rows: Vec<NetRow> = sql_query(NETWORK_SQL)
-            .bind::<Text, _>(&key.namespace)
-            .bind::<Array<Text>, _>(&all_pods)
-            .bind::<BigInt, _>(NETWORK_SCAN_ROWS)
-            .bind::<BigInt, _>(NETWORK_PEERS_MAX + 1)
-            .load(conn)?;
-        let scanned = rows.first().map(|r| r.scanned).unwrap_or(0);
-        let truncated = rows.len() as i64 > NETWORK_PEERS_MAX || scanned >= NETWORK_SCAN_ROWS;
-        rows.truncate(NETWORK_PEERS_MAX as usize);
-        (rows, truncated)
+        match read_network(conn, key, &all_pods, network_timeout_ms)? {
+            Ok((rows, truncated, rules)) => (rows, truncated, rules, None),
+            Err(why) => (Vec::new(), false, Vec::new(), Some(why)),
+        }
     };
-
-    let mut network_rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
-        .bind::<Text, _>(&key.namespace)
-        .bind::<Text, _>(&key.kind)
-        .bind::<Text, _>(&key.name)
-        .bind::<BigInt, _>(NETWORK_RULES_MAX)
-        .load(conn)?;
-    network_rules.dedup();
 
     let audit: Vec<AuditRow> = if all_pods.is_empty() {
         Vec::new()
@@ -757,6 +844,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         network,
         network_truncated,
         network_rules,
+        network_unread,
         audit,
         compute,
         compute_truncated,
@@ -2158,7 +2246,10 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
     let since = s.network.iter().map(|r| r.first_seen).min();
     let mut findings = Vec::new();
     let mut reasons = Vec::new();
-    let status = if peers.is_empty() {
+    let status = if let Some(why) = &s.network_unread {
+        reasons.push(reason("network_unread", why.clone()));
+        "unknown"
+    } else if peers.is_empty() {
         reasons.push(reason(
             "no_flows",
             "No flows observed for this workload's pods",
@@ -2214,11 +2305,14 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
                     },
                     fraction: None,
                     observed_since: since.map(utc),
-                    note: format!(
-                        "Flows from {} pod(s) ({} live)",
-                        if s.any_pods { "the workload's" } else { "no" },
-                        s.live_pods.len()
-                    ),
+                    note: match &s.network_unread {
+                        Some(why) => why.clone(),
+                        None => format!(
+                            "Flows from {} pod(s) ({} live)",
+                            if s.any_pods { "the workload's" } else { "no" },
+                            s.live_pods.len()
+                        ),
+                    },
                 },
                 reasons,
             },
@@ -2925,11 +3019,16 @@ fn snapshot_of(d: &Dimensions, s: &Sources) -> (Value, BTreeMap<&'static str, St
             )
         })
         .collect();
-    let network = json!({
-        "rules": rules.into_iter().map(|(dir, proto, port, peer)| json!({
-            "direction": dir, "protocol": proto, "port": port, "peer": peer
-        })).collect::<Vec<_>>(),
-    });
+    // Not read is not "no rules": a null section, and never a version.
+    let network = if s.network_unread.is_some() {
+        Value::Null
+    } else {
+        json!({
+            "rules": rules.into_iter().map(|(dir, proto, port, peer)| json!({
+                "direction": dir, "protocol": proto, "port": port, "peer": peer
+            })).collect::<Vec<_>>(),
+        })
+    };
 
     let snap = json!({
         "podSecurity": pod_security,
@@ -3428,6 +3527,11 @@ pub fn snapshot_one(
     let sources = load_sources(conn, key)?;
     if sources.is_empty() {
         return Ok(None);
+    }
+    if let Some(why) = &sources.network_unread {
+        // Served live as a partial profile, never versioned: a snapshot
+        // with no rules would read as every peer removed.
+        return Err(format!("network dimension not read; profile not snapshotted: {why}").into());
     }
     let p = build(key, &sources, Utc::now());
     store_snapshot(conn, key, &p, cap).map(Some)
@@ -5504,6 +5608,48 @@ mod tests {
     }
 
     #[test]
+    fn unread_network_is_unknown_with_the_reason_and_never_a_snapshot() {
+        let key = Key {
+            namespace: "shop".into(),
+            kind: "Deployment".into(),
+            name: "api".into(),
+        };
+        let why = "the flow aggregate was not read: the pod_traffic query exceeded 10000 ms";
+        let s = Sources {
+            any_pods: true,
+            live_pods: vec!["api-1".into()],
+            network_unread: Some(why.into()),
+            ..Default::default()
+        };
+        let p = build(&key, &s, Utc::now());
+        let n = &p.dimensions.network;
+        assert_eq!(n.env.status, "unknown");
+        assert_eq!(n.env.coverage.level, "none");
+        assert_eq!(n.env.coverage.note, why);
+        assert_eq!(n.env.reasons[0].code, "network_unread");
+        assert_eq!(n.env.reasons[0].message, why);
+        assert!(n.peers.is_empty() && !n.truncated);
+        assert!(p.posture.unknown_dimensions.contains(&"network"));
+        assert!(p.snapshot["network"].is_null(), "{}", p.snapshot);
+        assert!(p.findings.iter().all(|f| f.dimension != "network"));
+        // The same sources with the flows read: the usual empty answer.
+        let read = Sources {
+            network_unread: None,
+            ..s
+        };
+        let p = build(&key, &read, Utc::now());
+        assert_eq!(p.dimensions.network.env.reasons[0].code, "no_flows");
+        assert!(p
+            .dimensions
+            .network
+            .env
+            .coverage
+            .note
+            .starts_with("Flows from"));
+        assert!(p.snapshot["network"]["rules"].is_array());
+    }
+
+    #[test]
     fn snapshot_hash_ignores_timestamps_and_counts() {
         let mut s = Sources {
             containers: vec![container("app", restricted())],
@@ -7256,6 +7402,73 @@ mod live_tests {
         assert_eq!(names, vec!["bud-1", "bud-2", "bud-3"]);
         conn.batch_execute("DELETE FROM pod_details WHERE pod_name LIKE 'bud-%'")
             .unwrap();
+        reset(&mut conn, ns);
+    }
+    /// A flow aggregate that runs past its bound leaves the profile
+    /// readable without its network dimension; the snapshotter records
+    /// the failure instead of versioning a partial profile, and clears it
+    /// once the read fits.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_profile_survives_a_slow_flow_read() {
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-slow";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, 'e', "{}");
+        // Enough rows for the newest-first scan and sort to outlast 1 ms.
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_traffic (uuid, pod_name, pod_namespace, pod_ip, pod_port, ip_protocol, traffic_type, \
+               traffic_in_out_ip, traffic_in_out_port, time_stamp) \
+             SELECT 'kgtest-slow-' || g, 'checkout-1', '{ns}', '10.0.0.1', '8080', 'TCP', 'INGRESS', \
+               '10.1.' || (g / 250) || '.' || (g % 250), '40000', \
+               timezone('UTC', NOW()) - make_interval(secs => g) \
+             FROM generate_series(1, 60000) g;"
+        ))
+        .unwrap();
+        let k = key(ns);
+        let s = load_sources_bounded(&mut conn, &k, 1).unwrap();
+        let why = s.network_unread.clone().expect("the 1 ms bound ran out");
+        assert!(why.contains("exceeded 1 ms"), "{why}");
+        assert!(s.network.is_empty() && s.network_rules.is_empty());
+        assert_eq!(
+            s.live_pods,
+            vec!["checkout-1".to_string()],
+            "other sources read"
+        );
+        assert_eq!(s.containers.len(), 1);
+        let p = build(&k, &s, Utc::now());
+        assert_eq!(p.dimensions.network.env.status, "unknown");
+        assert_eq!(p.dimensions.network.env.coverage.note, why);
+        assert_eq!(p.dimensions.images.containers.len(), 1);
+        // A generous bound reads them (and hits the scan limit).
+        let s = load_sources_bounded(&mut conn, &k, 30_000).unwrap();
+        assert!(s.network_unread.is_none());
+        assert!(!s.network.is_empty() && s.network_truncated);
+        // The snapshotter under the tight bound: a failure, not a version.
+        let t = {
+            let _g = crate::test_support::env_lock();
+            std::env::set_var("PROFILE_NETWORK_READ_TIMEOUT_MS", "1");
+            let one = snapshot_one(&mut conn, &k, 50);
+            let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+            std::env::remove_var("PROFILE_NETWORK_READ_TIMEOUT_MS");
+            let e = one.expect_err("a partial profile is not snapshotted");
+            assert!(e.to_string().contains("not snapshotted"), "{e}");
+            t
+        };
+        assert!(t.failed >= 1, "{t:?}");
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let c = &l["items"][0];
+        assert_eq!(c["name"], json!("checkout"));
+        assert!(c["revision"].is_null(), "{c}");
+        assert!(c["lastError"].as_str().unwrap().contains("not read"), "{c}");
+        // With the read fitting again, the next tick computes and clears it.
+        let t = snapshot_tick(&mut conn, 1_000, 50, Duration::ZERO).unwrap();
+        assert!(t.computed >= 1, "{t:?}");
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, false, 10).unwrap();
+        let c = &l["items"][0];
+        assert_eq!(c["revision"], json!(1));
+        assert!(c["lastError"].is_null() && c["failedAt"].is_null(), "{c}");
+        assert!(c["posture"]["status"].is_string());
         reset(&mut conn, ns);
     }
 }

@@ -547,6 +547,9 @@ fn network_inputs(
 /// Why network evidence is too thin to enforce, or `None`.
 pub fn network_partial(p: &Profile) -> Option<String> {
     let n = &p.dimensions.network;
+    if let Some(r) = n.env.reasons.iter().find(|r| r.code == "network_unread") {
+        return Some(r.message.clone());
+    }
     if n.peers.is_empty() {
         return Some("no flows have been observed for this workload".into());
     }
@@ -1983,6 +1986,15 @@ mod tests {
         assert_eq!(
             network_partial(&p).as_deref(),
             Some("no flows have been observed for this workload")
+        );
+        // Flows not read at all is its own reason, not "none observed".
+        let mut s = sources();
+        s.network_unread =
+            Some("the flow aggregate was not read: the pod_traffic query exceeded 10000 ms".into());
+        let p = wp::build(&key(), &s, Utc::now());
+        assert_eq!(
+            network_partial(&p).as_deref(),
+            Some("the flow aggregate was not read: the pod_traffic query exceeded 10000 ms")
         );
     }
 }
