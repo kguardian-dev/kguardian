@@ -55,7 +55,7 @@ export function EntitiesPeer({ label, entities }: { label: string; entities?: st
         {entities.map((e) => (
           <span
             key={e}
-            title="Cilium entity — node identity, not a pod label; edit in the YAML view"
+            title="Cilium entity, not a pod label; edit in the YAML view"
             className="rounded-control border border-hubble-border bg-hubble-dark px-2 py-0.5 font-mono text-[11px] text-secondary"
           >
             {e}

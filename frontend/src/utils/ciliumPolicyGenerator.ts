@@ -9,10 +9,10 @@ import {
   type CiliumPortRule,
 } from '../types/ciliumPolicy';
 import { apiClient } from '../services/api';
-import { createRowIdentityResolver, type TrafficIdentity } from './trafficIdentity';
+import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
 import { quoteYamlValue } from './networkPolicyGenerator';
 import { peerCIDR } from './ipCidr';
-import { collapseToServiceIdentity, identityKey, newerRow, unattributedPeerComment } from './peerComments';
+import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import { specNodeName } from './hostNetwork';
 import {
   HOST_NETWORK_ENTITIES,
@@ -30,13 +30,23 @@ interface PeerInfo {
   identity: TrafficIdentity;
 }
 
-export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<CiliumNetworkPolicy> {
+/** Cilium's entity for the API server's endpoints, which no selector and no
+ *  CIDR on the `default/kubernetes` ClusterIP can reach. */
+export const KUBE_APISERVER_ENTITY = 'kube-apiserver';
+
+/** The Service the API server registers itself under, in every cluster. */
+export function isKubeApiserverService(namespace: string, name: string): boolean {
+  return namespace === 'default' && name === 'kubernetes';
+}
+
+/** `sources`: listings the caller already holds, see generateNetworkPolicy. */
+export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: IdentitySources = {}): Promise<CiliumNetworkPolicy> {
   const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
   const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
 
   // Per-ROW identities — see the sibling comment in networkPolicyGenerator:
   // stored `peer_*` first, then the guarded by-IP fallback.
-  const resolver = await createRowIdentityResolver();
+  const resolver = await createRowIdentityResolver(sources);
   const rows: NetworkTraffic[] = pod.traffic ?? [];
   const identities = await Promise.all(rows.map((t) => resolver.resolve(t)));
   const rowIdentity = new Map<NetworkTraffic, TrafficIdentity>();
@@ -95,8 +105,8 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
 
   // One pod listing per generation, fetched lazily and only when a Service
   // peer needs its backends inspected. null = listing failed (unknown).
-  let allPods: Promise<PodInfo[] | null> | undefined;
-  const listPods = (): Promise<PodInfo[] | null> => {
+  let allPods: Promise<readonly PodInfo[] | null> | undefined;
+  const listPods = (): Promise<readonly PodInfo[] | null> => {
     if (resolver.pods) return Promise.resolve(resolver.pods);
     if (!allPods) {
       allPods = (async () => {
@@ -114,7 +124,8 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
   const getPeerPodFacts = async (podName: string): Promise<PeerPodFacts> => {
     const facts: PeerPodFacts = { labels: null, hostNetwork: undefined };
     try {
-      const podInfo = await apiClient.getPodDetailsByName(podName);
+      // The listing keys pods by name exactly as `/pod/name/{name}` does.
+      const podInfo = resolver.index?.podsByName.get(podName) ?? (await apiClient.getPodDetailsByName(podName));
       if (!podInfo) return facts;
       if (podInfo.workload_selector_labels && Object.keys(podInfo.workload_selector_labels).length > 0) {
         facts.labels = podInfo.workload_selector_labels;
@@ -172,6 +183,21 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     const { identity } = peerInfo;
 
     if (identity.svcName) {
+      // No selector means no endpointSelector, and Cilium evaluates egress
+      // after the service translation, so a CIDR on the ClusterIP never
+      // matches either. Only the API server has an entity standing for it.
+      if (identity.svcNoSelector) {
+        const ns = identity.svcNamespace || 'default';
+        if (isKubeApiserverService(ns, identity.svcName)) {
+          return {
+            entities: [KUBE_APISERVER_ENTITY],
+            comment: selectorlessServiceComment(ns, identity.svcName, peerInfo.ip, 'kube-apiserver'),
+          };
+        }
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return {};
+        return { cidr, comment: selectorlessServiceComment(ns, identity.svcName, peerInfo.ip, 'cidr') };
+      }
       // A Service fronting host-network pods fronts node IPs — entities, not
       // an endpointSelector built from the Service selector.
       const backends = hostNetworkServiceBackends(await listPods(), identity.svcNamespace, identity.svcSelector);
@@ -285,6 +311,8 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       rule.fromEndpoints = [resolved.selector];
     } else if (resolved.cidr) {
       rule.fromCIDR = [resolved.cidr];
+    } else if (resolved.entities) {
+      rule.fromEntities = resolved.entities;
     }
     ingressRules.push(rule);
   }
@@ -321,6 +349,8 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       rule.toEndpoints = [resolved.selector];
     } else if (resolved.cidr) {
       rule.toCIDR = [resolved.cidr];
+    } else if (resolved.entities) {
+      rule.toEntities = resolved.entities;
     }
     egressRules.push(rule);
   }
@@ -354,10 +384,14 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       // unparseable peers are now dropped, a direction can observe traffic and
       // still end with no rules, and flipping defaultDeny to false there would
       // turn "deny everything not listed" into "restrict nothing".
-      defaultDeny: {
-        ingress: ingressMap.size > 0,
-        egress: egressMap.size > 0,
-      },
+      // Nothing observed in either direction is the reference deny-all
+      // (cilium_default_deny golden); left false the policy restricts nothing.
+      defaultDeny: ingressMap.size === 0 && egressMap.size === 0
+        ? { ingress: true, egress: true }
+        : {
+          ingress: ingressMap.size > 0,
+          egress: egressMap.size > 0,
+        },
       ...(ingressRules.length > 0 && { ingress: ingressRules }),
       ...(egressRules.length > 0 && { egress: egressRules }),
     },
@@ -391,8 +425,15 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
     yaml.push(`    egress: ${policy.spec.defaultDeny.egress}`);
   }
 
+  // The CRD requires an ingress or egress section (spec anyOf), and Cilium's
+  // form for "deny this direction, allow nothing" is a single empty rule.
+  const denyOnly = (dir: 'ingress' | 'egress') => policy.spec.defaultDeny[dir] && !(policy.spec[dir]?.length);
+
   // Ingress rules
-  if (policy.spec.ingress && policy.spec.ingress.length > 0) {
+  if (denyOnly('ingress')) {
+    yaml.push('  ingress:');
+    yaml.push('  - {}');
+  } else if (policy.spec.ingress && policy.spec.ingress.length > 0) {
     yaml.push('  ingress:');
     policy.spec.ingress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
@@ -434,7 +475,10 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   }
 
   // Egress rules
-  if (policy.spec.egress && policy.spec.egress.length > 0) {
+  if (denyOnly('egress')) {
+    yaml.push('  egress:');
+    yaml.push('  - {}');
+  } else if (policy.spec.egress && policy.spec.egress.length > 0) {
     yaml.push('  egress:');
     policy.spec.egress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));

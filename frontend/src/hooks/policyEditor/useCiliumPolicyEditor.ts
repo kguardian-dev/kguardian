@@ -9,13 +9,16 @@ import type {
   CiliumPortRule,
 } from '../../types/ciliumPolicy';
 import { generateCiliumNetworkPolicy } from '../../utils/ciliumPolicyGenerator';
+import type { IdentitySources } from '../../utils/trafficIdentity';
 
 interface UseCiliumPolicyEditorProps {
   pod: PodNodeData | null;
   isOpen: boolean;
+  /** Listings the app already holds; generation reuses them instead of refetching. */
+  sources?: IdentitySources;
 }
 
-export const useCiliumPolicyEditor = ({ pod, isOpen }: UseCiliumPolicyEditorProps) => {
+export const useCiliumPolicyEditor = ({ pod, isOpen, sources }: UseCiliumPolicyEditorProps) => {
   const [ciliumPolicy, setCiliumPolicy] = useState<CiliumNetworkPolicy | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isIngressExpanded, setIsIngressExpanded] = useState(true);
@@ -30,7 +33,7 @@ export const useCiliumPolicyEditor = ({ pod, isOpen }: UseCiliumPolicyEditorProp
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
       setIsLoading(true);
-      generateCiliumNetworkPolicy(pod)
+      generateCiliumNetworkPolicy(pod, sources)
         .then((generatedPolicy) => {
           setCiliumPolicy(generatedPolicy);
         })
@@ -38,7 +41,7 @@ export const useCiliumPolicyEditor = ({ pod, isOpen }: UseCiliumPolicyEditorProp
           setIsLoading(false);
         });
     }
-  }, [isOpen, pod]);
+  }, [isOpen, pod, sources]);
 
   const toggleDefaultDeny = (direction: 'ingress' | 'egress') => {
     if (!ciliumPolicy) return;

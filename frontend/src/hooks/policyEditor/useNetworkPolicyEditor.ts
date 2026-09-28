@@ -2,13 +2,16 @@ import { useState, useEffect, useRef } from 'react';
 import type { PodNodeData } from '../../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPort, NetworkPolicyPeer } from '../../types/networkPolicy';
 import { generateNetworkPolicy } from '../../utils/networkPolicyGenerator';
+import type { IdentitySources } from '../../utils/trafficIdentity';
 
 interface UseNetworkPolicyEditorProps {
   pod: PodNodeData | null;
   isOpen: boolean;
+  /** Listings the app already holds; generation reuses them instead of refetching. */
+  sources?: IdentitySources;
 }
 
-export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorProps) => {
+export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolicyEditorProps) => {
   const [policy, setPolicy] = useState<NetworkPolicy | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isIngressExpanded, setIsIngressExpanded] = useState(true);
@@ -25,7 +28,7 @@ export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorPr
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
       setIsLoading(true);
-      generateNetworkPolicy(pod)
+      generateNetworkPolicy(pod, sources)
         .then((generatedPolicy) => {
           setPolicy(generatedPolicy);
         })
@@ -33,7 +36,7 @@ export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorPr
           setIsLoading(false);
         });
     }
-  }, [isOpen, pod]);
+  }, [isOpen, pod, sources]);
 
   const addIngressRule = () => {
     if (!policy) return;

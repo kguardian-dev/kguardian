@@ -74,3 +74,22 @@ export function collapseToServiceIdentity(rowIdentity: Map<NetworkTraffic, Traff
     }
   }
 }
+
+/** How a generator rendered a Service that has no `spec.selector`. */
+export type SelectorlessServiceRendering = 'ipBlock' | 'cidr' | 'kube-apiserver';
+
+/**
+ * The `# ...` line above a rule for a Service with no `spec.selector`
+ * (`default/kubernetes`, operator-managed Endpoints): no backend label to
+ * select, and a rule on the ClusterIP never matches after the Service DNAT.
+ */
+export function selectorlessServiceComment(
+  namespace: string,
+  name: string,
+  ip: string,
+  rendering: SelectorlessServiceRendering,
+): string {
+  const lead = `Service ${namespace}/${name} has no selector`;
+  if (rendering === 'kube-apiserver') return `${lead} — kube-apiserver entity covers its endpoints`;
+  return `${lead} — ${rendering} ${ip} is its ClusterIP and will not match after DNAT`;
+}
