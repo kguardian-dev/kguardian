@@ -106,7 +106,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.19.2"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.19.3"` | Broker version tag (auto-updated by release-please) |
 | broker.imageInventory.retention | object | `{"batchSize":5000,"days":30,"intervalSeconds":3600}` | Retention for the image inventory: `images` (one row per image digest) and `workload_containers` (one row per workload, container and digest, with its securityContext). Running pods refresh their rows continuously, so only digests no running pod has reported for `days` are pruned (a finished rollout's old image, a deleted workload), followed by images nothing references any more. The tables are sized by what runs, not by time. |
 | broker.imageInventory.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. Same [100, 100000] clamp as `broker.audit.retention.batchSize`, for the same reason. |
 | broker.imageInventory.retention.days | int | `30` | Prune inventory rows no running pod has refreshed for this many days. Set to 0 to disable pruning (rows of deleted workloads are then kept forever). |
@@ -327,7 +327,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.20.1"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.20.2"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.apiPath | bool | `true` | Also route /api on the same host to the Broker. The Broker serves bare paths (/pod/info, /pod/traffic), so this only works behind an ingress controller that strips the prefix, such as nginx with rewrite-target. Controllers that pass the path through unchanged (AWS ALB, for example) make every /api request a 404. The UI image proxies /api to the Broker itself, so setting this to false serves the whole application from the UI Service and works on any controller. |
@@ -385,7 +385,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.12.1"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.12.2"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
