@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.1...broker/v1.19.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* name the aarch64 seccomp architecture SCMP_ARCH_AARCH64 so arm64 pods can start ([#1742](https://github.com/kguardian-dev/kguardian/issues/1742)) ([acb1cbd](https://github.com/kguardian-dev/kguardian/commit/acb1cbda8068ede73f37a30acf13787fa2485e01))
+* stop seccomp distribution scaling database load with nodes times CRs ([#1744](https://github.com/kguardian-dev/kguardian/issues/1744)) ([ea9b6e8](https://github.com/kguardian-dev/kguardian/commit/ea9b6e899fe2bf1dc9500d254629d642a15c16f7))
+
 ## [1.19.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.0...broker/v1.19.1) (2026-09-27)
 
 
