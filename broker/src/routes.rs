@@ -13,10 +13,10 @@ use crate::{
     export_seccomp_profile_post, get_attestation_policy, get_attestations, get_audit_verdicts,
     get_cluster_environment, get_compute_contention, get_compute_findings, get_compute_history,
     get_compute_latest, get_compute_nodes, get_image, get_image_runtime, get_image_trust,
-    get_images, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_namespaces,
-    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
-    get_running_attestations, get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip,
-    get_svc_details, get_version, get_vulnerabilities, get_vulnerability_exposure,
+    get_images, get_node_status, get_pod_by_ip, get_pod_by_name, get_pod_details,
+    get_pod_namespaces, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name,
+    get_pods_by_node, get_running_attestations, get_seccomp_profile, get_seccomp_profile_file,
+    get_svc_by_ip, get_svc_details, get_version, get_vulnerabilities, get_vulnerability_exposure,
     get_workload_capabilities, get_workload_containers, get_workload_export, get_workload_profile,
     get_workload_profile_diff, get_workload_profile_version, get_workload_profile_versions,
     get_workload_runtime, get_workloads, image_sbom_cyclonedx_resource, image_sbom_resource,
@@ -32,6 +32,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_pod_traffic)
         .service(get_pod_details)
         .service(get_pod_namespaces)
+        .service(get_node_status)
         .service(add_svc_details)
         .service(get_pod_by_ip)
         .service(get_pod_by_name)
