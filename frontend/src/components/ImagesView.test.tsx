@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, test } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ImagesView } from './ImagesView';
-import { replayVulnApi, cvePage, imageDetail } from '../fixtures/vulns';
+import { replayVulnApi, cvePage, gatedVulnApi, imageDetail, imageVulns, vulnCapture } from '../fixtures/vulns';
 import { answer, replayApi } from '../fixtures/replay';
 import { listNamespacePayments } from '../fixtures/profile';
 import { VulnApi } from '../services/vulnApi';
+import type { CvePage } from '../types/vulns';
 
 afterEach(cleanup);
 
@@ -123,6 +124,130 @@ test('a failed read never shows zero counts', async () => {
   await screen.findByText('Broker token required');
   expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(4);
   expect(screen.queryByText('Summary not computed yet')).toBeNull();
+});
+
+describe('ImagesView: header tiles count the scope (DATA-10, IMG-07)', () => {
+  const tile = (label: string) => within(screen.getByRole('group', { name: 'Vulnerability posture' })).getByText(label).closest('div,button')!.parentElement!.textContent!;
+
+  test('the tiles count every CVE in scope while the table shows its first page', async () => {
+    const page1 = vulnCapture<CvePage>('vulnerabilities-page1-limit2').body;
+    const { api, calls } = replayVulnApi([answer('GET /vulnerabilities?limit=50', page1)]);
+    render(view({ api }));
+    expect(await screen.findAllByTestId('cve-row')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Load more CVEs' })).toBeTruthy();
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7'));
+    expect(tile('P0 act now')).toBe('P0 act now1');
+    expect(tile('P1 schedule')).toBe('P1 schedule3');
+    expect(tile('In CISA KEV')).toBe('In CISA KEV14 unknown');
+    expect(calls).toContain('GET /vulnerabilities?limit=500');
+    expect(screen.queryByTestId('tiles-caption')).toBeNull();
+  });
+
+  test('the filters narrow the table only; the tiles keep the scope counts and say so', async () => {
+    render(view({ api: replayVulnApi().api }));
+    expect(await screen.findAllByTestId('cve-row')).toHaveLength(cvePage.items.length);
+    fireEvent.change(screen.getByLabelText('Severity', { exact: false }), { target: { value: 'c' } });
+    await waitFor(() => expect(screen.getAllByTestId('cve-row')).toHaveLength(1));
+    expect(tile('P1 schedule')).toBe('P1 schedule3');
+    expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7');
+    expect(screen.getByTestId('tiles-caption').textContent).toBe('The tiles count every CVE in all namespaces; the filters below narrow the table only.');
+  });
+
+  test('more CVEs than one read returns: the tiles say "+" and that they cover the first 500', async () => {
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=500', { ...cvePage, nextAfter: 'more' })]);
+    render(view({ api }));
+    await screen.findAllByTestId('cve-row');
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7+'));
+    expect(tile('P0 act now')).toBe('P0 act now1+');
+    expect(screen.getByTestId('tiles-caption').textContent).toMatch(/\(the first 500\)/);
+  });
+
+  test('a scope change clears the tiles and the table until the new scope has been read', async () => {
+    const empty = { items: [], nextAfter: null, computedAt: cvePage.computedAt, staleSeconds: 1 };
+    const g = gatedVulnApi((l) => l.startsWith('GET /vulnerabilities?namespace=empty'), [
+      answer('GET /vulnerabilities?namespace=empty&limit=50', empty),
+      answer('GET /vulnerabilities?namespace=empty&limit=500', empty),
+    ]);
+    const { rerender } = render(view({ api: g.api }));
+    await screen.findAllByTestId('cve-row');
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7'));
+    rerender(view({ api: g.api, allNamespaces: false, namespace: 'empty' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(g.held.length).toBe(2);
+    // The header says "empty": its tiles and rows must not still be the cluster's.
+    expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads…');
+    expect(tile('P1 schedule')).toBe('P1 schedule…');
+    expect(screen.queryAllByTestId('cve-row')).toHaveLength(0);
+    await act(() => g.release(/limit=500/));
+    await act(() => g.release(/limit=50$/));
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads0'));
+    expect(await screen.findByText(/No CVEs reported for empty/)).toBeTruthy();
+  });
+
+  test('IMG-17: the Tier filter stays when the scope has no CVEs; only a Broker that sends no tiers hides it', async () => {
+    const empty = { items: [], nextAfter: null, computedAt: cvePage.computedAt, staleSeconds: 1 };
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?namespace=empty&limit=50', empty), answer('GET /vulnerabilities?namespace=empty&limit=500', empty)]);
+    render(view({ api, allNamespaces: false, namespace: 'empty' }));
+    await screen.findByText(/No CVEs reported for empty/);
+    expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
+  });
+});
+
+describe('Summary freshness (IMG-15)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  test('the age keeps counting while the page sits open', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', { ...cvePage, staleSeconds: 100 })]);
+    render(view({ api }));
+    expect((await screen.findByText(/^Summary rebuilt/)).textContent).toBe('Summary rebuilt 2m ago');
+    act(() => {
+      vi.advanceTimersByTime(65_000);
+    });
+    expect(screen.getByText(/^Summary rebuilt/).textContent).toBe('Summary rebuilt 3m ago');
+    expect(screen.getByText(/^Summary rebuilt/).getAttribute('title')).toMatch(/^Rebuilt 2026-09-27 01:29 UTC\./);
+  });
+});
+
+describe('ImagesView: Images tab reads (IMG-09, IMG-11)', () => {
+  test('a digest no source reported on skips the SBOM read and says "Not read", not "No SBOM"', async () => {
+    const ne = imageDetail('node-exporter').digest;
+    const grafana = imageDetail('grafana').digest;
+    const { api, calls } = replayVulnApi();
+    render(view({ tab: 'images', api }));
+    const rows = await screen.findAllByTestId('image-row');
+    const row = rows.find((r) => within(r).queryByText('quay.io/prometheus/node-exporter:v1.8.2'))!;
+    await waitFor(() => expect(within(row).getAllByText('Not read').length).toBeGreaterThan(0));
+    expect(within(row).queryByText('No SBOM')).toBeNull();
+    // A digest with a report still has its SBOM read.
+    await waitFor(() => expect(calls.some((c) => c.startsWith(`GET /images/${grafana}/sbom`))).toBe(true));
+    expect(calls.some((c) => c.startsWith(`GET /images/${ne}/sbom`))).toBe(false);
+  });
+
+  test('a Refresh keeps the cells on screen until their re-read lands', async () => {
+    const { api } = replayVulnApi();
+    const { rerender } = render(view({ tab: 'images', api, refreshTick: 0 }));
+    const rows = await screen.findAllByTestId('image-row');
+    await waitFor(() => expect(screen.queryAllByText('…')).toHaveLength(0));
+    rerender(view({ tab: 'images', api, refreshTick: 1 }));
+    expect(screen.queryAllByText('…')).toHaveLength(0);
+    expect(screen.getAllByTestId('image-row')).toHaveLength(rows.length);
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryAllByText('…')).toHaveLength(0);
+  });
+
+  test('IMG-11: when /sbom lists nothing but the report names the SBOM it matched from, the cell shows that SBOM', async () => {
+    const ledger = imageDetail('ledger').digest;
+    const page = imageVulns('ledger');
+    const grype = { ...page.reports[0], source: 'grype', sbomSources: ['registry'], sbomTrust: 'unverified' as const };
+    const { api } = replayVulnApi([answer(`GET /images/${ledger}/vulnerabilities?limit=1`, { ...page, reports: [grype] })]);
+    render(view({ tab: 'images', api }));
+    const rows = await screen.findAllByTestId('image-row');
+    const row = rows.find((r) => within(r).queryByText('ghcr.io/example/ledger:2.3.1'))!;
+    await waitFor(() => expect(within(row).getAllByTestId('sbom-matched').length).toBeGreaterThan(0));
+    expect(within(row).getAllByText(/used by Grype/).length).toBeGreaterThan(0);
+    expect(within(row).queryByText('No SBOM')).toBeNull();
+  });
 });
 
 describe('Background and null tiers', () => {

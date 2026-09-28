@@ -8,7 +8,7 @@ import type { CveSummary } from '../../types/vulns';
 import { copyText } from '../../utils/clipboard';
 import { shortDigest } from '../../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, tierRank, WORKLOAD_FACTORS } from '../../utils/tiers';
-import { cveAiPrompt, cveHeadline, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
+import { cveAiPrompt, cveHeadline, impactCounts, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Modal } from '../ui/Modal';
@@ -65,6 +65,8 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
   // Worst case over every row; pending until every read has settled.
   const head = cveHeadline(rows, { pending, failed: failed.size, summaryTier: summary?.tier });
   const overall = head.pending ? null : head.tier;
+  // The prompt states the headline's merged factors, not the first image's own.
+  const prompt = () => (e ? cveAiPrompt(e, f, overall, head.pending ? [] : head.factors) : '');
   const link = safeHttpUrl(f?.primaryUrl);
 
   let body;
@@ -73,9 +75,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
     body = <EmptyState icon={SearchX} title={`${id} affects nothing in the inventory`} description="No image the Broker knows about carries this vulnerability. It may have been fixed, or the images that had it are gone." />;
   } else if (error) body = <VulnErrorState error={error} onRetry={() => void reload()} />;
   else if (e) {
-    const running = e.workloads.filter((w) => w.running);
-    const exposed = e.workloads.filter((w) => w.network?.exposed === true);
-    const unknownExp = e.workloads.filter((w) => w.network?.exposed == null);
+    const impact = impactCounts(e);
     body = (
       <div className="px-5 py-4 space-y-5">
         <div className="space-y-2">
@@ -108,11 +108,16 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
         <section aria-label="Impact in this cluster" className="rounded-control border border-hubble-border bg-hubble-darker/40 px-4 py-3">
           <h3 className="text-[11px] uppercase tracking-wide text-tertiary">Impact in this cluster</h3>
           <p className="mt-1 text-sm text-primary" data-testid="cve-impact">
-            <span className="font-mono tabular-nums">{e.images.length}</span> image{e.images.length === 1 ? '' : 's'} carry it →{' '}
-            <span className="font-mono tabular-nums">{e.workloads.length}</span> workload container{e.workloads.length === 1 ? '' : 's'} →{' '}
-            <span className="font-mono tabular-nums">{running.length}</span> running →{' '}
-            <span className={`font-mono tabular-nums ${exposed.length ? 'text-severity-critical' : ''}`}>{exposed.length}</span> with outside ingress
-            {unknownExp.length > 0 && <span className="text-tertiary"> · exposure unknown for {unknownExp.length}</span>}
+            <span className="font-mono tabular-nums">{impact.images}</span> image{impact.images === 1 ? '' : 's'} carry it →{' '}
+            <span className="font-mono tabular-nums">{impact.containers}</span> workload container{impact.containers === 1 ? '' : 's'} →{' '}
+            <span className="font-mono tabular-nums">{impact.running}</span> running workload{impact.running === 1 ? '' : 's'} →{' '}
+            <span className={`font-mono tabular-nums ${impact.beyondNodes ? 'text-severity-critical' : ''}`}>{impact.beyondNodes}</span> with outside ingress
+            {impact.nodeOnly > 0 && (
+              <span className="text-tertiary" title="Ingress seen only from node addresses: how kubelet probes reach a pod, and how NodePort traffic arrives after SNAT, so proof of neither. Brokers before the exposure rework count these as exposed in the list row and By namespace.">
+                {' '}· {impact.nodeOnly} with node ingress only
+              </span>
+            )}
+            {impact.unknownExposure > 0 && <span className="text-tertiary"> · exposure unknown for {impact.unknownExposure}</span>}
           </p>
           <p className="mt-1 text-[11px] text-tertiary" title={IN_USE_UNKNOWN_TITLE}>
             {e.inUse === null ? 'No runtime evidence that any affected workload loads the package: unknown is ranked as if loaded. ' : ''}
@@ -218,10 +223,10 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
       footer={
         e ? (
           <>
-            <Button variant="ghost" size="sm" leftIcon={Copy} onClick={() => void copyText(cveAiPrompt(e, f, overall))}>
+            <Button variant="ghost" size="sm" leftIcon={Copy} onClick={() => void copyText(prompt())}>
               Copy summary
             </Button>
-            <Button variant="primary" size="sm" leftIcon={Sparkles} onClick={() => onAskAI(cveAiPrompt(e, f, overall))}>
+            <Button variant="primary" size="sm" leftIcon={Sparkles} onClick={() => onAskAI(prompt())}>
               Ask AI
             </Button>
           </>

@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ImagesView } from '../ImagesView';
 import { AdmissionPolicyModal } from './AdmissionPolicyModal';
 import { replayVulnApi, vulnCapture } from '../../fixtures/vulns';
+import { answer } from '../../fixtures/replay';
 import { VulnApi } from '../../services/vulnApi';
 import type { RunningSignaturePage } from '../../types/attestations';
 
@@ -127,6 +128,108 @@ describe('Images → Supply chain (captured from a real Broker)', () => {
   test('a 401 from the Broker is a token message', async () => {
     supplyTab(new VulnApi({ fetchImpl: (async () => new Response('', { status: 401 })) as typeof fetch }));
     expect(await screen.findByText('Broker token required')).toBeTruthy();
+  });
+});
+
+describe('Supply chain running feed paging (IMG-05)', () => {
+  const feed = vulnCapture<RunningSignaturePage>('attestations-running').body;
+  const tileText = (label: string) => within(screen.getByRole('group', { name: 'Signature posture' })).getByText(label).closest('div,button')!.parentElement!.textContent!;
+
+  /** The captured feed served in pages of `size`, each page released by the test. */
+  function pagedFeed(size: number) {
+    const pages: RunningSignaturePage[] = [];
+    for (let i = 0; i < feed.items.length; i += size) pages.push({ items: feed.items.slice(i, i + size), nextAfter: i + size < feed.items.length ? String(i + size) : null });
+    const waiting: Array<() => void> = [];
+    const calls: string[] = [];
+    const fetchImpl = ((input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://x');
+      calls.push(`${url.pathname.replace(/^\/api/, '')}${url.search}`);
+      if (!url.pathname.endsWith('/attestations/running')) return Promise.resolve(new Response('', { status: 404 }));
+      const page = pages[Number(url.searchParams.get('after') ?? 0) / size];
+      return new Promise<Response>((resolve) => waiting.push(() => resolve(new Response(JSON.stringify(page), { status: 200 }))));
+    }) as typeof fetch;
+    const release = async () => {
+      for (let i = 0; i < 100 && waiting.length === 0; i++) await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+      const next = waiting.shift();
+      if (!next) throw new Error('no running-feed read in flight');
+      await act(async () => {
+        next();
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    };
+    return { api: new VulnApi({ fetchImpl }), release, calls };
+  }
+
+  test('reads every page: rows and a progress note appear as pages land, the tiles are a lower bound until the last page, then nothing is capped', async () => {
+    const f = pagedFeed(3); // 8 containers in 3 pages
+    supplyTab(f.api);
+    await f.release();
+    const note = await screen.findByTestId('running-progress');
+    expect(note.textContent).toMatch(/Still reading: 3 running containers so far \(page 1\)\. Counts and filters are incomplete/);
+    expect(screen.getAllByTestId('signature-row').length).toBeGreaterThan(0);
+    expect(tileText('Running digests')).toMatch(/\+$/);
+    await f.release();
+    await f.release();
+    await waitFor(() => expect(screen.queryByTestId('running-progress')).toBeNull());
+    expect(screen.getAllByTestId('signature-row')).toHaveLength(8);
+    expect(tileText('Running digests')).toBe('Running digests8');
+    expect(f.calls.filter((c) => c.startsWith('/attestations/running'))).toHaveLength(3);
+    expect(screen.queryByText(/counts are a lower bound/)).toBeNull();
+  });
+});
+
+describe('Export admission policy: one read per scope and format (IMG-01, IMG-02, IMG-14)', () => {
+  test('a parent re-render with a fresh scope object does not read the policy again', async () => {
+    const { api, calls } = replayVulnApi();
+    const { rerender } = render(<AdmissionPolicyModal api={api} scope={{ kind: 'cluster', namespace: 'payments' }} onClose={noop} />);
+    await screen.findByLabelText('Policy YAML');
+    rerender(<AdmissionPolicyModal api={api} scope={{ kind: 'cluster', namespace: 'payments' }} onClose={noop} />);
+    rerender(<AdmissionPolicyModal api={api} scope={{ kind: 'cluster', namespace: 'payments' }} onClose={noop} />);
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    const reads = calls.filter((c) => c.startsWith('GET /attestations/policy'));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatch(/namespace=payments/);
+    expect(screen.getByLabelText('Policy YAML')).toBeTruthy();
+  });
+
+  test('closing the modal aborts the read in flight', async () => {
+    let signal: AbortSignal | undefined;
+    const hang = ((_: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => {});
+    }) as typeof fetch;
+    const { unmount } = render(<AdmissionPolicyModal api={new VulnApi({ fetchImpl: hang })} scope={{ kind: 'cluster' }} onClose={noop} />);
+    await waitFor(() => expect(signal).toBeDefined());
+    expect(signal!.aborted).toBe(false);
+    unmount();
+    expect(signal!.aborted).toBe(true);
+  });
+
+  test('IMG-02: a 503 that says the read needs the whole budget is explained as such, not as a wait of a few seconds', async () => {
+    const body = 'broker read memory budget exhausted: this request needs 262144 KiB of a 262144 KiB budget and waited 5000 ms without getting it. The request was REFUSED, not truncated — retry.';
+    const api = new VulnApi({ fetchImpl: (async () => new Response(body, { status: 503 })) as typeof fetch });
+    render(<AdmissionPolicyModal api={api} scope={{ kind: 'cluster' }} onClose={noop} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/whole read memory budget \(256 MiB\)/);
+    expect(alert.textContent).not.toMatch(/few seconds/);
+    expect(screen.getByRole('button', { name: /Retry/ })).toBeTruthy();
+  });
+
+  test('IMG-14: many "not covered" lines collapse into a count with an expander, the identities stay in view, and the YAML follows', async () => {
+    const lines = vulnCapture<string>('policy-kguardian-audit').body.split('\n');
+    const bodyStart = lines.findIndex((l) => !l.startsWith('#'));
+    const extra = Array.from({ length: 1400 }, (_, i) => `# not covered: 123456789012.dkr.ecr.us-west-2.amazonaws.com/repo-${i} (a running digest is unknown)`);
+    const text = [...lines.slice(0, bodyStart), ...extra, ...lines.slice(bodyStart)].join('\n');
+    render(<AdmissionPolicyModal api={replayVulnApi([answer('GET /attestations/policy?format=kguardian&mode=audit', text)]).api} scope={{ kind: 'cluster' }} onClose={noop} />);
+    const header = await screen.findByRole('region', { name: 'Policy header: review before applying' });
+    expect(within(header).getAllByText(/^identity: /)).toHaveLength(2);
+    const summary = within(header).getByText(/^1406 images not covered by this policy/);
+    expect(summary.tagName).toBe('SUMMARY');
+    const details = summary.parentElement as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(within(header).getByText(/^not covered: ghcr\.io\/example\/reports/).closest('details')).toBe(details);
+    expect(within(details).getAllByText(/^not covered: /)).toHaveLength(1406);
+    expect(screen.getByLabelText('Policy YAML').textContent).toMatch(/^apiVersion: kguardian\.dev\/v1alpha1/);
   });
 });
 

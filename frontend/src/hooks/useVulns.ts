@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
-import type { CveSummary, Exposure, Finding, ImageDetail, ImageSummary, Report } from '../types/vulns';
+import type { CveSummary, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
@@ -28,15 +28,25 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   const [nextAfter, setNextAfter] = useState<string | null>(null);
   const [computedAt, setComputedAt] = useState<string | null>(null);
   const [staleSeconds, setStaleSeconds] = useState<number | null>(null);
+  // When `staleSeconds` was true (this browser's clock), so the age can keep counting.
+  const [receivedAt, setReceivedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
   const key = JSON.stringify(q);
+  const loadedFor = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const current = begin();
     setLoading(true);
+    // Another scope's or filter's rows are not this one's; a same-query Refresh keeps them until the new page lands.
+    if (loadedFor.current !== key) {
+      loadedFor.current = key;
+      setItems([]);
+      setNextAfter(null);
+      setError(null);
+    }
     try {
       const p = await api.listCves({ ...(JSON.parse(key) as CveListQuery), limit: CVE_PAGE_SIZE });
       if (!current()) return;
@@ -44,6 +54,7 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
       setNextAfter(p.nextAfter);
       setComputedAt(p.computedAt);
       setStaleSeconds(p.staleSeconds);
+      setReceivedAt(Date.now());
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -74,7 +85,54 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
     }
   }, [api, key, nextAfter, begin]);
 
-  return { items, computedAt, staleSeconds, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
+  return { items, computedAt, staleSeconds, receivedAt, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
+}
+
+/** Rows one scope-only read covers for the header tiles (the Broker clamps `limit` to 500). */
+export const CVE_TOTALS_LIMIT = 500;
+
+/**
+ * The CVE summary for the scope alone, no table filters, in one read of up
+ * to CVE_TOTALS_LIMIT rows: what the header tiles count. `capped` when the
+ * Broker had more rows than that, so every tile is a lower bound.
+ */
+export function useCveTotals(namespace: string | undefined, refreshTick = 0, api: VulnApi = vulnApi) {
+  const [items, setItems] = useState<CveSummary[]>([]);
+  const [capped, setCapped] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+  const begin = useLatest();
+  const scope = useRef(namespace);
+
+  const load = useCallback(async () => {
+    const current = begin();
+    setLoading(true);
+    // Another scope's counts are not this one's; a same-scope Refresh keeps them until the new read lands.
+    if (scope.current !== namespace) {
+      scope.current = namespace;
+      setItems([]);
+      setCapped(false);
+      setError(null);
+    }
+    try {
+      const p = await api.listCves({ ...(namespace ? { namespace } : {}), limit: CVE_TOTALS_LIMIT });
+      if (!current()) return;
+      setItems(p.items);
+      setCapped(p.nextAfter !== null);
+      setError(null);
+    } catch (err) {
+      if (current()) setError(err);
+    } finally {
+      if (current()) setLoading(false);
+    }
+  }, [api, namespace, begin]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / scope change / refresh
+    void load();
+  }, [load, refreshTick]);
+
+  return { items, capped, loading, error, reload: load };
 }
 
 /** Images per CVE whose findings the drawer reads (tier, factors, KEV/EPSS). */
@@ -156,10 +214,10 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
 
 export const IMAGE_PAGE_SIZE = 25;
 /** Per-digest reads in flight at once while enriching an Images page. */
-export const IMAGE_ENRICH_CONCURRENCY = 3;
+export const IMAGE_ENRICH_CONCURRENCY = 6;
 
 /**
- * What the Images table adds to each inventory row (three reads per
+ * What the Images table adds to each inventory row (two or three reads per
  * digest). Each read settles on its own: a failed SBOM read leaves the
  * workloads and vulnerability columns intact, and says "Unknown" in its
  * own column only.
@@ -171,16 +229,19 @@ export interface ImageEnrichment {
   /** Vulnerability reports; [] = no vulnerability data (unknown). */
   vulnReports: Report[] | null;
   vulnError: unknown;
-  /** SBOM reports (every source, with trust); [] = no SBOM. */
+  /** SBOM reports (every source, with trust); [] = no SBOM; null with `sbomSkipped` = not read. */
   sbomReports: Report[] | null;
   sbomError: unknown;
+  /** The SBOM read was skipped: no source reported on the digest, so nothing was matched from an SBOM. */
+  sbomSkipped: boolean;
 }
 
 /**
  * `GET /images` one page (25 digests) at a time, each digest enriched with
- * its workloads, vulnerability reports and SBOM reports, at most
- * IMAGE_ENRICH_CONCURRENCY reads in flight. Enrichment is cached per digest
- * for the session and refreshed on the header Refresh.
+ * its workloads and vulnerability reports, then its SBOM reports when a
+ * source reported on it, at most IMAGE_ENRICH_CONCURRENCY digests in flight.
+ * Enrichment is cached per digest for the session; a Refresh keeps the
+ * cells on screen until their re-read lands.
  */
 export function useImageList(namespace: string | undefined, refreshTick = 0, api: VulnApi = vulnApi) {
   const [items, setItems] = useState<ImageSummary[]>([]);
@@ -198,15 +259,20 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   const enrich = useCallback(
     async (rows: ImageSummary[], current: () => boolean) => {
       const tasks = rows.map((r) => async () => {
-        const [d, v, sb] = await Promise.allSettled([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 }), api.getImageSbom(r.digest, { limit: 1 })]);
+        const [d, v] = await Promise.allSettled([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 })]);
+        // No report means nothing was matched from an SBOM, so that read is skipped (most digests on a cluster without a scanner); a failed report read still looks.
+        const skipSbom = v.status === 'fulfilled' && v.value.reports.length === 0;
+        let sb: PromiseSettledResult<SbomPage> | null = null;
+        if (!skipSbom) [sb] = await Promise.allSettled([api.getImageSbom(r.digest, { limit: 1 })]);
         const e: ImageEnrichment = {
           workloads: d.status === 'fulfilled' ? d.value.workloads : null,
           workloadsTruncated: d.status === 'fulfilled' ? d.value.truncated : false,
           workloadsError: d.status === 'rejected' ? d.reason ?? 'read failed' : null,
           vulnReports: v.status === 'fulfilled' ? v.value.reports : null,
           vulnError: v.status === 'rejected' ? v.reason ?? 'read failed' : null,
-          sbomReports: sb.status === 'fulfilled' ? sb.value.reports : null,
-          sbomError: sb.status === 'rejected' ? sb.reason ?? 'read failed' : null,
+          sbomReports: sb?.status === 'fulfilled' ? sb.value.reports : null,
+          sbomError: sb?.status === 'rejected' ? sb.reason ?? 'read failed' : null,
+          sbomSkipped: skipSbom,
         };
         if (current()) setEnriched((prev) => new Map(prev).set(r.digest, e));
       });
@@ -222,9 +288,9 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
     try {
       const p = await api.listImages({ limit: IMAGE_PAGE_SIZE, ...(namespace ? { namespace } : {}) });
       if (!current()) return;
+      // Cells already read stay until their re-read lands: a Refresh is not 25 rows of "…".
       setItems(p.items);
       setNextAfter(p.nextAfter);
-      setEnriched(new Map());
       setError(null);
       setLoading(false);
       await enrich(p.items, () => gen === listGen.current);
@@ -271,11 +337,20 @@ export function useImageVulns(digest: string | null, api: VulnApi = vulnApi, pag
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  const loadedFor = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     if (!digest) return;
     const current = begin();
     setLoading(true);
+    // A new digest starts empty, so nothing of the previous image shows under it; a same-digest reload keeps its rows.
+    if (loadedFor.current !== digest) {
+      loadedFor.current = digest;
+      setReports(null);
+      setItems([]);
+      setNextAfter(null);
+    }
+    setError(null);
     try {
       const p = await api.getImageVulns(digest, { limit: pageSize });
       if (!current()) return;

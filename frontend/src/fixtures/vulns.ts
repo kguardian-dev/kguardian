@@ -82,12 +82,50 @@ export const digestOf = (name: string) => imageDetail(name).digest;
  */
 export function replayVulnApi(extra: Capture[] = [], opts: { broker?: CaptureSet } = {}) {
   const calls: string[] = [];
-  const all = [...extra, ...SETS[opts.broker ?? 'current'].values()];
-  const norm = (r: string) => decodeURIComponent(r.replace(/\+/g, ' '));
+  const answer = replayAnswer(extra, opts.broker ?? 'current');
   const fetchImpl = (async (input: RequestInfo | URL) => {
-    const url = new URL(String(input), 'http://x');
-    const line = `GET ${url.pathname.replace(/^\/api/, '')}${url.search}`;
+    const line = requestLine(input);
     calls.push(line);
+    return answer(line);
+  }) as typeof fetch;
+  return { api: new VulnApi({ fetchImpl }), calls };
+}
+
+/**
+ * `replayVulnApi` whose requests matching `gate` are held until the test
+ * releases them: `release(match)` answers the first held request matching
+ * `match` (wrap the call in `act`). For in-flight and stale-response tests.
+ */
+export function gatedVulnApi(gate: (line: string) => boolean, extra: Capture[] = [], opts: { broker?: CaptureSet } = {}) {
+  const calls: string[] = [];
+  const held: Array<{ line: string; resolve: () => void }> = [];
+  const answer = replayAnswer(extra, opts.broker ?? 'current');
+  const fetchImpl = ((input: RequestInfo | URL) => {
+    const line = requestLine(input);
+    calls.push(line);
+    if (!gate(line)) return Promise.resolve(answer(line));
+    return new Promise<Response>((resolve) => held.push({ line, resolve: () => resolve(answer(line)) }));
+  }) as typeof fetch;
+  const release = async (match: RegExp) => {
+    const i = held.findIndex((h) => match.test(h.line));
+    if (i < 0) throw new Error(`nothing held matching ${match}; held: ${held.map((h) => h.line).join(' | ')}`);
+    const [h] = held.splice(i, 1);
+    h.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+  };
+  return { api: new VulnApi({ fetchImpl }), calls, held, release };
+}
+
+const requestLine = (input: RequestInfo | URL) => {
+  const url = new URL(String(input), 'http://x');
+  return `GET ${url.pathname.replace(/^\/api/, '')}${url.search}`;
+};
+
+/** The captured answer for one request line (`extra` first; `limit=` falls back to the capture without it; otherwise an empty 404). */
+function replayAnswer(extra: Capture[], set: CaptureSet): (line: string) => Response {
+  const all = [...extra, ...SETS[set].values()];
+  const norm = (r: string) => decodeURIComponent(r.replace(/\+/g, ' '));
+  return (line) => {
     const noLimit = (() => {
       const u = new URL(line.slice(4), 'http://x');
       u.searchParams.delete('limit');
@@ -96,6 +134,5 @@ export function replayVulnApi(extra: Capture[] = [], opts: { broker?: CaptureSet
     const hit = all.find((c) => norm(c.request) === norm(line)) ?? all.find((c) => norm(c.request) === norm(noLimit));
     if (!hit) return new Response('', { status: 404 });
     return new Response(typeof hit.body === 'string' ? hit.body : JSON.stringify(hit.body), { status: hit.status });
-  }) as typeof fetch;
-  return { api: new VulnApi({ fetchImpl }), calls };
+  };
 }

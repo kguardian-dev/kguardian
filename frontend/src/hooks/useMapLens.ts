@@ -303,7 +303,7 @@ export function useMapLens(
         const [imgRead, sigRead] = await Promise.all([
           readImages(vulnApi, namespace, lens),
           lens === 'supply'
-            ? readRunningSignatures(vulnApi, namespace).then(
+            ? readRunningSignatures(vulnApi, namespace, { cancelled: () => !current() }).then(
                 (r) => ({ ok: true as const, ...r }),
                 (err: unknown) => ({ ok: false as const, unsupported: vulnErrorKind(err) === 'unsupported' }),
               )
