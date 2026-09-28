@@ -478,7 +478,13 @@ pub struct CrIn {
     #[serde(rename = "syscallCount")]
     pub syscall_count: usize,
     pub drift: DriftIn,
+    /// The broker's count from node-status posts (nodes heard from
+    /// recently).
     pub distribution: DistIn,
+    /// The CR's own `status.distribution` (the controllers' count against
+    /// the API server's node list); absent when the CR carries none.
+    #[serde(rename = "statusDistribution", default)]
+    pub status_distribution: Option<DistIn>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1834,6 +1840,7 @@ pub struct CrView {
     pub missing: Vec<String>,
     pub extra: Vec<String>,
     pub distribution: DistIn,
+    pub status_distribution: Option<DistIn>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1899,6 +1906,7 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
         missing: c.drift.missing.clone(),
         extra: c.drift.extra.clone(),
         distribution: c.distribution.clone(),
+        status_distribution: c.status_distribution.clone(),
     });
     match &cr {
         None => {
@@ -5544,6 +5552,72 @@ mod tests {
         assert_eq!(p.controls[0].in_sync, Some(false));
     }
 
+    /// The CR block carries both counts the seccomp summary has: the
+    /// broker's node-status count and the CR's own `status.distribution`,
+    /// which differ when a node stops reporting (48/48 beside 60/60).
+    #[test]
+    fn cr_status_distribution_is_mirrored_from_the_seccomp_summary() {
+        let summary = |cr_extra: Value| {
+            let mut v = json!({
+                "hash": "h", "syscallCount": 3, "architectures": ["x86_64"],
+                "updatedAt": "2026-09-14T00:33:00",
+                "capture": {"level": "full", "complete": true, "incomplete": 0},
+                "cr": {
+                    "name": "media-transform-api", "defaultAction": "SCMP_ACT_LOG", "hash": "x",
+                    "syscallCount": 2, "drift": {"missing": [], "extra": [], "inSync": true},
+                    "distribution": {"ready": 48, "total": 48, "state": "Ready"}
+                },
+                "denials": null
+            });
+            if let (Value::Object(cr), Value::Object(x)) = (&mut v["cr"], cr_extra) {
+                cr.extend(x);
+            }
+            serde_json::from_value::<SeccompSummary>(v).unwrap()
+        };
+        let with = summary(json!({
+            "statusDistribution": {"ready": 60, "total": 60, "state": "Ready"}
+        }));
+        let names: BTreeSet<String> = ["read", "write"].iter().map(|x| x.to_string()).collect();
+        let p = build(
+            &key(),
+            &Sources {
+                seccomp: Some((with, names.clone())),
+                ..Default::default()
+            },
+            now(),
+        );
+        let cr = p.dimensions.syscalls.cr.as_ref().unwrap();
+        assert_eq!((cr.distribution.ready, cr.distribution.total), (48, 48));
+        let sd = cr.status_distribution.as_ref().expect("mirrored");
+        assert_eq!((sd.ready, sd.total, sd.state.as_str()), (60, 60, "Ready"));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v["dimensions"]["syscalls"]["cr"]["statusDistribution"],
+            json!({"ready": 60, "total": 60, "state": "Ready"})
+        );
+        assert_eq!(
+            v["dimensions"]["syscalls"]["cr"]["distribution"]["ready"],
+            48
+        );
+        // A CR without one (older controller, or nothing distributed yet).
+        for absent in [json!({}), json!({"statusDistribution": null})] {
+            let p = build(
+                &key(),
+                &Sources {
+                    seccomp: Some((summary(absent), names.clone())),
+                    ..Default::default()
+                },
+                now(),
+            );
+            let v = serde_json::to_value(&p).unwrap();
+            assert!(v["dimensions"]["syscalls"]["cr"]["statusDistribution"].is_null());
+            assert_eq!(
+                v["dimensions"]["syscalls"]["cr"]["distribution"]["ready"],
+                48
+            );
+        }
+    }
+
     #[test]
     fn syscalls_dimension_from_the_seccomp_summary() {
         let sum = SeccompSummary {
@@ -5571,6 +5645,7 @@ mod tests {
                     total: 1,
                     state: "Ready".into(),
                 },
+                status_distribution: None,
             }),
             denials: Some(DenialIn {
                 total: 0,

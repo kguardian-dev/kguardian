@@ -768,6 +768,11 @@ From `GET /workloads/flux-system/Deployment/source-controller/profile` -> 200 (c
       "ready": 0,
       "total": 1,
       "state": "Pending"
+    },
+    "statusDistribution": {
+      "ready": 1,
+      "total": 1,
+      "state": "Ready"
     }
   },
   "denials": null
@@ -779,6 +784,10 @@ From `GET /workloads/flux-system/Deployment/source-controller/profile` -> 200 (c
   status at least `warn`.
 - `cr`: `null` = no SeccompProfile CR references the workload. `mode`: `audit` for `SCMP_ACT_LOG` /
   `SCMP_ACT_ALLOW`, else `enforce`. `missing` = observed but not allowed (blocked when enforced).
+  `distribution` is the broker's count from node-status posts (nodes heard from recently);
+  `statusDistribution` mirrors the CR's own `status.distribution` (the controllers' count against the API
+  server's node list), `null` when the CR carries none, exactly as `GET /seccomp/profiles/{..}` serves it.
+  The two differ when a node stops reporting.
 - `denials`: `null` = cannot tell "nothing denied" from "nothing capturing" (reason `denials_unknown`).
 - Findings: `syscalls.no_enforcing_profile` medium (no CR, or a CR in audit mode), `syscalls.drift`
   medium, `syscalls.denials` high.
@@ -1905,3 +1914,5 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     section 2.4). Past it the profile is served with `network` `unknown` (reason `network_unread`,
     `snapshot.network` `null`) instead of a 500 at the pool's statement timeout; the snapshotter records
     the failure rather than versioning a partial profile.
+  - `dimensions.syscalls.cr.statusDistribution` (section 2.5), the CR's own `status.distribution`
+    beside the broker's `distribution`; `null` when the CR has none.
