@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { callGemini } from "./gemini.js";
 import { McpClient } from "../mcpClient.js";
 import type { ChatRequest } from "../types/index.js";
+import type { StreamEvent } from "./events.js";
 
 // Mock of the Gemini generateContent API. Gemini's path carries both the API
 // version and the model id, so these tests exist mainly to prove the model
@@ -136,4 +137,27 @@ test("a 404 from the gateway explains which URL was called and which var to fix"
       return true;
     },
   );
+});
+
+test("a tool round reports tool_use and tool_result when an emitter is supplied", async () => {
+  process.env.GEMINI_BASE_URL = origin;
+  responseQueue.push({
+    status: 200,
+    body: {
+      candidates: [
+        { content: { parts: [{ functionCall: { name: "get_cluster_pods", args: { namespace: "argocd" } } }] } },
+      ],
+    },
+  });
+  responseQueue.push(textResponse("2 pods"));
+
+  const events: StreamEvent[] = [];
+  const res = await callGemini({ ...baseRequest }, stubBroker, (e) => events.push(e));
+
+  assert.equal(res.message, "2 pods");
+  assert.deepEqual(events, [
+    { type: "tool_use", name: "get_cluster_pods", id: "call_0_0" },
+    { type: "tool_result", name: "get_cluster_pods", ok: true },
+  ]);
+  assert.equal(capturedPaths.length, 2);
 });

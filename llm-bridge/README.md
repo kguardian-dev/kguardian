@@ -131,11 +131,11 @@ Health check. Read by the chart's liveness and readiness probes and by the front
 }
 ```
 
-`hasProvider` is true when at least one provider API key is set to a non-empty value. `mcp` reports whether the MCP endpoint is routed.
+`hasProvider` is true when at least one provider API key is set to a non-empty value. `mcp` reports whether the external MCP endpoint (`POST /mcp`, off by default) is routed. It says nothing about the assistant's own tools, which always run in-process, so `mcp: false` is the normal reading on an install that has not enabled that endpoint.
 
 ### POST /api/chat/stream
 
-Streaming chat over Server-Sent Events — this is what the frontend uses. The response is a stream of `text`, `thinking`, `tool_use`, `tool_result`, and a terminal `done` (or `error`) event, with `: ping` keepalives while the model works. Anthropic streams natively; the other providers run to completion and arrive as a single `text` chunk.
+Streaming chat over Server-Sent Events — this is what the frontend uses. The response is a stream of `text`, `thinking`, `tool_use`, `tool_result`, and a terminal `done` (or `error`) event, with `: ping` keepalives while the model works. Anthropic, OpenAI and Copilot (including any OpenAI-compatible gateway behind `OPENAI_BASE_URL`) stream natively, so text arrives as it is generated and each tool call is reported as it runs. Gemini runs to completion and arrives as a single `text` chunk after its `tool_use`/`tool_result` events.
 
 Rate-limited to **20 requests per minute** per client. (`/mcp` is not covered by this limiter — it has its own, far higher one; see below.)
 

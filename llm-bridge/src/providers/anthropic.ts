@@ -5,6 +5,7 @@ import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 import { resolveBaseUrl } from "./baseUrl.js";
+import type { Emit, ProviderError } from "./events.js";
 
 // Upper bound on tool-calling round-trips before we force a final answer.
 const MAX_TOOL_ROUNDS = 10;
@@ -26,19 +27,9 @@ const MAX_TOKENS = 8192;
 // concern, so we give adaptive thinking + answer generous headroom.
 const STREAM_MAX_TOKENS = 16000;
 
-// ---------------------------------------------------------------------------
-// Streaming event contract (provider -> transport). Kept transport-agnostic so
-// the HTTP layer decides how to serialise (SSE) and the provider stays testable.
-// ---------------------------------------------------------------------------
-export type StreamEvent =
-  | { type: "text"; delta: string }
-  | { type: "thinking"; delta: string }
-  | { type: "tool_use"; name: string; id: string }
-  | { type: "tool_result"; name: string; ok: boolean }
-  | { type: "done"; model: string }
-  | { type: "error"; error: string };
-
-export type Emit = (event: StreamEvent) => void;
+// The streaming event contract lives in events.ts, shared by every provider;
+// re-exported here so existing importers keep working.
+export type { StreamEvent, Emit, ProviderError } from "./events.js";
 
 // ---------------------------------------------------------------------------
 // Shared setup helpers (used by both the streaming and non-streaming entry
@@ -351,15 +342,6 @@ function finalize(message: Anthropic.Message): ChatResponse {
     provider: LLMProvider.ANTHROPIC,
     model: message.model,
   };
-}
-
-/**
- * An Error that carries the upstream provider HTTP status so the transport can
- * map it (429 rate-limit / 529 overload) instead of collapsing everything to a
- * generic 500. `status` is undefined for non-API (network/other) errors.
- */
-export interface ProviderError extends Error {
-  status?: number;
 }
 
 /** Normalise SDK/transport errors into a single Error with a clean message. */
