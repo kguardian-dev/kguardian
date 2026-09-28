@@ -1671,6 +1671,17 @@ pub const RUNNING_ROW_COST_BYTES: u64 = ATTESTATION_ROW_COST_BYTES;
 pub const RUNNING_DEFAULT_LIMIT: i64 = 100;
 pub const RUNNING_MAX_LIMIT: i64 = 200;
 
+/// Per running container read by `GET /attestations/policy`, in bytes.
+/// An estimate of the generation's working set, not the ingest body cap
+/// [`RUNNING_ROW_COST_BYTES`]: at that cap 5000 rows was 2.5 GiB, which the
+/// budget clamped to its whole, so a generation refused and was refused by
+/// every other read. A signed row (three signers, three provenance
+/// attestations) is ~2 KiB of JSON (`policy_row_cost_covers_a_signed_row`);
+/// 16 KiB holds the libpq text, the `Value` tree and `plan`'s clone of it.
+/// A digest carrying many attestations (up to [`MAX_ATTESTATIONS`]) is
+/// under-charged severalfold; accepted, the charge is an estimate.
+pub const POLICY_ROW_COST_BYTES: u64 = 16 * 1024;
+
 /// One running workload container and what is known about who signed its
 /// image. `verdict` is `None` when the digest has not been checked (no
 /// result yet, or signature discovery is off): not checked, never
@@ -1819,6 +1830,32 @@ pub fn running_filtered(
     };
     Ok(RunningPage { items, next_after })
 }
+
+/// How many rows [`running_filtered`] would page through for `namespace`,
+/// stopping at `cap + 1` so the count is bounded like the read it prices.
+pub fn running_count(
+    conn: &mut PgConnection,
+    namespace: Option<&str>,
+    cap: i64,
+) -> Result<i64, DbError> {
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = BigInt)]
+        n: i64,
+    }
+    let row: Count = sql_query(RUNNING_COUNT_SQL)
+        .bind::<Double, _>(crate::image_inventory::running_window_secs() as f64)
+        .bind::<Nullable<Text>, _>(namespace)
+        .bind::<BigInt, _>(cap.saturating_add(1))
+        .get_result(conn)?;
+    Ok(row.n)
+}
+
+const RUNNING_COUNT_SQL: &str = concat!(
+    "SELECT COUNT(*) AS n FROM (SELECT 1 FROM workload_containers wc WHERE ",
+    crate::image_inventory::running_sql!("$1"),
+    " AND ($2::text IS NULL OR wc.pod_namespace = $2) LIMIT $3) bounded"
+);
 
 #[get(
     "/attestations/running",

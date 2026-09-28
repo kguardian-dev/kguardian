@@ -780,15 +780,27 @@ pub async fn get_attestation_policy(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let ack = truthy(q.acknowledge_partial.as_deref());
-    // Charged at the worst case (every row as large as one stored result),
-    // which is more than any budget: the budget clamps it to the whole, so
-    // a generation runs alone and other reads wait or shed meanwhile.
-    // Generation is an occasional operator action; real rows are far
-    // smaller, but the charge is not allowed to under-count.
+    // Priced from the rows this scope really has (counted to the cap plus
+    // one) rather than the cap at the ingest body size, which took the whole
+    // budget; the count can go stale against the read below, which
+    // `load_rows` still caps at MAX_POLICY_ROWS.
+    let count_pool = pool.clone();
+    let count_ns = namespace.clone();
+    let rows_in_scope = actix_web::web::block(move || -> Result<i64, DbError> {
+        let mut conn = count_pool.get()?;
+        crate::attestation::running_count(&mut conn, count_ns.as_deref(), MAX_POLICY_ROWS)
+    })
+    .await?
+    .map_err(crate::db_error_response)?;
+    if rows_in_scope > MAX_POLICY_ROWS {
+        return Ok(HttpResponse::UnprocessableEntity().body(format!(
+            "more than {MAX_POLICY_ROWS} running containers; generate per namespace with ?namespace="
+        )));
+    }
     let _permit = match budget
         .acquire(crate::read_budget::cost_kib(
-            MAX_POLICY_ROWS,
-            crate::attestation::RUNNING_ROW_COST_BYTES,
+            rows_in_scope,
+            crate::attestation::POLICY_ROW_COST_BYTES,
         ))
         .await
     {
