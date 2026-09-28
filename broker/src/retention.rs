@@ -1592,37 +1592,74 @@ async fn run_compute_prune(pool: &DbPool, table: &'static str, days: u32) {
     );
 }
 
-/// Drop `pod_compute_latest` rows the controller stopped refreshing.
-/// The table is bounded by live-container count, so one bounded DELETE
-/// (still LIMITed through the CTE, for the pathological case of a whole
-/// cluster's controllers going away at once) is enough.
+/// The statement `run_stale_latest` issues per batch, a constant so the
+/// live test runs the SAME SQL. Same shape as `NODE_COMPUTE_STALE_PRUNE_SQL`
+/// below, window repeated on the outer DELETE for the same recheck reason.
+const POD_COMPUTE_STALE_PRUNE_SQL: &str = "WITH stale AS (\
+         SELECT container_uid FROM pod_compute_latest \
+         WHERE updated_at < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY updated_at \
+         LIMIT $2 \
+     ) \
+     DELETE FROM pod_compute_latest \
+     WHERE container_uid IN (SELECT container_uid FROM stale) \
+       AND updated_at < timezone('UTC', NOW()) - $1::interval";
+
+/// Drop `pod_compute_latest` rows the controller stopped refreshing, in
+/// batches like the history prune. One bounded DELETE per pass assumed a
+/// table sized by live containers; on a churning cluster the dead rows
+/// outgrow a batch, and a pass that only ever deletes one batch, or fails
+/// once, never catches up. Each batch is its own statement, so a failure
+/// costs one batch and the pass resumes on the next interval.
 async fn run_stale_latest(pool: &DbPool) {
-    let pool = pool.clone();
     let batch_size = retention_batch_size();
-    let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
-        let mut conn = pool.get().map_err(RetentionError::Pool)?;
-        sql_query(
-            "WITH stale AS (\
-                 SELECT container_uid FROM pod_compute_latest \
-                 WHERE updated_at < timezone('UTC', NOW()) - $1::interval \
-                 ORDER BY updated_at \
-                 LIMIT $2 \
-             ) \
-             DELETE FROM pod_compute_latest \
-             WHERE container_uid IN (SELECT container_uid FROM stale)",
-        )
+    let mut total_deleted = 0usize;
+    for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        let pool = pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+            let mut conn = pool.get().map_err(RetentionError::Pool)?;
+            prune_stale_latest(&mut conn, batch_size)
+        })
+        .await;
+        match result {
+            Ok(Ok(0)) => {
+                if total_deleted == 0 {
+                    debug!("pod_compute_latest: no stale containers");
+                } else {
+                    info!(
+                        rows = total_deleted,
+                        batches = batch_idx,
+                        "pod_compute_latest: pruned stale containers"
+                    );
+                }
+                return;
+            }
+            Ok(Ok(n)) => total_deleted += n,
+            Ok(Err(e)) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "pod_compute_latest stale prune failed");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "pod_compute_latest stale prune task panicked");
+                return;
+            }
+        }
+    }
+    info!(
+        rows = total_deleted,
+        cap = MAX_BATCHES_PER_PASS,
+        "pod_compute_latest stale prune hit per-pass batch cap; remaining rows will be pruned on next interval"
+    );
+}
+
+/// The blocking half of `run_stale_latest`, on a bare connection so the
+/// live test drives the exact statement and window the loop uses.
+fn prune_stale_latest(conn: &mut PgConnection, batch_size: i64) -> Result<usize, RetentionError> {
+    sql_query(POD_COMPUTE_STALE_PRUNE_SQL)
         .bind::<diesel::sql_types::Text, _>(format!("{} seconds", COMPUTE_LATEST_STALE_SECS))
         .bind::<diesel::sql_types::BigInt, _>(batch_size)
-        .execute(&mut conn)
+        .execute(conn)
         .map_err(RetentionError::Diesel)
-    })
-    .await;
-    match result {
-        Ok(Ok(0)) => debug!("pod_compute_latest: no stale containers"),
-        Ok(Ok(n)) => info!(rows = n, "pod_compute_latest: pruned stale containers"),
-        Ok(Err(e)) => warn!(error = %e, "pod_compute_latest stale prune failed"),
-        Err(e) => warn!(error = %e, "pod_compute_latest stale prune task panicked"),
-    }
 }
 
 /// The statement `run_stale_node_latest` issues, as a constant so the live
@@ -1639,9 +1676,8 @@ async fn run_stale_latest(pool: &DbPool) {
 /// true, because the CTE was materialised from the pass's snapshot, so the
 /// row that was just refreshed is deleted anyway (verified on Postgres
 /// 18). Repeating the window on the outer DELETE makes that recheck see
-/// the new `updated_at` and skip the row. The pod prune above has the
-/// same shape and the same gap; it is left for a follow-up. `$1` is bound
-/// once and referenced twice, which Postgres allows.
+/// the new `updated_at` and skip the row. `$1` is bound once and referenced
+/// twice, which Postgres allows.
 ///
 /// No index on `updated_at`: the table is node-count sized once this
 /// prune has run, and even the one-off backlog on a cluster upgrading to
@@ -3382,6 +3418,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pod_compute_stale_prune_sql_is_bounded_and_takes_the_oldest_first() {
+        let sql = POD_COMPUTE_STALE_PRUNE_SQL;
+        let window = "updated_at < timezone('UTC', NOW()) - $1::interval";
+        let (cte, delete) = sql
+            .split_once("DELETE FROM pod_compute_latest")
+            .expect("a CTE followed by the DELETE");
+        assert!(cte.contains("SELECT container_uid FROM pod_compute_latest"));
+        assert!(cte.contains(window), "the CTE selects by the window");
+        assert!(
+            cte.contains("ORDER BY updated_at"),
+            "longest-dead containers go first"
+        );
+        assert!(cte.contains("LIMIT $2"), "bounded through the CTE");
+        assert!(delete.contains("WHERE container_uid IN (SELECT container_uid FROM stale)"));
+        assert!(
+            delete.contains(&format!("AND {window}")),
+            "the outer DELETE repeats the window, so a container the controller \
+             refreshed while the DELETE waited is kept"
+        );
+    }
+
     // ---- live database ----------------------------------------------
     //
     // The prune is one SQL statement. The unit test above proves the right
@@ -3501,6 +3559,119 @@ mod tests {
         assert_eq!(
             prune_stale_node_latest(&mut conn, DEFAULT_BATCH_SIZE).expect("prune"),
             0
+        );
+    }
+
+    /// One container's row, `age_secs` behind the SERVER's clock (see
+    /// `seed_node`). Only the NOT NULL columns without defaults are set.
+    fn seed_container(conn: &mut PgConnection, uid: &str, age_secs: i64) {
+        use diesel::connection::SimpleConnection;
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_compute_latest \
+               (container_uid, pod_uid, namespace, pod_name, container, node, cgroup_id, ts, \
+                interval_ms, cpu_usage_millis, cpu_period_usec, cpu_nr_periods, cpu_nr_throttled, \
+                cpu_throttled_usec, cpu_psi_some10, cpu_psi_full10, mem_current, mem_working_set, \
+                mem_psi_some10, mem_psi_full10, mem_events_high, mem_events_max, mem_oom_kill, \
+                mem_refault, mem_pgmajfault, updated_at) \
+             VALUES ('{uid}', 'pod-{uid}', 'ns', 'pod-{uid}', 'app', 'node-a', 1, \
+                     timezone('UTC', NOW()), 5000, 0, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
+                     0, 0, timezone('UTC', NOW()) - INTERVAL '{age_secs} seconds')"
+        ))
+        .expect("seed pod_compute_latest");
+    }
+
+    fn remaining_containers(conn: &mut PgConnection) -> Vec<String> {
+        use crate::schema::pod_compute_latest::dsl::*;
+        pod_compute_latest
+            .select(container_uid)
+            .order(container_uid.asc())
+            .load(conn)
+            .expect("list containers")
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_dead_containers_in_batches_and_keeps_the_rest() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        conn.batch_execute("TRUNCATE pod_compute_latest")
+            .expect("reset the table this test uses");
+        let window = COMPUTE_LATEST_STALE_SECS;
+        seed_container(&mut conn, "live", 0);
+        seed_container(&mut conn, "quiet", window / 2);
+        seed_container(&mut conn, "dead-recent", window * 2);
+        seed_container(&mut conn, "dead-old", window * 24);
+        seed_container(&mut conn, "dead-older", window * 48);
+
+        // A batch of one takes the longest-dead container, not an arbitrary
+        // one, and a second batch the next: what the loop does per iteration.
+        assert_eq!(prune_stale_latest(&mut conn, 1).expect("prune"), 1);
+        assert_eq!(
+            remaining_containers(&mut conn),
+            ["dead-old", "dead-recent", "live", "quiet"].map(String::from)
+        );
+        assert_eq!(prune_stale_latest(&mut conn, 1).expect("prune"), 1);
+        assert_eq!(
+            remaining_containers(&mut conn),
+            ["dead-recent", "live", "quiet"].map(String::from)
+        );
+
+        // A full batch takes what is left outside the window and nothing
+        // inside it, and the pass then stops on a 0.
+        assert_eq!(
+            prune_stale_latest(&mut conn, DEFAULT_BATCH_SIZE).expect("prune"),
+            1
+        );
+        assert_eq!(
+            remaining_containers(&mut conn),
+            ["live", "quiet"].map(String::from)
+        );
+        assert_eq!(
+            prune_stale_latest(&mut conn, DEFAULT_BATCH_SIZE).expect("prune"),
+            0
+        );
+    }
+
+    /// One pass over a backlog larger than a batch. The fix is the loop:
+    /// the old single DELETE left 150 of these 250 dead rows behind.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_one_stale_container_pass_clears_a_backlog_beyond_one_batch() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        conn.batch_execute("TRUNCATE pod_compute_latest")
+            .expect("reset the table this test uses");
+        seed_container(&mut conn, "live-a", 0);
+        seed_container(&mut conn, "live-b", 0);
+        for i in 0..250 {
+            seed_container(
+                &mut conn,
+                &format!("dead-{i:03}"),
+                COMPUTE_LATEST_STALE_SECS * 2,
+            );
+        }
+
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(2)
+            .build(ConnectionManager::<PgConnection>::new(url))
+            .expect("pool");
+        // The batch size is read from the env on every pass; MIN_BATCH_SIZE
+        // makes 250 rows three batches. The runtime is built inside the env
+        // guard so no lock is held across an await.
+        with_env("AUDIT_VERDICTS_RETENTION_BATCH_SIZE", Some("100"), || {
+            assert_eq!(retention_batch_size(), MIN_BATCH_SIZE);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(run_stale_latest(&pool));
+        });
+
+        assert_eq!(
+            remaining_containers(&mut conn),
+            ["live-a", "live-b"].map(String::from),
+            "one pass must clear every dead container, not one batch of them"
         );
     }
 

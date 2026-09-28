@@ -177,7 +177,7 @@ pub async fn add_compute_batch(
         })
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(Accepted { accepted }))
 }
@@ -306,7 +306,7 @@ pub async fn add_compute_history_batch(
         })
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     info!(
         node = %batch.node,
@@ -387,7 +387,7 @@ pub async fn get_compute_latest(
         latest_for_namespace(&mut conn, &ns)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(resp))
 }
 
@@ -458,7 +458,7 @@ pub async fn get_compute_history(
         pod_container_count(&mut conn, &count_uid, cutoff)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     let row_limit = history_row_limit(minutes, containers);
     // A pod with more containers than assumed is charged the difference
     // as a second permit rather than truncated. Refused (503) like any
@@ -479,7 +479,7 @@ pub async fn get_compute_history(
         history_for_pod(&mut conn, &uid, cutoff, row_limit)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(HistoryResponse { rows }))
 }
 
@@ -567,7 +567,7 @@ pub async fn get_compute_contention(
         contention_pairs(&mut conn, ns, node, cutoff)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(ContentionResponse { pairs }))
 }
 
@@ -668,7 +668,7 @@ pub async fn get_compute_findings(
         load_findings_victims(&mut conn, ns, node, cutoff)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     if victims.victims.is_empty() {
         return Ok(HttpResponse::Ok().json(FindingsResponse {
             findings: Vec::new(),
@@ -689,7 +689,7 @@ pub async fn get_compute_findings(
         load_findings_rows(&mut conn, victims, cutoff)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     let (findings, victims_evaluated) = findings_for_scope(&scope, &thresholds);
     Ok(HttpResponse::Ok().json(FindingsResponse {
         findings,
@@ -946,7 +946,7 @@ pub async fn get_compute_nodes(
             .load::<NodeComputeLatest>(&mut conn)?)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(NodesResponse { nodes }))
 }
 

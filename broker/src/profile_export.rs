@@ -1392,7 +1392,7 @@ async fn export(
             probe_sbom_components(&mut conn, &k)
         })
         .await?
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+        .map_err(crate::db_error_response)?;
     }
     // The profile, plus the export's own bounded reads: flow rows for the
     // network generator and its memoised per-IP lookups.
@@ -1465,7 +1465,7 @@ async fn export(
         ))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         Out::NotFound => not_found_workload(),
         Out::Refused(r) => HttpResponse::Conflict().json(json!({

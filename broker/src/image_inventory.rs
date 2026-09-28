@@ -942,7 +942,7 @@ pub async fn get_images(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -1075,7 +1075,7 @@ pub async fn get_image(
         image_detail(&mut conn, &digest)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match detail {
         Some(d) => HttpResponse::Ok().json(d),
         None => HttpResponse::NotFound().body("No data found"),
@@ -1280,7 +1280,7 @@ pub async fn get_workload_containers(
         workload_containers(&mut conn, &ns, &kind, &name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(if out.containers.is_empty() {
         HttpResponse::NotFound().body("No data found")
     } else {

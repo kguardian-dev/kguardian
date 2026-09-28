@@ -533,6 +533,225 @@ fn live_load_rows_scopes_to_the_workload() {
     );
 }
 
+/// Two cluster-wide generations at the row cap and a compute poll fit the
+/// default budget together; charged at the ingest body cap, one generation
+/// took all of it.
+#[tokio::test]
+async fn two_policy_reads_and_a_compute_read_fit_the_default_budget() {
+    use crate::compute_api::LATEST_ROW_CAP;
+    use crate::read_budget::{
+        cost_kib, ReadBudget, COMPUTE_ROW_COST_BYTES, DEFAULT_READ_MEMORY_BUDGET_MB,
+    };
+    let budget = ReadBudget::with_budget_kib(
+        DEFAULT_READ_MEMORY_BUDGET_MB * 1024,
+        std::time::Duration::from_millis(0),
+    );
+    let policy = cost_kib(MAX_POLICY_ROWS, crate::attestation::POLICY_ROW_COST_BYTES);
+    assert!(
+        policy < budget.total_kib() / 2,
+        "one generation ({policy} KiB) must leave room for another"
+    );
+    let _a = budget.acquire(policy).await.expect("first generation");
+    let _b = budget
+        .acquire(policy)
+        .await
+        .expect("second generation beside it");
+    let _c = budget
+        .acquire(cost_kib(LATEST_ROW_CAP, COMPUTE_ROW_COST_BYTES))
+        .await
+        .expect("the compute poll beside both");
+}
+
+/// A namespace with three containers is charged for three rows, not the cap.
+#[test]
+fn policy_charge_follows_the_scope() {
+    use crate::read_budget::cost_kib;
+    let three = cost_kib(3, crate::attestation::POLICY_ROW_COST_BYTES);
+    let cap = cost_kib(MAX_POLICY_ROWS, crate::attestation::POLICY_ROW_COST_BYTES);
+    assert_eq!(three, 48);
+    assert!(three * 100 < cap);
+}
+
+/// The per-row estimate covers a signed row with room for the copies the
+/// generation holds (libpq text, the `Value` tree, `plan`'s clone).
+#[test]
+fn policy_row_cost_covers_a_signed_row() {
+    let signers = json!([
+        keyless(
+            GH,
+            "https://github.com/example/api/.github/workflows/release.yaml@refs/tags/v1.2.3"
+        ),
+        keyless(
+            GH,
+            "https://github.com/example/api/.github/workflows/publish.yaml@refs/heads/main"
+        ),
+        key(),
+    ]);
+    let atts = json!([
+        slsa(keyless(
+            GH,
+            "https://github.com/example/api/.github/workflows/release.yaml@refs/tags/v1.2.3"
+        )),
+        slsa(keyless(
+            GH,
+            "https://github.com/example/api/.github/workflows/release.yaml@refs/tags/v1.2.3"
+        )),
+        slsa(key()),
+    ]);
+    let r = row(
+        "shop-frontend-production",
+        "checkout-api-deployment",
+        99,
+        "123456789012.dkr.ecr.us-west-2.amazonaws.com/shop/checkout-api:2026.09.29-abcdef0",
+        Some("123456789012.dkr.ecr.us-west-2.amazonaws.com/shop/checkout-api"),
+        Some("verified"),
+        signers,
+        atts,
+    );
+    let json = serde_json::to_vec(&r).unwrap().len() as u64;
+    eprintln!("signed policy row: {json} B of JSON");
+    assert!(
+        json * 4 <= crate::attestation::POLICY_ROW_COST_BYTES,
+        "a signed row is {json} B of JSON; the estimate must hold four copies"
+    );
+}
+
+/// Migrated, emptied, and seeded with one image running as three containers
+/// (two in `shop`, one in `pay`) plus a terminated one. Returns the URL.
+fn live_seed() -> (String, diesel::pg::PgConnection) {
+    use diesel::connection::SimpleConnection;
+    use diesel::prelude::*;
+    use diesel_migrations::MigrationHarness;
+    const M: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+    let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+    let mut conn = diesel::pg::PgConnection::establish(&url).unwrap();
+    conn.run_pending_migrations(M).unwrap();
+    conn.batch_execute("TRUNCATE images, workload_containers, image_attestations")
+        .unwrap();
+    let d = format!("sha256:{:064x}", 81);
+    conn.batch_execute(&format!(
+        "INSERT INTO images (digest, repository, digest_kind) VALUES ('{d}', 'ghcr.io/example/api', 'repo');
+         INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, image_digest, container_kind, image_ref, state) VALUES
+           ('shop', 'Deployment', 'api', 'app', '{d}', 'regular', 'ghcr.io/example/api:1', 'running'),
+           ('shop', 'Deployment', 'api', 'sidecar', '{d}', 'regular', 'ghcr.io/example/api:1', 'running'),
+           ('pay', 'Deployment', 'gw', 'app', '{d}', 'regular', 'ghcr.io/example/api:1', 'running'),
+           ('pay', 'Deployment', 'old', 'app', '{d}', 'regular', 'ghcr.io/example/api:1', 'terminated');"
+    ))
+    .unwrap();
+    (url, conn)
+}
+
+fn live_pool(url: &str) -> DbPool {
+    diesel::r2d2::Pool::builder()
+        .max_size(2)
+        .build(diesel::r2d2::ConnectionManager::new(url))
+        .expect("pool")
+}
+
+async fn policy_status(
+    pool: DbPool,
+    budget: crate::read_budget::ReadBudget,
+    uri: &str,
+) -> actix_web::http::StatusCode {
+    use actix_web::{test, web, App};
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .app_data(web::Data::new(budget))
+            .service(get_attestation_policy),
+    )
+    .await;
+    test::call_service(&app, test::TestRequest::get().uri(uri).to_request())
+        .await
+        .status()
+}
+
+/// Two `shop` containers cost 32 KiB, which fits beside a 32 KiB read in a
+/// 128 KiB budget. Charged at the old cap the request took the whole budget
+/// and was shed here.
+#[actix_web::test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+async fn live_policy_read_is_charged_for_its_scope_and_fits_beside_another_read() {
+    use crate::read_budget::ReadBudget;
+    use actix_web::http::StatusCode;
+    let (url, _conn) = live_seed();
+    let budget = ReadBudget::with_budget_kib(128, std::time::Duration::ZERO);
+    let _other = budget.acquire(32).await.expect("another read in flight");
+    assert_eq!(
+        policy_status(
+            live_pool(&url),
+            budget.clone(),
+            "/attestations/policy?namespace=shop"
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(budget.shed_count(), 0, "nothing was shed");
+}
+
+/// Past the row cap the answer is 422 before any budget is charged: with the
+/// whole budget held the old handler shed first and answered 503.
+#[actix_web::test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+async fn live_policy_read_over_the_cap_answers_422_before_charging() {
+    use crate::read_budget::ReadBudget;
+    use actix_web::http::StatusCode;
+    use diesel::connection::SimpleConnection;
+    let (url, mut conn) = live_seed();
+    conn.batch_execute(&format!(
+        "INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, image_digest, container_kind, image_ref, state) \
+         SELECT 'big', 'Deployment', 'w' || g, 'app', 'sha256:{:064x}', 'regular', 'ghcr.io/example/api:1', 'running' \
+         FROM generate_series(1, {}) g",
+        81, MAX_POLICY_ROWS
+    ))
+    .unwrap();
+    let budget = ReadBudget::with_budget_kib(128, std::time::Duration::ZERO);
+    let _everything = budget.acquire(128).await.expect("the whole budget held");
+    assert_eq!(
+        policy_status(live_pool(&url), budget.clone(), "/attestations/policy").await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        budget.shed_count(),
+        0,
+        "the 422 must come before the charge"
+    );
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_running_count_agrees_with_load_rows_and_stops_at_the_cap() {
+    let (_url, mut conn) = live_seed();
+    // Only running containers, per scope, exactly what load_rows pages through.
+    assert_eq!(
+        crate::attestation::running_count(&mut conn, None, MAX_POLICY_ROWS).unwrap(),
+        3
+    );
+    assert_eq!(load_rows(&mut conn, None, None).unwrap().unwrap().len(), 3);
+    assert_eq!(
+        crate::attestation::running_count(&mut conn, Some("shop"), MAX_POLICY_ROWS).unwrap(),
+        2
+    );
+    assert_eq!(
+        load_rows(&mut conn, Some("shop"), None)
+            .unwrap()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        crate::attestation::running_count(&mut conn, Some("none"), MAX_POLICY_ROWS).unwrap(),
+        0
+    );
+    // Bounded: a cap of 1 reads two rows and stops, which is what the handler
+    // turns into the 422 before charging or reading anything.
+    assert_eq!(
+        crate::attestation::running_count(&mut conn, None, 1).unwrap(),
+        2
+    );
+}
+
 /// Glob semantics of Kyverno's matchImageReferences (gobwas glob, no
 /// separators: "*" matches any run of characters), to check what the
 /// generated globs select.

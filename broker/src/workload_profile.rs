@@ -3877,7 +3877,7 @@ pub async fn get_workloads(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -3910,7 +3910,7 @@ pub async fn get_workload_profile(
         workload_gate(&mut conn, &k)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     drop(gate);
     if !known {
         return Ok(not_found_workload());
@@ -3947,7 +3947,7 @@ pub async fn get_workload_profile(
         Ok(Some(build(&key, &s, Utc::now())))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         Some(p) => HttpResponse::Ok().json(p),
         None => not_found_workload(),
@@ -4131,7 +4131,7 @@ pub async fn get_workload_profile_versions(
         list_versions(&mut conn, &key, q.before, limit)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         Some(v) => HttpResponse::Ok().json(v),
         None => not_found_workload(),
@@ -4236,7 +4236,7 @@ pub async fn get_workload_profile_version(
         load_snapshot(&mut conn, &k2, Some(rev))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match row {
         None => revision_not_found(),
         Some(r) => HttpResponse::Ok().json(json!({
@@ -4369,7 +4369,7 @@ pub async fn get_workload_profile_diff(
         diff_versions(&mut conn, &key, from, to)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         DiffResult::Ok(v) => HttpResponse::Ok().json(v),
         DiffResult::NoVersions => not_found_workload(),

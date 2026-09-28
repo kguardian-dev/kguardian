@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_pod_details_capture_contributors;

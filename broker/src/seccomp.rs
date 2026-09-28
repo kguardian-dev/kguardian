@@ -1725,7 +1725,7 @@ async fn rebuild_profiles_body(
         Ok((all, crs))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     // More CRs than workloads is possible (several CRs can reference one
     // workload), and over-charging there is harmless; charging for blobs that
@@ -1772,7 +1772,7 @@ async fn rebuild_profiles_body(
         Ok(buf)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(web::Bytes::from(body))
 }
@@ -1839,7 +1839,7 @@ pub async fn get_seccomp_profile(
         }
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match result {
         Some((summary, profile)) => HttpResponse::Ok().json(ProfileDetail { summary, profile }),
@@ -1866,7 +1866,7 @@ pub async fn get_seccomp_profile_file(
         one_observed(&mut conn, &namespace, &kind, &name)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(match obs {
         Some(o) if o.meta.hash == hash => match o.require_names() {
@@ -2318,7 +2318,7 @@ async fn export_impl(
         one_observed(&mut conn, &ns, &k, &n)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     let Some(obs) = obs else {
         return Ok(HttpResponse::NotFound().body("no seccomp profile for that workload"));
@@ -2561,7 +2561,7 @@ pub async fn post_seccomp_node_status(
         Ok(())
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(()))
 }
@@ -2763,7 +2763,7 @@ pub async fn put_seccomp_cr(
         }))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(HttpResponse::Ok().json(out))
 }
@@ -2787,7 +2787,7 @@ pub async fn delete_seccomp_cr(
         Ok(n > 0)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
 
     Ok(if deleted {
         HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
@@ -3365,6 +3365,140 @@ mod tests {
         conn.batch_execute("TRUNCATE seccomp_node_status")
             .expect("reset node status");
         conn
+    }
+
+    /// The list's per-pod read (`capture_index` over every workload) must be
+    /// an index-only scan of `pod_details`, never a heap scan: on the dev
+    /// cluster (90 k pod_details rows, 87 k of them dead) the heap walk is
+    /// what pushed `GET /seccomp/profiles` past the 30 s statement timeout
+    /// while the per-workload route answered in half a second. The plan is
+    /// taken from the statement diesel really issues, not a copy of it.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_capture_index_walks_the_covering_index_not_the_heap() {
+        use diesel::connection::{Instrumentation, InstrumentationEvent, SimpleConnection};
+        use std::sync::{Arc, Mutex};
+        #[derive(QueryableByName)]
+        struct PlanLine {
+            #[diesel(sql_type = diesel::sql_types::Text, column_name = "QUERY PLAN")]
+            line: String,
+        }
+        let mut conn = live_conn();
+        conn.batch_execute("TRUNCATE pod_details, pod_syscalls")
+            .expect("reset the tables this test uses");
+        // Enough rows, with the compacted pod object the ingest stores, that
+        // a heap scan is a real alternative; every twentieth pod has no
+        // workload and must fall outside the partial index.
+        conn.batch_execute(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, pod_obj, time_stamp, \
+                 node_name, is_dead, workload_kind, workload_name, capture_level) \
+             SELECT 'wl-' || (g % 400) || '-' || md5(g::text), '10.0.0.1', 'ns-' || (g % 40), \
+                    ('{\"metadata\":{\"labels\":{\"app\":\"wl-' || (g % 400) || \
+                     '\",\"pod-template-hash\":\"' || md5(g::text) || '\"}}}')::json, \
+                    timezone('UTC', NOW()), 'n', g >= 1000, \
+                    CASE WHEN g % 20 = 0 THEN NULL ELSE 'Deployment' END, \
+                    CASE WHEN g % 20 = 0 THEN NULL ELSE 'wl-' || (g % 400) END, 'full' \
+             FROM generate_series(0, 19999) g; \
+             INSERT INTO pod_syscalls (pod_name, pod_namespace, syscalls, arch, time_stamp) \
+             SELECT pod_name, pod_namespace, 'read,write,futex', 'x86_64', time_stamp FROM pod_details; \
+             INSERT INTO pod_syscalls (pod_name, pod_namespace, syscalls, arch, time_stamp) \
+             SELECT 'gone-' || md5(g::text), 'ns', 'read,write', 'x86_64', timezone('UTC', NOW()) \
+             FROM generate_series(0, 19999) g;",
+        )
+        .expect("seed");
+        // Each on its own: VACUUM refuses to run inside the implicit
+        // transaction of a multi-statement batch.
+        conn.batch_execute("VACUUM ANALYZE pod_details")
+            .expect("vacuum");
+        conn.batch_execute("VACUUM ANALYZE pod_syscalls")
+            .expect("vacuum");
+
+        let issued: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = issued.clone();
+        conn.set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event {
+                log.lock().unwrap().push(query.to_string());
+            }
+        });
+        let index = capture_index(&mut conn, None).expect("capture index");
+        conn.set_instrumentation(
+            Box::new(|_: InstrumentationEvent<'_>| {}) as Box<dyn Instrumentation>
+        );
+        // 400 is a multiple of 20, so the twenty ids that only ever land on
+        // a workload-less pod have no contributors; the other 380 share the
+        // 19 000 pods with a workload.
+        assert_eq!(index.pods.len(), 380);
+        assert_eq!(index.pods.values().map(Vec::len).sum::<usize>(), 19_000);
+
+        let sql = issued
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|q| q.contains("\"pod_syscalls\"") && q.contains("\"pod_details\""))
+            .cloned()
+            .expect("the join statement was captured");
+        assert!(!sql.contains('$'), "the unscoped read binds nothing: {sql}");
+        let explain = |conn: &mut PgConnection| -> String {
+            let plan: Vec<PlanLine> = diesel::sql_query(format!("EXPLAIN {sql}"))
+                .load(conn)
+                .expect("explain");
+            plan.into_iter()
+                .map(|l| l.line)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // The shipped definition, independent of any planner decision.
+        #[derive(QueryableByName)]
+        struct IndexDef {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            indexdef: String,
+        }
+        let def: IndexDef = diesel::sql_query(
+            "SELECT indexdef FROM pg_indexes \
+             WHERE indexname = 'idx_pod_details_capture_contributors'",
+        )
+        .get_result(&mut conn)
+        .expect("the migration created the covering index");
+        assert!(
+            def.indexdef.contains(
+                "(pod_name) INCLUDE (pod_namespace, workload_kind, workload_name, capture_level)"
+            ),
+            "{}",
+            def.indexdef
+        );
+        assert!(
+            def.indexdef
+                .contains("WHERE ((workload_kind IS NOT NULL) AND (workload_name IS NOT NULL))"),
+            "{}",
+            def.indexdef
+        );
+
+        // Whether the planner PREFERS the index is a matter of scale (at
+        // 90 k pods with real label sets the heap is 50 MB against a 10 MB
+        // index and it does; at this fixture's size it may not), so the
+        // natural plan is only printed. With the heap walks penalised the
+        // statement must be servable from the index alone, which is what
+        // proves the INCLUDE list covers every selected column and the
+        // predicate matches the filters. Only these two knobs: from
+        // Postgres 18 `enable_indexscan = off` disables index-only scans too.
+        eprintln!("natural plan:\n{}", explain(&mut conn));
+        conn.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off")
+            .expect("penalise the heap walks");
+        let plan = explain(&mut conn);
+        conn.batch_execute("SET enable_seqscan = on; SET enable_bitmapscan = on")
+            .expect("restore");
+        assert!(
+            plan.contains(
+                "Index Only Scan using idx_pod_details_capture_contributors on pod_details"
+            ),
+            "pod_details must be servable index-only from the covering index:\n{plan}"
+        );
+        assert!(
+            !plan.contains("Seq Scan on pod_details") && !plan.contains("Heap Scan on pod_details"),
+            "no plan node may fetch pod_details rows from the heap:\n{plan}"
+        );
+        conn.batch_execute("TRUNCATE pod_details, pod_syscalls")
+            .expect("leave the shared tables empty");
     }
 
     fn report_node(conn: &mut PgConnection, node: &str, hash: &str, age_secs: i64) {

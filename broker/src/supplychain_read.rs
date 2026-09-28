@@ -808,7 +808,7 @@ pub async fn get_image_vulnerabilities(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -1052,7 +1052,7 @@ pub async fn get_image_sbom(
         image_sbom(&mut conn, &digest, source.as_deref(), after, limit)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -1352,7 +1352,7 @@ pub async fn get_image_sbom_cyclonedx(
         Ok(pick_sbom(&mut conn, &d2, s2.as_deref())?.1)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     let Some(report) = report else {
         return Ok(HttpResponse::NotFound().body("No SBOM for this image"));
     };
@@ -1385,7 +1385,7 @@ pub async fn get_image_sbom_cyclonedx(
         Ok(Export::Doc(cyclonedx_document(&d3, &report, comps)))
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         Export::None => HttpResponse::NotFound().body("No SBOM for this image"),
         Export::TooLarge(n) => HttpResponse::PayloadTooLarge().body(format!(
@@ -1878,7 +1878,7 @@ pub async fn get_vulnerabilities(
         )
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(HttpResponse::Ok().json(page))
 }
 
@@ -2434,7 +2434,7 @@ pub async fn get_vulnerability_exposure(
         vulnerability_exposure(&mut conn, &id, window_hours)
     })
     .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .map_err(crate::db_error_response)?;
     Ok(match out {
         Some(e) => HttpResponse::Ok().json(e),
         None => HttpResponse::NotFound().body("No affected image in the inventory"),

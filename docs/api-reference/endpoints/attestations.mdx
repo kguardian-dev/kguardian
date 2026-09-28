@@ -123,9 +123,11 @@ as YAML. See [ImageTrustPolicy](/concepts/image-trust-policy#generating-policies
 | `acknowledgePartial` | With `mode=enforce`, generate although some running images are not covered (otherwise `409`) |
 
 At most 5000 running containers are read; beyond that the answer is `422`
-and asks for `namespace`. A generation is charged at its worst case, which
-takes the whole read budget: other reads wait (up to
-`broker.readAcquireWaitMs`) or get `503` while it runs.
+and asks for `namespace`. The read budget is charged per running container
+in the scope (16 KiB each, so a cluster-wide generation at the cap takes
+about 78 MiB of the default 256 MiB), and the count is taken before
+anything is read, so the `422` reserves nothing from the read budget and a
+namespaced generation is priced by its own containers.
 
 ### `GET /image-trust`
 
