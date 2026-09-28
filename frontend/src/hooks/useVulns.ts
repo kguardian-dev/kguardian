@@ -412,6 +412,8 @@ export function usePssByWorkload(namespaces: readonly string[], api: ProfileApi 
           try {
             const page = await api.listWorkloads({ namespace, limit: 500 });
             for (const w of page.items) {
+              // A workload whose snapshots all failed has no dimensions: unknown, like a missing one.
+              if (w.computedAt === null) continue;
               out.set(workloadKey(w.namespace, w.kind, w.name), { level: w.dimensions.podSecurity.level, confidence: w.dimensions.podSecurity.levelConfidence });
             }
           } catch {

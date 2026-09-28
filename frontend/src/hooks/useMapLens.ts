@@ -173,6 +173,10 @@ export function coverageBadge(p: WorkloadListItem | undefined): LensBadge {
   if (!p) {
     return { lens: 'coverage', tone: 'unknown', text: 'no profile', label: 'No workload profile yet: coverage unknown.' };
   }
+  if (p.computedAt === null) {
+    // Every snapshot attempt failed: there is no posture to read, and that is not "no data".
+    return { lens: 'coverage', tone: 'unknown', text: 'profile failed', label: `The Broker's profile snapshot for this workload failed${p.lastError ? `: ${p.lastError}` : ''}. Coverage unknown.` };
+  }
   const pct = Math.round(p.posture.coverage * 100);
   const dims = (['network', 'syscalls', 'podSecurity', 'images'] as const)
     .map((d) => `${d === 'podSecurity' ? 'pod security' : d} ${STATUS_LABEL[p.dimensions[d].status].toLowerCase()}`)

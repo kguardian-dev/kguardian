@@ -514,10 +514,10 @@ test('a failed verdict read makes the would-deny tile unknown and says so; the c
 
 test('posture column: a snapshot that failed before it was ever computed reads "profile failed", and a stale one says so', () => {
   const saved = postureState.byKey;
-  const failedOnly = {
+  const failedOnly: WorkloadListItem = {
     clusterId: 'c', namespace: 'payments', kind: 'Deployment', name: 'reports', revision: null, contentHash: null, computedAt: null, lastChangedAt: null,
-    lastError: 'canceling statement due to statement timeout', failedAt: '2026-09-28T12:00:00',
-  } as unknown as WorkloadListItem;
+    lastError: 'canceling statement due to statement timeout', failedAt: '2026-09-28T12:00:00Z',
+  };
   const checkout = capturedItems.find((i) => i.name === 'checkout')!;
   const stale: WorkloadListItem = { ...checkout, lastError: 'canceling statement due to statement timeout', failedAt: '2026-09-28T12:00:00' };
   postureState.byKey = new Map([...capturedItems.map((i) => [keyOf(i), i] as const), [keyOf(failedOnly), failedOnly], [keyOf(stale), stale]]);
