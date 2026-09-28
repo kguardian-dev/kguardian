@@ -85,7 +85,10 @@ const handlers: Record<string, Handler> = {
     return summary;
   },
   get_cluster_pods: async (a) => {
-    const data = await brokerGetJSON(`/pod/info`);
+    // Live rows only: the tool drops dead pods anyway, and on a busy cluster
+    // they are most of the table. An older broker ignores the parameter and
+    // filterAlivePods still applies.
+    const data = await brokerGetJSON(`/pod/info?include_dead=false`);
     return compactPodsSummary(filterAlivePods(filterByNamespace(data, s(a.namespace))));
   },
   get_pod_details_by_name: async (a) => compactPodsSummary(await brokerGetJSON(`/pod/name/${enc(s(a.pod_name))}`)),

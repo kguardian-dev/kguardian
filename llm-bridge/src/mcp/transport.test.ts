@@ -42,9 +42,10 @@ const POD_ROW = {
 
 before(async () => {
   // Stand in for the broker so tool execution is hermetic. /pod/info serves a
-  // pod; every other path 500s, which is how the failing-tool case is driven.
+  // pod (whatever the query string, get_cluster_pods asks for live rows only);
+  // every other path 500s, which is how the failing-tool case is driven.
   brokerMock = http.createServer((req, res) => {
-    if (req.url === "/pod/info") {
+    if (req.url?.split("?")[0] === "/pod/info") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify([POD_ROW]));
       return;
