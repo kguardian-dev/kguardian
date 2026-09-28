@@ -16,7 +16,7 @@ import {
 import type { ComputeBlame, ComputeContainer } from '../types/compute';
 import { describeDrop, isDrop } from '../utils/dropCause';
 import { displaySyscallList } from '../utils/syscalls';
-import { UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, isPlaceholderPod, resolvePeer } from '../utils/peerResolution';
+import { UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeer } from '../utils/peerResolution';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -263,7 +263,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       switch (peer.kind) {
         case 'pod':
         case 'node':
-          if (isPlaceholderPod(peer.pod)) { identities.set(t, { isExternal: true, unattributed: true }); break; }
+          // A stored peer whose record is gone (placeholder) keeps its stored
+          // workload and name, matching the map's attribution.
           identities.set(t, {
             podName: peer.pod.pod_name,
             podIdentity: peer.pod.pod_identity || peer.pod.workload_name || undefined,

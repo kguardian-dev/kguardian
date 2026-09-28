@@ -51,6 +51,15 @@ export const UNATTRIBUTED_NAMESPACE = 'unattributed';
 /** Label of the map's Unattributed node. */
 export const UNATTRIBUTED_LABEL = 'Unattributed';
 
+/** `externalNamespace` of the map's node for private addresses no record holds. */
+export const PRIVATE_NAMESPACE = 'private';
+
+/** Label of that node. */
+export const PRIVATE_LABEL = 'Private network';
+
+/** Its tooltip. */
+export const PRIVATE_PEER_TOOLTIP = 'private, link-local, loopback or multicast address that no pod, node or Service record holds; not Internet';
+
 /**
  * Broker timestamps are naive UTC (`2026-08-04T09:12:41[.ffffff]`, no zone).
  * `Date.parse` would read a naive ISO string as LOCAL time, so a zone-less
@@ -191,10 +200,11 @@ export type PlaceholderPod = PodInfo & { placeholder: true };
 
 /**
  * Stand-in record for a stored peer whose `pod_details` row is gone
- * (retention pruned it) or whose uid no longer matches. It keeps the stored
- * identity for inspection but is flagged so every consumer — map, DataTable
- * and both generators — renders it as UNATTRIBUTED (no labels, no node of
- * its own, never a selector).
+ * (retention pruned it) or whose uid no longer matches (a StatefulSet slot
+ * restarted under the same name). It keeps the stored identity and is
+ * flagged: the map groups it under its stored workload (utils/externalPeers),
+ * while DataTable and both generators render it as UNATTRIBUTED — it carries
+ * no labels, so it can never become a selector.
  */
 export function placeholderPod(row: NetworkTraffic): PlaceholderPod {
   return {
@@ -227,9 +237,11 @@ export type PeerResolution =
   /** A Service ClusterIP: stamped by the broker (`stored`), or the row's IP
    *  IS a ClusterIP in the listing (by-IP; only when no pod ever held the
    *  IP). For a stored one `svc` is the current Service of that
-   *  namespace/name when the listing has it WITH a selector; null means the
+   *  namespace/name when the listing has it, selector or not (the kube API
+   *  `default/kubernetes` has none and is still a Service); null means the
    *  Service is gone or a recycled ClusterIP now names another Service —
-   *  consumers render that as unattributed. */
+   *  consumers render that as unattributed. The generators decide for
+   *  themselves whether `svc` can become a selector. */
   | { kind: 'service'; namespace: string | null; name: string | null; svc: ServiceInfo | null; stored: boolean }
   /** No stored peer and the guard excluded every pod that ever held the IP. */
   | { kind: 'unattributed'; ip: string; at: string }
@@ -258,7 +270,7 @@ export function serviceSelector(svc: ServiceInfo): Record<string, string> | unde
  * A stored pod is matched in the listing by (namespace, name); when both
  * the record and the row carry a uid they must agree. No match ⇒ a
  * placeholder (see `placeholderPod`). A stored Service must still exist
- * under that namespace/name with a selector, else `svc` is null.
+ * under that namespace/name, else `svc` is null.
  */
 export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResolution {
   const ip = row.traffic_in_out_ip;
@@ -278,7 +290,7 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
         kind: 'service',
         namespace: row.peer_namespace ?? null,
         name: row.peer_name ?? null,
-        svc: svc && serviceSelector(svc) ? svc : null,
+        svc: svc ?? null,
         stored: true,
       };
     }
@@ -308,9 +320,10 @@ export function peerKey(peer: PeerResolution): string | null {
   switch (peer.kind) {
     case 'pod':
     case 'node':
-      // A stored peer whose record is gone is rendered unattributed
-      // everywhere (map and generators agree), so it keys like one.
-      if (isPlaceholderPod(peer.pod)) return `unattributed:${peer.pod.pod_ip}`;
+      // A stored peer whose record is gone or superseded keys apart from the
+      // record that holds the name now (uid mismatch): same identity, not
+      // the same pod.
+      if (isPlaceholderPod(peer.pod)) return `former:${peer.pod.pod_namespace ?? ''}/${peer.pod.pod_name}`;
       return `pod:${peer.pod.pod_namespace ?? ''}/${peer.pod.pod_name}`;
     case 'unattributed':
       return `unattributed:${peer.ip}`;
@@ -319,6 +332,16 @@ export function peerKey(peer: PeerResolution): string | null {
     default:
       return null;
   }
+}
+
+/**
+ * `<ns>/<kind>/<name>` of the pod's owning workload, or null when the record
+ * (or stored row) does not carry one. Namespaced, so the same Deployment name
+ * in two namespaces never collides.
+ */
+export function workloadKey(pod: Pick<PodInfo, 'pod_namespace' | 'workload_kind' | 'workload_name'>): string | null {
+  if (!pod.workload_kind || !pod.workload_name) return null;
+  return `${pod.pod_namespace ?? ''}/${pod.workload_kind}/${pod.workload_name}`;
 }
 
 /**

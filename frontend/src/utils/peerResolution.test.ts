@@ -11,6 +11,7 @@ import {
   rankPods,
   resolvePeer,
   selectPodByIp,
+  workloadKey,
 } from './peerResolution';
 
 // The bug, as diagnosed live on cluster-00 (2026-09-03): `cmangos-database`
@@ -133,7 +134,7 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(peerKey(peer)).toBe('pod:home-system/autobrr-7d9c4b8f6-q2x9k');
   });
 
-  test('stored peer wins over the current IP holder; a gone record is a placeholder keyed as unattributed', () => {
+  test('stored peer wins over the current IP holder; a gone record is a placeholder keyed as a former pod', () => {
     const peer = resolvePeer(row({
       time_stamp: '2026-07-23T10:00:00',
       peer_kind: 'pod', peer_namespace: 'game-servers', peer_name: 'cmangos-backup-29271840-x7k2p',
@@ -147,12 +148,14 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(peer.pod.pod_namespace).toBe('game-servers');
     expect(peer.pod.workload_kind).toBe('CronJob');
     expect(peer.pod.is_dead).toBe(true);
-    // Placeholder: no labels → no selector may be built from it, and it
-    // renders as the Unattributed node (never autobrr, never a named node).
+    // Placeholder: no labels → no selector may be built from it (never
+    // autobrr). It keeps its stored identity, so the map can group it under
+    // its workload, and keys apart from any record holding the name now.
     expect(isPlaceholderPod(peer.pod)).toBe(true);
     expect(peerSelectorLabels(peer.pod)).toBeNull();
     expect(peerGroupIdentity(peer.pod)).toBe('cmangos-backup');
-    expect(peerKey(peer)).toBe('unattributed:10.244.12.199');
+    expect(workloadKey(peer.pod)).toBe('game-servers/CronJob/cmangos-backup');
+    expect(peerKey(peer)).toBe('former:game-servers/cmangos-backup-29271840-x7k2p');
   });
 
   test('stored peer whose record is present resolves to that record', () => {
@@ -166,12 +169,19 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
   test('stored peer is matched by (namespace, name); a uid mismatch is a different pod', () => {
     const withUid = pod({ ...autobrr, pod_obj: { metadata: { uid: 'uid-1', labels: { app: 'autobrr' } } } });
     const idx = buildPeerIndex([withUid]);
-    const base = { time_stamp: '2026-09-03T05:00:00', peer_kind: 'pod', peer_namespace: 'home-system', peer_name: autobrr.pod_name };
+    const base = { time_stamp: '2026-09-03T05:00:00', peer_kind: 'pod', peer_namespace: 'home-system', peer_name: autobrr.pod_name, peer_workload_kind: 'Deployment', peer_workload_name: 'autobrr' };
     expect(resolvePeer(row({ ...base, peer_uid: 'uid-1' }), idx)).toEqual({ kind: 'pod', pod: withUid, stored: true });
     expect(resolvePeer(row({ ...base, peer_uid: null }), idx)).toEqual({ kind: 'pod', pod: withUid, stored: true });
     const mismatch = resolvePeer(row({ ...base, peer_uid: 'uid-2' }), idx);
     expect(mismatch.kind).toBe('pod');
-    if (mismatch.kind === 'pod') expect(isPlaceholderPod(mismatch.pod)).toBe(true);
+    if (mismatch.kind === 'pod') {
+      expect(isPlaceholderPod(mismatch.pod)).toBe(true);
+      // Same StatefulSet slot, different pod: the placeholder keeps the stored
+      // workload but never keys like the record that holds the name now.
+      expect(mismatch.pod.workload_kind).toBe('Deployment');
+      expect(peerKey(mismatch)).toBe('former:home-system/autobrr-7d9c4b8f6-q2x9k');
+      expect(peerKey(mismatch)).not.toBe(peerKey({ kind: 'pod', pod: withUid, stored: true }));
+    }
     // Wrong namespace: not that pod either.
     const wrongNs = resolvePeer(row({ ...base, peer_namespace: 'prod' }), idx);
     if (wrongNs.kind === 'pod') expect(isPlaceholderPod(wrongNs.pod)).toBe(true);
@@ -191,7 +201,7 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(resolvePeer(row({ traffic_in_out_ip: '192.168.50.101' }), idx)).toEqual({ kind: 'node', pod: nodeExporter, stored: false });
   });
 
-  test('stored service peer: the Service of that ns/name with a selector; gone / recycled / selector-less ⇒ svc null', () => {
+  test('stored service peer: the current Service of that ns/name, selector or not; gone / recycled ⇒ svc null', () => {
     const svc: ServiceInfo = { svc_ip: '10.96.0.10', svc_name: 'db', svc_namespace: 'prod', service_spec: { spec: { selector: { app: 'db' } } } };
     const headless: ServiceInfo = { svc_ip: '10.96.0.11', svc_name: 'ext', svc_namespace: 'prod', service_spec: { spec: {} } };
     const idx = buildPeerIndex([], [svc, headless]);
@@ -199,9 +209,12 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(stored).toEqual({ kind: 'service', namespace: 'prod', name: 'db', svc, stored: true });
     const recycled = resolvePeer(row({ traffic_in_out_ip: '10.96.0.10', peer_kind: 'service', peer_namespace: 'prod', peer_name: 'old-db' }), idx);
     expect(recycled).toEqual({ kind: 'service', namespace: 'prod', name: 'old-db', svc: null, stored: true });
+    // Selector-less (the kube API, an ExternalName): still that Service on
+    // the map and in the table; the generators judge the selector themselves.
     const noSelector = resolvePeer(row({ traffic_in_out_ip: '10.96.0.11', peer_kind: 'service', peer_namespace: 'prod', peer_name: 'ext' }), idx);
-    expect(noSelector).toEqual({ kind: 'service', namespace: 'prod', name: 'ext', svc: null, stored: true });
+    expect(noSelector).toEqual({ kind: 'service', namespace: 'prod', name: 'ext', svc: headless, stored: true });
     expect(peerKey(stored)).toBe('svc:prod/db');
+    expect(peerKey(noSelector)).toBe('svc:prod/ext');
     expect(peerKey(recycled)).toBeNull();
   });
 
@@ -226,6 +239,16 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
 
   test('unrecognised peer_kind falls through to the guarded by-IP path', () => {
     expect(resolvePeer(row({ time_stamp: '2026-05-21T10:00:00', peer_kind: 'something-new', peer_name: 'x' }), index).kind).toBe('unattributed');
+  });
+});
+
+describe('workloadKey', () => {
+  test('namespaced <ns>/<kind>/<name>; null without an owning workload', () => {
+    expect(workloadKey(autobrr)).toBe('home-system/Deployment/autobrr');
+    expect(workloadKey({ pod_namespace: 'prod', workload_kind: 'Deployment', workload_name: 'autobrr' })).toBe('prod/Deployment/autobrr');
+    expect(workloadKey({ pod_namespace: 'prod', workload_kind: null, workload_name: 'autobrr' })).toBeNull();
+    expect(workloadKey({ pod_namespace: 'prod', workload_kind: 'Deployment', workload_name: null })).toBeNull();
+    expect(workloadKey({ pod_namespace: null, workload_kind: 'Job', workload_name: 'j' })).toBe('/Job/j');
   });
 });
 

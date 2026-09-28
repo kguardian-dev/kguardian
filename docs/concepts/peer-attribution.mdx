@@ -41,6 +41,16 @@ short-lived Job pods under their controller instead of drawing one node
 per pod name. For a `node` peer, `peer_name` is the host-network pod
 (typically a DaemonSet member), not the node.
 
+A stored peer outlives its record. Dead pods leave `pod_details` well
+before their traffic rows expire, and a StatefulSet replica that restarts
+keeps its name under a new UID. The row still names the workload, so the
+map draws such a peer under `peer_workload_kind`/`peer_workload_name`: a
+former replica of a workload in the selected namespace is an edge to that
+workload's card; a cross-namespace one joins the card of its live siblings,
+or gets a card named after the workload. It is never counted as a pod on
+that card, and the policy generators still emit an `ipBlock` for it: the
+record's labels are gone, so nothing may be selected.
+
 There is deliberately no `external` value. An IP that matched nothing is
 left `null`, because stamping "external" permanently would throw away the
 guarded by-IP fallback for a row whose peer spec simply arrived late — a
@@ -172,6 +182,12 @@ pod matched at flow time, and every generator emits an `ipBlock`
 `# unattributed peer <ip> at <time>` — never a `podSelector`. An
 allow-list built from a stale identity is worse than one that names the
 address.
+
+An IP no record ever held is external, and the map splits it by address:
+a public address is "Internet"; a private, link-local, loopback or
+multicast address the cluster has no record of (a node that has left, a
+load balancer, a VPN client, DHCPv6 multicast from a host-network pod) is
+"Private network".
 
 The guard narrows the by-IP fallback; it does not make it exact. If two
 former holders of an IP both started before the flow, history alone cannot

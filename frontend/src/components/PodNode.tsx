@@ -29,7 +29,7 @@ interface PodNodeProps {
 }
 
 // Pseudo-namespaces of the nodes that aggregate bare IPs rather than pods.
-const AGGREGATE_NAMESPACES = new Set(['internet', 'cluster', 'unattributed']);
+const AGGREGATE_NAMESPACES = new Set(['internet', 'cluster', 'unattributed', 'private']);
 
 /** Bar fill colour by how full the gauge is: past the denominator is an error. */
 function gaugeFillClass(pct: number | null): string {
