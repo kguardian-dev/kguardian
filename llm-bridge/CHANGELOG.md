@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.2...llm-bridge/v1.12.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* emit Cilium deny-all policies with the rule sections the CRD requires ([4a56e7f](https://github.com/kguardian-dev/kguardian/commit/4a56e7fe8be6889fc593a26865428e109f6a9831))
+* **llm-bridge:** emit the Cilium deny-all with one empty rule per direction ([27decc5](https://github.com/kguardian-dev/kguardian/commit/27decc56afefa44411c17a90be1905bc8c16c980))
+* **llm-bridge:** stream and report tool activity on the OpenAI-compatible path ([#1774](https://github.com/kguardian-dev/kguardian/issues/1774)) ([1ad0065](https://github.com/kguardian-dev/kguardian/commit/1ad00658ac972172ebc8a2a7f8905baa399370b2))
+
 ## [1.12.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.1...llm-bridge/v1.12.2) (2026-09-28)
 
 
