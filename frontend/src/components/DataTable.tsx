@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo } from '../types';
-import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox, Cpu } from 'lucide-react';
+import { ArrowRight, ArrowDown, ArrowUp, ArrowUpDown, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox, Cpu } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
+import { brokerTimeMs, formatBrokerTime } from '../utils/brokerTime';
 import {
   COMPUTE_KIND_LABEL,
   denominatorLabel,
@@ -46,6 +47,53 @@ const getPortLabel = (port: string, protocol: string): string => {
 };
 
 const TRAFFIC_PROFILE_MAX = 8;
+
+type TrafficSortKey = 'decision' | 'traffic_type' | 'time_stamp';
+interface TrafficSort {
+  key: TrafficSortKey;
+  dir: 'ascending' | 'descending';
+}
+// DROP first, newest within each group: a denied flow is the row to read first.
+const DEFAULT_TRAFFIC_SORT: TrafficSort = { key: 'decision', dir: 'descending' };
+
+const newestFirst = (a: NetworkTraffic, b: NetworkTraffic) =>
+  brokerTimeMs(b.time_stamp) - brokerTimeMs(a.time_stamp);
+
+function compareTraffic(a: NetworkTraffic, b: NetworkTraffic, sort: TrafficSort): number {
+  let cmp = 0;
+  switch (sort.key) {
+    case 'decision':
+      cmp = (a.decision === 'DROP' ? 1 : 0) - (b.decision === 'DROP' ? 1 : 0);
+      break;
+    case 'traffic_type':
+      cmp = (a.traffic_type ?? '').toUpperCase().localeCompare((b.traffic_type ?? '').toUpperCase());
+      break;
+    case 'time_stamp':
+      cmp = brokerTimeMs(a.time_stamp) - brokerTimeMs(b.time_stamp);
+      break;
+  }
+  if (cmp === 0) return newestFirst(a, b);
+  return sort.dir === 'ascending' ? cmp : -cmp;
+}
+
+const SortableHeader: React.FC<{
+  label: string;
+  sort: TrafficSort['dir'] | null;
+  onClick: () => void;
+}> = ({ label, sort, onClick }) => (
+  <th className="px-4 py-2" aria-sort={sort ?? undefined}>
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1 uppercase tracking-wide hover:text-primary transition-colors"
+    >
+      {label}
+      {sort === 'ascending' && <ArrowUp className="w-3 h-3" />}
+      {sort === 'descending' && <ArrowDown className="w-3 h-3" />}
+      {sort === null && <ArrowUpDown className="w-3 h-3 opacity-50" />}
+    </button>
+  </th>
+);
 
 const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
@@ -127,6 +175,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   const [trafficTypeFilter, setTrafficTypeFilter] = useState<'all' | 'ingress' | 'egress'>('all');
   const [protocolFilter, setProtocolFilter] = useState<string>('all');
   const [portFilter, setPortFilter] = useState<string>('all');
+  const [trafficSort, setTrafficSort] = useState<TrafficSort>(DEFAULT_TRAFFIC_SORT);
 
   // Pagination for large traffic tables
   const [trafficPage, setTrafficPage] = useState(0);
@@ -288,8 +337,18 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
     setTrafficTypeFilter('all');
     setProtocolFilter('all');
     setPortFilter('all');
+    setTrafficSort(DEFAULT_TRAFFIC_SORT);
     setTrafficPage(0);
   }
+
+  const toggleTrafficSort = (key: TrafficSortKey) => {
+    setTrafficSort(s =>
+      s.key === key
+        ? { key, dir: s.dir === 'ascending' ? 'descending' : 'ascending' }
+        : { key, dir: key === 'traffic_type' ? 'ascending' : 'descending' },
+    );
+    setTrafficPage(0);
+  };
   // Memoize expensive calculations
   const hasTraffic = useMemo(
     () => selectedPod?.traffic && selectedPod.traffic.length > 0,
@@ -359,15 +418,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         }
         return true;
       })
-      // Hoist denied flows: a DROP is the security-relevant row, so it leads;
-      // within each decision group, newest first.
-      .sort((a, b) => {
-        const aDrop = a.decision === 'DROP' ? 0 : 1;
-        const bDrop = b.decision === 'DROP' ? 0 : 1;
-        if (aDrop !== bDrop) return aDrop - bDrop;
-        return new Date(b.time_stamp).getTime() - new Date(a.time_stamp).getTime();
-      });
-  }, [selectedPod, decisionFilter, trafficTypeFilter, protocolFilter, portFilter]);
+      .sort((a, b) => compareTraffic(a, b, trafficSort));
+  }, [selectedPod, decisionFilter, trafficTypeFilter, protocolFilter, portFilter, trafficSort]);
 
   // Aggregate traffic by port/protocol for external node summary
   const trafficAggregation = useMemo(() => {
@@ -611,13 +663,25 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
                   <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
-                    <th className="px-4 py-2">Direction</th>
+                    <SortableHeader
+                      label="Direction"
+                      sort={trafficSort.key === 'traffic_type' ? trafficSort.dir : null}
+                      onClick={() => toggleTrafficSort('traffic_type')}
+                    />
                     <th className="px-4 py-2">Source</th>
                     <th className="px-4 py-2">Destination</th>
                     <th className="px-4 py-2">Protocol</th>
                     <th className="px-4 py-2">Summary</th>
-                    <th className="px-4 py-2">Decision</th>
-                    <th className="px-4 py-2">Timestamp</th>
+                    <SortableHeader
+                      label="Decision"
+                      sort={trafficSort.key === 'decision' ? trafficSort.dir : null}
+                      onClick={() => toggleTrafficSort('decision')}
+                    />
+                    <SortableHeader
+                      label="Timestamp"
+                      sort={trafficSort.key === 'time_stamp' ? trafficSort.dir : null}
+                      onClick={() => toggleTrafficSort('time_stamp')}
+                    />
                   </tr>
                 </thead>
                 <tbody>
@@ -770,7 +834,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
                         {/* Timestamp */}
                         <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
-                          {new Date(traffic.time_stamp).toLocaleString()}
+                          {formatBrokerTime(traffic.time_stamp)}
                         </td>
                       </tr>
                     );
@@ -1076,7 +1140,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                         </div>
                       </td>
                       <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
-                        {new Date(syscall.time_stamp).toLocaleString()}
+                        {formatBrokerTime(syscall.time_stamp)}
                       </td>
                     </tr>
                   );

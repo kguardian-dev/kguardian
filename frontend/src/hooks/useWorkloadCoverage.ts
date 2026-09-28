@@ -23,15 +23,15 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
   const [verdicts, setVerdicts] = useState<AuditVerdict[]>([]);
 
   const loadVerdicts = useCallback(async () => {
-    // getAuditVerdicts swallows errors into []: the column then reads
+    // A failed verdict read is swallowed into []: the column then reads
     // "not reported", which is the honest fallback. `namespace` filters on
     // the POLICY's namespace — for namespaced AuditNetworkPolicies that is
     // the subject workload's namespace, so a narrowed view's window is not
     // shared with noisy workloads elsewhere in the cluster.
     const base = { limit: COVERAGE_VERDICT_LIMIT, ...(namespace ? { namespace } : {}) };
     const [deny, allow] = await Promise.all([
-      api.getAuditVerdicts({ ...base, verdict: 'WouldDeny' }),
-      api.getAuditVerdicts({ ...base, verdict: 'Allow' }),
+      api.getAuditVerdicts({ ...base, verdict: 'WouldDeny' }).catch(() => []),
+      api.getAuditVerdicts({ ...base, verdict: 'Allow' }).catch(() => []),
     ]);
     setVerdicts([...deny, ...allow]);
   }, [namespace]);

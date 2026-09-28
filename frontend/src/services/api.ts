@@ -67,6 +67,9 @@ class BrokerAPIClient {
    * (idx_audit_verdicts_verdict_time). Prefer them over client-side
    * filtering when narrowing, especially with large policies, to avoid
    * burning the row limit on rows you'll discard.
+   *
+   * Rejects on failure, like the compute getters, so a caller can show an
+   * error instead of an empty "no verdicts" state.
    */
   async getAuditVerdicts(opts: {
     policy?: string;
@@ -75,19 +78,14 @@ class BrokerAPIClient {
     direction?: 'Ingress' | 'Egress';
     limit?: number;
   } = {}): Promise<AuditVerdict[]> {
-    try {
-      const params: Record<string, string | number> = {};
-      if (opts.policy) params.policy = opts.policy;
-      if (opts.namespace) params.namespace = opts.namespace;
-      if (opts.verdict) params.verdict = opts.verdict;
-      if (opts.direction) params.direction = opts.direction;
-      if (opts.limit) params.limit = opts.limit;
-      const response = await this.client.get('/audit/verdicts', { params });
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching audit verdicts:', error);
-      return [];
-    }
+    const params: Record<string, string | number> = {};
+    if (opts.policy) params.policy = opts.policy;
+    if (opts.namespace) params.namespace = opts.namespace;
+    if (opts.verdict) params.verdict = opts.verdict;
+    if (opts.direction) params.direction = opts.direction;
+    if (opts.limit) params.limit = opts.limit;
+    const response = await this.client.get('/audit/verdicts', { params });
+    return response.data || [];
   }
 
   /**

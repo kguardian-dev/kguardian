@@ -223,6 +223,9 @@ export function RisksView({
       .then((rows) => {
         if (!cancelled) setWouldDeny(rows);
       })
+      .catch(() => {
+        if (!cancelled) setWouldDeny([]);
+      })
       .finally(() => {
         if (!cancelled) setAuditLoading(false);
       });

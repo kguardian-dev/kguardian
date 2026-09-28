@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { X, RefreshCw, AlertTriangle, CheckCircle2, Filter } from 'lucide-react';
 import type { AuditVerdict, AuditVerdictKind } from '../types';
 import api from '../services/api';
+import { brokerTimeMs, formatBrokerTime } from '../utils/brokerTime';
 import { Modal } from './ui/Modal';
 import { EmptyState } from './ui/EmptyState';
 import { Button } from './ui/Button';
@@ -13,6 +14,17 @@ interface Props {
 
 type VerdictTab = 'WouldDeny' | 'Allow' | 'All';
 type DirectionFilter = 'All' | 'Ingress' | 'Egress';
+
+const TAB_LABEL: Record<VerdictTab, string> = { WouldDeny: 'would-deny', Allow: 'allow', All: '' };
+
+// Newest rows kept per load. The broker has no cursor, so one row past the
+// cap is requested only to learn whether older verdicts exist.
+const VERDICT_CAP = 400;
+
+// The workload a verdict is about: the destination of an Ingress flow, the
+// source of an Egress one. Not the policy's namespace.
+const subjectNamespace = (v: AuditVerdict): string | null =>
+  v.direction === 'Egress' ? v.src_namespace : v.dst_namespace;
 
 /**
  * AuditVerdictsPanel — modal table of evaluator verdicts.
@@ -35,9 +47,11 @@ type DirectionFilter = 'All' | 'Ingress' | 'Egress';
  */
 const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
   const [verdicts, setVerdicts] = useState<AuditVerdict[]>([]);
+  const [olderExist, setOlderExist] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [policyFilter, setPolicyFilter] = useState('');
+  const [namespaceFilter, setNamespaceFilter] = useState('');
   const [verdictTab, setVerdictTab] = useState<VerdictTab>('WouldDeny');
   // Direction is filtered server-side: the broker's /audit/verdicts
   // endpoint accepts a `direction` query param backed by
@@ -50,15 +64,14 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
     setError(null);
     try {
       // Fetch both verdicts in one shot; client-side filter by tab.
-      // 400-row cap leaves headroom for the busiest pol/window combo
-      // we expect operators to triage in one sitting.
       const rows = await api.getAuditVerdicts({
-        limit: 400,
+        limit: VERDICT_CAP + 1,
         ...(directionFilter !== 'All' ? { direction: directionFilter } : {}),
       });
-      setVerdicts(rows);
+      setOlderExist(rows.length > VERDICT_CAP);
+      setVerdicts(rows.slice(0, VERDICT_CAP));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load audit verdicts');
+      setError(`Failed to load audit verdicts: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -96,6 +109,18 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
     return { deny, allow, total: verdicts.length };
   }, [verdicts]);
 
+  // Namespaces offered by the filter: every subject seen in this load, plus
+  // the current choice so it stays selectable after a refresh drops it.
+  const namespaces = useMemo(() => {
+    const seen = new Set<string>();
+    for (const v of verdicts) {
+      const ns = subjectNamespace(v);
+      if (ns) seen.add(ns);
+    }
+    if (namespaceFilter) seen.add(namespaceFilter);
+    return Array.from(seen).sort();
+  }, [verdicts, namespaceFilter]);
+
   const visible = useMemo(() => {
     return verdicts
       .filter(v => {
@@ -104,6 +129,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
           const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
           if (key !== policyFilter) return false;
         }
+        if (namespaceFilter && subjectNamespace(v) !== namespaceFilter) return false;
         return true;
       })
       // Hoist would-deny verdicts: they are the actionable rows (a flow your
@@ -112,9 +138,15 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
         const aDeny = a.verdict === 'WouldDeny' ? 0 : 1;
         const bDeny = b.verdict === 'WouldDeny' ? 0 : 1;
         if (aDeny !== bDeny) return aDeny - bDeny;
-        return new Date(b.observed_at).getTime() - new Date(a.observed_at).getTime();
+        return brokerTimeMs(b.observed_at) - brokerTimeMs(a.observed_at);
       });
-  }, [verdicts, verdictTab, policyFilter]);
+  }, [verdicts, verdictTab, policyFilter, namespaceFilter]);
+
+  const hasFilters = policyFilter !== '' || namespaceFilter !== '';
+  const clearFilters = () => {
+    setPolicyFilter('');
+    setNamespaceFilter('');
+  };
 
   return (
     <Modal
@@ -190,23 +222,40 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               count={counts.total}
             />
           </div>
-          <div
-            className="flex items-center gap-2 pr-1"
-            role="group"
-            aria-label="Direction filter"
-          >
-            <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
-              Direction
-            </span>
-            <div className="flex overflow-hidden rounded border border-hubble-border">
-              {(['All', 'Ingress', 'Egress'] as const).map(d => (
-                <DirectionButton
-                  key={d}
-                  active={directionFilter === d}
-                  onClick={() => setDirectionFilter(d)}
-                  label={d}
-                />
-              ))}
+          <div className="flex items-center gap-4 pr-1">
+            <label className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-tertiary">
+              Workload namespace
+              <select
+                value={namespaceFilter}
+                onChange={e => setNamespaceFilter(e.target.value)}
+                className="rounded border border-hubble-border bg-hubble-card px-2 py-1 text-xs normal-case tracking-normal text-secondary"
+              >
+                <option value="">All</option>
+                {namespaces.map(ns => (
+                  <option key={ns} value={ns}>
+                    {ns}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div
+              className="flex items-center gap-2"
+              role="group"
+              aria-label="Direction filter"
+            >
+              <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
+                Direction
+              </span>
+              <div className="flex overflow-hidden rounded border border-hubble-border">
+                {(['All', 'Ingress', 'Egress'] as const).map(d => (
+                  <DirectionButton
+                    key={d}
+                    active={directionFilter === d}
+                    onClick={() => setDirectionFilter(d)}
+                    label={d}
+                  />
+                ))}
+              </div>
             </div>
           </div>
         </nav>
@@ -261,16 +310,14 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
             {!error && !loading && visible.length === 0 && (
               <EmptyState
                 icon={CheckCircle2}
-                title={`No ${verdictTab === 'All' ? '' : verdictTab.toLowerCase() + ' '}verdicts in the rolling window`}
-                description={
-                  policyFilter
-                    ? 'Nothing matched the current policy filter.'
-                    : 'The evaluator has not recorded any audited flows for this window yet.'
-                }
+                title={`No ${TAB_LABEL[verdictTab] ? `${TAB_LABEL[verdictTab]} ` : ''}verdicts ${
+                  olderExist ? `among the ${VERDICT_CAP} newest` : 'in the rolling window'
+                }`}
+                description={emptyDescription(verdictTab, directionFilter, counts, hasFilters, olderExist)}
                 action={
-                  policyFilter ? (
-                    <Button variant="secondary" size="sm" onClick={() => setPolicyFilter('')}>
-                      Clear filter
+                  hasFilters ? (
+                    <Button variant="secondary" size="sm" onClick={clearFilters}>
+                      Clear filters
                     </Button>
                   ) : undefined
                 }
@@ -306,7 +353,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                           <VerdictBadge verdict={v.verdict as AuditVerdictKind} />
                         </td>
                         <td className="px-4 py-2 text-tertiary whitespace-nowrap font-mono tabular-nums">
-                          {formatTimestamp(v.observed_at)}
+                          {formatBrokerTime(v.observed_at)}
                         </td>
                         <td className="px-4 py-2 font-mono text-xs">
                           {policyKey}
@@ -331,7 +378,9 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         <footer className="px-6 py-2 border-t border-hubble-border text-xs text-tertiary">
-          Showing {visible.length} of {verdicts.length} most recent verdict{verdicts.length === 1 ? '' : 's'} ·
+          {olderExist
+            ? `Showing ${visible.length} of the ${VERDICT_CAP} newest verdicts; older verdicts exist ·`
+            : `Showing ${visible.length} of ${verdicts.length} most recent verdict${verdicts.length === 1 ? '' : 's'} ·`}
           {' '}<span className="text-hubble-warning">{counts.deny} deny</span>
           {' '}·
           {' '}<span className="text-hubble-accent">{counts.allow} allow</span>.
@@ -408,12 +457,32 @@ const VerdictBadge: React.FC<{ verdict: AuditVerdictKind | string }> = ({ verdic
   );
 };
 
-function formatTimestamp(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
+// The client-side filters only see the loaded window, so when the load was
+// truncated every branch says that older verdicts exist beyond it.
+function emptyDescription(
+  tab: VerdictTab,
+  direction: DirectionFilter,
+  counts: { deny: number; allow: number; total: number },
+  hasFilters: boolean,
+  olderExist: boolean,
+): string {
+  if (counts.total === 0) {
+    return direction === 'All'
+      ? 'The evaluator has not recorded any audited flows for this window yet.'
+      : `The evaluator has not recorded any ${direction.toLowerCase()} flows for this window yet.`;
   }
+  const noMatch = olderExist
+    ? `Nothing in the ${VERDICT_CAP} newest verdicts matched the current filters; older verdicts exist.`
+    : 'Nothing matched the current filters.';
+  if (hasFilters) return noMatch;
+  const tail = olderExist ? '; older verdicts exist.' : '.';
+  if (tab === 'Allow' && counts.deny > 0) {
+    return `${counts.deny} would-deny verdict${counts.deny === 1 ? ' is' : 's are'} on the Would-Deny tab${tail}`;
+  }
+  if (tab === 'WouldDeny' && counts.allow > 0) {
+    return `${counts.allow} allow verdict${counts.allow === 1 ? ' is' : 's are'} on the Allow tab${tail}`;
+  }
+  return noMatch;
 }
 
 function formatPodRef(ns: string | null, name: string | null): string {
