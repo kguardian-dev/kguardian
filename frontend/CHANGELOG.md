@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.20.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.1...frontend/v1.20.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **frontend:** read the namespace picker from /pod/namespaces instead of the whole pod listing ([3a6c3af](https://github.com/kguardian-dev/kguardian/commit/3a6c3aff54b2b07949ee7be4c3adea3ac201845e))
+* serve the namespace picker without the whole pod listing and prune dead pods on their own window ([f5f5077](https://github.com/kguardian-dev/kguardian/commit/f5f507725b6ef7d9d5236ba93de7dc1736cdb780))
+
 ## [1.20.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.0...frontend/v1.20.1) (2026-09-27)
 
 
