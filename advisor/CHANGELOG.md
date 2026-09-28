@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.1...advisor/v1.11.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **advisor:** give the Cilium deny-all policy the rule sections the CRD requires ([3dd0f77](https://github.com/kguardian-dev/kguardian/commit/3dd0f77b8c019e266755ab592534b3448dc2a278))
+* emit Cilium deny-all policies with the rule sections the CRD requires ([4a56e7f](https://github.com/kguardian-dev/kguardian/commit/4a56e7fe8be6889fc593a26865428e109f6a9831))
+
 ## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.0...advisor/v1.11.1) (2026-09-27)
 
 
