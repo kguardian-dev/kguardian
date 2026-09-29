@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.28.5](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.4...chart/v1.28.5) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** stop pod_compute_latest's TOAST churn and vacuum small tables when autovacuum lags ([703d64e](https://github.com/kguardian-dev/kguardian/commit/703d64e71db37caf86eb9fabd3e9558bba8e233f))
+* **chart:** describe the maintenance vacuum interval as one schedule across replicas ([348024f](https://github.com/kguardian-dev/kguardian/commit/348024ff1407bcb48997e46a8d3e7abe35bbaa05))
+* **chart:** expose the broker's maintenance vacuum toggle and interval ([f4cc180](https://github.com/kguardian-dev/kguardian/commit/f4cc18021a8bc1bf52de8eab4d8d8040279e8aeb))
+* **chart:** guard broker leader election, print the UI host check, run the UI read-only ([94b3133](https://github.com/kguardian-dev/kguardian/commit/94b313378ea3f7e6f6372e1feb4136240a0739e8))
+* **chart:** guard leader election settings and run the UI read-only ([1539fd6](https://github.com/kguardian-dev/kguardian/commit/1539fd6073102f02de8c033090c8e9c032f75996))
+* **chart:** move to broker 1.19.7, frontend 1.20.7 and llm-bridge 1.12.5 ([#1841](https://github.com/kguardian-dev/kguardian/issues/1841)) ([cbe7f9a](https://github.com/kguardian-dev/kguardian/commit/cbe7f9ad409f5ce94b2e8f90e5fde52369c654f9))
+
 ## [1.28.4](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.3...chart/v1.28.4) (2026-09-29)
 
 
