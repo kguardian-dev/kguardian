@@ -500,15 +500,29 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
   // over all of it under-reported the card by the replica count.
   const multiReplica = containers.some((c) => c.pod_uid !== containers[0].pod_uid);
   const latest = (multiReplica ? undefined : series.latest) ?? podLevelSample(containers, now);
+  // The node-capacity fallback covers the same pods as the usage: every
+  // distinct node the card's containers run on, each counted once. One
+  // node's capacity under the usage of replicas spread over three read up to
+  // three times too high. A node without a row leaves the capacity unknown
+  // rather than understated.
+  const nodeCapacity = (of: (n: ComputeNode) => number | null | undefined): number | null => {
+    let total = 0;
+    for (const name of new Set(containers.map((c) => c.node))) {
+      const v = of(nodesByName.get(name) ?? ({} as ComputeNode));
+      if (v === null || v === undefined || !(v > 0)) return null;
+      total += v;
+    }
+    return total;
+  };
   const cpuDen = pickDenominator(
     containers.map((c) => c.cpu_limit_millis),
     containers.map((c) => c.cpu_request_millis),
-    nodeRow?.cpu_cores != null ? nodeRow.cpu_cores * 1000 : null,
+    nodeCapacity((n) => (n.cpu_cores != null ? n.cpu_cores * 1000 : null)),
   );
   const memDen = pickDenominator(
     containers.map((c) => c.mem_limit),
     containers.map((c) => c.mem_request),
-    nodeRow?.memory_bytes ?? null,
+    nodeCapacity((n) => n.memory_bytes),
   );
 
   // Rows exist, so the node is reporting: `pending` cannot apply here. A
