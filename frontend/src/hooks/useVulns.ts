@@ -5,7 +5,7 @@ import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
 import { workloadKey } from '../utils/workloads';
-import { mergeFindings, VULN_SEVERITY_RANK } from '../utils/vulnView';
+import { mergeFindings, sameVulnId, VULN_SEVERITY_RANK } from '../utils/vulnView';
 
 /** Drop a response for a request the user has already moved away from. */
 function useLatest() {
@@ -116,11 +116,14 @@ export const CVE_TOTALS_LIMIT = 500;
 /**
  * The CVE summary for the scope alone, no table filters, in one read of up
  * to CVE_TOTALS_LIMIT rows: what the header tiles count. `capped` when the
- * Broker had more rows than that, so every tile is a lower bound.
+ * Broker had more rows than that, so every tile is a lower bound over the
+ * first rows in the list's `order`: by tier (`tier`), or most severe first
+ * (null, an older Broker).
  */
 export function useCveTotals(namespace: string | undefined, refreshTick = 0, api: VulnApi = vulnApi) {
   const [items, setItems] = useState<CveSummary[]>([]);
   const [capped, setCapped] = useState(false);
+  const [order, setOrder] = useState<'tier' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
@@ -141,6 +144,7 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
       if (!current()) return;
       setItems(p.items);
       setCapped(p.nextAfter !== null);
+      setOrder(p.order === 'tier' ? 'tier' : null);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -154,7 +158,7 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
     void load();
   }, [load, refreshTick]);
 
-  return { items, capped, loading, error, reload: load };
+  return { items, capped, order, loading, error, reload: load };
 }
 
 /** Images per CVE whose findings the drawer reads (tier, factors, KEV/EPSS). */
@@ -184,7 +188,7 @@ async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage, curren
     if (!current()) break;
     const v = await api.getImageVulns(img.digest, { vulnId: id, limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
     for (const f of v.items) {
-      if (f.id !== id) continue;
+      if (!sameVulnId(f.id, id)) continue;
       matches.push(f);
       missing.delete(`${f.package.name}@${f.installedVersion}`);
     }

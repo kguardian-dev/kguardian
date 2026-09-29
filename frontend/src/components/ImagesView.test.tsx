@@ -202,6 +202,21 @@ describe('ImagesView: header tiles count the scope (DATA-10, IMG-07)', () => {
     await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7+'));
     expect(tile('P0 act now')).toBe('P0 act now1+');
     expect(screen.getByTestId('tiles-caption').textContent).toMatch(/\(the first 500\)/);
+    // An older Broker's first 500 are the most severe: say which subset the lower bounds cover.
+    expect(screen.getAllByTitle(/first 500 CVEs in scope, most severe first; more exist/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByTitle(/tier order/)).toHaveLength(0);
+  });
+
+  test('capped against a Broker that ranks by tier: the tiles say their first 500 are taken in tier order', async () => {
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=500', { ...cvePage, nextAfter: 'more', order: 'tier' })]);
+    render(view({ api }));
+    await screen.findAllByTestId('cve-row');
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7+'));
+    // Still lower bounds ("+"), over the first 500 by tier.
+    expect(tile('P0 act now')).toBe('P0 act now1+');
+    expect(screen.getAllByTitle(/first 500 CVEs in scope, in tier order \(P0 first\); more exist/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByTitle(/most severe first/)).toHaveLength(0);
+    expect(screen.getByTestId('tiles-caption').textContent).toMatch(/\(the first 500\)/);
   });
 
   test('a scope change clears the tiles and the table until the new scope has been read', async () => {

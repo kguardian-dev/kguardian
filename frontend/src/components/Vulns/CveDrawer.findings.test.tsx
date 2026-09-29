@@ -111,6 +111,19 @@ describe('CVE drawer: an image with more findings than one read', () => {
   });
 });
 
+describe('CVE drawer: ids match regardless of case, as the Broker compares them', () => {
+  test('a GHSA id the report spells in another case is still the CVE\'s finding', async () => {
+    const ghsa: Exposure = { ...ledgerOnly, id: 'GHSA-7rjr-3q55-vv33' };
+    const reported = { ...cveFinding, id: 'ghsa-7RJR-3Q55-vv33', tier: 'P0', tierFactors: ['in_use:executed', 'kev', 'severity:critical', 'exposed'] };
+    const { api, reads } = paged(ghsa, [[...filler(3), reported]]);
+    render(<CveDrawer id={ghsa.id} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />);
+    await settle();
+    expect(reads).toHaveLength(1);
+    expect(rowTier()).toBe('P0');
+    expect(headlineTier()).toBe('P0');
+  });
+});
+
 describe('CVE drawer: the per-image read asks for the one CVE (vuln_id)', () => {
   /**
    * Every image carries 1,200 other findings ranked above the CVE's, then

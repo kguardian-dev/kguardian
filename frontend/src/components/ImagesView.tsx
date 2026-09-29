@@ -6,7 +6,7 @@ import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
 import { formatTimestamp, shortDigest } from '../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
-import { asUtc, canonicalCveId, canonicalDigest, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
+import { asUtc, canonicalCveId, canonicalDigest, cveRowFactors, sameVulnId, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { StatStrip, StatTile } from './ui/StatTile';
@@ -118,7 +118,8 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
   const loadedKnown = totals.items.some((c) => c.inUse !== null);
   const tierTile = (n: number) => (tiersKnown || totals.items.length === 0 ? n : 'unknown');
   const filtered = sevId !== 'all' || tierId !== 'all' || fixable || running;
-  const cappedNote = loadedAll ? '' : ` Counted over the first ${CVE_TOTALS_LIMIT} CVEs in scope; more exist.`;
+  // Which CVEs a capped count covers depends on the list's order: by tier, every P0 comes first, but the other tiles are still lower bounds.
+  const cappedNote = loadedAll ? '' : ` Counted over the first ${CVE_TOTALS_LIMIT} CVEs in scope, ${totals.order === 'tier' ? 'in tier order (P0 first)' : 'most severe first'}; more exist.`;
   const reloadAll = () => {
     void cves.reload();
     void totals.reload();
@@ -286,7 +287,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
       {cve && (
         <CveDrawer
           id={cve}
-          summary={openedFrom?.id === cve ? openedFrom : cves.items.find((c) => c.id === cve)}
+          summary={openedFrom && sameVulnId(openedFrom.id, cve) ? openedFrom : cves.items.find((c) => sameVulnId(c.id, cve))}
           onClose={() => onParamsChange({ cve: undefined })}
           onOpenWorkload={onOpenWorkload}
           onShowOnMap={onShowOnMap}

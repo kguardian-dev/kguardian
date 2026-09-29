@@ -64,6 +64,14 @@ export function canonicalCveId(id: string): string {
   const t = jumpTarget(id);
   return t?.kind === 'cve' ? t.id : id;
 }
+/**
+ * Two vulnerability ids name the same one: compared ignoring case, as the
+ * Broker compares them (`vuln_id`), so a GHSA a report spells in another
+ * case is still that advisory.
+ */
+export function sameVulnId(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
 export function canonicalDigest(digest: string): string {
   const t = jumpTarget(digest);
   return t?.kind === 'digest' ? t.digest : digest;

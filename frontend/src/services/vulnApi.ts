@@ -151,7 +151,12 @@ export class VulnApi {
     throw new VulnApiError(res.status, 'error', msg);
   }
 
-  /** `GET /vulnerabilities`: CVEs grouped by id, most severe first. */
+  /**
+   * `GET /vulnerabilities`: CVEs grouped by id. With `order: 'tier'` in the
+   * response the list is ranked by tier (P0, unknown, P1, P2, Background),
+   * then severity, then id; without it (an older Broker) it is most severe
+   * first.
+   */
   listCves(q: CveListQuery = {}): Promise<CvePage> {
     return this.json<CvePage>(
       '/vulnerabilities',
