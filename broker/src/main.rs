@@ -367,7 +367,7 @@ async fn main() -> Result<(), std::io::Error> {
     // seconds, when their dead tuples say autovacuum is not keeping up
     // (maintenance.rs). Leader only, on its own connection. Disable with
     // BROKER_MAINTENANCE_VACUUM_ENABLED=false.
-    api::spawn_maintenance();
+    api::spawn_maintenance(pool.clone());
 
     // Image attestation results not re-checked within
     // IMAGE_ATTESTATION_RETENTION_DAYS (attestation.rs). Results for

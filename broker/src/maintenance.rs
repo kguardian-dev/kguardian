@@ -13,8 +13,10 @@
 //! `pod_compute_latest` held 982 MB for 2 900 live rows.
 //!
 //! So the leader checks the tables every
-//! `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` (default 300, plus up to 10 %
-//! jitter) and runs a plain `VACUUM (ANALYZE)` on each one whose dead
+//! `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` (default 300; paced by
+//! `leader::Cadence`, so a hand-off neither repeats nor skips a pass, and a
+//! pass that loses leadership stops before its next table) and runs a
+//! plain `VACUUM (ANALYZE)` on each one whose dead
 //! tuples, heap plus TOAST, reach `BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES`
 //! (default 10 000) and a fifth of its live rows. With autovacuum healthy
 //! the counts stay under that and a pass is one catalog query. Never
@@ -24,7 +26,11 @@
 //! The big append-and-prune tables (`pod_compute_history`, `pod_traffic`,
 //! `pod_contention_history`, ...) are deliberately not on the list: a
 //! VACUUM of tens of GB is hours of I/O the broker should not start on its
-//! own. See [`TABLES`].
+//! own. Nor is any table the broker builds indexes on in the background
+//! (`CREATE INDEX CONCURRENTLY`, e.g. the compute history minute index):
+//! a VACUUM there would contend with the build's lock and must be
+//! coordinated with it, not fired on a timer. See [`TABLES`] and
+//! [`NEVER_VACUUMED`].
 //!
 //! VACUUM cannot run inside a transaction, so each pass opens its own
 //! connection (like `retention::ensure_minute_index`), with a
@@ -50,11 +56,14 @@ use diesel::prelude::*;
 use diesel::sql_types::{Array, BigInt, Bool, Text};
 use tracing::{debug, info, warn};
 
+type DbPool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>;
+
 /// Tables the pass considers, in the order it vacuums them. Chosen by
 /// churn and size: each is rewritten continuously (upserted every sample,
 /// or deleted and re-inserted on a timer) but holds at most thousands of
 /// rows, so a VACUUM of it takes seconds even when it is badly bloated.
-/// A table missing from the schema is skipped.
+/// A table missing from the schema is skipped. Never add one of
+/// [`NEVER_VACUUMED`] (a unit test enforces it).
 pub const TABLES: [&str; 6] = [
     // One row per live container, upserted every 5 s; a TOAST table.
     "pod_compute_latest",
@@ -68,6 +77,20 @@ pub const TABLES: [&str; 6] = [
     "runtime_in_use_coverage",
     // One row per workload container and digest, refreshed on a throttle.
     "workload_containers",
+];
+
+/// Tables this task must never VACUUM: the large append-and-prune tables,
+/// whose VACUUM is heavy, and every table with a background
+/// `CREATE INDEX CONCURRENTLY` (`retention::ensure_minute_index` builds one
+/// on `pod_compute_history`), whose maintenance is coordinated with the
+/// build instead. Extend it when a background index build moves to a new
+/// table.
+pub const NEVER_VACUUMED: [&str; 5] = [
+    "pod_compute_history",
+    "pod_contention_history",
+    "pod_traffic",
+    "seccomp_denials",
+    "audit_verdicts",
 ];
 
 const DEFAULT_INTERVAL_SECS: u64 = 300;
@@ -88,8 +111,8 @@ const LOCK_TIMEOUT: &str = "5s";
 /// First pass after startup: after the pool has warmed and the migrations'
 /// own work is done, never on the startup path.
 const WARMUP: Duration = Duration::from_secs(120);
-/// How often a follower checks whether it has become the leader.
-const FOLLOWER_POLL: Duration = Duration::from_secs(60);
+/// The task's name in logs and `leader_task_runs`.
+const TASK: &str = "maintenance vacuum";
 /// Longest wait after repeated failures.
 const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
@@ -258,11 +281,21 @@ pub(crate) fn run_pass(
         .load::<TableStat>(conn)?;
     let mut out = Vec::with_capacity(stats.len());
     for s in stats {
+        // A pass that loses leadership stops before its next table; a
+        // VACUUM already running finishes.
+        if !crate::leader::still_leader(TASK) {
+            break;
+        }
         // The query returns names from TABLES only; map back to the
         // 'static entry for the metric label.
         let Some(table) = TABLES.iter().copied().find(|t| *t == s.name) else {
             continue;
         };
+        // Also enforced by a unit test; this keeps a bad edit to TABLES
+        // from ever reaching a heavy or index-building table.
+        if NEVER_VACUUMED.contains(&table) {
+            continue;
+        }
         let dead = s.heap_dead.saturating_add(s.toast_dead);
         let outcome = if !needs_vacuum(dead, s.live, threshold) {
             debug!(table, dead, live = s.live, "maintenance vacuum not needed");
@@ -325,20 +358,12 @@ pub(crate) fn run_pass(
     Ok(out)
 }
 
-/// Up to `max`, from the process's random source (a v4 UUID, which the
-/// broker already depends on).
-fn jitter_up_to(max: Duration) -> Duration {
-    let r = u64::from_le_bytes(
-        uuid::Uuid::new_v4().as_bytes()[..8]
-            .try_into()
-            .unwrap_or([0; 8]),
-    );
-    max.mul_f64((r as f64) / (u64::MAX as f64))
-}
-
-/// Start the maintenance loop (module docs). Leader only; off with
-/// `BROKER_MAINTENANCE_VACUUM_ENABLED=false`.
-pub fn spawn() {
+/// Start the maintenance loop (module docs). Leader only, paced by
+/// [`crate::leader::Cadence`] like the retention loops, so replicas keep
+/// one schedule across a hand-off; off with
+/// `BROKER_MAINTENANCE_VACUUM_ENABLED=false`. `pool` records completed
+/// passes (`leader_task_runs`); the VACUUMs run on their own connection.
+pub fn spawn(pool: DbPool) {
     if !enabled() {
         info!("maintenance VACUUM disabled (BROKER_MAINTENANCE_VACUUM_ENABLED=false)");
         return;
@@ -360,51 +385,56 @@ pub fn spawn() {
         "maintenance VACUUM scheduled (leader only; a no-op while autovacuum keeps up)"
     );
     actix_web::rt::spawn(async move {
-        tokio::time::sleep(WARMUP + jitter_up_to(interval / 10)).await;
+        tokio::time::sleep(WARMUP).await;
+        let mut cadence = crate::leader::Cadence::new(TASK, interval);
         let mut failures: u32 = 0;
         loop {
-            if !crate::leader::is_leader() {
-                tokio::time::sleep(FOLLOWER_POLL).await;
-                continue;
-            }
             let url = url.clone();
-            let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-                let mut conn =
-                    PgConnection::establish(&url).map_err(|e| format!("connect: {e}"))?;
-                run_pass(&mut conn, threshold).map_err(|e| e.to_string())
+            let ran = crate::leader::singleton(TASK, async move {
+                tokio::task::spawn_blocking(move || -> Result<_, String> {
+                    let mut conn =
+                        PgConnection::establish(&url).map_err(|e| format!("connect: {e}"))?;
+                    run_pass(&mut conn, threshold).map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| format!("task panicked: {e}"))
+                .and_then(|r| r)
             })
-            .await
-            .map_err(|e| format!("task panicked: {e}"))
-            .and_then(|r| r);
-            let ok = match result {
-                Ok(outcomes) => {
-                    let mut ok = true;
-                    for (table, outcome) in outcomes {
-                        record(table, outcome);
-                        ok &= outcome != Outcome::Failed;
+            .await;
+            if let Some(result) = ran {
+                let ok = match result {
+                    Ok(outcomes) => {
+                        let mut ok = true;
+                        for (table, outcome) in outcomes {
+                            record(table, outcome);
+                            ok &= outcome != Outcome::Failed;
+                        }
+                        ok
                     }
-                    ok
+                    Err(e) => {
+                        warn!(error = %e, "maintenance VACUUM pass failed");
+                        false
+                    }
+                };
+                if ok {
+                    failures = 0;
+                    LAST_SUCCESS.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+                    // Only a clean pass counts as the cluster's last one, so
+                    // a new leader retries a failed pass promptly.
+                    cadence.completed(&pool).await;
+                } else {
+                    failures = failures.saturating_add(1);
+                    let wait = backoff(interval, failures);
+                    warn!(
+                        failures,
+                        retry_secs = wait.as_secs(),
+                        "maintenance VACUUM backing off"
+                    );
+                    // The cadence waits one interval; the back-off is the rest.
+                    tokio::time::sleep(wait.saturating_sub(interval)).await;
                 }
-                Err(e) => {
-                    warn!(error = %e, "maintenance VACUUM pass failed");
-                    false
-                }
-            };
-            let wait = if ok {
-                failures = 0;
-                LAST_SUCCESS.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
-                interval
-            } else {
-                failures = failures.saturating_add(1);
-                let backoff = backoff(interval, failures);
-                warn!(
-                    failures,
-                    retry_secs = backoff.as_secs(),
-                    "maintenance VACUUM backing off"
-                );
-                backoff
-            };
-            tokio::time::sleep(wait + jitter_up_to(interval / 10)).await;
+            }
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -476,6 +506,15 @@ mod tests {
         set("BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES", Some("50000"));
         assert_eq!(dead_tuple_threshold(), 50_000);
         set("BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES", None);
+    }
+
+    #[test]
+    fn heavy_and_index_building_tables_are_never_vacuumed() {
+        for t in NEVER_VACUUMED {
+            assert!(!TABLES.contains(&t), "{t} must not be on the VACUUM list");
+        }
+        // The background minute-index build's table in particular.
+        assert!(NEVER_VACUUMED.contains(&"pod_compute_history"));
     }
 
     #[test]

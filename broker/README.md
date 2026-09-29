@@ -69,7 +69,7 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `LEADER_ELECTION_RETRY_PERIOD_SECS` | `2` | Renew/acquire cadence; must be below renew deadline / 1.2 (a bad combination falls back to 15/10/2) |
 | `POD_NAME` | hostname | Lease holder identity (downward API). Lease requests go straight to the in-cluster API server and ignore `HTTP(S)_PROXY` |
 | `BROKER_MAINTENANCE_VACUUM_ENABLED` | `true` | Leader-only `VACUUM (ANALYZE)` of the small high-churn tables when autovacuum falls behind (see below); `false` disables |
-| `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` | `300` | How often the leader checks those tables' dead tuples (min 60, plus up to 10% jitter) |
+| `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` | `300` | How often the leader checks those tables' dead tuples (min 60). One schedule across replicas, like the retention loops (`leader_task_runs`) |
 | `BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES` | `10000` | Dead tuples (heap + TOAST) a table needs, and at least a fifth of its live rows, before it is vacuumed (min 1000) |
 | `RUST_LOG` | `info` | Log level |
 
