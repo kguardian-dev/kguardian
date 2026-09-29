@@ -225,13 +225,20 @@ pub fn spawn(pool: DbPool) {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
         tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut cadence = crate::leader::Cadence::new("audit retention", interval);
         loop {
-            // Audit pruning only when enabled; dead-pod pruning always.
-            if audit_days > 0 {
-                run_pass(&pool, audit_days).await;
-            }
-            run_dead_pod_pass(&pool, dead_pod_days).await;
-            tokio::time::sleep(interval).await;
+            // Leader only (leader.rs): every replica pruning at once just
+            // contends on the same rows.
+            cadence
+                .pass(&pool, async {
+                    // Audit pruning only when enabled; dead-pod pruning always.
+                    if audit_days > 0 {
+                        run_pass(&pool, audit_days).await;
+                    }
+                    run_dead_pod_pass(&pool, dead_pod_days).await;
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
     spawn_compute(compute_pool);
@@ -260,9 +267,14 @@ fn spawn_compute(pool: DbPool) {
     }
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
+        let mut cadence = crate::leader::Cadence::new("compute retention", interval);
         loop {
-            run_compute_pass(&pool, days, minute_hours).await;
-            tokio::time::sleep(interval).await;
+            // Leader only: two replicas folding the same range both insert
+            // its five-minute rows (see run_downsample_batch).
+            cadence
+                .pass(&pool, run_compute_pass(&pool, days, minute_hours))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -325,6 +337,7 @@ fn spawn_seccomp_denials(pool: DbPool) {
         // Staggered against the other two loops' 60 s and 90 s warmups so
         // three full-table prunes do not land on a cold pool together.
         tokio::time::sleep(Duration::from_secs(120)).await;
+        let mut cadence = crate::leader::Cadence::new("seccomp denial retention", interval);
         loop {
             // Denial pruning only when enabled; attribution backfill always,
             // the same split the audit loop makes for dead pods. The backfill
@@ -335,15 +348,19 @@ fn spawn_seccomp_denials(pool: DbPool) {
             // Before the prune, so a row on the edge of the window is
             // attributed for whatever poll it has left rather than being
             // repaired and deleted in the same pass.
-            backfill_denial_attribution(&pool).await;
-            if days > 0 {
-                run_seccomp_denial_pass(&pool, days).await;
-                // Once per pass, after the denial prune: the node table is
-                // one row per node, so it needs no batching and no cadence of
-                // its own.
-                prune_stale_denial_nodes(&pool, days).await;
-            }
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, async {
+                    backfill_denial_attribution(&pool).await;
+                    if days > 0 {
+                        run_seccomp_denial_pass(&pool, days).await;
+                        // Once per pass, after the denial prune: the node table
+                        // is one row per node, so it needs no batching and no
+                        // cadence of its own.
+                        prune_stale_denial_nodes(&pool, days).await;
+                    }
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -354,6 +371,9 @@ async fn run_seccomp_denial_pass(pool: &DbPool, days: u32) {
     let batch_size = seccomp_denial_batch_size();
     let mut total_deleted: usize = 0;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_seccomp_denial_pass") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             run_seccomp_denial_batch(&pool, days, batch_size)
@@ -634,16 +654,24 @@ fn spawn_pod_traffic(pool: DbPool) {
         // Staggered after the 60 / 90 / 120 s warmups of the other loops.
         tokio::time::sleep(Duration::from_secs(150)).await;
         let mut cursor = None;
+        let mut cadence = crate::leader::Cadence::new("pod traffic retention", interval);
         loop {
-            if days > 0 {
-                cursor = run_pod_traffic_pass(&pool, days, cursor).await;
+            if crate::leader::is_leader() {
+                if days > 0 {
+                    cursor = run_pod_traffic_pass(&pool, days, cursor).await;
+                }
+                // After the age pass, so the cap only counts rows that age
+                // and supersede pruning have already left.
+                if max_rows > 0 {
+                    run_pod_traffic_cap(&pool, max_rows).await;
+                }
+                cadence.completed(&pool).await;
+            } else {
+                // A cursor is only meaningful to the replica that walked
+                // it; start over if leadership comes back.
+                cursor = None;
             }
-            // After the age pass, so the cap only counts rows that age and
-            // supersede pruning have already left.
-            if max_rows > 0 {
-                run_pod_traffic_cap(&pool, max_rows).await;
-            }
-            tokio::time::sleep(interval).await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -834,6 +862,9 @@ async fn run_pod_traffic_pass(
     let mut total_deleted: usize = 0;
     let mut total_examined: usize = 0;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_pod_traffic_pass") {
+            break;
+        }
         let pool = pool.clone();
         let after = cursor.clone();
         let result =
@@ -1049,6 +1080,9 @@ async fn run_dead_pod_pass(pool: &DbPool, days: u32) {
     let batch_size = retention_batch_size();
     let mut total_deleted: usize = 0;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_dead_pod_pass") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             run_dead_pod_batch(&pool, days, batch_size)
@@ -1119,6 +1153,9 @@ async fn run_pass(pool: &DbPool, days: u32) {
     let batch_size = retention_batch_size();
     let mut total_deleted: usize = 0;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("audit retention") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             run_batch(&pool, days, batch_size)
@@ -1368,6 +1405,9 @@ async fn run_downsample(pool: &DbPool, minute_hours: u32) {
     let mut folded_total = 0usize;
     let mut written_total = 0usize;
     for batch_idx in 0..MAX_DOWNSAMPLE_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("compute downsample") {
+            return;
+        }
         let pool = pool.clone();
         let result =
             tokio::task::spawn_blocking(move || run_downsample_batch(&pool, minute_hours)).await;
@@ -1440,6 +1480,9 @@ const MINUTE_INDEX_RECHECK: Duration = Duration::from_secs(3600);
 /// First retry after a failed build, doubled per failure up to the
 /// re-check cadence.
 const MINUTE_INDEX_RETRY: Duration = Duration::from_secs(300);
+/// How often a follower re-checks whether it has become the leader, so
+/// a new leader ensures the index within a minute rather than an hour.
+const MINUTE_INDEX_FOLLOWER_POLL: Duration = Duration::from_secs(60);
 
 /// What [`ensure_minute_index`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1560,6 +1603,12 @@ fn spawn_minute_index() {
         tokio::time::sleep(MINUTE_INDEX_WARMUP).await;
         let mut retry = MINUTE_INDEX_RETRY;
         loop {
+            // Leader only, on top of the build's own advisory lock: the
+            // downsample that needs the index runs only there.
+            if !crate::leader::is_leader() {
+                tokio::time::sleep(MINUTE_INDEX_FOLLOWER_POLL).await;
+                continue;
+            }
             let url = url.clone();
             let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
                 let mut conn =
@@ -1650,6 +1699,15 @@ fn run_downsample_batch(
         return Ok(None);
     };
     conn.transaction::<_, RetentionError, _>(|conn| {
+        // Serialise folds cluster-wide. Leader election already keeps this
+        // to one replica, but a leader hand-off can overlap one in-flight
+        // batch; without the lock both would insert the range's five-minute
+        // rows. A waiter's statements run on a fresh snapshot once the
+        // holder commits, so it finds the range already folded and writes 0.
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<diesel::sql_types::Text, _>(DOWNSAMPLE_LOCK_KEY)
+            .execute(conn)
+            .map_err(RetentionError::Diesel)?;
         let written = sql_query(DOWNSAMPLE_INSERT_SQL)
             .bind::<Timestamp, _>(start)
             .bind::<Timestamp, _>(end)
@@ -1673,6 +1731,9 @@ fn run_downsample_batch(
         Ok(Some((written, deleted)))
     })
 }
+
+/// Transaction-scoped advisory lock key for [`run_downsample_batch`].
+const DOWNSAMPLE_LOCK_KEY: &str = "kguardian:compute_downsample";
 
 const DOWNSAMPLE_INSERT_SQL: &str = "\
 INSERT INTO pod_compute_history (\
@@ -1754,6 +1815,9 @@ async fn run_compute_prune(pool: &DbPool, table: &'static str, days: u32) {
     let batch_size = retention_batch_size();
     let mut total_deleted = 0usize;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_compute_prune") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             let mut conn = pool.get().map_err(RetentionError::Pool)?;
@@ -1838,6 +1902,9 @@ async fn run_stale_latest(pool: &DbPool) {
     let batch_size = retention_batch_size();
     let mut total_deleted = 0usize;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_stale_latest") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             let mut conn = pool.get().map_err(RetentionError::Pool)?;
@@ -2084,9 +2151,12 @@ fn spawn_image_inventory(pool: DbPool) {
     actix_web::rt::spawn(async move {
         // Staggered after the other loops' 60/90/120 s warmups.
         tokio::time::sleep(Duration::from_secs(150)).await;
+        let mut cadence = crate::leader::Cadence::new("image inventory retention", interval);
         loop {
-            run_image_inventory_pass(&pool, days).await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_image_inventory_pass(&pool, days))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2115,6 +2185,9 @@ async fn run_batched_prune(
 ) {
     let mut total: usize = 0;
     for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        if !crate::leader::still_leader("run_batched_prune") {
+            break;
+        }
         let pool = pool.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
             let mut conn = pool.get().map_err(RetentionError::Pool)?;
@@ -2294,12 +2367,18 @@ fn spawn_runtime_inventory(pool: DbPool) {
         // Staggered between the image inventory (150 s) and profile
         // (180 s) warmups.
         tokio::time::sleep(Duration::from_secs(165)).await;
+        let mut cadence = crate::leader::Cadence::new("runtime inventory retention", interval);
         loop {
-            let window = crate::runtime_capabilities::evidence_window_hours();
-            for (table, sql, days) in runtime_inventory_prunes(days, window) {
-                run_batched_prune(&pool, table, sql, days, image_inventory_batch_size()).await;
-            }
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, async {
+                    let window = crate::runtime_capabilities::evidence_window_hours();
+                    for (table, sql, days) in runtime_inventory_prunes(days, window) {
+                        run_batched_prune(&pool, table, sql, days, image_inventory_batch_size())
+                            .await;
+                    }
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2379,9 +2458,12 @@ fn spawn_workload_profiles(pool: DbPool) {
     }
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(180)).await;
+        let mut cadence = crate::leader::Cadence::new("workload profile retention", interval);
         loop {
-            run_workload_profiles_pass(&pool, days).await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_workload_profiles_pass(&pool, days))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2621,9 +2703,12 @@ fn spawn_supplychain(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(45)).await;
+        let mut cadence = crate::leader::Cadence::new("supply-chain pass", interval);
         loop {
-            run_supplychain_pass(&pool, days, grace).await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_supplychain_pass(&pool, days, grace))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2636,6 +2721,9 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     let mut cursor: Option<(String, String)> = None;
     let mut changed = 0usize;
     for _ in 0..MAX_SUPPLYCHAIN_BATCHES {
+        if !crate::leader::still_leader("run_supplychain_pass") {
+            break;
+        }
         let pool = pool.clone();
         let after = cursor.clone();
         let r = tokio::task::spawn_blocking(move || -> Result<_, RetentionError> {
@@ -2665,21 +2753,30 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     if changed > 0 {
         info!(links_changed = changed, "supply-chain links refreshed");
     }
+    if !crate::leader::still_leader("supply-chain pass") {
+        return;
+    }
     // 1a. Runtime in-use evidence and exposure (P1-5), which the summary
     //     below tiers from.
     run_in_use_pass(pool, batch).await;
+    if !crate::leader::still_leader("supply-chain pass") {
+        return;
+    }
     // 1b. Rebuild the per-CVE summary GET /vulnerabilities reads, from the
     //     links just refreshed.
     let p = pool.clone();
     match tokio::task::spawn_blocking(move || -> Result<i64, RetentionError> {
         let mut conn = p.get().map_err(RetentionError::Pool)?;
-        crate::supplychain_read::refresh_cve_summary(&mut conn).map_err(RetentionError::Diesel)
+        rebuild_cve_summary(&mut conn).map_err(RetentionError::Diesel)
     })
     .await
     {
         Ok(Ok(n)) => debug!(cves = n, "supply-chain CVE summary rebuilt"),
         Ok(Err(e)) => warn!(error = %e, "supply-chain CVE summary rebuild failed"),
         Err(e) => warn!(error = %e, "supply-chain CVE summary task panicked"),
+    }
+    if !crate::leader::still_leader("supply-chain pass") {
+        return;
     }
     // 2. Staged pages.
     let ttl = supplychain_page_ttl_secs();
@@ -2692,6 +2789,9 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
             pages = expired,
             "supply-chain retention expired incomplete SBOM page sets"
         );
+    }
+    if !crate::leader::still_leader("supply-chain pass") {
+        return;
     }
     // 3. Payloads of images nothing runs.
     if days == 0 {
@@ -2783,8 +2883,10 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let mut conn = p.get().map_err(|e| e.to_string())?;
-                    s::refresh_package_use_batch(&mut conn, after.as_deref(), batch)
-                        .map_err(|e| e.to_string())
+                    with_supplychain_lock(&mut conn, |c| {
+                        s::refresh_package_use_batch(c, after.as_deref(), batch)
+                    })
+                    .map_err(|e| e.to_string())
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
@@ -2806,25 +2908,30 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
         }
         debug!(rows, "in-use: package use refreshed");
     }
+    // The write below trusts `evidence`; a pass that lost leadership while
+    // collecting it leaves the tables to the new leader.
+    if !crate::leader::still_leader("in-use refresh") {
+        return;
+    }
     let p = pool.clone();
     let r =
         tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), RetentionError> {
             let mut conn = p.get().map_err(RetentionError::Pool)?;
-            let pruned = if available {
-                s::prune_package_use(&mut conn)
-            } else {
-                s::clear_package_use(&mut conn)
-            }
-            .map_err(RetentionError::Diesel)?;
-            let t = crate::in_use::TierSettings::from_env();
-            let cov =
-                s::refresh_coverage(&mut conn, &t, &evidence).map_err(RetentionError::Diesel)?;
-            let exp = s::refresh_exposure(
-                &mut conn,
-                crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
-            )
-            .map_err(RetentionError::Diesel)?;
-            Ok((pruned, cov, exp))
+            with_supplychain_lock(&mut conn, |conn| {
+                let pruned = if available {
+                    s::prune_package_use(conn)
+                } else {
+                    s::clear_package_use(conn)
+                }?;
+                let t = crate::in_use::TierSettings::from_env();
+                let cov = s::refresh_coverage(conn, &t, &evidence)?;
+                let exp = s::refresh_exposure(
+                    conn,
+                    crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
+                )?;
+                Ok((pruned, cov, exp))
+            })
+            .map_err(RetentionError::Diesel)
         })
         .await;
     match r {
@@ -2840,6 +2947,54 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
     }
 }
 
+/// Transaction-scoped advisory lock key for the supply-chain pass's
+/// rebuilt tables.
+const SUPPLYCHAIN_LOCK_KEY: &str = "kguardian:supplychain_derived";
+
+/// Run `f` in a transaction holding [`SUPPLYCHAIN_LOCK_KEY`]. The CVE summary
+/// and in-use coverage are rebuilt by DELETE-then-INSERT; two overlapping
+/// rebuilds (an old leader's pass and the new leader's first, during a
+/// hand-off) would each insert a full set, and the second would fail on the
+/// first's rows or duplicate them. Serialised, the second rebuilds on top
+/// of the first. Relink, page expiry and GC are per-row idempotent and run
+/// without it; so are the peer late-resolve (`peer_kind IS NULL` guard) and
+/// the stale-alive sweep (`is_dead = false` guard).
+fn with_supplychain_lock<T, E: From<diesel::result::Error>>(
+    conn: &mut PgConnection,
+    f: impl FnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E> {
+    conn.transaction(|conn| {
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<diesel::sql_types::Text, _>(SUPPLYCHAIN_LOCK_KEY)
+            .execute(conn)?;
+        f(conn)
+    })
+}
+
+/// The pass's CVE rebuild. The facts go first, OUTSIDE the lock: they have
+/// their own short transaction that table-locks `vuln_cve_facts`
+/// (cc178442), which already serialises two rebuilds, and nesting it in
+/// the lock's transaction would turn it into a savepoint and hold that
+/// table lock, which ingest upserts wait on, through the whole summary
+/// rebuild. Only the summary, which reads the facts and writes nothing
+/// ingest touches, runs under [`SUPPLYCHAIN_LOCK_KEY`].
+fn rebuild_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
+    rebuild_cve_summary_with(conn, || {})
+}
+
+/// [`rebuild_cve_summary`] with a hook run under the lock, before the
+/// summary (tests drive concurrent ingest from it).
+fn rebuild_cve_summary_with(
+    conn: &mut PgConnection,
+    under_lock: impl FnOnce(),
+) -> QueryResult<i64> {
+    crate::supplychain_read::refresh_cve_facts(conn)?;
+    with_supplychain_lock(conn, |conn| {
+        under_lock();
+        crate::supplychain_read::refresh_cve_summary_only(conn)
+    })
+}
+
 /// Repeat `step` until it reports 0 or the per-pass cap.
 async fn run_supplychain_steps<F>(pool: &DbPool, step: F) -> usize
 where
@@ -2847,6 +3002,9 @@ where
 {
     let mut total = 0usize;
     for _ in 0..MAX_SUPPLYCHAIN_BATCHES {
+        if !crate::leader::still_leader("run_supplychain_steps") {
+            break;
+        }
         let pool = pool.clone();
         let step = step.clone();
         let r = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
@@ -3972,6 +4130,173 @@ mod tests {
                 row("c/app", "2026-09-01 00:05", None),
             ]
         );
+        conn.batch_execute("TRUNCATE pod_compute_history")
+            .expect("leave the table empty for the other live tests");
+    }
+
+    /// Two overlapping supply-chain rebuilds are serialised: the second
+    /// waits for the first to commit, then rebuilds on top of it and
+    /// succeeds (unserialised, both DELETE-then-INSERT the same summary).
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_overlapping_supplychain_rebuilds_are_serialised() {
+        use diesel::sql_types::BigInt;
+        let mut conn = live_conn();
+        let mut watcher = live_conn();
+        #[derive(QueryableByName)]
+        struct Waiting {
+            #[diesel(sql_type = BigInt)]
+            n: i64,
+        }
+        let second = with_supplychain_lock(&mut conn, |conn| {
+            crate::supplychain_read::refresh_cve_summary_only(conn)?;
+            let second = std::thread::spawn(|| rebuild_cve_summary(&mut live_conn()));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let waiting = sql_query(
+                    "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+                )
+                .get_result::<Waiting>(&mut watcher)?
+                .n;
+                if waiting > 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the second rebuild never waited on the lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok::<_, diesel::result::Error>(second)
+        })
+        .expect("first rebuild");
+        second
+            .join()
+            .expect("join")
+            .expect("the second rebuild succeeds after the first commits");
+    }
+
+    /// An ingest upsert into `vuln_cve_facts` proceeds while the pass's
+    /// summary rebuild holds the supply-chain lock: the facts' table lock
+    /// (cc178442) must be released when the facts are, not held until the
+    /// summary commits. A short lock_timeout turns a wait into a failure.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_ingest_is_not_blocked_by_the_locked_summary_rebuild() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        let mut ingest = None;
+        rebuild_cve_summary_with(&mut conn, || {
+            let h = std::thread::spawn(|| {
+                live_conn().batch_execute(
+                    "SET lock_timeout = '1500ms'; \
+                     INSERT INTO vuln_cve_facts (vuln_id, updated_at) \
+                     VALUES ('CVE-LEADER-INGEST-1', timezone('UTC', NOW())) \
+                     ON CONFLICT (vuln_id) DO UPDATE SET updated_at = EXCLUDED.updated_at; \
+                     DELETE FROM vuln_cve_facts WHERE vuln_id = 'CVE-LEADER-INGEST-1'",
+                )
+            });
+            ingest = Some(h.join().expect("join"));
+        })
+        .expect("rebuild");
+        let r = ingest.expect("the hook ran");
+        assert!(r.is_ok(), "ingest waited on the facts lock: {r:?}");
+    }
+
+    /// Two folds of the same range (an old leader's last batch overlapping
+    /// the new leader's first) write each five-minute row once: the second
+    /// waits on the batch's advisory lock and then finds nothing to fold.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_overlapping_downsamples_do_not_duplicate_rows() {
+        use diesel::connection::SimpleConnection;
+        use diesel::sql_types::{BigInt, Text, Timestamp};
+        let mut conn = live_conn();
+        conn.batch_execute(
+            "TRUNCATE pod_compute_history; \
+             INSERT INTO pod_compute_history (container_uid, pod_uid, namespace, pod_name, \
+               container, node, ts, resolution_secs, cpu_usage_millis_avg, cpu_usage_millis_max, \
+               cpu_usage_millis_last, cpu_period_usec, cpu_nr_periods, cpu_nr_throttled, \
+               cpu_throttled_usec, cpu_psi_some10_avg, cpu_psi_some10_max, cpu_psi_full10_avg, \
+               cpu_psi_full10_max, mem_current_avg, mem_current_max, mem_current_last, \
+               mem_working_set_avg, mem_working_set_max, mem_working_set_last, \
+               mem_psi_some10_avg, mem_psi_some10_max, mem_psi_full10_avg, mem_psi_full10_max, \
+               mem_events_high, mem_events_max, mem_oom_kill, mem_refault, mem_pgmajfault) \
+             SELECT c || '/app', c, 'ns', c, 'app', 'n', \
+               timestamp '2026-09-01 00:00' + k * interval '1 minute', 60, \
+               0, 0, 0, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 \
+             FROM unnest(ARRAY['a', 'b']) c, generate_series(0, 9) k",
+        )
+        .expect("seed pod_compute_history");
+        let at = |s: &str| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").expect("timestamp")
+        };
+
+        // "Replica one" is mid-batch: lock held, rows folded, not committed.
+        conn.batch_execute("BEGIN").expect("begin");
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<Text, _>(DOWNSAMPLE_LOCK_KEY)
+            .execute(&mut conn)
+            .expect("take the downsample lock");
+        sql_query(DOWNSAMPLE_INSERT_SQL)
+            .bind::<Timestamp, _>(at("2026-09-01 00:00"))
+            .bind::<Timestamp, _>(at("2026-09-01 00:10"))
+            .execute(&mut conn)
+            .expect("fold");
+        sql_query(
+            "DELETE FROM pod_compute_history \
+             WHERE resolution_secs = 60 AND ts >= $1 AND ts < $2",
+        )
+        .bind::<Timestamp, _>(at("2026-09-01 00:00"))
+        .bind::<Timestamp, _>(at("2026-09-01 00:10"))
+        .execute(&mut conn)
+        .expect("delete the folded minutes");
+
+        // "Replica two" starts the same batch and must block on the lock.
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(2)
+            .build(ConnectionManager::<PgConnection>::new(url))
+            .expect("pool");
+        let second = std::thread::spawn(move || run_downsample_batch(&pool, 24));
+        let mut watcher = live_conn();
+        #[derive(QueryableByName)]
+        struct Waiting {
+            #[diesel(sql_type = BigInt)]
+            n: i64,
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting = sql_query(
+                "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+            )
+            .get_result::<Waiting>(&mut watcher)
+            .expect("read pg_locks")
+            .n;
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second fold never waited on the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        conn.batch_execute("COMMIT").expect("commit");
+        let outcome = second.join().expect("join").expect("second fold");
+        assert_eq!(outcome, Some((0, 0)), "the range was already folded");
+
+        #[derive(QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = BigInt)]
+            n: i64,
+        }
+        let rows =
+            sql_query("SELECT count(*) AS n FROM pod_compute_history WHERE resolution_secs = 300")
+                .get_result::<Count>(&mut conn)
+                .expect("count folded rows")
+                .n;
+        assert_eq!(rows, 4, "two containers x two buckets, each written once");
         conn.batch_execute("TRUNCATE pod_compute_history")
             .expect("leave the table empty for the other live tests");
     }

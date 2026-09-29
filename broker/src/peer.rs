@@ -394,6 +394,10 @@ pub fn spawn(pool: DbPool) {
     actix_web::rt::spawn(async move {
         loop {
             tokio::time::sleep(every).await;
+            // Leader only (leader.rs): both passes rewrite shared rows.
+            if !crate::leader::is_leader() {
+                continue;
+            }
             if window > 0 {
                 let pool = pool.clone();
                 let result =
@@ -411,7 +415,7 @@ pub fn spawn(pool: DbPool) {
                     Err(e) => warn!(error = %e, "peer late-resolve task panicked"),
                 }
             }
-            if stale > 0 {
+            if stale > 0 && crate::leader::still_leader("peer stale-alive sweep") {
                 let pool = pool.clone();
                 let result = tokio::task::spawn_blocking(
                     move || -> Result<Vec<(String, usize)>, DbError> {

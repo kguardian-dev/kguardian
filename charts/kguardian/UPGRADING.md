@@ -60,6 +60,24 @@ What to do:
 its subdomains at any depth, which is broader than a Kubernetes wildcard (one
 label).
 
+## Broker leader election, and the bundled database's `max_connections` (multi-replica installs)
+
+With `broker.replicaCount` of 2 or more, the Broker replicas now elect a
+leader through a Lease, and only the leader runs the background jobs that
+prune or derive shared data. `broker.leaderElection.enabled` (default true)
+adds a Role and RoleBinding in the release namespace and mounts a service
+account token into the Broker pod.
+
+The bundled database is now sized for every Broker pod of a rolling update:
+the chart sets `max_connections` from `broker.replicaCount` and
+`broker.dbPoolMaxSize` whenever PostgreSQL's default of 100 is not enough
+(150 for three replicas). **If you already run two or more Broker replicas
+with the bundled database, the database pod restarts once during this
+upgrade** to apply it (its strategy is `Recreate`, so expect a brief outage
+of Broker writes). Single-replica installs are unchanged. With an external
+database, check its `max_connections` against the formula in
+`docs/installation.mdx`; `helm install` prints the number.
+
 ## Upgrading to 1.27.0
 
 1.27.0 is a minor release that carries one breaking change for installs with

@@ -1927,7 +1927,7 @@ pub fn prune(conn: &mut PgConnection, days: u32) -> Result<usize, DbError> {
             .bind::<BigInt, _>(RETENTION_BATCH)
             .execute(conn)?;
         total += n;
-        if (n as i64) < RETENTION_BATCH {
+        if (n as i64) < RETENTION_BATCH || !crate::leader::still_leader("attestation retention") {
             break;
         }
     }
@@ -1945,20 +1945,28 @@ pub fn spawn_retention(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(180)).await;
+        let mut cadence =
+            crate::leader::Cadence::new("attestation retention", Duration::from_secs(3600));
         loop {
-            let p = pool.clone();
-            match web::block(move || -> Result<usize, DbError> {
-                let mut conn = p.get()?;
-                prune(&mut conn, days)
-            })
-            .await
-            {
-                Ok(Ok(n)) if n > 0 => info!(rows = n, "image attestation retention pruned rows"),
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "image attestation retention failed"),
-                Err(e) => warn!(error = %e, "image attestation retention task failed"),
+            // Leader only (leader.rs).
+            if crate::leader::is_leader() {
+                let p = pool.clone();
+                match web::block(move || -> Result<usize, DbError> {
+                    let mut conn = p.get()?;
+                    prune(&mut conn, days)
+                })
+                .await
+                {
+                    Ok(Ok(n)) if n > 0 => {
+                        info!(rows = n, "image attestation retention pruned rows")
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = %e, "image attestation retention failed"),
+                    Err(e) => warn!(error = %e, "image attestation retention task failed"),
+                }
+                cadence.completed(&pool).await;
             }
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            cadence.wait(&pool).await;
         }
     });
 }

@@ -123,6 +123,12 @@ spec:
           image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          {{- with include "kguardian.dbMaxConnections" . }}
+          # Sized for every broker pod of a rolling update with a full pool
+          # (kguardian.dbConnectionsRequired); the image default of 100 is
+          # not enough at this broker.replicaCount / dbPoolMaxSize.
+          args: ["-c", "max_connections={{ . }}"]
+          {{- end }}
           ports:
             - containerPort: 5432
           securityContext:

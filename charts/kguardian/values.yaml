@@ -775,6 +775,12 @@ broker:
   # the default 16 permits leaves 16 connections of headroom.
   # Tune up when broker logs show "could not get db conn for audit
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
+  #
+  # Each replica opens at most this many connections (idle, it keeps 4). The
+  # database must accept (replicaCount + rolling-update surge, 25% rounded
+  # up) x dbPoolMaxSize + 13. The bundled database is sized for that
+  # automatically (database.maxConnections); an external one is not, so
+  # check its max_connections when raising replicaCount or this value.
   dbPoolMaxSize: 32
 
   imageInventory:
@@ -943,6 +949,29 @@ broker:
     # Accepts integer or percentage string ("50%").
     minAvailable: 1
     maxUnavailable: ""
+
+  # Lease-based leader election for the broker's cluster-singleton background
+  # jobs: retention prunes, the compute downsample, the workload profile
+  # snapshotter, the stale-pod sweep and the supply-chain rollups. With
+  # replicaCount > 1 only the replica holding the Lease runs them (every
+  # replica still serves the API); without it they run on every replica and
+  # duplicate work and rows. Harmless at replicaCount 1.
+  leaderElection:
+    # -- Enable leader election. Adds a Role/RoleBinding limited to the
+    # broker's own Lease in the release namespace and mounts a service
+    # account token into the broker pod. With it off, every replica runs
+    # every background job, which is only safe at replicaCount 1.
+    enabled: true
+    # -- Seconds a follower waits after the leader's last renewal before it
+    # takes over (how long the jobs pause when a leader dies without a
+    # graceful shutdown).
+    leaseDurationSeconds: 15
+    # -- Seconds the leader keeps running the jobs without a successful
+    # renewal. Must be below leaseDurationSeconds.
+    renewDeadlineSeconds: 10
+    # -- Seconds between renew/acquire attempts. Must be below
+    # renewDeadlineSeconds / 1.2. An invalid combination falls back to 15/10/2.
+    retryPeriodSeconds: 2
 
   # -- Scoped bearer-token auth on the broker HTTP API. Without it any pod
   # that can reach the broker Service can read everything and forge
@@ -1139,6 +1168,14 @@ database:
     # | require | verify-ca | verify-full). Cloud-managed Postgres typically
     # requires "require" or stricter.
     sslMode: prefer
+
+  # -- max_connections for the bundled PostgreSQL. Empty (the default) sizes
+  # it automatically: the image default of 100 until the broker could open
+  # more, i.e. (broker.replicaCount + rolling-update surge, 25% rounded up)
+  # x broker pool size + 13, then that number rounded up to a multiple of 10.
+  # An explicit value below that requirement refuses to render. Ignored with
+  # an external database, whose limit you must size by the same formula.
+  maxConnections: ""
 
   # -- Object name for the in-cluster Database deployment / PVC / SA. Only
   # used when `database.enabled=true`.
