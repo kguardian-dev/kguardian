@@ -28,6 +28,72 @@ export interface StreamOptions {
   signal?: AbortSignal;
 }
 
+// What llm-bridge accepts (llm-bridge/src/index.ts, src/types/index.ts): a
+// JSON body of at most 100 KiB, at most 100 history messages, each at most
+// 50,000 characters. A request over any of them is refused outright, so a long
+// conversation would fail on every turn until the user cleared it.
+const BRIDGE_MAX_BODY_BYTES = 100 * 1024;
+const BRIDGE_MAX_CONTENT_CHARS = 50_000;
+/** History sent with a message: the newest 25 exchanges at most. */
+export const MAX_HISTORY_MESSAGES = 50;
+const CLIPPED = '\n\n[… the rest of this message was not sent]';
+/** Room left in the body for JSON punctuation and the fields around the history. */
+const BODY_SLACK_BYTES = 256;
+
+const jsonBytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).length;
+
+/** The longest start of `text` whose JSON-encoded form, with the clip marker, fits `maxBytes`. */
+function clipToBytes(text: string, maxBytes: number): string {
+  if (jsonBytes(text) <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (jsonBytes(text.slice(0, mid) + CLIPPED) <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return text.slice(0, lo) + CLIPPED;
+}
+
+const clipToChars = ({ role, content }: HistoryMessage): HistoryMessage => ({
+  role,
+  content: content.length > BRIDGE_MAX_CONTENT_CHARS
+    ? content.slice(0, BRIDGE_MAX_CONTENT_CHARS - CLIPPED.length) + CLIPPED
+    : content,
+});
+
+/** A history entry's share of the body, with the comma that separates it. */
+const entryBytes = (m: HistoryMessage): number => jsonBytes(m) + 1;
+
+/**
+ * The newest part of `history` that llm-bridge accepts next to a request
+ * whose other fields take `reservedBytes`: at most MAX_HISTORY_MESSAGES,
+ * each clipped to the per-message limit, the oldest dropped first until the
+ * body fits. The newest exchange is clipped rather than dropped when it alone
+ * is too big, leaving room for its question. The result starts on a user
+ * turn, as the providers expect.
+ */
+export function boundHistory(history: HistoryMessage[], reservedBytes: number): HistoryMessage[] {
+  let budget = BRIDGE_MAX_BODY_BYTES - reservedBytes - BODY_SLACK_BYTES;
+  const kept: HistoryMessage[] = [];
+  for (let i = history.length - 1; i >= 0 && kept.length < MAX_HISTORY_MESSAGES; i--) {
+    const message = clipToChars(history[i]);
+    const room = kept.length === 0 && i > 0
+      ? budget - Math.min(entryBytes(clipToChars(history[i - 1])), Math.floor(budget / 2))
+      : budget;
+    if (entryBytes(message) > room) {
+      const overhead = entryBytes({ role: message.role, content: '' });
+      if (kept.length > 1 || room - overhead < 1024) break;
+      message.content = clipToBytes(message.content, room - overhead);
+    }
+    budget -= entryBytes(message);
+    kept.push(message);
+  }
+  kept.reverse();
+  while (kept.length > 0 && kept[0].role !== 'user') kept.shift();
+  return kept;
+}
+
 /**
  * Stream a chat response over Server-Sent Events from the llm-bridge.
  * Parses the SSE frames and dispatches typed events to `handlers`. Resolves
@@ -41,17 +107,14 @@ export async function streamChatMessage(
   handlers: StreamHandlers,
   options: StreamOptions = {}
 ): Promise<void> {
+  const request = { message, history: [] as HistoryMessage[], context, provider: options.provider };
+  request.history = boundHistory(history ?? [], jsonBytes(request));
   let response: Response;
   try {
     response = await fetch(`${LLM_BRIDGE_URL}/api/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message,
-        history,
-        context,
-        provider: options.provider,
-      }),
+      body: JSON.stringify(request),
       signal: options.signal,
     });
   } catch (error) {
@@ -81,6 +144,9 @@ export async function streamChatMessage(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // The bridge ends every stream with a done or an error frame. A body that
+  // ends without one was cut short on the way (a proxy timeout, a restart).
+  let ended = false;
 
   const dispatch = (frame: string): void => {
     const dataLine = frame
@@ -111,9 +177,11 @@ export async function streamChatMessage(
         handlers.onToolResult?.(event.name as string, event.ok as boolean);
         break;
       case 'done':
+        ended = true;
         handlers.onDone?.({ model: event.model as string });
         break;
       case 'error':
+        ended = true;
         handlers.onError?.(event.error as string);
         break;
     }
@@ -131,6 +199,7 @@ export async function streamChatMessage(
       }
     }
     if (buffer.trim()) dispatch(buffer);
+    if (!ended && !options.signal?.aborted) handlers.onError?.('The reply was cut off before it finished');
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') return;
     handlers.onError?.((error as Error)?.message || 'The AI stream was interrupted');

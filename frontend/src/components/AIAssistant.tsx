@@ -157,6 +157,58 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   );
 };
 
+// Replies carry text the model read from tool results, which an attacker can
+// shape (pod names, DNS names, CVE text). An image would be fetched as soon as
+// it rendered, carrying whatever the injected text put in its URL, so an image
+// shows as its alt text only. Links need a click and open in a new tab
+// without a referrer or a handle back to this page.
+const ReplyImage: React.FC<{ alt?: string }> = ({ alt }) => (alt ? <span>[image: {alt}]</span> : null);
+
+const ReplyLink: React.FC<{ href?: string; children?: React.ReactNode }> = ({ href, children }) =>
+  href && /^(https?:)?\/\//i.test(href) ? (
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  ) : (
+    <a href={href}>{children}</a>
+  );
+
+const REPLY_COMPONENTS = { pre: CodeBlock, img: ReplyImage, a: ReplyLink };
+
+// Notes this panel adds to a reply that did not finish. They are for the
+// reader, not the model, and are taken off again before a reply is sent back
+// as history.
+const STOPPED_NOTE = '\n\n_Stopped._';
+const STOPPED_EMPTY = '_Stopped before an answer arrived._';
+const FAILED_PREFIX = 'Error: ';
+const errorNote = (error: string) => `\n\n_Error: ${error}_`;
+const ERROR_NOTE = /\n\n_Error: [^\n]*_$/;
+
+/** What a reply adds to the history, or null for one with no answer in it. */
+function replyForHistory(content: string): string | null {
+  if (content.startsWith(FAILED_PREFIX) || content === STOPPED_EMPTY) return null;
+  const text = content.endsWith(STOPPED_NOTE) ? content.slice(0, -STOPPED_NOTE.length) : content.replace(ERROR_NOTE, '');
+  return text.trim() ? text : null;
+}
+
+/**
+ * The conversation as history for the next message: each question with the
+ * answer it got. A question whose reply failed, was stopped before any text or
+ * came back empty is left out with it, so the history alternates user and
+ * assistant turns and carries no empty messages. aiApi trims it to what the
+ * bridge accepts.
+ */
+function conversationHistory(messages: Message[]): HistoryMessage[] {
+  const history: HistoryMessage[] = [];
+  for (let i = 0; i + 1 < messages.length; i++) {
+    const question = messages[i];
+    const reply = messages[i + 1];
+    if (question.role !== 'user' || reply.role !== 'assistant') continue;
+    i++;
+    const answer = replyForHistory(reply.content);
+    if (answer) history.push({ role: 'user', content: question.content }, { role: 'assistant', content: answer });
+  }
+  return history;
+}
+
 // ---------------------------------------------------------------------------
 // Shared chrome for both layouts (modal and side panel). The two views render
 // identical header/messages/input markup — only the layout-toggle buttons in
@@ -226,7 +278,7 @@ const ChatMessages: React.FC<{
             </div>
             {message.role === 'assistant' ? (
               <div className="text-sm text-primary prose prose-sm dark:prose-invert max-w-none prose-p:my-1.5 prose-headings:mt-3 prose-headings:mb-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-pre:my-2 prose-pre:bg-hubble-darker prose-pre:border prose-pre:border-hubble-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock }}>{message.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={REPLY_COMPONENTS}>{message.content}</ReactMarkdown>
               </div>
             ) : (
               <p className="text-sm text-primary whitespace-pre-wrap">{message.content}</p>
@@ -415,10 +467,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     };
 
     // Conversation history (exclude the in-flight turn) before we mutate state.
-    const history: HistoryMessage[] = messages.map(msg => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    const history = conversationHistory(messages);
 
     // Streaming placeholder the deltas accumulate into.
     const assistantId = crypto.randomUUID();
@@ -473,8 +522,8 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
             streaming: false,
             activity: undefined,
             content: m.content
-              ? `${m.content}\n\n_Error: ${error}_`
-              : `Error: ${error}`,
+              ? `${m.content}${errorNote(error)}`
+              : `${FAILED_PREFIX}${error}`,
           })),
       }, { signal: controller.signal });
     } catch (error) {
@@ -482,7 +531,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         ...m,
         streaming: false,
         activity: undefined,
-        content: `Error: ${error instanceof Error ? error.message : 'Failed to get AI response. Please check that your API keys are configured.'}`,
+        content: `${FAILED_PREFIX}${error instanceof Error ? error.message : 'Failed to get AI response. Please check that your API keys are configured.'}`,
       }));
     } finally {
       // Finalize the placeholder in every termination case — including an
@@ -522,7 +571,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     setMessages(prev =>
       prev.map(m =>
         m.streaming
-          ? { ...m, streaming: false, activity: undefined, content: m.content ? `${m.content}\n\n_Stopped._` : '_Stopped before an answer arrived._' }
+          ? { ...m, streaming: false, activity: undefined, content: m.content ? `${m.content}${STOPPED_NOTE}` : STOPPED_EMPTY }
           : m,
       ),
     );
