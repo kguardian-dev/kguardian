@@ -1,4 +1,4 @@
-import { defineConfig, type ProxyOptions } from 'vite'
+import { defineConfig, type Plugin, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
 
@@ -117,9 +117,119 @@ export function brokerProxy(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
   }
 }
 
+export type LlmProxyDecision =
+  | { allow: true }
+  | { allow: false; status: 404 | 405; reason: string }
+
+/** The llm-bridge routes the UI calls: the chat stream, and the health check. */
+const LLM_ROUTES: Record<string, string> = { '/api/chat/stream': 'POST', '/health': 'GET' }
+
+/**
+ * Whether the /llm-api proxy forwards a request. The UI only posts to the
+ * chat stream, so nothing else on the bridge (its MCP endpoint, for one) is
+ * reachable through the UI's origin.
+ */
+export function llmProxyDecision(method: string | undefined, url: string | undefined): LlmProxyDecision {
+  const path = (url ?? '').split('?')[0].split('#')[0].replace(/^\/llm-api(?=\/|$)/, '') || '/'
+  const want = LLM_ROUTES[path]
+  if (!want) return { allow: false, status: 404, reason: 'not an llm-bridge route the UI uses' }
+  const m = (method ?? '').toUpperCase()
+  if (m === want || (want === 'GET' && m === 'HEAD')) return { allow: true }
+  return { allow: false, status: 405, reason: `${m || 'this method'} is not allowed through the llm-bridge proxy` }
+}
+
+/** The /llm-api → llm-bridge proxy shared by the dev server and vite preview. */
+export function llmProxy(env: NodeJS.ProcessEnv = process.env): ProxyOptions {
+  return {
+    target: env.VITE_LLM_BRIDGE_URL || 'http://localhost:8080',
+    changeOrigin: true,
+    rewrite: (path) => path.replace(/^\/llm-api/, ''),
+    bypass: (req, res) => {
+      const d = llmProxyDecision(req.method, req.url)
+      if (d.allow) return undefined
+      if (!res) return false // websocket upgrade: vite answers 404
+      res.statusCode = d.status
+      res.setHeader('Content-Type', 'text/plain')
+      res.end(d.reason)
+      return req.url ?? '/'
+    },
+    configure: (proxy) => {
+      // Behind an SSO proxy the browser's Authorization header is the user's
+      // ID token; the bridge does not use it and should not receive it.
+      proxy.on('proxyReq', (proxyReq) => proxyReq.removeHeader('authorization'))
+    },
+  }
+}
+
+/**
+ * Host names the server answers, from ALLOWED_HOSTS (comma-separated; the
+ * chart sets it from its ingress hosts, SSO hostnames, frontend.allowedHosts
+ * and the Service's DNS names). An ingress-style `*.example.com` becomes
+ * vite's `.example.com`. vite always accepts localhost and IP addresses, so
+ * port-forwarding and kubelet probes keep working.
+ *
+ * Unset, every Host is accepted, as before: the /api proxy then answers any
+ * page that rebinds its own name to this server's address (DNS rebinding),
+ * with the broker read token attached, so the server warns at startup.
+ */
+export function allowedHostsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] | true {
+  const hosts = (env.ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean)
+    .map((h) => (h.startsWith('*.') ? h.slice(1) : h))
+  return hosts.length > 0 ? hosts : true
+}
+
+const allowedHosts = allowedHostsFromEnv()
+
+const ALLOWED_HOSTS_WARNING =
+  'ALLOWED_HOSTS is not set, so this server answers requests for any host name. ' +
+  'A web page can then reach the /api proxy, and the broker token it holds, through DNS rebinding. ' +
+  'Set ALLOWED_HOSTS to the comma-separated host names users open the UI on (the Helm chart does this ' +
+  'when it knows them: frontend.ingress, frontend.sso.hostnames or frontend.allowedHosts).'
+
+/** Warns once when a server starts without a host allowlist; `vite build` stays quiet. */
+function allowedHostsWarning(): Plugin {
+  return {
+    name: 'kguardian:allowed-hosts-warning',
+    configureServer(server) {
+      if (allowedHosts === true) server.config.logger.warn(ALLOWED_HOSTS_WARNING)
+    },
+    configurePreviewServer(server) {
+      if (allowedHosts === true) server.config.logger.warn(ALLOWED_HOSTS_WARNING)
+    },
+  }
+}
+
+/**
+ * Headers vite preview (the production server) sends. The UI is never meant
+ * to be framed. The CSP allows only the app's own scripts, connections and
+ * images: a model reply, or anything else, cannot make the browser load an
+ * image from another host. Inline style attributes stay allowed because
+ * React and React Flow set element styles.
+ */
+export const SECURITY_HEADERS: Record<string, string> = {
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; '),
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'same-origin',
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), allowedHostsWarning()],
 
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
@@ -127,14 +237,10 @@ export default defineConfig({
 
   // Development server configuration
   server: {
-    allowedHosts: true,
+    allowedHosts,
     proxy: {
       '/api': brokerProxy(),
-      '/llm-api': {
-        target: process.env.VITE_LLM_BRIDGE_URL || 'http://localhost:8080',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/llm-api/, ''),
-      },
+      '/llm-api': llmProxy(),
     },
   },
 
@@ -183,14 +289,11 @@ export default defineConfig({
     // address, so probes and Service traffic fail on IPv6-only clusters.
     host: true,
     strictPort: true,
-    allowedHosts: true,
+    allowedHosts,
+    headers: SECURITY_HEADERS,
     proxy: {
       '/api': brokerProxy(),
-      '/llm-api': {
-        target: process.env.VITE_LLM_BRIDGE_URL || 'http://localhost:8080',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/llm-api/, ''),
-      },
+      '/llm-api': llmProxy(),
     },
   },
 })
