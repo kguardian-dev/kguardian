@@ -56,8 +56,15 @@ export interface ComputeContainer {
   runq_p99_us: number | null;
   runq_max_us: number | null;
   runq_overflow: number | null;
+  /** The heaviest few culprits, largest wait first. The broker keeps only
+   *  these so the row stays small; the two fields below cover the rest. */
   blame: ComputeBlame[] | null;
   updated_at: string;
+  /** Culprits the broker left off `blame`, and their summed wait. A share is
+   *  over `sum(blame.wait_ns) + blame_omitted_wait_ns`. Absent from an older
+   *  broker, which sent the whole list. */
+  blame_omitted?: number;
+  blame_omitted_wait_ns?: number;
 }
 
 /** Mirrors `node_compute_latest`. */

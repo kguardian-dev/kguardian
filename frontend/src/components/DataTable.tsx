@@ -354,16 +354,30 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   // the outage says nothing about it.
   const computeMissing = computeUnavailable && !hasCompute && !selectedPod?.isExternal;
   const blame = useMemo(() => {
-    if (!compute) return { rows: [] as Array<ComputeBlame & { victim: string }>, totalWaitNs: 0 };
+    if (!compute) return { rows: [] as Array<ComputeBlame & { victim: string }>, totalWaitNs: 0, hiddenCount: 0, hiddenWaitNs: 0 };
     // One list across the pod's containers, largest wait first. The share is
-    // over EVERY blame entry, not the ten shown, so the visible rows never
-    // sum to 100% when a long tail was cut off.
+    // over EVERY culprit, not the ten shown, so the visible rows never sum to
+    // 100% when a long tail was cut off. That includes the culprits the
+    // broker keeps off each row (it stores the heaviest few, with the count
+    // and wait of the rest).
     const all: Array<ComputeBlame & { victim: string }> = [];
+    let omittedCount = 0;
+    let omittedWaitNs = 0;
     for (const c of compute.containers) {
       for (const b of c.blame ?? []) all.push({ ...b, victim: c.container });
+      omittedCount += c.blame_omitted ?? 0;
+      omittedWaitNs += c.blame_omitted_wait_ns ?? 0;
     }
-    const totalWaitNs = all.reduce((sum, b) => sum + b.wait_ns, 0);
-    return { rows: all.sort((a, b) => b.wait_ns - a.wait_ns).slice(0, 10), totalWaitNs };
+    const listedWaitNs = all.reduce((sum, b) => sum + b.wait_ns, 0);
+    const rows = all.sort((a, b) => b.wait_ns - a.wait_ns).slice(0, 10);
+    const shownWaitNs = rows.reduce((sum, b) => sum + b.wait_ns, 0);
+    const totalWaitNs = listedWaitNs + omittedWaitNs;
+    return {
+      rows,
+      totalWaitNs,
+      hiddenCount: all.length - rows.length + omittedCount,
+      hiddenWaitNs: totalWaitNs - shownWaitNs,
+    };
   }, [compute]);
   const blameRows = blame.rows;
   const totalWaitNs = blame.totalWaitNs;
@@ -1024,6 +1038,12 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                     ))}
                   </tbody>
                 </table>
+                {blame.hiddenCount > 0 && (
+                  <div className="px-4 py-2 bg-hubble-dark border-t border-hubble-border text-xs text-tertiary" data-testid="compute-blame-hidden">
+                    {blame.hiddenCount} more {blame.hiddenCount === 1 ? 'culprit' : 'culprits'} not listed
+                    {totalWaitNs > 0 && <> · {formatPercent((blame.hiddenWaitNs / totalWaitNs) * 100)} of the wait</>}
+                  </div>
+                )}
               </div>
             )}
           </div>
