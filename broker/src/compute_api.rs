@@ -250,6 +250,8 @@ fn upsert_latest(conn: &mut PgConnection, rows: &[PodComputeLatest]) -> Result<(
             runq_overflow.eq(excluded(runq_overflow)),
             blame.eq(excluded(blame)),
             updated_at.eq(excluded(updated_at)),
+            blame_omitted.eq(excluded(blame_omitted)),
+            blame_omitted_wait_ns.eq(excluded(blame_omitted_wait_ns)),
         ))
         .execute(conn)?;
     Ok(())
@@ -1244,6 +1246,8 @@ mod tests {
 
     // ---- live database ---------------------------------------------------
 
+    use crate::compute_types::LATEST_BLAME_LIMIT;
+
     const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
         diesel_migrations::embed_migrations!("./db/migrations");
 
@@ -1261,56 +1265,14 @@ mod tests {
         conn
     }
 
-    /// One container's row as `upsert_latest` receives it, sampled at `at`.
-    fn latest_row(i: usize, at: NaiveDateTime) -> PodComputeLatest {
-        PodComputeLatest {
-            container_uid: format!("pod-{i:03}/app"),
-            pod_uid: format!("pod-{i:03}"),
-            namespace: "payments".into(),
-            pod_name: format!("api-{i:03}"),
-            container: "app".into(),
-            node: format!("worker-{}", i % 3),
-            cgroup_id: i as i64,
-            ts: at,
-            interval_ms: 5000,
-            cpu_usage_millis: f64::from(at.and_utc().timestamp_subsec_millis()),
-            cpu_quota_usec: Some(100_000),
-            cpu_period_usec: 100_000,
-            cpu_request_millis: Some(250),
-            cpu_limit_millis: Some(1000),
-            cpu_nr_periods: 50,
-            cpu_nr_throttled: 0,
-            cpu_throttled_usec: 0,
-            cpu_psi_some10: 0.0,
-            cpu_psi_full10: 0.0,
-            mem_current: 64 << 20,
-            mem_working_set: 48 << 20,
-            mem_limit: Some(256 << 20),
-            mem_request: Some(128 << 20),
-            mem_psi_some10: 0.0,
-            mem_psi_full10: 0.0,
-            mem_events_high: 0,
-            mem_events_max: 0,
-            mem_oom_kill: 0,
-            mem_refault: 0,
-            mem_pgmajfault: 0,
-            runq_count: Some(10),
-            runq_p50_us: Some(20),
-            runq_p95_us: Some(80),
-            runq_p99_us: Some(120),
-            runq_max_us: Some(400),
-            runq_overflow: Some(0),
-            blame: serde_json::json!([]),
-            updated_at: at,
-        }
-    }
-
     #[derive(QueryableByName)]
     struct XactUpdates {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         updated: i64,
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         hot: i64,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        toast_inserted: i64,
     }
 
     /// The property that keeps `pod_compute_latest` the size of the live
@@ -1321,18 +1283,35 @@ mod tests {
     /// own transaction like the ingest's, because a round only stays HOT if
     /// the fillfactor headroom is there and the previous round's versions
     /// get pruned out of it.
+    ///
+    /// And it writes nothing to the TOAST table. The rows carry the blame
+    /// list a busy node sends (20 culprits with random pod UIDs, ~4 KB that
+    /// compresses to ~1.8 KB, which was stored out of line) through the
+    /// same `from_sample` the ingest uses. A TOASTed value is rewritten as
+    /// new TOAST rows on every upsert, never HOT, and only VACUUM reclaims
+    /// the old ones: 740 MB of the table's 982 MB on the dev cluster once
+    /// autovacuum stopped.
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_latest_upserts_are_hot_updates() {
         const CONTAINERS: usize = 200;
+        const CULPRITS: usize = 20;
         let mut conn = live_conn();
         let t0 = chrono::Utc::now().naive_utc();
-        let rows: Vec<_> = (0..CONTAINERS).map(|i| latest_row(i, t0)).collect();
+        let rows = realistic_rows(0, 0..CONTAINERS, 0, CULPRITS, t0);
+        assert_eq!(
+            rows[0].blame.as_array().map(Vec::len),
+            Some(LATEST_BLAME_LIMIT)
+        );
+        assert_eq!(
+            rows[0].blame_omitted,
+            (CULPRITS - LATEST_BLAME_LIMIT) as i32
+        );
         upsert_latest(&mut conn, &rows).expect("first sample inserts");
 
         for round in 1..=5i64 {
             let at = t0 + chrono::Duration::seconds(5 * round);
-            let rows: Vec<_> = (0..CONTAINERS).map(|i| latest_row(i, at)).collect();
+            let rows = realistic_rows(0, 0..CONTAINERS, round, CULPRITS, at);
             // The xact counters also hold earlier transactions' counts until
             // the backend flushes them, which it only does while idle, so
             // the round is the difference of two reads inside it.
@@ -1341,8 +1320,10 @@ mod tests {
                     let read = |conn: &mut PgConnection| {
                         diesel::sql_query(
                             "SELECT \
-                               pg_stat_get_xact_tuples_updated('pod_compute_latest'::regclass) AS updated, \
-                               pg_stat_get_xact_tuples_hot_updated('pod_compute_latest'::regclass) AS hot",
+                               pg_stat_get_xact_tuples_updated(oid) AS updated, \
+                               pg_stat_get_xact_tuples_hot_updated(oid) AS hot, \
+                               pg_stat_get_xact_tuples_inserted(reltoastrelid) AS toast_inserted \
+                             FROM pg_class WHERE oid = 'pod_compute_latest'::regclass",
                         )
                         .get_result::<XactUpdates>(conn)
                     };
@@ -1357,6 +1338,11 @@ mod tests {
             assert_eq!(
                 hot, updated,
                 "round {round}: every upsert of a known container must be HOT"
+            );
+            assert_eq!(
+                after.toast_inserted - before.toast_inserted,
+                0,
+                "round {round}: the row must stay inline, or every upsert rewrites its TOAST value"
             );
         }
     }
@@ -1508,5 +1494,124 @@ mod tests {
                 .is_empty(),
             "the schema is back where the other live tests expect it"
         );
+    }
+
+    /// One container's wire sample with a blame list the size and shape a
+    /// busy node produces: `culprits` entries (the controller sends up to
+    /// 20), pod culprits named `ns/deployment-hash-suffix/container` with a
+    /// `pod-uid/container` identity, plus the kernel and two system units.
+    /// Waits and counts change every round, as they do between samples.
+    fn realistic_sample(i: usize, round: i64, culprits: usize) -> serde_json::Value {
+        const NS: [&str; 5] = [
+            "payments",
+            "kube-system",
+            "monitoring",
+            "ingress-nginx",
+            "checkout-service",
+        ];
+        const APP: [&str; 5] = [
+            "api-gateway",
+            "aws-node",
+            "prometheus-node-exporter",
+            "ingress-nginx-controller",
+            "order-worker",
+        ];
+        const CTR: [&str; 5] = [
+            "app",
+            "aws-node",
+            "node-exporter",
+            "controller",
+            "istio-proxy",
+        ];
+        const UNITS: [&str; 2] = [
+            "system.slice/containerd.service",
+            "system.slice/kubelet.service",
+        ];
+        let blame: Vec<serde_json::Value> = (0..culprits)
+            .map(|k| {
+                let seed = splitmix((i * 64 + k) as u64 ^ (round as u64) << 32);
+                let wait = (seed % 400_000_000) as i64;
+                let count = ((seed >> 32) % 500) as i64;
+                match k {
+                    0 => serde_json::json!({ "cgroup_id": 0, "kind": "kernel", "ref": "kernel",
+                        "container_uid": null, "count": count, "wait_ns": wait }),
+                    1 | 2 => serde_json::json!({ "cgroup_id": 4000 + k, "kind": "system",
+                        "ref": UNITS[k - 1],
+                        "container_uid": null, "count": count, "wait_ns": wait }),
+                    _ => {
+                        let peer = (i * 13 + k * 7) % 2900;
+                        // Pod UIDs and ReplicaSet hashes are random, which
+                        // is what keeps a real list from compressing well.
+                        let h = |salt: u64| splitmix(peer as u64 * 1_000 + salt);
+                        let uid = format!(
+                            "{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}",
+                            h(1) as u32,
+                            h(2) as u16,
+                            h(3) & 0xfff,
+                            h(4) & 0xfff,
+                            h(5) & 0xffff_ffff_ffff
+                        );
+                        serde_json::json!({ "cgroup_id": 100_000 + peer, "kind": "pod",
+                            "ref": format!("{}/{}-{:010x}-{:05x}/{}", NS[peer % 5], APP[peer % 5],
+                                h(6) & 0xff_ffff_ffff, h(7) & 0xf_ffff, CTR[peer % 5]),
+                            "container_uid": format!("{uid}/{}", CTR[peer % 5]),
+                            "count": count, "wait_ns": wait })
+                    }
+                }
+            })
+            .collect();
+        serde_json::json!({
+            "container_uid": format!("pod-{i:05}/app"),
+            "pod_uid": format!("pod-{i:05}"), "pod_name": format!("api-{i:05}"),
+            "namespace": NS[i % 5], "container": "app", "cgroup_id": 100_000 + i,
+            "cpu": { "usage_usec": 412_000 + round * 100 + i as i64, "quota_usec": 100_000,
+                     "period_usec": 100_000, "request_millis": 250, "limit_millis": 1000,
+                     "nr_periods": 50, "nr_throttled": round % 3, "throttled_usec": round * 10,
+                     "psi_some10": 1.5, "psi_full10": 0.0 },
+            "memory": { "current": 183_500_800 + round, "working_set": 171_000_000 + round,
+                        "limit": 268_435_456, "request": 134_217_728, "psi_some10": 0.0,
+                        "psi_full10": 0.0, "events_high": 0, "events_max": 0, "oom_kill": 0,
+                        "refault": round % 7, "pgmajfault": 0 },
+            "runq": { "count": 340 + round, "p50_us": 90, "p95_us": 1800, "p99_us": 24_000,
+                      "max_us": 61_000, "overflow": 0, "hist": [] },
+            "blame": blame,
+        })
+    }
+
+    /// A deterministic 64-bit mix (SplitMix64), for test data that looks
+    /// random without a dependency.
+    fn splitmix(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// One node's `POST /pod/compute/batch` for containers `ids`, flattened
+    /// to the rows `upsert_latest` receives.
+    fn realistic_rows(
+        node: usize,
+        ids: std::ops::Range<usize>,
+        round: i64,
+        culprits: usize,
+        at: NaiveDateTime,
+    ) -> Vec<PodComputeLatest> {
+        let batch: ComputeBatch = serde_json::from_value(serde_json::json!({
+            "node": format!("ip-10-0-{node}-17.eu-west-1.compute.internal"),
+            "ts": at.and_utc().to_rfc3339(), "interval_ms": 5000,
+            "ctxt_per_sec": 41250.0, "compute_enabled": true, "compute_supported": true,
+            "contention_loaded": true,
+            "node_pressure": { "cpu_some10": 3.1, "cpu_full10": 0.0, "mem_some10": 0.0, "mem_full10": 0.0 },
+            "node_capacity": { "cpu_cores": 32, "memory_bytes": 137_438_953_472_i64 },
+            "bpf_occupancy": { "runq_enqueued": 0, "runq_hist": 0, "pair": 0 },
+            "unknown_blame_share": 0.0,
+            "containers": ids.map(|i| realistic_sample(i, round, culprits)).collect::<Vec<_>>(),
+        }))
+        .expect("realistic batch parses");
+        batch
+            .containers
+            .iter()
+            .map(|c| PodComputeLatest::from_sample(&batch, c, at))
+            .collect()
     }
 }

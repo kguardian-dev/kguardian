@@ -426,10 +426,16 @@ pub struct PodComputeLatest {
     pub runq_p99_us: Option<i64>,
     pub runq_max_us: Option<i64>,
     pub runq_overflow: Option<i64>,
-    /// The wire `blame` array, verbatim.
+    /// The heaviest culprits of the wire `blame` array, heaviest first
+    /// ([`bound_blame`]).
     pub blame: serde_json::Value,
     #[serde(with = "utc_ts")]
     pub updated_at: NaiveDateTime,
+    /// Wire culprits left off `blame`, and the wait they account for, so a
+    /// share is taken over `sum(blame.wait_ns) + blame_omitted_wait_ns`
+    /// rather than over the culprits that fit. Positional — stay last.
+    pub blame_omitted: i32,
+    pub blame_omitted_wait_ns: i64,
 }
 
 impl PodComputeLatest {
@@ -443,6 +449,7 @@ impl PodComputeLatest {
     ) -> Self {
         let interval_ms = i32::try_from(batch.interval_ms).unwrap_or(i32::MAX);
         let runq = c.runq.as_ref();
+        let blame = bound_blame(&c.blame);
         PodComputeLatest {
             container_uid: c.container_uid.clone(),
             pod_uid: c.pod_uid.clone(),
@@ -480,9 +487,74 @@ impl PodComputeLatest {
             runq_p99_us: runq.map(|r| r.p99_us),
             runq_max_us: runq.map(|r| r.max_us),
             runq_overflow: runq.map(|r| r.overflow),
-            blame: serde_json::to_value(&c.blame).unwrap_or(serde_json::Value::Array(vec![])),
+            blame: blame.entries,
             updated_at: now,
+            blame_omitted: blame.omitted,
+            blame_omitted_wait_ns: blame.omitted_wait_ns,
         }
+    }
+}
+
+/// Culprits kept on a `pod_compute_latest` row. The Controller sends up to
+/// 20 per container every 5 s; at ~200 bytes each that list is ~4 KB of
+/// JSONB, and a row over ~2 KB is TOASTed: every upsert then writes a new
+/// out-of-line value and leaves the old one dead in the TOAST table. TOAST
+/// rows are inserted and deleted, never updated in place, so unlike the
+/// HOT heap update nothing but VACUUM reclaims them (740 MB of the table's
+/// 982 MB on the dev cluster within hours of autovacuum stopping). Five
+/// culprits of ordinary names is under 1 KB, so the row stays inline
+/// without even being compressed. The readers of this list show the top
+/// few (the pod panel's blame table); the findings engine reads the
+/// minute pairs in `pod_contention_history`, which keeps the full top 10.
+pub const LATEST_BLAME_LIMIT: usize = 5;
+
+/// Bytes of JSON the kept culprits may take. Kubernetes names allow a
+/// single `ref` of several hundred bytes, and nothing upstream bounds
+/// `ref` at all, so a count limit alone cannot keep the row inline.
+pub const LATEST_BLAME_MAX_BYTES: usize = 1024;
+
+/// What [`bound_blame`] keeps and what it leaves off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundedBlame {
+    /// The kept entries, heaviest first, as the wire JSON array.
+    pub entries: serde_json::Value,
+    pub omitted: i32,
+    pub omitted_wait_ns: i64,
+}
+
+/// The heaviest culprits of `blame` that fit [`LATEST_BLAME_LIMIT`] and
+/// [`LATEST_BLAME_MAX_BYTES`], plus the count and wait of the rest. The
+/// kept entries are always a prefix of the list by wait, so "top N" stays
+/// true: the first culprit that does not fit ends the list rather than
+/// being skipped for a smaller one behind it.
+pub fn bound_blame(blame: &[BlameEntry]) -> BoundedBlame {
+    let mut sorted: Vec<&BlameEntry> = blame.iter().collect();
+    // Stable, so equal waits keep the Controller's order.
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.wait_ns));
+    let mut kept = Vec::new();
+    // The array's brackets; each entry adds its own bytes and a comma.
+    let mut bytes = 2;
+    for b in &sorted {
+        if kept.len() == LATEST_BLAME_LIMIT {
+            break;
+        }
+        let Ok(v) = serde_json::to_value(b) else {
+            break;
+        };
+        let len = v.to_string().len() + usize::from(!kept.is_empty());
+        if bytes + len > LATEST_BLAME_MAX_BYTES {
+            break;
+        }
+        bytes += len;
+        kept.push(v);
+    }
+    let rest = &sorted[kept.len()..];
+    BoundedBlame {
+        omitted: i32::try_from(rest.len()).unwrap_or(i32::MAX),
+        omitted_wait_ns: rest
+            .iter()
+            .fold(0i64, |sum, b| sum.saturating_add(b.wait_ns.max(0))),
+        entries: serde_json::Value::Array(kept),
     }
 }
 
@@ -922,12 +994,95 @@ mod tests {
         assert_eq!(row.blame.as_array().map(|a| a.len()), Some(2));
         assert_eq!(row.blame[0]["ref"], "batch/etl-1-x/worker");
         assert_eq!(row.blame[1]["container_uid"], serde_json::Value::Null);
+        assert_eq!((row.blame_omitted, row.blame_omitted_wait_ns), (0, 0));
         let node = NodeComputeLatest::from_batch(&batch, now);
         assert_eq!(node.cpu_cores, 32);
         assert!(!node.contention_loaded);
         // The contract example carries no failure counters → NULL.
         assert_eq!(node.bpf_hist_update_failures, None);
         assert_eq!(node.bpf_pair_update_failures, None);
+    }
+
+    fn culprit(id: u64, reference: &str, wait_ns: i64) -> BlameEntry {
+        BlameEntry {
+            cgroup_id: id,
+            kind: "pod".into(),
+            reference: reference.into(),
+            container_uid: Some(format!("{id:036}/app")),
+            count: 3,
+            wait_ns,
+        }
+    }
+
+    #[test]
+    fn blame_keeps_the_heaviest_culprits_and_counts_the_rest() {
+        // Out of order on purpose: the kept list is by wait, not by position.
+        let blame: Vec<BlameEntry> = (1..=12)
+            .map(|i| {
+                culprit(
+                    i,
+                    &format!("ns/pod-{i}/app"),
+                    (i as i64 % 7) * 1_000 + i as i64,
+                )
+            })
+            .collect();
+        let b = bound_blame(&blame);
+        let kept = b.entries.as_array().unwrap();
+        assert_eq!(kept.len(), LATEST_BLAME_LIMIT);
+        let waits: Vec<i64> = kept
+            .iter()
+            .map(|e| e["wait_ns"].as_i64().unwrap())
+            .collect();
+        assert_eq!(waits, [6_006, 5_012, 5_005, 4_011, 4_004]);
+        assert_eq!(b.omitted, 7);
+        // Nothing lost: kept + omitted is the wire total.
+        let total: i64 = blame.iter().map(|e| e.wait_ns).sum();
+        assert_eq!(waits.iter().sum::<i64>() + b.omitted_wait_ns, total);
+        // Same wire shape as the Controller's entries.
+        assert_eq!(kept[0]["ref"], "ns/pod-6/app");
+        assert!(kept[0].get("container_uid").is_some());
+    }
+
+    #[test]
+    fn a_short_blame_list_is_kept_whole() {
+        let blame = [culprit(1, "a/b/c", 20), culprit(2, "a/b/d", 10)];
+        let b = bound_blame(&blame);
+        assert_eq!(b.entries.as_array().unwrap().len(), 2);
+        assert_eq!((b.omitted, b.omitted_wait_ns), (0, 0));
+        let empty = bound_blame(&[]);
+        assert_eq!(empty.entries, serde_json::json!([]));
+        assert_eq!((empty.omitted, empty.omitted_wait_ns), (0, 0));
+    }
+
+    #[test]
+    fn blame_is_bounded_in_bytes_as_well_as_count() {
+        // Names at the Kubernetes limits: ~400-byte refs. Only as many as
+        // fit in LATEST_BLAME_MAX_BYTES are kept, and they are the heaviest.
+        let long = |i: u64| format!("{}/{}/{}", "n".repeat(63), "p".repeat(253), i);
+        let blame: Vec<BlameEntry> = (1..=5)
+            .map(|i| culprit(i, &long(i), 100 - i as i64))
+            .collect();
+        let b = bound_blame(&blame);
+        let kept = b.entries.as_array().unwrap();
+        assert!(!kept.is_empty() && kept.len() < 5, "kept {}", kept.len());
+        assert!(b.entries.to_string().len() <= LATEST_BLAME_MAX_BYTES);
+        assert_eq!(kept[0]["cgroup_id"], 1);
+        assert_eq!(b.omitted as usize, 5 - kept.len());
+
+        // One culprit too large on its own keeps nothing rather than
+        // TOASTing the row; a smaller one behind it is not promoted.
+        let huge = [culprit(1, &"x".repeat(4096), 50), culprit(2, "a/b/c", 10)];
+        let b = bound_blame(&huge);
+        assert_eq!(b.entries, serde_json::json!([]));
+        assert_eq!((b.omitted, b.omitted_wait_ns), (2, 60));
+    }
+
+    #[test]
+    fn negative_waits_do_not_shrink_the_omitted_total() {
+        let mut blame: Vec<BlameEntry> = (1..=6).map(|i| culprit(i, "a/b/c", 10)).collect();
+        blame.push(culprit(7, "a/b/c", -5));
+        let b = bound_blame(&blame);
+        assert_eq!((b.omitted, b.omitted_wait_ns), (2, 10));
     }
 
     #[test]
