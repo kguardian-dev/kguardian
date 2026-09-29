@@ -43,6 +43,8 @@ import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
 import { CloudOff, Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
+import { useElapsedSeconds } from './hooks/useWorkloadProfile';
+import { LISTING_READ_TIMEOUT_MS } from './services/readTimeout';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { MapLens, PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
@@ -50,6 +52,9 @@ import { UI_DIMENSIONS } from './constants/ui';
 const MAP_LENSES: readonly MapLens[] = ['traffic', 'vulns', 'supply', 'coverage'];
 /** Views whose data is the resolved namespace's, so an unknown URL namespace is corrected there. */
 const NAMESPACE_DATA_VIEWS: ReadonlySet<View> = new Set<View>(['map', 'risks']);
+
+/** After this many seconds of waiting, the map skeleton says why the first load can be slow. */
+const SLOW_READ_HINT_AFTER_S = 5;
 
 function App() {
   const { settings, updateSettings, toggleSetting } = useSettings();
@@ -195,6 +200,10 @@ function App() {
   // way: that wait is loading too, or `#/map` would flash "No workloads in
   // default" for the whole of it.
   const podsSettling = loading || !namespaceKnown;
+  // The first load of a large namespace can take most of the listing
+  // timeout; after a few seconds the skeleton says so, as the workload
+  // profile's does, instead of sitting silent until an error appears.
+  const podsWaited = useElapsedSeconds(podsSettling && rawPods.length === 0);
   // The header Refresh is the one refresh control. Views with their own
   // broker data (seccomp profiles, audit verdicts) reload when this ticks.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -806,8 +815,15 @@ function App() {
         )}
 
         {podsSettling && pods.length === 0 ? (
-          <div className="flex-1 min-h-0">
-            <GraphSkeleton />
+          <div className="flex-1 min-h-0 flex flex-col">
+            {podsWaited >= SLOW_READ_HINT_AFTER_S && (
+              <p role="status" className="px-4 py-1.5 text-xs text-tertiary tabular-nums" data-testid="pods-elapsed">
+                Reading the workloads… {podsWaited}s. The pod listing is the Broker's largest read; on a large cluster it can take up to {Math.round(LISTING_READ_TIMEOUT_MS / 1000)} s.
+              </p>
+            )}
+            <div className="flex-1 min-h-0">
+              <GraphSkeleton />
+            </div>
           </div>
         ) : error && pods.length === 0 ? (
           // The listing failed: say so, never "No workloads", which is a claim

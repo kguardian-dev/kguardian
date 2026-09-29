@@ -330,3 +330,18 @@ test('other failed reads are explained too', async () => {
   await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
   expect(screen.getByText(/1 read failed/).textContent).toMatch(/Refresh to read them again/);
 });
+
+test('a first load that takes a while says so on the skeleton; a quick one does not flash it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    podDataState.loading = true;
+    renderAt('#/map?ns=payments');
+    await vi.waitFor(() => expect(screen.getByText('Loading…')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(screen.queryByTestId('pods-elapsed')).toBeNull();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(screen.getByTestId('pods-elapsed').textContent).toMatch(/Reading the workloads… \d+s\. .*up to 35 s/));
+  } finally {
+    vi.useRealTimers();
+  }
+});
