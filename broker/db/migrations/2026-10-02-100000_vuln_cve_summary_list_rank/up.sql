@@ -30,8 +30,10 @@
 -- idx_vuln_cve_summary_upper lets GET /vulnerabilities/{id}/exposure find
 -- the stored spellings of an id case-insensitively without a scan.
 --
--- idx_vuln_cve_summary_order (scope, severity DESC, vuln_id) served the
--- severity-first order only; nothing reads by it now.
+-- The index the severity-first order used is dropped by the next
+-- migration (2026-10-02-100100), not here: DROP INDEX needs an ACCESS
+-- EXCLUSIVE lock, and a drop that timed out here would roll back these
+-- builds with it.
 SET LOCAL lock_timeout = '5s';
 
 CREATE INDEX IF NOT EXISTS idx_vuln_cve_summary_list ON vuln_cve_summary (
@@ -41,5 +43,3 @@ CREATE INDEX IF NOT EXISTS idx_vuln_cve_summary_list ON vuln_cve_summary (
 );
 CREATE INDEX IF NOT EXISTS idx_vuln_cve_summary_upper
     ON vuln_cve_summary (upper(vuln_id));
-
-DROP INDEX IF EXISTS idx_vuln_cve_summary_order;

@@ -3383,7 +3383,7 @@ fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
 fn live_database_cve_list_pages_are_served_by_the_list_index() {
     use diesel::connection::SimpleConnection;
-    use diesel::sql_types::{Double, SmallInt};
+    use diesel::sql_types::{Double, Integer, SmallInt};
     let mut conn = live_conn();
     for i in 0..200 {
         summary_row(
@@ -3434,28 +3434,75 @@ fn live_database_cve_list_pages_are_served_by_the_list_index() {
     let tiered_deep = plan(&mut conn, Some((22, "CVE-2026-0100")), Some(vec![1, 3]));
     conn.batch_execute("RESET enable_seqscan; RESET enable_bitmapscan")
         .expect("restore the planner");
-    // A tier filter is a set of rank ranges read off the index, in order.
-    for (name, p) in [("tiered", &tiered), ("tiered deep", &tiered_deep)] {
-        let cond = p
-            .lines()
-            .find(|l| l.contains("Index Cond"))
-            .unwrap_or_default();
-        assert!(
-            cond.contains("= ANY"),
-            "{name} page reads only the tier's ranks:\n{p}"
-        );
+    #[derive(QueryableByName)]
+    struct Version {
+        #[diesel(sql_type = Integer)]
+        v: i32,
     }
-    for (name, p) in [
-        ("first", &first),
-        ("deep", &deep),
-        ("tiered", &tiered),
-        ("tiered deep", &tiered_deep),
-    ] {
+    let server = sql_query("SELECT current_setting('server_version_num')::int AS v")
+        .get_result::<Version>(&mut conn)
+        .expect("server version")
+        .v;
+    let mut in_order = vec![("first", &first), ("deep", &deep)];
+    // A tier filter is a set of rank values read off the index, in order.
+    // Postgres reads an `= ANY` list in index order from 17 on; before
+    // that the planner sorts the tier's rows instead, which is still
+    // correct (checked below), only not index-ordered.
+    if server >= 170_000 {
+        for (name, p) in [("tiered", &tiered), ("tiered deep", &tiered_deep)] {
+            let cond = p
+                .lines()
+                .find(|l| l.contains("Index Cond"))
+                .unwrap_or_default();
+            assert!(
+                cond.contains("= ANY"),
+                "{name} page reads only the tier's ranks:\n{p}"
+            );
+        }
+        in_order.extend([("tiered", &tiered), ("tiered deep", &tiered_deep)]);
+    }
+    for (name, p) in in_order {
         assert!(
             p.contains("idx_vuln_cve_summary_list"),
             "{name} page served by the list index:\n{p}"
         );
         assert!(!p.contains("Sort"), "{name} page needs no sort:\n{p}");
+    }
+    // Whatever the plan, a tier-filtered walk returns exactly the tier's
+    // rows, in list order, each once.
+    {
+        use crate::supplychain_read::{list_cves_filtered, parse_cve_cursor, ListFilters};
+        let f = ListFilters {
+            tiers: Some(vec![1, 3]),
+            ..Default::default()
+        };
+        let mut got: Vec<(i16, String)> = Vec::new();
+        let mut after = None;
+        loop {
+            let p = list_cves_filtered(&mut conn, &f, None, false, after, 7).unwrap();
+            got.extend(p.items.iter().map(|c| {
+                let t = if c.summary.tier.as_deref() == Some("P1") {
+                    1
+                } else {
+                    3
+                };
+                (t, c.summary.id.clone())
+            }));
+            match p.next_after {
+                Some(c) => after = parse_cve_cursor(Some(&c)).unwrap(),
+                None => break,
+            }
+        }
+        let mut want: Vec<(i16, i16, String)> = (0..200usize)
+            .filter(|i| matches!(i % 5, 2 | 4))
+            .map(|i| {
+                let t = if i % 5 == 2 { 1 } else { 3 };
+                (t, 5 - (i % 6) as i16, format!("CVE-2026-{i:04}"))
+            })
+            .collect();
+        want.sort();
+        let want: Vec<(i16, String)> = want.into_iter().map(|(t, _, id)| (t, id)).collect();
+        assert_eq!(got, want);
     }
     let cond = deep
         .lines()

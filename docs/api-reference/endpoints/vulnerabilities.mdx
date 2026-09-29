@@ -354,7 +354,10 @@ by tag only.
 
 Which images, workloads and namespaces a CVE affects, running or not, and
 what traffic reached them. `{id}` is matched case-insensitively, like the
-`vuln_id` filter. `window_hours` (default 168, max 720) sets how
+`vuln_id` filter; an id stored in an unusual spelling (not upper, lower or
+GitHub's GHSA casing) that was ingested since the last summary rebuild is
+matched case-insensitively after the next rebuild, within minutes.
+`window_hours` (default 168, max 720) sets how
 far back flows count. Up to 200 images and 200 workload containers are
 listed; `truncated` says when there are more. `404` when no inventory
 digest is affected.
