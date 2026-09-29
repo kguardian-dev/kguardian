@@ -20,28 +20,34 @@ export function useSeccompProfiles(pollMs = 15_000) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const inflight = useRef(false);
+  // Unmounted: a read that answers later writes nothing, and no poll starts one.
+  const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
-    if (inflight.current) return;
+    if (inflight.current || !mounted.current) return;
     inflight.current = true;
     try {
       const rows = await api.listProfiles();
+      if (!mounted.current) return;
       setProfiles(rows);
       setError(null);
     } catch (err) {
-      setError(describe(err));
+      if (mounted.current) setError(describe(err));
     } finally {
       inflight.current = false;
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, [api]);
 
   useEffect(() => {
+    mounted.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, same as usePodData
     void refresh();
-    if (pollMs <= 0) return;
-    const t = setInterval(() => void refresh(), pollMs);
-    return () => clearInterval(t);
+    const t = pollMs > 0 ? setInterval(() => void refresh(), pollMs) : undefined;
+    return () => {
+      mounted.current = false;
+      clearInterval(t);
+    };
   }, [refresh, pollMs]);
 
   return { api, profiles, loading, error, refresh };
@@ -86,6 +92,8 @@ export function useSeccompProfileDetail(api: SeccompApi, ns: string | null, kind
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, same as usePodData
     void reload();
   }, [reload]);
+  // Unmounted: a read still in flight is no longer the latest, so it writes nothing.
+  useEffect(() => () => void ++seq.current, []);
 
   return { detail, setDetail, loading, error, errorStatus, reload };
 }

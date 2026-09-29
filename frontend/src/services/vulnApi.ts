@@ -151,7 +151,12 @@ export class VulnApi {
     throw new VulnApiError(res.status, 'error', msg);
   }
 
-  /** `GET /vulnerabilities`: CVEs grouped by id, most severe first. */
+  /**
+   * `GET /vulnerabilities`: CVEs grouped by id. With `order: 'tier'` in the
+   * response the list is ranked by tier (P0, unknown, P1, P2, Background),
+   * then severity, then id; without it (an older Broker) it is most severe
+   * first.
+   */
   listCves(q: CveListQuery = {}): Promise<CvePage> {
     return this.json<CvePage>(
       '/vulnerabilities',
@@ -183,10 +188,15 @@ export class VulnApi {
     return this.json<ImageDetail>(`/images/${seg(digest)}`);
   }
 
-  /** `GET /images/{digest}/vulnerabilities`: deduplicated findings + the reports behind them. */
-  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } & TierFilters = {}, signal?: AbortSignal): Promise<ImageVulnsPage> {
-    const { tier, kev, epssMin, inUse, ...rest } = q;
-    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, ...tierParams({ tier, kev, epssMin, inUse }) }, false, signal);
+  /**
+   * `GET /images/{digest}/vulnerabilities`: deduplicated findings + the
+   * reports behind them. `vulnId` (`vuln_id`) asks for one CVE's findings
+   * only (case-insensitive exact match); a Broker predating it ignores the
+   * parameter and returns every finding, so callers still filter by id.
+   */
+  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string; vulnId?: string } & TierFilters = {}, signal?: AbortSignal): Promise<ImageVulnsPage> {
+    const { tier, kev, epssMin, inUse, vulnId, ...rest } = q;
+    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, vuln_id: vulnId, ...tierParams({ tier, kev, epssMin, inUse }) }, false, signal);
   }
 
   /** `GET /images/{digest}/sbom`: every source's SBOM (reports) and one's components. */

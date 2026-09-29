@@ -18,9 +18,9 @@ vi.mock('../utils/peerResolution', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/peerResolution')>();
   return {
     ...actual,
-    resolvePeer: (...args: Parameters<typeof actual.resolvePeer>) => {
+    resolvePeerForView: (...args: Parameters<typeof actual.resolvePeerForView>) => {
       resolvePeer.calls += 1;
-      return actual.resolvePeer(...args);
+      return actual.resolvePeerForView(...args);
     },
   };
 });

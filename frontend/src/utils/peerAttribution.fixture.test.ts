@@ -83,14 +83,24 @@ const dbService: ServiceInfo = {
 
 let listing: PodInfo[] | (() => never) = [cmangosDatabase, autobrr, cmangosWeb];
 let services: Record<string, ServiceInfo> = {};
+/** `/svc/ip` fails (timeout, 5xx), as opposed to answering 404 (null). */
+let svcLookupFails = false;
+/** `/pod/ip` fails (timeout, 5xx), as opposed to answering 404 (null). */
+let podLookupFails = false;
 const byName = () => Object.fromEntries((typeof listing === 'function' ? [] : listing).map((p) => [p.pod_name, p]));
 
 vi.mock('../services/api', () => ({
   apiClient: {
-    getServiceByIP: vi.fn(async (ip: string) => services[ip] ?? null),
+    getServiceByIP: vi.fn(async (ip: string) => {
+      if (svcLookupFails) throw new Error('timeout of 10000ms exceeded');
+      return services[ip] ?? null;
+    }),
     getAllPods: vi.fn(async () => (typeof listing === 'function' ? listing() : listing)),
     // Pre-`?at=` broker: always the current holder.
-    getPodDetailsByIP: vi.fn(async (ip: string) => (ip === '10.244.12.199' ? autobrr : null)),
+    getPodDetailsByIP: vi.fn(async (ip: string) => {
+      if (podLookupFails) throw new Error('timeout of 10000ms exceeded');
+      return ip === '10.244.12.199' ? autobrr : null;
+    }),
     getPodDetailsByName: vi.fn(async (name: string) => byName()[name] ?? null),
   },
 }));
@@ -175,6 +185,8 @@ const normaliseCilium = (rules: unknown): Rule[] =>
 beforeEach(() => {
   listing = [cmangosDatabase, autobrr, cmangosWeb];
   services = {};
+  svcLookupFails = false;
+  podLookupFails = false;
   vi.mocked(apiClient.getPodDetailsByIP).mockClear();
 });
 
@@ -440,5 +452,150 @@ describe('generateCiliumNetworkPolicy — peer attribution', () => {
     expect((spec(parse(yaml)).ingress as Rule[])[0].fromCIDR).toEqual(['10.244.12.199/32']);
     expect(yaml).not.toContain('fromEndpoints');
     expect(commentLines(yaml)).toEqual(['# unattributed peer 10.244.12.199 at 2026-09-03T05:00:00']);
+  });
+});
+
+// --- a Service lookup that failed ----------------------------------------
+//
+// No Service listing to answer from, and `/svc/ip` failed (timeout, 5xx):
+// whether the address is a ClusterIP is unknown. It used to read as "not a
+// Service" and render as an external address. A ClusterIP sits in the
+// cluster's Service CIDR (private address space), so a private address the
+// lookup could not check is an unattributed peer; a 404 is still "not a
+// Service", and a public address cannot be a ClusterIP.
+
+describe('generators — a failed /svc/ip lookup', () => {
+  const clusterIpRow = egressRow('10.96.0.50', '443', '2026-09-03T05:00:01');
+  const publicRow = egressRow('203.0.113.9', '443', '2026-09-03T05:00:02');
+  const both = target(cmangosDatabase, [clusterIpRow, publicRow]);
+
+  test('standard: the private address is an ipBlock with the unattributed comment; the public one stays external', async () => {
+    svcLookupFails = true;
+    const yaml = policyToYAML(await generateNetworkPolicy(both));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ ipBlock: { cidr: '10.96.0.50/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+      { to: [{ ipBlock: { cidr: '203.0.113.9/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+    ]);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
+    // The comment sits above the ClusterIP's rule, not the public address's.
+    const lines = yaml.split('\n');
+    const at = lines.findIndex((l) => l.trim().startsWith('#'));
+    expect(lines[at + 1]).toBe('  - to:');
+    const rule = lines.slice(at + 1, lines.findIndex((l, i) => i > at + 1 && l.startsWith('  - ')));
+    expect(rule.join('\n')).toContain('10.96.0.50/32');
+    expect(rule.join('\n')).not.toContain('203.0.113.9');
+  });
+
+  test('cilium: toCIDR with the unattributed comment for the private address only', async () => {
+    svcLookupFails = true;
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(both));
+    expect((spec(parse(yaml)).egress as Rule[]).map((r) => r.toCIDR)).toEqual([['10.96.0.50/32'], ['203.0.113.9/32']]);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
+  });
+
+  test('pod listing unavailable too: the by-IP fallback treats the failed Service lookup the same way', async () => {
+    svcLookupFails = true;
+    listing = () => { throw new Error('broker down'); };
+    const standard = policyToYAML(await generateNetworkPolicy(both));
+    expect(commentLines(standard)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
+    const cilium = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(both));
+    expect(commentLines(cilium)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
+  });
+
+  test('one policy with a former holder and a failed lookup: only the failed lookup carries the note; the default comment is unchanged', async () => {
+    svcLookupFails = true;
+    const pod = target(cmangosDatabase, [...(staleIpPeer.traffic as Partial<NetworkTraffic>[]), clusterIpRow]);
+    for (const yaml of [policyToYAML(await generateNetworkPolicy(pod)), ciliumPolicyToYAML(await generateCiliumNetworkPolicy(pod))]) {
+      expect(commentLines(yaml)).toEqual([
+        '# unattributed peer 10.244.12.199 at 2026-07-23T10:00:00',
+        '# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)',
+      ]);
+    }
+  });
+
+  test('a 404 (not a Service) is external, as before: no comment', async () => {
+    const yaml = policyToYAML(await generateNetworkPolicy(both));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ ipBlock: { cidr: '10.96.0.50/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+      { to: [{ ipBlock: { cidr: '203.0.113.9/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
+    ]);
+    expect(commentLines(yaml)).toEqual([]);
+  });
+
+  test('a supplied Service listing answers for the failed lookup: not in it ⇒ external', async () => {
+    svcLookupFails = true;
+    const yaml = policyToYAML(await generateNetworkPolicy(both, { services: [dbService] }));
+    expect(commentLines(yaml)).toEqual([]);
+  });
+});
+
+// Pod listing down too: the by-IP fallback (`/svc/ip`, then `/pod/ip`) per
+// row. Each lookup tells "not one" (404) from "failed"; a private address
+// either lookup could not rule out is unattributed, never external.
+describe('generators — pod listing down: every combination of the by-IP lookups', () => {
+  const podIpRow = egressRow('10.244.7.7', '8080', '2026-09-03T05:00:03');
+  const publicRow = egressRow('203.0.113.9', '443', '2026-09-03T05:00:02');
+  const listingDown = () => { listing = () => { throw new Error('broker down'); }; };
+  const comments = async (pod: PodNodeData, sources = {}) => {
+    const standard = commentLines(policyToYAML(await generateNetworkPolicy(pod, sources)));
+    expect(commentLines(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(pod, sources)))).toEqual(standard);
+    return standard;
+  };
+
+  test('Service 404, pod lookup failed: unattributed, saying the pod lookup failed', async () => {
+    listingDown();
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (pod lookup failed)']);
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [podIpRow])));
+    expect(spec(parse(yaml)).egress).toEqual([{ to: [{ ipBlock: { cidr: '10.244.7.7/32' } }], ports: [{ protocol: 'TCP', port: 8080 }] }]);
+  });
+
+  test('Service lookup failed, pod 404: unattributed, saying the Service lookup failed', async () => {
+    listingDown();
+    svcLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (Service lookup failed)']);
+  });
+
+  test('both lookups failed: unattributed, the Service lookup named (it may be a ClusterIP)', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (Service lookup failed)']);
+  });
+
+  test('both 404: external, no comment', async () => {
+    listingDown();
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual([]);
+  });
+
+  test('a public address is external whichever lookup failed', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [publicRow]))).toEqual([]);
+  });
+
+  test('a supplied Service listing is used by IP before /svc/ip: the Service selector, no lookup', async () => {
+    listingDown();
+    svcLookupFails = true;
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [egressRow('10.96.0.10', '5432', '2026-09-03T05:00:01')]), { services: [dbService] }));
+    expect(vi.mocked(apiClient.getServiceByIP)).not.toHaveBeenCalled();
+    expect(normaliseStandard(spec(parse(yaml)).egress, 'game-servers')).toEqual([
+      { to: [{ podSelector: { matchLabels: { app: 'db' } } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+    ]);
+  });
+
+  test('a supplied listing without the address answers for a failed /svc/ip: pod 404 ⇒ external', async () => {
+    listingDown();
+    svcLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]), { services: [dbService] })).toEqual([]);
+  });
+
+  test('a supplied listing without the address, pod lookup failed: still unattributed (pod lookup failed)', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]), { services: [dbService] })).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (pod lookup failed)']);
   });
 });

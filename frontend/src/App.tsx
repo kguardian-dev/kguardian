@@ -868,6 +868,7 @@ function App() {
                 onFocusChange={setFocusedNodeId}
                 allPodsLookup={allPodsLookup}
                 services={services}
+                servicesUnavailable={servicesListing === null}
                 showExternalNodes={settings.showExternalNodes}
                 onToggleExternalNodes={() => updateSettings({ showExternalNodes: !settings.showExternalNodes })}
                 showDaemonSetNodes={settings.showDaemonSetNodes}
@@ -927,6 +928,7 @@ function App() {
                   selectedPod={selectedPod}
                   allPodsLookup={allPodsLookup}
                   services={services}
+                  servicesUnavailable={servicesListing === null}
                   computeUnavailable={compute.supported && compute.unavailable}
                 />
               </div>

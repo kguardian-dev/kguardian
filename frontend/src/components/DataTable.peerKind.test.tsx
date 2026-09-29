@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import DataTable from './DataTable';
 import type { NetworkTraffic, PodInfo, PodNodeData } from '../types';
 import { buildExternalNodes } from '../utils/externalPeers';
-import { PRIVATE_PEER_TOOLTIP, buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
+import { PRIVATE_PEER_TOOLTIP, SERVICE_LOOKUP_FAILED_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeer, resolvePeerForView, type PeerResolution } from '../utils/peerResolution';
 
 // A peer is labelled "Pod" only when it resolved to a pod record (stored on
 // the row, or the guarded by-IP lookup). On EKS the ALB's network interfaces
@@ -95,4 +95,59 @@ test('from a local workload: private is Private IP, public is Internet, a resolv
   const pod = peerCell('10.0.0.7');
   expect(pod.textContent).toMatch(/Pod/);
   expect(pod.textContent).toMatch(/ledger/);
+});
+
+// The Service listing could not be read: a private address no pod ever held
+// may be a ClusterIP, so it is not "Private network: no Service record holds
+// it". It is unattributed, as the generators render it when their `/svc/ip`
+// lookup fails. A public address cannot be a ClusterIP and stays Internet.
+test('Service listing unavailable: an unheld private address is Unattributed on the map and in the table; public stays Internet', () => {
+  const traffic = [flow('10.96.0.50'), flow('140.82.112.3'), flow('10.0.0.7')];
+  const pods = [local(traffic)];
+  const index = buildPeerIndex(lookup, []);
+  const rowPeers = new Map<NetworkTraffic, PeerResolution>(traffic.map((t) => [t, resolvePeerForView(t, index, false)]));
+  const cards = buildExternalNodes({
+    pods, services: [], rowPeers, localPodByName: new Map(pods.map((p) => [p.pod.pod_name, p])), localPodByWorkload: new Map(),
+    svcIpToLocalPod: new Map(), podNameToSvcIp: new Map(),
+  });
+  const ids = cards.map((c) => c.id);
+  expect(ids).toContain('external-unattributed-out');
+  expect(ids).toContain('external-internet-out');
+  expect(ids).not.toContain('external-private-out');
+  const unattributed = cards.find((c) => c.id === 'external-unattributed-out')!;
+  expect(unattributed.traffic!.map((t) => t.traffic_in_out_ip)).toEqual(['10.96.0.50']);
+  // No pod ever held it: "former holder of this IP" would be false.
+  expect(unattributed.tooltip).toBe(SERVICE_LOOKUP_FAILED_TOOLTIP);
+
+  render(<DataTable selectedPod={pods[0]} allPodsLookup={lookup} services={[]} servicesUnavailable />);
+  fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
+  const cell = peerCell('10.96.0.50');
+  expect(cell.textContent).toMatch(/Unattributed/);
+  expect(cell.textContent).not.toMatch(/Private IP/);
+  expect(cell.querySelector(`[title="${SERVICE_LOOKUP_FAILED_TOOLTIP}"]`)).not.toBeNull();
+  expect(cell.querySelector(`[title="${UNATTRIBUTED_PEER_TOOLTIP}"]`)).toBeNull();
+  expect(peerCell('140.82.112.3').textContent).toMatch(/Internet/);
+  expect(peerCell('10.0.0.7').textContent).toMatch(/ledger/);
+});
+
+test('the Unattributed card holding a former holder and a failed-lookup address says both', () => {
+  const guardedOut = { kind: 'unattributed' as const, ip: '10.0.0.99', at: '2026-09-16T00:00:00' };
+  const failed = { kind: 'unattributed' as const, ip: '10.96.0.50', at: '2026-09-16T00:00:00', reason: 'service-lookup-failed' as const };
+  const traffic = [flow('10.0.0.99'), flow('10.96.0.50')];
+  const pods = [local(traffic)];
+  const rowPeers = new Map<NetworkTraffic, PeerResolution>([[traffic[0], guardedOut], [traffic[1], failed]]);
+  const card = buildExternalNodes({
+    pods, services: [], rowPeers, localPodByName: new Map(pods.map((p) => [p.pod.pod_name, p])), localPodByWorkload: new Map(),
+    svcIpToLocalPod: new Map(), podNameToSvcIp: new Map(),
+  }).find((c) => c.id === 'external-unattributed-out')!;
+  expect(card.tooltip).toContain(UNATTRIBUTED_PEER_TOOLTIP);
+  expect(card.tooltip).toContain(SERVICE_LOOKUP_FAILED_TOOLTIP);
+});
+
+test('with a Service listing, an unheld private address is still Private IP', () => {
+  const traffic = [flow('10.96.0.50')];
+  const index = buildPeerIndex(lookup, []);
+  expect(resolvePeerForView(traffic[0], index, true)).toEqual({ kind: 'unknown' });
+  openTraffic(local(traffic));
+  expect(peerCell('10.96.0.50').textContent).toMatch(/Private IP/);
 });

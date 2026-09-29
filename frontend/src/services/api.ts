@@ -137,15 +137,18 @@ class BrokerAPIClient {
    * started later and prefers one alive then (`GET /pod/ip/{ip}?at=`). A
    * broker predating the parameter ignores it and returns the current
    * holder, so callers apply the same start-time guard themselves
-   * (utils/peerResolution). 404 (no holder at that time) resolves to null.
+   * (utils/peerResolution). 404 (no holder at that time) resolves to null;
+   * any other failure is rethrown, never returned as null: a lookup that
+   * failed does not say no pod held the address.
    */
   async getPodDetailsByIP(podIP: string, at?: string): Promise<PodInfo | null> {
     try {
       const response = await this.client.get(`/pod/ip/${podIP}`, at !== undefined ? { params: { at } } : undefined);
       return response.data;
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null;
       console.error('Error fetching pod details by IP:', error);
-      return null;
+      throw error;
     }
   }
 
@@ -197,15 +200,18 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get service details by IP address
+   * The Service whose ClusterIP is `serviceIP`. 404 (no such Service)
+   * resolves to null; any other failure is rethrown, never returned as
+   * null: a lookup that failed does not say the address is not a Service.
    */
   async getServiceByIP(serviceIP: string): Promise<ServiceInfo | null> {
     try {
       const response = await this.client.get(`/svc/ip/${serviceIP}`);
       return response.data;
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null;
       console.error('Error fetching service by IP:', error);
-      return null;
+      throw error;
     }
   }
 

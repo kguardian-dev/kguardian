@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
+import { vulnApi, VulnApiError, type CveListQuery, type VulnApi } from '../services/vulnApi';
 import type { CveSummary, ExposedImage, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
 import { workloadKey } from '../utils/workloads';
-import { mergeFindings, VULN_SEVERITY_RANK } from '../utils/vulnView';
+import { mergeFindings, sameVulnId, VULN_SEVERITY_RANK } from '../utils/vulnView';
 
 /** Drop a response for a request the user has already moved away from. */
 function useLatest() {
@@ -22,7 +22,10 @@ export const CVE_PAGE_SIZE = 50;
  * `GET /vulnerabilities`, one server page at a time (filters server-side),
  * with `loadMore`. The summary is rebuilt by the Broker on an interval;
  * `computedAt` / `staleSeconds` say how fresh it is (null until the first
- * rebuild, which is "not computed yet", not "no CVEs").
+ * rebuild, which is "not computed yet", not "no CVEs"). `order` is `tier`
+ * when the Broker ranks the whole list by tier, null from an older Broker.
+ * A Load more whose cursor the Broker refuses as one from an older list
+ * order (it was upgraded meanwhile) quietly reads the first page again.
  */
 export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick = 0, api: VulnApi = vulnApi) {
   const [items, setItems] = useState<CveSummary[]>([]);
@@ -31,6 +34,8 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   const [staleSeconds, setStaleSeconds] = useState<number | null>(null);
   // When `staleSeconds` was true (this browser's clock), so the age can keep counting.
   const [receivedAt, setReceivedAt] = useState<number | null>(null);
+  // The order the Broker says the list is in: `tier`, or null (an older Broker, most severe first).
+  const [order, setOrder] = useState<'tier' | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -61,6 +66,7 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
       setComputedAt(p.computedAt);
       setStaleSeconds(p.staleSeconds);
       setReceivedAt(Date.now());
+      setOrder(p.order === 'tier' ? 'tier' : null);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -88,14 +94,21 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
       setNextAfter(p.nextAfter);
       setError(null);
     } catch (err) {
-      if (current()) setError(err);
+      if (!current()) return;
+      // The Broker was upgraded while the list was open: its cursor belongs to the old order. Start again from the first page.
+      if (isOlderOrderCursor(err)) await load();
+      else setError(err);
     } finally {
       if (current()) setLoadingMore(false);
     }
-  }, [api, key, nextAfter, begin]);
+  }, [api, key, nextAfter, begin, load]);
 
-  return { items, computedAt, staleSeconds, receivedAt, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
+  return { items, computedAt, staleSeconds, receivedAt, order, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
 }
+
+/** The Broker's 400 for a `?after=` cursor from its previous (severity-first) list order. */
+const OLDER_ORDER_CURSOR = 'after is a cursor from an older list order';
+const isOlderOrderCursor = (err: unknown) => err instanceof VulnApiError && err.status === 400 && err.message.startsWith(OLDER_ORDER_CURSOR);
 
 /** Rows one scope-only read covers for the header tiles (the Broker clamps `limit` to 500). */
 export const CVE_TOTALS_LIMIT = 500;
@@ -103,11 +116,14 @@ export const CVE_TOTALS_LIMIT = 500;
 /**
  * The CVE summary for the scope alone, no table filters, in one read of up
  * to CVE_TOTALS_LIMIT rows: what the header tiles count. `capped` when the
- * Broker had more rows than that, so every tile is a lower bound.
+ * Broker had more rows than that, so every tile is a lower bound over the
+ * first rows in the list's `order`: by tier (`tier`), or most severe first
+ * (null, an older Broker).
  */
 export function useCveTotals(namespace: string | undefined, refreshTick = 0, api: VulnApi = vulnApi) {
   const [items, setItems] = useState<CveSummary[]>([]);
   const [capped, setCapped] = useState(false);
+  const [order, setOrder] = useState<'tier' | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
@@ -128,6 +144,7 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
       if (!current()) return;
       setItems(p.items);
       setCapped(p.nextAfter !== null);
+      setOrder(p.order === 'tier' ? 'tier' : null);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -141,19 +158,22 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
     void load();
   }, [load, refreshTick]);
 
-  return { items, capped, loading, error, reload: load };
+  return { items, capped, order, loading, error, reload: load };
 }
 
 /** Images per CVE whose findings the drawer reads (tier, factors, KEV/EPSS). */
 export const CVE_IMAGE_READS = 10;
 /** Findings per page of an image read in the drawer (the Broker's maximum). */
 export const CVE_FINDING_PAGE_SIZE = 500;
-/** Pages of one image's findings the drawer reads looking for the CVE: the read has no CVE filter. */
+/** Pages of one image's findings the drawer reads looking for the CVE, for a Broker that ignores `vuln_id`. */
 export const CVE_FINDING_PAGES = 4;
 
 /**
  * Every finding of CVE `id` in one image: one per package and version that
- * carries it. Pages until each package the exposure lists is found, the
+ * carries it. The read asks for that CVE alone (`vuln_id`), so a Broker that
+ * supports it answers in one page. An older Broker ignores the parameter and
+ * returns every finding, so rows of other CVEs are still skipped here and
+ * the read pages until each package the exposure lists is found, the
  * findings (most severe first) are past the CVE's least severe package, or
  * the image has no more. `complete` is false when CVE_FINDING_PAGES ran out
  * first: what was found is part of the answer, not all of it. Stops (and
@@ -166,9 +186,9 @@ async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage, curren
   let after: string | undefined;
   for (let page = 0; page < CVE_FINDING_PAGES; page++) {
     if (!current()) break;
-    const v = await api.getImageVulns(img.digest, { limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
+    const v = await api.getImageVulns(img.digest, { vulnId: id, limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
     for (const f of v.items) {
-      if (f.id !== id) continue;
+      if (!sameVulnId(f.id, id)) continue;
       matches.push(f);
       missing.delete(`${f.package.name}@${f.installedVersion}`);
     }

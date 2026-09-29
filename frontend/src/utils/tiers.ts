@@ -21,9 +21,14 @@ export function brokerTier(t: unknown): RiskTierName | null {
   return typeof t === 'string' && (TIERS as readonly string[]).includes(t) ? (t as RiskTierName) : null;
 }
 
-export const TIER_RANK: Record<RiskTierName, number> = { P0: 3, P1: 2, P2: 1, Background: 0 };
-/** Sort key, most urgent first; an unknown tier is never ranked below a known one. */
-export const tierRank = (t: RiskTierName | null) => (t === null ? 4 : TIER_RANK[t]);
+export const TIER_RANK: Record<RiskTierName, number> = { P0: 4, P1: 2, P2: 1, Background: 0 };
+/**
+ * Sort key, most urgent first, in the Broker's tier order (the order of its
+ * CVE list): P0, unknown, P1, P2, Background. Nothing outranks P0; an
+ * unknown tier ranks above every other known one, so it never reads as
+ * better than a known P1.
+ */
+export const tierRank = (t: RiskTierName | null) => (t === null ? 3 : TIER_RANK[t]);
 
 export const TIER_UNKNOWN_TITLE = 'No tier yet: not computed, or this Broker predates tiers. Unknown, not low.';
 

@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { useCveList, useImageList, useImageVulns } from './useVulns';
-import { VulnApi } from '../services/vulnApi';
+import { VulnApi, vulnErrorKind } from '../services/vulnApi';
 
 // "Load more" racing a filter change or a Refresh: a first page in flight
 // owns the list, so neither spinner is left on and no refresh is dropped.
@@ -64,6 +64,64 @@ describe('useCveList', () => {
     expect(result.current.loading).toBe(false);
     expect(result.current.loadingMore).toBe(false);
     expect(result.current.items.map((c) => c.id)).toEqual(['CVE-1']);
+  });
+});
+
+describe('useCveList: the list order', () => {
+  const OLD_CURSOR = 'after is a cursor from an older list order; the list is now ordered by tier: request the first page again';
+
+  /**
+   * The Broker is upgraded while the page is open: the first page came from
+   * the old one (severity cursor, no `order`), the next page is asked of the
+   * new one, which answers `pageMore` (a status and body) to that cursor and
+   * serves tier-ordered first pages from then on.
+   */
+  function upgraded(pageMore: { status: number; body: string }) {
+    const firsts: number[] = [];
+    let upgradedYet = false;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const u = new URL(String(input), 'http://x');
+      if (u.searchParams.get('after')) {
+        upgradedYet = true;
+        return new Response(pageMore.body, { status: pageMore.status });
+      }
+      firsts.push(firsts.length);
+      return new Response(JSON.stringify(upgradedYet
+        ? { items: [cve('CVE-9')], nextAfter: 't0.5.CVE-9', computedAt: 't', staleSeconds: 0, order: 'tier' }
+        : { items: [cve('CVE-1')], nextAfter: '5.CVE-1', computedAt: 't', staleSeconds: 0 }));
+    }) as typeof fetch;
+    return { api: new VulnApi({ fetchImpl }), firsts };
+  }
+
+  test('the order the Broker says it used is exposed; an older Broker says none', async () => {
+    const { api: a } = upgraded({ status: 400, body: OLD_CURSOR });
+    const { result } = renderHook(() => useCveList({}, 0, a));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.order).toBeNull();
+  });
+
+  test("Load more with an older Broker's cursor after an upgrade: the list quietly starts again from the first page", async () => {
+    const { api: a, firsts } = upgraded({ status: 400, body: OLD_CURSOR });
+    const { result } = renderHook(() => useCveList({}, 0, a));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => { await result.current.loadMore(); });
+    await waitFor(() => expect(result.current.items.map((c) => c.id)).toEqual(['CVE-9']));
+    expect(firsts).toHaveLength(2);
+    expect(result.current.error).toBeNull();
+    expect(result.current.order).toBe('tier');
+    expect(result.current.loading).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+  });
+
+  test('any other 400 on Load more is still an error, and the rows stay', async () => {
+    const { api: a, firsts } = upgraded({ status: 400, body: 'after must be the nextAfter of the previous page' });
+    const { result } = renderHook(() => useCveList({}, 0, a));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => { await result.current.loadMore(); });
+    expect(firsts).toHaveLength(1);
+    expect(vulnErrorKind(result.current.error)).toBe('bad_request');
+    expect(result.current.items.map((c) => c.id)).toEqual(['CVE-1']);
+    expect(result.current.loadingMore).toBe(false);
   });
 });
 

@@ -45,18 +45,49 @@ test('a late failure for the previous workload does not put its error on the cur
 // list read held the in-flight guard forever, every later poll was skipped,
 // and the seccomp panel sat on its skeleton with no error.
 test('a list read that never answers times out with an error, and the next poll reads again', async () => {
-  const fetchImpl = vi.fn((_: RequestInfo | URL, init?: RequestInit) =>
-    new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason))));
+  const reads: Promise<Response>[] = [];
+  const fetchImpl = vi.fn((_: RequestInfo | URL, init?: RequestInit) => {
+    const read = new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)));
+    reads.push(read);
+    return read;
+  });
   const { seccompApi } = await import('../services/seccompApi');
   const internals = seccompApi as unknown as { fetchImpl: typeof fetch; timeoutMs: number };
   const saved = { fetchImpl: internals.fetchImpl, timeoutMs: internals.timeoutMs };
   Object.assign(internals, { fetchImpl, timeoutMs: 20 });
+  const { result, unmount } = renderHook(() => useSeccompProfiles(50));
   try {
-    const { result } = renderHook(() => useSeccompProfiles(50));
     await waitFor(() => expect(result.current.error).toMatch(/did not answer/));
     expect(result.current.loading).toBe(false);
     await waitFor(() => expect(fetchImpl.mock.calls.length).toBeGreaterThan(1));
   } finally {
+    // Stop the poll, and let the read still in flight time out, before the
+    // real client comes back and before jsdom is torn down: a poll or a
+    // timeout firing after teardown was an unhandled "window is not defined".
+    unmount();
+    await act(async () => { await Promise.allSettled(reads); });
     Object.assign(internals, saved);
+  }
+  expect(fetchImpl.mock.calls.length).toBe(reads.length);
+});
+
+test('after unmount the list poll starts no read and a late answer writes nothing', async () => {
+  vi.useFakeTimers();
+  let answer: ((r: Response) => void) | undefined;
+  const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => { answer = resolve; }));
+  const { seccompApi } = await import('../services/seccompApi');
+  const internals = seccompApi as unknown as { fetchImpl: typeof fetch };
+  const saved = internals.fetchImpl;
+  internals.fetchImpl = fetchImpl as unknown as typeof fetch;
+  const errors = vi.spyOn(console, 'error');
+  try {
+    const { unmount } = renderHook(() => useSeccompProfiles(1000));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    unmount();
+    await act(async () => { answer!(new Response('[]', { status: 200 })); await vi.advanceTimersByTimeAsync(5000); });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    internals.fetchImpl = saved;
   }
 });

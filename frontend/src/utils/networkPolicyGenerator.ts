@@ -311,7 +311,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
       // A guarded-out peer (the flow predates every pod that held the IP)
       // is the same ipBlock, with a comment saying no pod could be matched.
       if (identity.unattributed) {
-        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service, identity.unattributed.reason) };
       }
       return { peers: [{ ipBlock: { cidr } }] };
     }

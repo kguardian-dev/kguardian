@@ -41,7 +41,20 @@ describe('ImagesView: Vulnerabilities tab', () => {
     expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
   });
 
-  test('the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
+  test('a Broker that ranks the list by tier ("order": "tier"): the table says so, keeps its order, and needs no note about later pages', async () => {
+    const tiers = ['P0', 'P0', null, 'P1', 'P2'];
+    const ranked = { ...cvePage, order: 'tier', nextAfter: 't2.4.CVE-2099-104', items: tiers.map((tier, i) => ({ ...cvePage.items[i % cvePage.items.length], id: `CVE-2099-10${i}`, tier })) };
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', ranked)]);
+    render(view({ api }));
+    const rows = await screen.findAllByTestId('cve-row');
+    expect(rows.map((r) => r.querySelector('[data-tier]')!.getAttribute('data-tier'))).toEqual(['P0', 'P0', 'unknown', 'P1', 'P2']);
+    expect(rows.map((r) => within(r).getAllByText(/^CVE-2099-10\d$/)[0].textContent)).toEqual(ranked.items.map((c) => c.id));
+    expect(screen.getByText(/ranked by tier/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Load more CVEs' })).toBeTruthy();
+    expect(screen.queryByTestId('page-order-note')).toBeNull();
+  });
+
+  test('an older Broker (no "order"): the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
     const page1 = vulnCapture<CvePage>('vulnerabilities-page1-limit2').body;
     const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', page1)]);
     render(view({ api }));
@@ -189,6 +202,21 @@ describe('ImagesView: header tiles count the scope (DATA-10, IMG-07)', () => {
     await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7+'));
     expect(tile('P0 act now')).toBe('P0 act now1+');
     expect(screen.getByTestId('tiles-caption').textContent).toMatch(/\(the first 500\)/);
+    // An older Broker's first 500 are the most severe: say which subset the lower bounds cover.
+    expect(screen.getAllByTitle(/first 500 CVEs in scope, most severe first; more exist/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByTitle(/tier order/)).toHaveLength(0);
+  });
+
+  test('capped against a Broker that ranks by tier: the tiles say their first 500 are taken in tier order', async () => {
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=500', { ...cvePage, nextAfter: 'more', order: 'tier' })]);
+    render(view({ api }));
+    await screen.findAllByTestId('cve-row');
+    await waitFor(() => expect(tile('CVEs on running workloads')).toBe('CVEs on running workloads7+'));
+    // Still lower bounds ("+"), over the first 500 by tier.
+    expect(tile('P0 act now')).toBe('P0 act now1+');
+    expect(screen.getAllByTitle(/first 500 CVEs in scope, in tier order \(P0 first\); more exist/).length).toBeGreaterThan(0);
+    expect(screen.queryAllByTitle(/most severe first/)).toHaveLength(0);
+    expect(screen.getByTestId('tiles-caption').textContent).toMatch(/\(the first 500\)/);
   });
 
   test('a scope change clears the tiles and the table until the new scope has been read', async () => {
@@ -296,5 +324,18 @@ describe('Background and null tiers', () => {
     const first = rows.find((r) => within(r).queryByText('CVE-2099-0001'))!;
     expect(first.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
     expect(first.querySelector('[data-tier]')!.getAttribute('title')).toMatch(/not computed/);
+  });
+});
+
+describe('Row order', () => {
+  const tiers = ['P1', null, 'Background', 'P0', 'P2'];
+  const mixed = { ...cvePage, items: tiers.map((tier, i) => ({ ...cvePage.items[i % cvePage.items.length], id: `CVE-2099-10${i}`, tier })) };
+  const rowTiers = (rows: HTMLElement[]) => rows.map((r) => r.querySelector('[data-tier]')!.getAttribute('data-tier'));
+
+  test("the loaded rows follow the Broker's tier order: P0, unknown, P1, P2, Background (unknown never above P0)", async () => {
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', mixed)]);
+    render(view({ api }));
+    const rows = await screen.findAllByTestId('cve-row');
+    expect(rowTiers(rows)).toEqual(['P0', 'unknown', 'P1', 'P2', 'Background']);
   });
 });

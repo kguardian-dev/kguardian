@@ -15,8 +15,14 @@ test('brokerTier: only the four tiers; anything else (an older Broker sends none
   expect(brokerTier('Background')).toBe('Background');
   expect(brokerTier(undefined)).toBeNull();
   expect(brokerTier('P9')).toBeNull();
-  // Unknown is never ranked below a known tier.
-  expect(tierRank(null)).toBeGreaterThan(tierRank('P0'));
+});
+
+test("tierRank is the Broker's tier order: P0, unknown, P1, P2, Background", () => {
+  const tiers = ['Background', 'P1', null, 'P2', 'P0'] as const;
+  expect([...tiers].sort((a, b) => tierRank(b) - tierRank(a))).toEqual(['P0', null, 'P1', 'P2', 'Background']);
+  // Unknown never reads as better than a known P1, and nothing outranks P0.
+  expect(tierRank(null)).toBeGreaterThan(tierRank('P1'));
+  expect(tierRank('P0')).toBeGreaterThan(tierRank(null));
 });
 
 test("every #1678 factor maps to a chip; an unrecognised one is shown as sent", () => {

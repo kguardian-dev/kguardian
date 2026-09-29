@@ -111,6 +111,72 @@ describe('CVE drawer: an image with more findings than one read', () => {
   });
 });
 
+describe('CVE drawer: ids match regardless of case, as the Broker compares them', () => {
+  test('a GHSA id the report spells in another case is still the CVE\'s finding', async () => {
+    const ghsa: Exposure = { ...ledgerOnly, id: 'GHSA-7rjr-3q55-vv33' };
+    const reported = { ...cveFinding, id: 'ghsa-7RJR-3Q55-vv33', tier: 'P0', tierFactors: ['in_use:executed', 'kev', 'severity:critical', 'exposed'] };
+    const { api, reads } = paged(ghsa, [[...filler(3), reported]]);
+    render(<CveDrawer id={ghsa.id} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />);
+    await settle();
+    expect(reads).toHaveLength(1);
+    expect(rowTier()).toBe('P0');
+    expect(headlineTier()).toBe('P0');
+  });
+});
+
+describe('CVE drawer: the per-image read asks for the one CVE (vuln_id)', () => {
+  /**
+   * Every image carries 1,200 other findings ranked above the CVE's, then
+   * the CVE (P0). A Broker that honours `vuln_id` (case-insensitive exact
+   * match, combined with paging) returns only the CVE's rows; an older one
+   * ignores the parameter and pages through everything.
+   */
+  function broker(honoursVulnId: boolean) {
+    const reads: URL[] = [];
+    const rows = [...filler(1200), { ...cveFinding, tier: 'P0', tierFactors: ['in_use:executed', 'kev', 'severity:critical', 'exposed'] }];
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const u = new URL(String(input), 'http://x');
+      if (u.pathname.endsWith('/exposure')) return new Response(JSON.stringify(exposure), { status: 200 });
+      reads.push(u);
+      const vulnId = u.searchParams.get('vuln_id');
+      const matching = honoursVulnId && vulnId ? rows.filter((f) => f.id.toLowerCase() === vulnId.toLowerCase()) : rows;
+      const limit = Number(u.searchParams.get('limit'));
+      const from = Number((u.searchParams.get('after') ?? 'o0').slice(1));
+      const items = matching.slice(from, from + limit);
+      return new Response(JSON.stringify({ ...ledgerPage, items, nextAfter: from + limit < matching.length ? `o${from + limit}` : null }), { status: 200 });
+    }) as typeof fetch;
+    const perImage = () => {
+      const n = new Map<string, number>();
+      for (const u of reads) n.set(u.pathname, (n.get(u.pathname) ?? 0) + 1);
+      return [...n.values()];
+    };
+    return { api: new VulnApi({ fetchImpl }), reads, perImage };
+  }
+
+  test('a Broker that honours it: one read per image, and the CVE is found', async () => {
+    const { api, reads, perImage } = broker(true);
+    renderDrawer(api, exposure);
+    await settle();
+    expect(reads.every((u) => u.searchParams.get('vuln_id') === exposure.id)).toBe(true);
+    expect(perImage()).toEqual([1, 1, 1]);
+    expect(screen.getAllByTestId('cve-workload').map((r) => r.querySelector('[data-tier]')!.getAttribute('data-tier'))).toEqual(
+      exposure.workloads.map(() => 'P0'),
+    );
+    expect(headlineTier()).toBe('P0');
+  });
+
+  test('an older Broker that ignores it: pages as before, keeps only the CVE\'s rows, and finds it', async () => {
+    const { api, reads, perImage } = broker(false);
+    renderDrawer(api, exposure);
+    await settle();
+    expect(reads.every((u) => u.searchParams.get('vuln_id') === exposure.id)).toBe(true);
+    // 1,201 rows at 500 per page.
+    expect(perImage()).toEqual([3, 3, 3]);
+    expect(headlineTier()).toBe('P0');
+    expect(headlineLabels()).not.toContain('read incomplete');
+  });
+});
+
 describe('CVE drawer: reads stop once the drawer has moved on', () => {
   /** Every image read is held until `step()`; each page has more after it, so every image would page to the budget. */
   function held(e: Exposure) {

@@ -40,7 +40,7 @@ import type { ComputeFinding } from '../types/compute';
 import { shouldExitFocus } from '../utils/graphFocus';
 import { EDGE_COLOR_DAEMONSET, edgeStrokeColor, isDaemonSetPeer, partitionDaemonSetPeers, shouldAutoShowDaemonSets } from '../utils/daemonSetPeers';
 import { GraphControls } from './GraphControls';
-import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
+import { buildPeerIndex, resolvePeerForView, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, localWorkloadIndex, remoteNodeForRow } from '../utils/externalPeers';
 import type { MapLens, PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_DIMENSIONS, UI_TIMING } from '../constants/ui';
@@ -56,6 +56,8 @@ interface NetworkGraphProps {
   pods: PodNodeData[];
   allPodsLookup: PodInfo[];
   services: ServiceInfo[];
+  /** No Service listing could be read: a private address no pod held may be a ClusterIP, so it is unattributed. */
+  servicesUnavailable?: boolean;
   showExternalNodes: boolean;
   onToggleExternalNodes: () => void;
   /** Show DaemonSet / host-network peers (utils/daemonSetPeers). Off by default. */
@@ -113,6 +115,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
   allPodsLookup,
   services,
+  servicesUnavailable = false,
   showExternalNodes,
   onToggleExternalNodes,
   showDaemonSetNodes,
@@ -172,11 +175,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const map = new Map<NetworkTraffic, PeerResolution>();
     trafficPods.forEach((pod) => {
       pod.traffic?.forEach((traffic) => {
-        if (traffic.traffic_in_out_ip) map.set(traffic, resolvePeer(traffic, peerIndex));
+        if (traffic.traffic_in_out_ip) map.set(traffic, resolvePeerForView(traffic, peerIndex, !servicesUnavailable));
       });
     });
     return map;
-  }, [trafficPods, peerIndex]);
+  }, [trafficPods, peerIndex, servicesUnavailable]);
 
   // Build name-to-PodNodeData lookup for in-namespace pods (a resolved peer
   // is matched to its node by NAME, never by IP)

@@ -19,12 +19,14 @@ export const PROFILE_POLL_MAX_BACKOFF_MS = 300_000;
 
 /**
  * Failures worth backing off for: the Broker is slow or struggling (timeout,
- * 5xx, shed read, network), and asking again in 30 s only adds load. A 404
- * or 400 will not change by waiting, so those keep the plain poll.
+ * 5xx, shed read, network), and asking again in 30 s only adds load; or the
+ * read was refused (401/403), which lasts until someone fixes the token or
+ * its scope, so a fast poll only repeats the refusal. A 404 or 400 keeps the
+ * plain poll: the workload may appear.
  */
-function isTransient(err: unknown): boolean {
+function backsOff(err: unknown): boolean {
   const kind = errorKind(err);
-  return kind === 'timeout' || kind === 'busy' || kind === 'error';
+  return kind === 'timeout' || kind === 'busy' || kind === 'error' || kind === 'auth';
 }
 
 /**
@@ -32,7 +34,7 @@ function isTransient(err: unknown): boolean {
  * Refresh (`refreshTick`), and polls (the profile is computed live). A poll
  * that fails keeps the last good profile and surfaces the error beside it.
  * A poll is skipped while a read is still in flight, and after a transient
- * failure the next poll waits twice as long per consecutive failure (up to
+ * or auth failure the next poll waits twice as long per consecutive failure (up to
  * PROFILE_POLL_MAX_BACKOFF_MS); `reload` (the Retry button) resets that.
  */
 export function useWorkloadProfile(ns: string, kind: string, name: string, refreshTick = 0, pollMs = 30_000, api: ProfileApi = profileApi) {
@@ -56,7 +58,7 @@ export function useWorkloadProfile(ns: string, kind: string, name: string, refre
       setError(null);
     } catch (err) {
       if (!current()) return;
-      if (isTransient(err)) {
+      if (backsOff(err)) {
         failures.current += 1;
         nextPollAt.current = Date.now() + Math.min(pollMs * 2 ** failures.current, PROFILE_POLL_MAX_BACKOFF_MS);
       }
@@ -129,28 +131,50 @@ export function useElapsedSeconds(active: boolean): number {
   return active ? elapsed : 0;
 }
 
-/** Version history, newest first, with "load older" paging. */
+/**
+ * Version history, newest first, with "load older" paging. Another workload
+ * empties the list until its own first page answers, and a page of the
+ * previous workload's that answers late is dropped.
+ */
 export function useProfileVersions(ns: string, kind: string, name: string, refreshTick = 0, api: ProfileApi = profileApi) {
   const [data, setData] = useState<VersionList | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
+
+  const page = useCallback((before?: number) => api.listVersions(ns, kind, name, before === undefined ? {} : { before }), [api, ns, kind, name]);
+
+  // The workload the versions in `data` belong to: another one's are no answer for this one.
+  const dataFor = useRef(page);
 
   const load = useCallback(async () => {
     const current = begin();
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
+    if (dataFor.current !== page) {
+      dataFor.current = page;
+      setData(null);
+      setError(null);
+    }
     try {
-      const v = await api.listVersions(ns, kind, name);
+      const v = await page();
       if (!current()) return;
       setData(v);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
-  }, [api, ns, kind, name, begin]);
+  }, [page, begin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / key change
@@ -158,34 +182,51 @@ export function useProfileVersions(ns: string, kind: string, name: string, refre
   }, [load, refreshTick]);
 
   const loadMore = useCallback(async () => {
-    if (!data?.nextBefore) return;
+    if (!data?.nextBefore || firstPageInFlight.current) return;
+    const current = begin();
     setLoadingMore(true);
     try {
-      const more = await api.listVersions(ns, kind, name, { before: data.nextBefore });
+      const more = await page(data.nextBefore);
+      if (!current()) return;
       setData((prev) => (prev ? { ...more, items: [...prev.items, ...more.items] } : more));
     } catch (err) {
-      setError(err);
+      if (current()) setError(err);
     } finally {
-      setLoadingMore(false);
+      if (current()) setLoadingMore(false);
     }
-  }, [api, ns, kind, name, data]);
+  }, [page, data, begin]);
 
   return { data, loading, loadingMore, error, reload: load, loadMore };
 }
 
-/** The diff between two stored revisions (either may be omitted: broker defaults). */
+/**
+ * The diff between two stored revisions (either may be omitted: broker
+ * defaults). Another pair (or workload) clears the diff until its own
+ * answers, so the pickers never name revisions above another pair's diff;
+ * a Refresh of the same pair keeps it on screen meanwhile.
+ */
 export function useProfileDiff(ns: string, kind: string, name: string, from: number | undefined, to: number | undefined, enabled: boolean, api: ProfileApi = profileApi) {
   const [diff, setDiff] = useState<ProfileDiff | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
 
+  const read = useCallback(() => api.getDiff(ns, kind, name, { from, to }), [api, ns, kind, name, from, to]);
+
+  // The pair the diff on screen answers.
+  const diffFor = useRef(read);
+
   const load = useCallback(async () => {
     if (!enabled) return;
     const current = begin();
     setLoading(true);
+    if (diffFor.current !== read) {
+      diffFor.current = read;
+      setDiff(null);
+      setError(null);
+    }
     try {
-      const d = await api.getDiff(ns, kind, name, { from, to });
+      const d = await read();
       if (!current()) return;
       setDiff(d);
       setError(null);
@@ -197,7 +238,7 @@ export function useProfileDiff(ns: string, kind: string, name: string, from: num
     } finally {
       if (current()) setLoading(false);
     }
-  }, [api, ns, kind, name, from, to, enabled, begin]);
+  }, [read, enabled, begin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on selection change
