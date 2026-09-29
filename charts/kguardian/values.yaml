@@ -982,7 +982,7 @@ broker:
     # Leader only, and a single catalog query per pass while autovacuum is
     # healthy. Needs no privilege beyond owning the tables.
     enabled: true
-    # -- Seconds between checks (minimum 60, plus up to 10% jitter).
+    # -- Seconds between checks (minimum 60), on one schedule across replicas.
     intervalSeconds: 300
 
   # -- Scoped bearer-token auth on the broker HTTP API. Without it any pod
