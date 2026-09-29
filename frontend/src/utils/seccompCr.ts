@@ -1,5 +1,5 @@
 import type { SeccompProfile } from '../types/seccompProfile';
-import type { CaptureInfo, CrInfo, WorkloadProfileDetail } from '../types/seccompWorkload';
+import { CR_ARCHITECTURES, CR_DEFAULT_ACTIONS, CR_RULE_ACTIONS, type CaptureInfo, type CrInfo, type WorkloadProfileDetail } from '../types/seccompWorkload';
 import type { PodNodeData } from '../types';
 import { quoteYamlValue } from './networkPolicyGenerator';
 import { describePartialCapture, normalizeLevel } from './seccompCapture';
@@ -42,6 +42,29 @@ export interface CrRenderInput {
   workloadRef?: { kind: string; name: string } | null;
   /** Comment lines (without trailing newline) placed above the document. */
   header?: string[];
+}
+
+/**
+ * Values in `profile` the SeccompProfile CRD rejects (its enums, see
+ * charts/kguardian/files/kguardian.dev_seccompprofiles.yaml), as
+ * `<field> <value>`. The editor offers the full seccomp vocabulary for the
+ * SPO and raw JSON formats; a kguardian CR carrying one of these fails
+ * `kubectl apply`, so it is not exported. Empty rules are not rendered and
+ * are not checked.
+ */
+export function kguardianCrIssues(profile: SeccompProfile): string[] {
+  const out: string[] = [];
+  const allowed = (list: readonly string[], v: string) => list.includes(v);
+  if (!allowed(CR_DEFAULT_ACTIONS, profile.defaultAction)) out.push(`defaultAction ${profile.defaultAction}`);
+  // ARM64 stays valid in the CRD for manifests written with it.
+  (profile.architectures ?? [])
+    .filter((a) => !allowed(CR_ARCHITECTURES, a) && a !== 'SCMP_ARCH_ARM64')
+    .forEach((a) => out.push(`architecture ${a}`));
+  const actions = new Set((profile.syscalls ?? []).filter((r) => r.names.length > 0).map((r) => r.action));
+  actions.forEach((a) => {
+    if (!allowed(CR_RULE_ACTIONS, a)) out.push(`syscall rule action ${a}`);
+  });
+  return out;
 }
 
 /** Render a `kguardian.dev/v1alpha1` SeccompProfile CR manifest. */

@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 import {
   allowedSyscalls,
   buildExportYaml,
@@ -13,10 +17,11 @@ import {
   captureHeaderLines,
   podProfileToKguardianCR,
   suggestedCrName,
+  kguardianCrIssues,
 } from './seccompCr';
 import type { PodNodeData } from '../types';
 import type { SeccompProfile } from '../types/seccompProfile';
-import type { WorkloadProfileDetail } from '../types/seccompWorkload';
+import { CR_ARCHITECTURES, CR_DEFAULT_ACTIONS, CR_RULE_ACTIONS, type WorkloadProfileDetail } from '../types/seccompWorkload';
 
 const observed: SeccompProfile = {
   defaultAction: 'SCMP_ACT_LOG',
@@ -196,5 +201,38 @@ describe('seccompCr', () => {
     const bare: PodNodeData = { ...pod, pod: { ...pod.pod, workload_kind: null, workload_name: null, pod_identity: null, pod_name: 'Solo_Pod' } };
     expect(suggestedCrName(bare)).toBe('solo-pod');
     expect(podProfileToKguardianCR(bare, observed, { level: 'full', complete: true, pods: [] })).not.toContain('workloadRef');
+  });
+});
+
+// The kguardian CR is the default seccomp export, and its CRD enumerates the
+// actions and architectures it accepts. The editor offered the full seccomp
+// vocabulary (TRAP, TRACE, KILL_THREAD, ALLOW as default, MIPS/PPC/S390...),
+// which `kubectl apply` rejects: `Unsupported value: "SCMP_ACT_TRAP"`.
+describe('kguardian CR — only what the SeccompProfile CRD accepts', () => {
+  const crdPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../charts/kguardian/files/kguardian.dev_seccompprofiles.yaml');
+  const crdSpec = parse(fs.readFileSync(crdPath, 'utf8')).spec.versions[0].schema.openAPIV3Schema.properties.spec.properties;
+
+  test('the editor vocabularies are the CRD enums (ARM64 accepted but never offered)', () => {
+    expect([...CR_DEFAULT_ACTIONS]).toEqual(crdSpec.defaultAction.enum);
+    expect([...CR_RULE_ACTIONS]).toEqual(crdSpec.syscalls.items.properties.action.enum);
+    expect([...CR_ARCHITECTURES]).toEqual(crdSpec.architectures.items.enum.filter((a: string) => a !== 'SCMP_ARCH_ARM64'));
+  });
+
+  test('a profile inside the enums has no issues, and every issue names the field and value', () => {
+    expect(kguardianCrIssues(observed)).toEqual([]);
+    const outside: SeccompProfile = {
+      defaultAction: 'SCMP_ACT_TRAP',
+      architectures: ['SCMP_ARCH_X86_64', 'SCMP_ARCH_S390X'],
+      syscalls: [{ names: ['read'], action: 'SCMP_ACT_ALLOW' }, { names: ['ptrace'], action: 'SCMP_ACT_TRACE' }],
+    };
+    expect(kguardianCrIssues(outside)).toEqual([
+      'defaultAction SCMP_ACT_TRAP',
+      'architecture SCMP_ARCH_S390X',
+      'syscall rule action SCMP_ACT_TRACE',
+    ]);
+  });
+
+  test('a rule with no syscalls is not rendered, so its action is not an issue', () => {
+    expect(kguardianCrIssues({ ...observed, syscalls: [...observed.syscalls!, { names: [], action: 'SCMP_ACT_TRAP' }] })).toEqual([]);
   });
 });

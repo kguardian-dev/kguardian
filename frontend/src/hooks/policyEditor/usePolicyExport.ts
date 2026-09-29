@@ -6,7 +6,7 @@ import { policyToYAML } from '../../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
 import { toAuditNetworkPolicy } from '../../utils/auditNetworkPolicy';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
-import { podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
+import { kguardianCrIssues, podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
 import type { PodNodeData } from '../../types';
 import type { CaptureInfo } from '../../types/seccompWorkload';
 
@@ -84,6 +84,14 @@ export const usePolicyExport = ({
 }: UsePolicyExportProps) => {
   const [copiedToClipboard, setCopiedToClipboard] = useState(false);
 
+  // What the kguardian CR would carry that its CRD rejects. Checked on the
+  // action it actually exports (audit-first unless the operator picked one).
+  // Non-empty ⇒ no CR is exported: the editor shows these instead.
+  const crIssues =
+    policyType === 'seccomp' && seccompFormat === 'kguardian' && seccompProfile
+      ? kguardianCrIssues({ ...seccompProfile, defaultAction: crDefaultAction ?? 'SCMP_ACT_LOG' })
+      : [];
+
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
       return policyToYAML(networkFormat === 'audit' ? toAuditNetworkPolicy(policy) : policy);
@@ -95,7 +103,7 @@ export const usePolicyExport = ({
         // Use pod identity for resource name, fallback to pod name
         return profileToYAML(seccompProfile, podIdentity || podName, podNamespace);
       }
-      if (!pod) return null;
+      if (!pod || crIssues.length > 0) return null;
       return podProfileToKguardianCR(pod, seccompProfile, capture, { defaultAction: crDefaultAction });
     }
     return null;
@@ -173,5 +181,6 @@ export const usePolicyExport = ({
     handleCopy,
     handleDownload,
     getExportContent,
+    crIssues,
   };
 };

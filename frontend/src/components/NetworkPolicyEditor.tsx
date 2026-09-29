@@ -22,6 +22,7 @@ import type { IdentitySources } from '../utils/trafficIdentity';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
 import { useWorkloadCapture } from '../hooks/useWorkloadCapture';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
+import { CR_ARCHITECTURES, CR_DEFAULT_ACTIONS, CR_RULE_ACTIONS } from '../types/seccompWorkload';
 import { PolicyHeader } from './PolicyEditor';
 import { Modal } from './ui/Modal';
 import {
@@ -67,6 +68,21 @@ const PeerlessRuleNotice: React.FC<{ missing: string; add: string }> = ({ missin
 
 /** On a rule with peers but no ports: an empty port list matches every port. */
 const AllPortsNote = () => <p className="text-xs text-tertiary italic">All ports: no port restriction</p>;
+
+/** Shown in place of a kguardian CR its CRD would reject (kguardianCrIssues). */
+const CrBlockedNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    The kguardian SeccompProfile CRD does not accept {issues.join(', ')}. Pick a supported value in the visual editor, or
+    export as the Security Profiles Operator CR or raw JSON, which take the full seccomp vocabulary.
+  </div>
+);
+
+/** The kguardian CR's allowed values, plus the current one when it falls
+ *  outside them, so the editor shows what is selected rather than silently
+ *  displaying a different option. */
+const withCurrent = <T extends string>(allowed: readonly T[], current: T): T[] =>
+  allowed.includes(current) ? [...allowed] : [...allowed, current];
+const NOT_IN_CR = ' (not accepted by the kguardian CR)';
 
 const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType, podsLookup, services }) => {
   const env = useClusterEnvironment();
@@ -223,7 +239,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   } = useSyscallAutocomplete();
 
   // Export functionality
-  const { copiedToClipboard, handleCopy, handleDownload, getExportContent } = usePolicyExport({
+  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues } = usePolicyExport({
     policyType,
     policy,
     ciliumPolicy,
@@ -379,10 +395,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     </span>
                   </div>
                 )}
-                <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                  {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
-                  {getExportContent() ?? ''}
-                </pre>
+                {crIssues.length > 0 ? (
+                  <CrBlockedNotice issues={crIssues} />
+                ) : (
+                  <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
+                    {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
+                    {getExportContent() ?? ''}
+                  </pre>
+                )}
               </div>
             ) : (
               /* Visual Editor */
@@ -2006,6 +2026,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 ) : policyType === 'seccomp' && seccompProfile ? (
                   /* Seccomp Profile Visual Editor */
                   <>
+                    {crIssues.length > 0 && <CrBlockedNotice issues={crIssues} />}
+
                     {/* Default Action */}
                     <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
                       <h3 className="text-sm font-semibold text-primary mb-3">Default Action</h3>
@@ -2018,8 +2040,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             className="bg-hubble-card text-primary px-3 py-2 rounded border border-hubble-border
                                        focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent text-sm"
                           >
-                            {SECCOMP_ACTIONS.map(action => (
-                              <option key={action} value={action}>{action}</option>
+                            {(seccompFormat === 'kguardian' ? withCurrent(CR_DEFAULT_ACTIONS, seccompProfile.defaultAction) : SECCOMP_ACTIONS).map(action => (
+                              <option key={action} value={action}>
+                                {action}{seccompFormat === 'kguardian' && !(CR_DEFAULT_ACTIONS as readonly string[]).includes(action) ? NOT_IN_CR : ''}
+                              </option>
                             ))}
                           </select>
                         </div>
@@ -2046,7 +2070,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
                       <h3 className="text-sm font-semibold text-primary mb-3">Architectures</h3>
                       <div className="flex flex-wrap gap-2">
-                        {ARCHITECTURES.map(arch => (
+                        {(seccompFormat === 'kguardian'
+                          ? [...CR_ARCHITECTURES, ...(seccompProfile.architectures ?? []).filter((a) => !(CR_ARCHITECTURES as readonly string[]).includes(a))]
+                          : ARCHITECTURES
+                        ).map(arch => (
                           <button
                             key={arch}
                             onClick={() => toggleArchitecture(arch)}
@@ -2102,8 +2129,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       className="bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
                                                  focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                     >
-                                      {SECCOMP_ACTIONS.map(action => (
-                                        <option key={action} value={action}>{action}</option>
+                                      {(seccompFormat === 'kguardian' ? withCurrent(CR_RULE_ACTIONS, rule.action) : SECCOMP_ACTIONS).map(action => (
+                                        <option key={action} value={action}>
+                                          {action}{seccompFormat === 'kguardian' && !(CR_RULE_ACTIONS as readonly string[]).includes(action) ? NOT_IN_CR : ''}
+                                        </option>
                                       ))}
                                     </select>
                                   </div>

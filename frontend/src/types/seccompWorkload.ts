@@ -124,5 +124,13 @@ export interface ExportBody extends ExportParams {
 export const CR_DEFAULT_ACTIONS = ['SCMP_ACT_LOG', 'SCMP_ACT_ERRNO', 'SCMP_ACT_KILL', 'SCMP_ACT_KILL_PROCESS'] as const;
 export type CrDefaultAction = (typeof CR_DEFAULT_ACTIONS)[number];
 
+/** Actions the CRD accepts for `spec.syscalls[].action`. */
+export const CR_RULE_ACTIONS = ['SCMP_ACT_ALLOW', 'SCMP_ACT_LOG', 'SCMP_ACT_ERRNO', 'SCMP_ACT_KILL', 'SCMP_ACT_KILL_PROCESS'] as const;
+
+/** Architectures the CRD accepts for `spec.architectures`, less
+ *  `SCMP_ARCH_ARM64`: the CRD still accepts it for old manifests, but it is not
+ *  an OCI name and new ones use `SCMP_ARCH_AARCH64` (see ARCHITECTURES). */
+export const CR_ARCHITECTURES = ['SCMP_ARCH_X86_64', 'SCMP_ARCH_X86', 'SCMP_ARCH_X32', 'SCMP_ARCH_AARCH64'] as const;
+
 /** Workload kinds `spec.workloadRef.kind` accepts. */
 export const CR_WORKLOAD_KINDS = ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob', 'Job', 'ReplicaSet', 'ReplicationController'] as const;
