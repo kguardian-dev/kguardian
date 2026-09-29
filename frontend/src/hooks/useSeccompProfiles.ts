@@ -53,22 +53,32 @@ export function useSeccompProfileDetail(api: SeccompApi, ns: string | null, kind
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
+  // Only the latest request may write: switching workload while a read was
+  // in flight let the previous workload's late answer replace the current
+  // one's, and its profile was then shown and exported under this name.
+  const seq = useRef(0);
 
   const reload = useCallback(async () => {
+    const id = ++seq.current;
+    const current = () => id === seq.current;
     if (!ns || !kind || !name) {
       setDetail(null);
+      setLoading(false); // a read still in flight for the previous workload no longer counts
       return;
     }
     setLoading(true);
     try {
-      setDetail(await api.getProfile(ns, kind, name));
+      const d = await api.getProfile(ns, kind, name);
+      if (!current()) return;
+      setDetail(d);
       setError(null);
       setErrorStatus(null);
     } catch (err) {
+      if (!current()) return;
       setError(describe(err));
       setErrorStatus(err instanceof SeccompApiError ? err.status : null);
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [api, ns, kind, name]);
 

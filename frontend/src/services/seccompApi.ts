@@ -1,4 +1,5 @@
 import apiClient from './api';
+import { isTimeout, PROFILE_READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { ExportBody, ExportParams, WorkloadProfileDetail, WorkloadProfileSummary } from '../types/seccompWorkload';
 
 /**
@@ -28,6 +29,8 @@ export class SeccompApiError extends Error {
 
 export interface SeccompApiOptions {
   fetchImpl?: typeof fetch;
+  /** Give up after this long (default: just past the Broker's statement timeout). */
+  timeoutMs?: number;
 }
 
 function seg(s: string): string {
@@ -37,9 +40,17 @@ function seg(s: string): string {
 export class SeccompApi {
   private readonly fetchImpl: typeof fetch;
 
+  private readonly timeoutMs: number;
+
   constructor(opts: SeccompApiOptions = {}) {
     // Bind lazily so a test can install a global fetch mock after construction.
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
+    // Every read needs a timeout: a hung one held the list hook's in-flight
+    // guard forever, so every later poll was skipped with no error shown.
+    // Past the statement timeout rather than READ_TIMEOUT_MS, because the list
+    // can legitimately take most of it (see useSeccompProfileFallback), and a
+    // client abort before the Broker answers only repeats the statement.
+    this.timeoutMs = opts.timeoutMs ?? PROFILE_READ_TIMEOUT_MS;
   }
 
   private get base(): string {
@@ -49,13 +60,19 @@ export class SeccompApi {
   private async send(method: 'GET' | 'POST', path: string, accept: string, body?: unknown): Promise<{ status: number; ok: boolean; text: string }> {
     const headers: Record<string, string> = { Accept: accept };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const res = await this.fetchImpl(`${this.base}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: 'same-origin',
-    });
-    return { status: res.status, ok: res.ok, text: await res.text() };
+    try {
+      const res = await this.fetchImpl(`${this.base}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        credentials: 'same-origin',
+        signal: timeoutSignal(this.timeoutMs),
+      });
+      return { status: res.status, ok: res.ok, text: await res.text() };
+    } catch (err) {
+      if (isTimeout(err)) throw new SeccompApiError(0, timeoutMessage(this.timeoutMs), null);
+      throw err;
+    }
   }
 
   private get(path: string, accept: string) {
