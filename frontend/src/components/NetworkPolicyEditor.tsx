@@ -16,7 +16,7 @@ import {
   type DenyAllCause,
 } from '../utils/cniPolicySupport';
 import { ipBlockScope } from '../utils/ipBlockScope';
-import { ruleHasPeers } from '../utils/networkPolicyGenerator';
+import { isValidPolicyPort, ruleHasPeers } from '../utils/networkPolicyGenerator';
 import { ciliumRuleHasPeers } from '../utils/ciliumPolicyGenerator';
 import type { IdentitySources } from '../utils/trafficIdentity';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
@@ -74,6 +74,14 @@ const CrBlockedNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
   <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
     The kguardian SeccompProfile CRD does not accept {issues.join(', ')}. Pick a supported value in the visual editor, or
     export as the Security Profiles Operator CR or raw JSON, which take the full seccomp vocabulary.
+  </div>
+);
+
+/** Shown in place of a NetworkPolicy with a port the API server rejects. */
+const InvalidPortsNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    Nothing to export: {issues.join(', ')} is not a valid port. A port is a number from 1 to 65535 or a named
+    container port (for example http).
   </div>
 );
 
@@ -239,7 +247,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   } = useSyscallAutocomplete();
 
   // Export functionality
-  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues } = usePolicyExport({
+  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues, portIssues } = usePolicyExport({
     policyType,
     policy,
     ciliumPolicy,
@@ -397,6 +405,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 )}
                 {crIssues.length > 0 ? (
                   <CrBlockedNotice issues={crIssues} />
+                ) : portIssues.length > 0 ? (
+                  <InvalidPortsNotice issues={portIssues} />
                 ) : (
                   <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
                     {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
@@ -865,14 +875,16 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                         </select>
                                         <span className="text-xs text-tertiary">/</span>
                                         <input
-                                          type="number"
+                                          type="text"
                                           value={port.port}
-                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', parseInt(e.target.value) || 0, 'ingress')}
-                                          className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
-                                          placeholder="80"
-                                          min="1"
-                                          max="65535"
+                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', e.target.value, 'ingress')}
+                                          aria-invalid={!isValidPolicyPort(port.port)}
+                                          title={isValidPolicyPort(port.port) ? undefined : 'A number from 1 to 65535 or a named port'}
+                                          className={`w-24 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                       isValidPolicyPort(port.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                     }`}
+                                          placeholder="80 or http"
                                         />
                                         <button
                                           onClick={() => removePortFromRule(rule.id, portIndex, 'ingress')}
@@ -1351,14 +1363,16 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                         </select>
                                         <span className="text-xs text-tertiary">/</span>
                                         <input
-                                          type="number"
+                                          type="text"
                                           value={port.port}
-                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', parseInt(e.target.value) || 0, 'egress')}
-                                          className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
-                                          placeholder="80"
-                                          min="1"
-                                          max="65535"
+                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', e.target.value, 'egress')}
+                                          aria-invalid={!isValidPolicyPort(port.port)}
+                                          title={isValidPolicyPort(port.port) ? undefined : 'A number from 1 to 65535 or a named port'}
+                                          className={`w-24 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                       isValidPolicyPort(port.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                     }`}
+                                          placeholder="80 or http"
                                         />
                                         <button
                                           onClick={() => removePortFromRule(rule.id, portIndex, 'egress')}

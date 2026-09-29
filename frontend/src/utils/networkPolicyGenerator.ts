@@ -507,6 +507,39 @@ export function ruleHasPeers(rule: NetworkPolicyRule): boolean {
   return rule.peers.length > 0;
 }
 
+/** An IANA service name, the form of a named container port: 1-15 lowercase
+ *  letters, digits and inner single hyphens, with at least one letter. */
+const PORT_NAME_RE = /^(?=.{1,15}$)(?=.*[a-z])[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/**
+ * What `NetworkPolicyPort.port` accepts: a number 1-65535 (or its decimal
+ * string, as the editor holds it) or a named port. Anything else, including
+ * the empty string a cleared field leaves, makes the API server reject the
+ * whole policy.
+ */
+export function isValidPolicyPort(port: string | number): boolean {
+  if (typeof port === 'number') return Number.isInteger(port) && port >= 1 && port <= 65535;
+  if (/^[0-9]+$/.test(port)) return isValidPolicyPort(Number(port));
+  return PORT_NAME_RE.test(port);
+}
+
+/** Every invalid port in the rules that render, as `<direction> rule <n>: port "<value>"`. */
+export function invalidPolicyPorts(policy: NetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule, i) => {
+      if (!ruleHasPeers(rule)) return;
+      rule.ports.filter((p) => !isValidPolicyPort(p.port)).forEach((p) => out.push(`${dir} rule ${i + 1}: port "${p.port}"`));
+    });
+  });
+  return out;
+}
+
+/** A port number is written bare; a named port is a string, quoted when YAML
+ *  would read it as something else (`no`, `on`). */
+const portValue = (port: string | number): string =>
+  typeof port === 'number' || /^[0-9]+$/.test(port) ? String(port) : quoteYamlValue(port);
+
 /** A peer's selector. No labels is written `{}`, the API's "select all"
  *  (every pod in the namespace, or every namespace), rather than a bare
  *  `matchLabels:` that reads as if something were missing. */
@@ -566,7 +599,7 @@ export function policyToYAML(policy: NetworkPolicy): string {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
           yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
-          yaml.push(`      port: ${port.port}`);
+          yaml.push(`      port: ${portValue(port.port)}`);
         });
       }
     });
@@ -595,7 +628,7 @@ export function policyToYAML(policy: NetworkPolicy): string {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
           yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
-          yaml.push(`      port: ${port.port}`);
+          yaml.push(`      port: ${portValue(port.port)}`);
         });
       }
     });

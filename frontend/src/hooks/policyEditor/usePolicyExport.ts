@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { NetworkPolicy } from '../../types/networkPolicy';
 import type { CiliumNetworkPolicy } from '../../types/ciliumPolicy';
 import type { SeccompProfile } from '../../types/seccompProfile';
-import { policyToYAML } from '../../utils/networkPolicyGenerator';
+import { invalidPolicyPorts, policyToYAML } from '../../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
 import { toAuditNetworkPolicy } from '../../utils/auditNetworkPolicy';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
@@ -92,8 +92,13 @@ export const usePolicyExport = ({
       ? kguardianCrIssues({ ...seccompProfile, defaultAction: crDefaultAction ?? 'SCMP_ACT_LOG' })
       : [];
 
+  // Ports the API server would reject (a cleared field, 0, out of range).
+  // Non-empty ⇒ nothing is exported: the editor lists them instead.
+  const portIssues = policyType === 'network' && policy ? invalidPolicyPorts(policy) : [];
+
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
+      if (portIssues.length > 0) return null;
       return policyToYAML(networkFormat === 'audit' ? toAuditNetworkPolicy(policy) : policy);
     } else if (policyType === 'cilium' && ciliumPolicy) {
       return ciliumPolicyToYAML(ciliumPolicy);
@@ -182,5 +187,6 @@ export const usePolicyExport = ({
     handleDownload,
     getExportContent,
     crIssues,
+    portIssues,
   };
 };

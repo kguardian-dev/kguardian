@@ -84,6 +84,28 @@ test('a rule with sources but no ports says it allows every port', async () => {
   expect(screen.getByText('All ports: no port restriction')).toBeTruthy();
 });
 
+// Clearing the port field used to store 0 and export `port: 0`, which the
+// API server rejects; a named port could not be typed at all.
+test('a cleared port blocks the export and says so; a named port is exported as a name', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
+  await waitForYaml('app: api');
+  toVisual();
+  const input = screen.getByDisplayValue('8080') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: '' } });
+  expect(input.getAttribute('aria-invalid')).toBe('true');
+
+  toYaml();
+  expect(document.querySelector('pre')).toBeNull();
+  const notice = screen.getByText(/not a valid port/);
+  expect(notice.textContent).toContain('egress rule 1: port ""');
+  expect(notice.textContent).not.toContain('port: 0');
+
+  toVisual();
+  fireEvent.change(screen.getByPlaceholderText('80 or http'), { target: { value: 'http' } });
+  toYaml();
+  expect(parse(yamlText()).spec.egress[0].ports).toEqual([{ protocol: 'TCP', port: 'http' }]);
+});
+
 test('cilium: a rule with ports but no peer is flagged and left out, never an L4-only allow-all', async () => {
   render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="cilium" />);
   await waitForYaml('kind: CiliumNetworkPolicy');

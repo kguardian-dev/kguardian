@@ -241,6 +241,10 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
     type: 'ingress' | 'egress'
   ) => {
     if (!policy) return;
+    // The port field is free text: a number, a named port, or (mid-edit)
+    // empty. Digits are stored as a number; anything else is kept as typed
+    // and flagged by isValidPolicyPort rather than coerced to 0.
+    if (field === 'port' && typeof value === 'string' && /^[0-9]+$/.test(value)) value = Number(value);
     if (type === 'ingress') {
       setPolicy({
         ...policy,

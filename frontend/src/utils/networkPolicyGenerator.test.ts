@@ -10,7 +10,7 @@ vi.mock('../services/api', () => ({
 }));
 
 import { parse } from 'yaml';
-import { generateNetworkPolicy, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
+import { generateNetworkPolicy, invalidPolicyPorts, isValidPolicyPort, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
 import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers } from './ciliumPolicyGenerator';
 import type { NetworkPolicy, NetworkPolicyRule } from '../types/networkPolicy';
 import type { CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy } from '../types/ciliumPolicy';
@@ -241,5 +241,55 @@ describe('policyToYAML / ciliumPolicyToYAML — a rule with no peers is left out
     // An empty selector is an explicit peer: every endpoint in the namespace.
     expect(ciliumRuleHasPeers({ id: 'x', fromEndpoints: [{ matchLabels: {} }] })).toBe(true);
     expect(ciliumRuleHasPeers({ id: 'x', toEndpoints: [], toPorts: ports('53') })).toBe(false);
+  });
+});
+
+// A NetworkPolicy port is a number 1-65535 or a named container port (an
+// IANA service name: at most 15 lowercase letters, digits and inner hyphens,
+// with at least one letter). Clearing the editor's port field used to store
+// 0, exported as `port: 0`, which the API server rejects.
+describe('isValidPolicyPort / invalidPolicyPorts / port rendering', () => {
+  it.each([[80], [1], [65535], ['8080'], ['http'], ['metrics-9'], ['a'], ['dns-tcp']])('accepts %s', (port) => {
+    expect(isValidPolicyPort(port)).toBe(true);
+  });
+
+  it.each([[0], [65536], [-1], [1.5], [''], ['0'], ['99999'], ['HTTP'], ['-http'], ['http-'], ['h--p'], ['123-456'], ['averyveryverylongname'], ['8080 ']])(
+    'rejects %j',
+    (port) => {
+      expect(isValidPolicyPort(port)).toBe(false);
+    },
+  );
+
+  const policyWithPorts = (ports: NetworkPolicyRule['ports']): NetworkPolicy => ({
+    apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'web-policy', namespace: 'prod' },
+    spec: {
+      podSelector: { matchLabels: { app: 'web' } }, policyTypes: ['Ingress', 'Egress'],
+      ingress: [{ id: 'i', peers: [{ podSelector: { matchLabels: { app: 'api' } } }], ports }],
+      egress: [{ id: 'e', peers: [{ ipBlock: { cidr: '10.0.0.0/8' } }], ports: [{ protocol: 'UDP', port: 53 }] }],
+    },
+  });
+
+  it('invalidPolicyPorts names each bad port by direction and rule', () => {
+    expect(invalidPolicyPorts(policyWithPorts([{ protocol: 'TCP', port: 8080 }]))).toEqual([]);
+    expect(invalidPolicyPorts(policyWithPorts([{ protocol: 'TCP', port: '' }, { protocol: 'TCP', port: 0 }]))).toEqual([
+      'ingress rule 1: port ""',
+      'ingress rule 1: port "0"',
+    ]);
+  });
+
+  it('a peerless rule is not exported, so its ports are not checked', () => {
+    const policy = policyWithPorts([{ protocol: 'TCP', port: 8080 }]);
+    policy.spec.egress = [{ id: 'e', peers: [], ports: [{ protocol: 'TCP', port: '' }] }];
+    expect(invalidPolicyPorts(policy)).toEqual([]);
+  });
+
+  it('a named port renders as a string, a numeric one as a number', () => {
+    const doc = parse(policyToYAML(policyWithPorts([{ protocol: 'TCP', port: 'http' }, { protocol: 'TCP', port: '8443' }, { protocol: 'TCP', port: 'no' }])));
+    // `no` is a YAML 1.1 boolean unless quoted.
+    expect(doc.spec.ingress[0].ports).toEqual([
+      { protocol: 'TCP', port: 'http' },
+      { protocol: 'TCP', port: 8443 },
+      { protocol: 'TCP', port: 'no' },
+    ]);
   });
 });
