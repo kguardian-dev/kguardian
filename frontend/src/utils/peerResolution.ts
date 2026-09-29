@@ -58,7 +58,7 @@ export const PRIVATE_NAMESPACE = 'private';
 export const PRIVATE_LABEL = 'Private network';
 
 /** Its tooltip. */
-export const PRIVATE_PEER_TOOLTIP = 'private, link-local, loopback or multicast address that no pod, node or Service record holds; not Internet';
+export const PRIVATE_PEER_TOOLTIP = 'private, link-local, loopback or multicast address that no pod, node or Service record holds (typically a load balancer, VPC endpoint or peered network); not Internet';
 
 /**
  * Broker timestamps are naive UTC (`2026-08-04T09:12:41[.ffffff]`, no zone).
