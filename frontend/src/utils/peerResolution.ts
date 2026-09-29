@@ -323,13 +323,14 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
 }
 
 /**
- * An address no pod ever held, when whether it is a Service ClusterIP could
- * not be established (the Service listing or the `/svc/ip` lookup failed):
- * a ClusterIP is allocated from the cluster's Service CIDR, which is private
- * address space, so a private address may be one and is unattributed, never
- * external. A public address cannot be a ClusterIP and stays external.
+ * An address no known pod holds, when whether it is a Service ClusterIP (the
+ * Service listing or `/svc/ip` failed) or a pod (`/pod/ip` failed) could not
+ * be established: ClusterIPs and pod IPs are allocated from the cluster's
+ * Service and pod CIDRs, which are private address space, so a private
+ * address may be one and is unattributed, never external. A public address
+ * cannot be one and stays external.
  */
-export function mayBeUncheckedClusterIP(ip: string): boolean {
+export function mayBeUncheckedClusterAddress(ip: string): boolean {
   return isPrivateAddress(ip);
 }
 
@@ -342,7 +343,7 @@ export function mayBeUncheckedClusterIP(ip: string): boolean {
 export function resolvePeerForView(row: NetworkTraffic, index: PeerIndex, servicesKnown: boolean): PeerResolution {
   const peer = resolvePeer(row, index);
   const ip = row.traffic_in_out_ip;
-  if (peer.kind === 'unknown' && !servicesKnown && ip && mayBeUncheckedClusterIP(ip)) return { kind: 'unattributed', ip, at: row.time_stamp, reason: 'service-lookup-failed' };
+  if (peer.kind === 'unknown' && !servicesKnown && ip && mayBeUncheckedClusterAddress(ip)) return { kind: 'unattributed', ip, at: row.time_stamp, reason: 'service-lookup-failed' };
   return peer;
 }
 

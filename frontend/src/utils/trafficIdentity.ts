@@ -4,7 +4,7 @@ import { specNodeName } from './hostNetwork';
 import {
   buildPeerIndex,
   isPlaceholderPod,
-  mayBeUncheckedClusterIP,
+  mayBeUncheckedClusterAddress,
   peerSelectorLabels,
   podEligibleAt,
   parseBrokerTime,
@@ -39,8 +39,8 @@ export interface TrafficIdentity {
   /** No pod may be selected for this row: the start-time guard excluded
    *  every pod that ever held the IP (the flow predates the current holder),
    *  or the stored peer is gone from the broker, or no pod ever held the
-   *  private address and the Service lookup failed (it may be a ClusterIP;
-   *  utils/peerResolution `mayBeUncheckedClusterIP`). Rendered as an ipBlock
+   *  private address and the Service or pod lookup failed (`reason`; it may be one;
+   *  utils/peerResolution `mayBeUncheckedClusterAddress`). Rendered as an ipBlock
    *  with the `unattributed peer` comment, never as a selector. `at` is the
    *  row's `time_stamp` verbatim. `service` (`<ns>/<name>`) is set when the IP
    *  is a Service ClusterIP whose selector is unknown (spec never stored). */
@@ -100,15 +100,22 @@ function serviceRowIdentity(serviceInfo: ServiceInfo, ip: string, at: string): T
  * is applied here on the returned record (known start, not after the flow),
  * because a broker predating `?at=` ignores the parameter and returns the
  * current holder. A guarded-out result is `{ isExternal: true, unattributed }`,
- * as is a private address no pod holds whose Service lookup failed.
+ * as is a private address no pod holds whose Service or pod lookup failed
+ * (a 404 is "not one"; any other failure leaves it unchecked).
+ *
+ * `services` is a Service listing the caller holds: an address in it is that
+ * Service with no `/svc/ip` read, and one not in it is not a Service when
+ * `/svc/ip` fails.
  */
-export async function resolveTrafficIdentity(ip: string, at?: string): Promise<TrafficIdentity> {
+export async function resolveTrafficIdentity(ip: string, at?: string, services?: readonly ServiceInfo[]): Promise<TrafficIdentity> {
   if (!ip) {
     return { isExternal: true };
   }
 
-  // Priority 1: Try to get service info from API
+  // Priority 1: the Service whose ClusterIP it is, from the listing, else /svc/ip.
   let serviceUnchecked = false;
+  const listed = services?.find((s) => s.svc_ip === ip && s.svc_name);
+  if (listed) return serviceRowIdentity(listed, ip, at ?? '');
   try {
     const serviceInfo = await apiClient.getServiceByIP(ip);
     if (serviceInfo && serviceInfo.svc_name) {
@@ -116,11 +123,12 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
     }
   } catch {
     // Service lookup failed (not a 404): continue to pod lookup, but the
-    // address may still be a ClusterIP.
-    serviceUnchecked = true;
+    // address may still be a ClusterIP, unless the listing says it is not.
+    serviceUnchecked = !services;
   }
 
   // Priority 2: Try to get pod info from API (checks all namespaces)
+  let podUnchecked = false;
   try {
     const podInfo = await apiClient.getPodDetailsByIP(ip, at);
     if (podInfo && podInfo.pod_name) {
@@ -130,11 +138,15 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
       return podIdentityFromRecord(podInfo);
     }
   } catch {
-    // Pod lookup failed, continue to external
+    // Pod lookup failed (not a 404): the address may still be a pod.
+    podUnchecked = true;
   }
 
-  // No pod, and the Service lookup failed: a ClusterIP is not external.
-  if (serviceUnchecked && mayBeUncheckedClusterIP(ip)) return { isExternal: true, unattributed: { ip, at: at ?? '', reason: 'service-lookup-failed' } };
+  // A lookup that failed cannot say a private address is external. The
+  // Service lookup is named first: the address may be a ClusterIP.
+  if ((serviceUnchecked || podUnchecked) && mayBeUncheckedClusterAddress(ip)) {
+    return { isExternal: true, unattributed: { ip, at: at ?? '', reason: serviceUnchecked ? 'service-lookup-failed' : 'pod-lookup-failed' } };
+  }
 
   // Priority 3: External traffic
   return { isExternal: true };
@@ -158,7 +170,7 @@ export interface IdentitySources {
  * first, then the guarded by-IP fallback. Service ClusterIPs come from the
  * supplied `services` listing when it has them, else from `/svc/ip`, cached.
  * When the listing is unavailable the resolver degrades to
- * `resolveTrafficIdentity(ip, row.time_stamp)` per distinct (ip, time),
+ * `resolveTrafficIdentity(ip, row.time_stamp, services)` per distinct (ip, time),
  * which still applies the guard on whatever the broker returns.
  */
 export interface RowIdentityResolver {
@@ -204,7 +216,7 @@ export async function createRowIdentityResolver(sources: IdentitySources = {}): 
     const key = `${ip}@${at}`;
     let p = byIpAt.get(key);
     if (!p) {
-      p = resolveTrafficIdentity(ip, at);
+      p = resolveTrafficIdentity(ip, at, Array.isArray(sources.services) ? sources.services : undefined);
       byIpAt.set(key, p);
     }
     return p;
@@ -250,7 +262,7 @@ export async function createRowIdentityResolver(sources: IdentitySources = {}): 
         // No pod ever held the IP: Service ClusterIP, else external. A
         // lookup that failed cannot say it is not a ClusterIP.
         const svc = await lookupService(ip);
-        if (svc === LOOKUP_FAILED) return mayBeUncheckedClusterIP(ip) ? { isExternal: true, unattributed: { ip, at: row.time_stamp, reason: 'service-lookup-failed' } } : { isExternal: true };
+        if (svc === LOOKUP_FAILED) return mayBeUncheckedClusterAddress(ip) ? { isExternal: true, unattributed: { ip, at: row.time_stamp, reason: 'service-lookup-failed' } } : { isExternal: true };
         return svc && svc.svc_name ? serviceRowIdentity(svc, ip, row.time_stamp) : { isExternal: true };
       }
     }

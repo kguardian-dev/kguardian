@@ -69,3 +69,14 @@ test('/svc/ip: a 404 is "not a Service" (null); any other failure is rethrown, s
   get.mockRejectedValueOnce(new Error('timeout of 10000ms exceeded') as never);
   await expect(apiClient.getServiceByIP('10.96.0.50')).rejects.toThrow(/timeout/);
 });
+
+test('/pod/ip: a 404 is "no holder" (null); any other failure is rethrown, so it is never mistaken for one', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const get = vi.spyOn(axiosOf(apiClient), 'get');
+  get.mockRejectedValueOnce(new AxiosError('Not Found', 'ERR_BAD_REQUEST', undefined, undefined, { status: 404 } as never) as never);
+  await expect(apiClient.getPodDetailsByIP('10.244.7.7', '2026-09-03T05:00:03')).resolves.toBeNull();
+  get.mockRejectedValueOnce(new AxiosError('Service Unavailable', 'ERR_BAD_RESPONSE', undefined, undefined, { status: 503 } as never) as never);
+  await expect(apiClient.getPodDetailsByIP('10.244.7.7')).rejects.toThrow('Service Unavailable');
+  get.mockRejectedValueOnce(new Error('timeout of 10000ms exceeded') as never);
+  await expect(apiClient.getPodDetailsByIP('10.244.7.7')).rejects.toThrow(/timeout/);
+});

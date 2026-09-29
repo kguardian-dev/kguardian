@@ -85,6 +85,8 @@ let listing: PodInfo[] | (() => never) = [cmangosDatabase, autobrr, cmangosWeb];
 let services: Record<string, ServiceInfo> = {};
 /** `/svc/ip` fails (timeout, 5xx), as opposed to answering 404 (null). */
 let svcLookupFails = false;
+/** `/pod/ip` fails (timeout, 5xx), as opposed to answering 404 (null). */
+let podLookupFails = false;
 const byName = () => Object.fromEntries((typeof listing === 'function' ? [] : listing).map((p) => [p.pod_name, p]));
 
 vi.mock('../services/api', () => ({
@@ -95,7 +97,10 @@ vi.mock('../services/api', () => ({
     }),
     getAllPods: vi.fn(async () => (typeof listing === 'function' ? listing() : listing)),
     // Pre-`?at=` broker: always the current holder.
-    getPodDetailsByIP: vi.fn(async (ip: string) => (ip === '10.244.12.199' ? autobrr : null)),
+    getPodDetailsByIP: vi.fn(async (ip: string) => {
+      if (podLookupFails) throw new Error('timeout of 10000ms exceeded');
+      return ip === '10.244.12.199' ? autobrr : null;
+    }),
     getPodDetailsByName: vi.fn(async (name: string) => byName()[name] ?? null),
   },
 }));
@@ -181,6 +186,7 @@ beforeEach(() => {
   listing = [cmangosDatabase, autobrr, cmangosWeb];
   services = {};
   svcLookupFails = false;
+  podLookupFails = false;
   vi.mocked(apiClient.getPodDetailsByIP).mockClear();
 });
 
@@ -520,5 +526,76 @@ describe('generators — a failed /svc/ip lookup', () => {
     svcLookupFails = true;
     const yaml = policyToYAML(await generateNetworkPolicy(both, { services: [dbService] }));
     expect(commentLines(yaml)).toEqual([]);
+  });
+});
+
+// Pod listing down too: the by-IP fallback (`/svc/ip`, then `/pod/ip`) per
+// row. Each lookup tells "not one" (404) from "failed"; a private address
+// either lookup could not rule out is unattributed, never external.
+describe('generators — pod listing down: every combination of the by-IP lookups', () => {
+  const podIpRow = egressRow('10.244.7.7', '8080', '2026-09-03T05:00:03');
+  const publicRow = egressRow('203.0.113.9', '443', '2026-09-03T05:00:02');
+  const listingDown = () => { listing = () => { throw new Error('broker down'); }; };
+  const comments = async (pod: PodNodeData, sources = {}) => {
+    const standard = commentLines(policyToYAML(await generateNetworkPolicy(pod, sources)));
+    expect(commentLines(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(pod, sources)))).toEqual(standard);
+    return standard;
+  };
+
+  test('Service 404, pod lookup failed: unattributed, saying the pod lookup failed', async () => {
+    listingDown();
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (pod lookup failed)']);
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [podIpRow])));
+    expect(spec(parse(yaml)).egress).toEqual([{ to: [{ ipBlock: { cidr: '10.244.7.7/32' } }], ports: [{ protocol: 'TCP', port: 8080 }] }]);
+  });
+
+  test('Service lookup failed, pod 404: unattributed, saying the Service lookup failed', async () => {
+    listingDown();
+    svcLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (Service lookup failed)']);
+  });
+
+  test('both lookups failed: unattributed, the Service lookup named (it may be a ClusterIP)', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (Service lookup failed)']);
+  });
+
+  test('both 404: external, no comment', async () => {
+    listingDown();
+    expect(await comments(target(cmangosDatabase, [podIpRow]))).toEqual([]);
+  });
+
+  test('a public address is external whichever lookup failed', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [publicRow]))).toEqual([]);
+  });
+
+  test('a supplied Service listing is used by IP before /svc/ip: the Service selector, no lookup', async () => {
+    listingDown();
+    svcLookupFails = true;
+    vi.mocked(apiClient.getServiceByIP).mockClear();
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [egressRow('10.96.0.10', '5432', '2026-09-03T05:00:01')]), { services: [dbService] }));
+    expect(vi.mocked(apiClient.getServiceByIP)).not.toHaveBeenCalled();
+    expect(normaliseStandard(spec(parse(yaml)).egress, 'game-servers')).toEqual([
+      { to: [{ podSelector: { matchLabels: { app: 'db' } } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+    ]);
+  });
+
+  test('a supplied listing without the address answers for a failed /svc/ip: pod 404 ⇒ external', async () => {
+    listingDown();
+    svcLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]), { services: [dbService] })).toEqual([]);
+  });
+
+  test('a supplied listing without the address, pod lookup failed: still unattributed (pod lookup failed)', async () => {
+    listingDown();
+    svcLookupFails = true;
+    podLookupFails = true;
+    expect(await comments(target(cmangosDatabase, [podIpRow]), { services: [dbService] })).toEqual(['# unattributed peer 10.244.7.7 at 2026-09-03T05:00:03 (pod lookup failed)']);
   });
 });
