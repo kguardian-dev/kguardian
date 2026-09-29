@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.20.7](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.6...frontend/v1.20.7) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** allow a Service's targetPort in generated egress rules ([82b8135](https://github.com/kguardian-dev/kguardian/commit/82b8135d3e9f92670e4ed80a0fd018cd79bc73df))
+* **broker:** stop pod_compute_latest's TOAST churn and vacuum small tables when autovacuum lags ([703d64e](https://github.com/kguardian-dev/kguardian/commit/703d64e71db37caf86eb9fabd3e9558bba8e233f))
+* **chart:** guard leader election settings and run the UI read-only ([1539fd6](https://github.com/kguardian-dev/kguardian/commit/1539fd6073102f02de8c033090c8e9c032f75996))
+* **frontend:** allow a Service's targetPort, not its port, on generated egress rules ([f321785](https://github.com/kguardian-dev/kguardian/commit/f32178595ffb539f608d3b39c085f5b9f23c4b45))
+* **frontend:** answer /oauth2/userinfo with 204 when no SSO proxy is in front ([4eea0ec](https://github.com/kguardian-dev/kguardian/commit/4eea0ec3e702534a80472a57f683ee39bb3a608a))
+* **frontend:** attach a Service on the map only to pods in its namespace ([0bd3086](https://github.com/kguardian-dev/kguardian/commit/0bd308641663b3b0d43e8da8d74848c946b3b0d3))
+* **frontend:** base each workload's fix chip on its own image ([cd8c266](https://github.com/kguardian-dev/kguardian/commit/cd8c266703b5ed30f7c9618dc071903713ec53c1))
+* **frontend:** check the IP for a namespaceless row's only same-named pod ([6a3bd07](https://github.com/kguardian-dev/kguardian/commit/6a3bd077542d7c1cc9bc682acfb547757cb87330))
+* **frontend:** count the culprits the broker leaves off in blame shares ([f331d3d](https://github.com/kguardian-dev/kguardian/commit/f331d3d53bb0b2279bc82c8e5002b483fe23a3d4))
+* **frontend:** images list scope, fix chips, assistant links and the Esc lens ([1d3f8c5](https://github.com/kguardian-dev/kguardian/commit/1d3f8c50077c4f1afe51cc925b4bd8db8b8c8090))
+* **frontend:** keep the assistant's page context within llm-bridge's limit ([9bfa8a6](https://github.com/kguardian-dev/kguardian/commit/9bfa8a64b7b304adc479538b0327659f49af3153))
+* **frontend:** keep the lens chosen while focused when Esc leaves focus ([0dc6771](https://github.com/kguardian-dev/kguardian/commit/0dc677121f8a1465cff1293ec7e98ba881e47acb))
+* **frontend:** match a row's capturing pod by name when it has no namespace ([ed6eb44](https://github.com/kguardian-dev/kguardian/commit/ed6eb44851a99994d83e167ef48f70fad9ae0433))
+* **frontend:** name the capturing pod as the local side of aggregate-card rows ([c5d18f7](https://github.com/kguardian-dev/kguardian/commit/c5d18f7d09c1437f59b6f272c530332242062cf5))
+* **frontend:** name the capturing pod on aggregate-card traffic rows ([6eb44e7](https://github.com/kguardian-dev/kguardian/commit/6eb44e728c7445e34cd260eecdfddfb104923e16))
+* **frontend:** open every assistant link that leaves the page in a new tab ([a7909ec](https://github.com/kguardian-dev/kguardian/commit/a7909ecabb9ce555a2d5f18781995b1d2a805a44))
+* **frontend:** resolve named targetPorts for host-network backends and keep digit-led port names ([37100fc](https://github.com/kguardian-dev/kguardian/commit/37100fc54bac179dfd56f7bcffceba71c908bd60))
+* **frontend:** say "no CR" in the Workloads Drift column ([317898d](https://github.com/kguardian-dev/kguardian/commit/317898dfd9bb71a0a3fd97e24bc6abfa8306efeb))
+* **frontend:** say blame shares are over the controller's top 20 culprits ([cf91d0d](https://github.com/kguardian-dev/kguardian/commit/cf91d0dd26470fd77f55d1a8a3976cfc5b417563))
+* **frontend:** slim the runtime image and let it run read-only ([43bb038](https://github.com/kguardian-dev/kguardian/commit/43bb03858fe2dd6308c06e89a97baae98d942e97))
+* **frontend:** start the Images list empty when the namespace changes ([2410975](https://github.com/kguardian-dev/kguardian/commit/24109750755ac509af6fb0f4839d910b48ebc7ea))
+* **frontend:** tidy SSO detection, empty reply links and the Drift cell doc ([8ca5914](https://github.com/kguardian-dev/kguardian/commit/8ca59146b2ed004119cdedbb6f09c346063cbde7))
+* **frontend:** warn in the seccomp editor when a syscall read failed ([05ac158](https://github.com/kguardian-dev/kguardian/commit/05ac158a0491bb740cecf2cc6fac13813e3767a5))
+
 ## [1.20.6](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.5...frontend/v1.20.6) (2026-09-29)
 
 
