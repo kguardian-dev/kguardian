@@ -11,7 +11,7 @@ vi.mock('../services/api', () => ({
 
 import { parse } from 'yaml';
 import { generateNetworkPolicy, invalidPolicyPorts, isValidPolicyPort, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
-import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers } from './ciliumPolicyGenerator';
+import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers, invalidCiliumPorts } from './ciliumPolicyGenerator';
 import type { NetworkPolicy, NetworkPolicyRule } from '../types/networkPolicy';
 import type { CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy } from '../types/ciliumPolicy';
 
@@ -291,5 +291,69 @@ describe('isValidPolicyPort / invalidPolicyPorts / port rendering', () => {
       { protocol: 'TCP', port: 8443 },
       { protocol: 'TCP', port: 'no' },
     ]);
+  });
+});
+
+// Observed rows whose port is not 1-65535 (ICMP carries pod_port "0") or is
+// missing are skipped, as the advisor's parsePort does
+// (advisor/pkg/network/standard_policy.go): they used to render `port: 0`,
+// which the API server rejects, and which the editor's port check would now
+// hold back from export. A protocol NetworkPolicy does not know maps to TCP,
+// as the advisor's protocolPtr does.
+describe('generators — observed rows with no usable port are skipped, as the advisor skips them', () => {
+  const icmpIngress = { traffic_type: 'INGRESS', pod_port: '0', traffic_in_out_ip: '10.9.0.1', ip_protocol: 'ICMP' };
+  const tcpIngress = { traffic_type: 'INGRESS', pod_port: '8080', traffic_in_out_ip: '10.9.0.2', ip_protocol: 'TCP' };
+  const portlessEgress = { traffic_type: 'EGRESS', traffic_in_out_port: '', traffic_in_out_ip: '10.9.0.3', ip_protocol: 'UDP' };
+  const outOfRangeEgress = { traffic_type: 'EGRESS', traffic_in_out_port: '70000', traffic_in_out_ip: '10.9.0.4', ip_protocol: 'TCP' };
+  const dnsEgress = { traffic_type: 'EGRESS', traffic_in_out_port: '53', traffic_in_out_ip: '10.9.0.5', ip_protocol: 'udp' };
+
+  it('standard: only the rows with a real port become rules, and the document exports', async () => {
+    const policy = await generateNetworkPolicy(podWith([icmpIngress, tcpIngress, portlessEgress, outOfRangeEgress, dnsEgress]));
+    expect(invalidPolicyPorts(policy)).toEqual([]);
+    const doc = parse(policyToYAML(policy));
+    expect(doc.spec.policyTypes).toEqual(['Ingress', 'Egress']);
+    expect(doc.spec.ingress).toEqual([{ from: [{ ipBlock: { cidr: '10.9.0.2/32' } }], ports: [{ protocol: 'TCP', port: 8080 }] }]);
+    expect(doc.spec.egress).toEqual([{ to: [{ ipBlock: { cidr: '10.9.0.5/32' } }], ports: [{ protocol: 'UDP', port: 53 }] }]);
+  });
+
+  it('cilium: the same rows, no empty or zero port', async () => {
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(podWith([icmpIngress, tcpIngress, portlessEgress, outOfRangeEgress, dnsEgress])));
+    const doc = parse(yaml);
+    expect(doc.spec.ingress).toEqual([{ fromCIDR: ['10.9.0.2/32'], toPorts: [{ ports: [{ port: '8080', protocol: 'TCP' }] }] }]);
+    expect(doc.spec.egress).toEqual([{ toCIDR: ['10.9.0.5/32'], toPorts: [{ ports: [{ port: '53', protocol: 'UDP' }] }] }]);
+  });
+
+  it('only ICMP observed: no direction has a usable row, so the reference deny-all, as the advisor', async () => {
+    const policy = await generateNetworkPolicy(podWith([icmpIngress]));
+    expect(invalidPolicyPorts(policy)).toEqual([]);
+    expect(parse(policyToYAML(policy)).spec).toEqual({ podSelector: { matchLabels: { app: 'web' } }, policyTypes: ['Ingress', 'Egress'] });
+    const cilium = parse(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(podWith([icmpIngress]))));
+    expect(cilium.spec.enableDefaultDeny).toEqual({ ingress: true, egress: true });
+  });
+
+  it('an unknown protocol with a real port maps to TCP, as the advisor', async () => {
+    const policy = await generateNetworkPolicy(podWith([{ ...tcpIngress, ip_protocol: 'ICMP' }]));
+    expect(policy.spec.ingress?.[0].ports).toEqual([{ protocol: 'TCP', port: 8080 }]);
+  });
+});
+
+// The Cilium editor's port field is free text. Empty, it used to export
+// `port: ""`, which the CRD rejects; nothing in the editor says an empty
+// field means "any port", so it is flagged rather than guessed.
+describe('invalidCiliumPorts', () => {
+  const cnp = (port: string): CiliumNetworkPolicy => ({
+    apiVersion: 'cilium.io/v2', kind: 'CiliumNetworkPolicy', metadata: { name: 'web-cilium-policy', namespace: 'prod' },
+    spec: {
+      endpointSelector: { matchLabels: { app: 'web' } }, defaultDeny: { ingress: false, egress: true },
+      egress: [{ id: 'e', toCIDR: ['10.0.0.0/8'], toPorts: [{ ports: [{ port, protocol: 'TCP' }] }] }],
+    },
+  });
+
+  it.each([['80'], ['0'], ['65535'], ['http']])('accepts %j (Cilium: 0 is any port)', (port) => {
+    expect(invalidCiliumPorts(cnp(port))).toEqual([]);
+  });
+
+  it.each([[''], ['65536'], ['-1'], ['8080 ']])('flags %j', (port) => {
+    expect(invalidCiliumPorts(cnp(port))).toEqual([`egress rule 1: port "${port}"`]);
   });
 });

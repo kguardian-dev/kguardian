@@ -3,7 +3,7 @@ import type { NetworkPolicy } from '../../types/networkPolicy';
 import type { CiliumNetworkPolicy } from '../../types/ciliumPolicy';
 import type { SeccompProfile } from '../../types/seccompProfile';
 import { invalidPolicyPorts, policyToYAML } from '../../utils/networkPolicyGenerator';
-import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
+import { ciliumPolicyToYAML, invalidCiliumPorts } from '../../utils/ciliumPolicyGenerator';
 import { toAuditNetworkPolicy } from '../../utils/auditNetworkPolicy';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
 import { kguardianCrIssues, podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
@@ -93,14 +93,20 @@ export const usePolicyExport = ({
       : [];
 
   // Ports the API server would reject (a cleared field, 0, out of range).
-  // Non-empty ⇒ nothing is exported: the editor lists them instead.
-  const portIssues = policyType === 'network' && policy ? invalidPolicyPorts(policy) : [];
+  // Non-empty ⇒ nothing is exported: the editor lists them instead. The
+  // generators never emit one (they skip rows without a usable port), so
+  // only a value typed in the editor can land here.
+  const portIssues =
+    policyType === 'network' && policy ? invalidPolicyPorts(policy)
+      : policyType === 'cilium' && ciliumPolicy ? invalidCiliumPorts(ciliumPolicy)
+        : [];
 
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
       if (portIssues.length > 0) return null;
       return policyToYAML(networkFormat === 'audit' ? toAuditNetworkPolicy(policy) : policy);
     } else if (policyType === 'cilium' && ciliumPolicy) {
+      if (portIssues.length > 0) return null;
       return ciliumPolicyToYAML(ciliumPolicy);
     } else if (policyType === 'seccomp' && seccompProfile) {
       if (seccompFormat === 'json') return profileToJSON(seccompProfile);

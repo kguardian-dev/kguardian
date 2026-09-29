@@ -120,3 +120,48 @@ test('cilium: a rule with ports but no peer is flagged and left out, never an L4
   expect(doc.spec.egress).toHaveLength(1);
   expect(doc.spec.egress[0].toEndpoints).toEqual([{ matchLabels: { app: 'api' } }]);
 });
+
+// The port check guards what a user types, not what was observed: rows with no
+// usable port (ICMP carries pod_port "0") are skipped by the generators, so
+// "Build policy" on such traffic still exports, in both formats.
+const withIcmp: PodNodeData = {
+  ...target,
+  traffic: [
+    ...target.traffic!,
+    { traffic_type: 'INGRESS', pod_port: '0', traffic_in_out_ip: '10.0.0.9', ip_protocol: 'ICMP', time_stamp: '2026-09-03T00:00:00' },
+    { traffic_type: 'EGRESS', traffic_in_out_port: '0', traffic_in_out_ip: '10.0.0.9', ip_protocol: 'ICMP', time_stamp: '2026-09-03T00:00:00' },
+  ],
+} as PodNodeData;
+
+test('observed ICMP / port 0 rows: the generated policy exports in both formats, without port 0', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={withIcmp} initialPolicyType="network" />);
+  await waitForYaml('app: api');
+  expect(screen.queryByText(/not a valid port/)).toBeNull();
+  const doc = parse(yamlText());
+  expect(doc.spec.policyTypes).toEqual(['Egress']);
+  expect(doc.spec.egress).toEqual([{ to: [{ podSelector: { matchLabels: { app: 'api' } } }], ports: [{ protocol: 'TCP', port: 8080 }] }]);
+
+  fireEvent.click(screen.getByRole('radio', { name: /CiliumNetworkPolicy/ }));
+  await waitForYaml('kind: CiliumNetworkPolicy');
+  expect(screen.queryByText(/not a valid port/)).toBeNull();
+  const cnp = parse(yamlText());
+  expect(cnp.spec.ingress).toBeUndefined();
+  expect(cnp.spec.egress).toEqual([{ toEndpoints: [{ matchLabels: { app: 'api' } }], toPorts: [{ ports: [{ port: '8080', protocol: 'TCP' }] }] }]);
+});
+
+test('cilium: an emptied port field is flagged and blocks the export instead of writing port: ""', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="cilium" />);
+  await waitForYaml('kind: CiliumNetworkPolicy');
+  toVisual();
+  const input = screen.getByDisplayValue('8080') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: '' } });
+  expect(input.getAttribute('aria-invalid')).toBe('true');
+  toYaml();
+  expect(document.querySelector('pre')).toBeNull();
+  expect(screen.getByText(/not a valid port/).textContent).toContain('egress rule 1: port ""');
+  // 0 is Cilium's "any port" and is accepted.
+  toVisual();
+  fireEvent.change(document.querySelector('input[aria-invalid="true"]')!, { target: { value: '0' } });
+  toYaml();
+  expect(parse(yamlText()).spec.egress[0].toPorts).toEqual([{ ports: [{ port: '0', protocol: 'TCP' }] }]);
+});

@@ -16,6 +16,26 @@ import {
 } from './hostNetwork';
 
 /**
+ * The port of an observed row, or null when it has none NetworkPolicy can
+ * express: missing, not a decimal number, or outside 1-65535 (ICMP rows carry
+ * "0"). The row is then skipped, as the advisor's parsePort skips it
+ * (standard_policy.go), rather than rendered as a port the API server rejects.
+ * Shared with the Cilium generator so both skip the same rows.
+ */
+export function observedPort(port: string | null | undefined): string | null {
+  if (!port || !/^[0-9]+$/.test(port)) return null;
+  const n = Number(port);
+  return n >= 1 && n <= 65535 ? String(n) : null;
+}
+
+/** The protocol of an observed row: TCP, UDP or SCTP, anything else TCP, as
+ *  the advisor's protocolPtr maps it. */
+export function observedProtocol(protocol: string | null | undefined): string {
+  const p = (protocol ?? '').toUpperCase();
+  return p === 'UDP' || p === 'SCTP' ? p : 'TCP';
+}
+
+/**
  * `sources` are the listings the caller already holds (the map's pods and
  * Services); without them the resolver downloads `/pod/info` again.
  */
@@ -49,7 +69,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
 
   // Process traffic rules
   rows.forEach((traffic) => {
-    const protocol = traffic.ip_protocol || 'TCP';
+    const protocol = observedProtocol(traffic.ip_protocol);
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) {
@@ -78,7 +98,9 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
     if (!map) return;
     // For ingress: allow traffic FROM remote IP TO this pod's port.
     // For egress: allow traffic TO remote IP:port.
-    const port = (trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port) || '80';
+    const port = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
+    // No usable port (ICMP rows carry "0"): skip the row, as the advisor does.
+    if (port === null) return;
 
     const entry = map.get(key);
     if (!entry) {

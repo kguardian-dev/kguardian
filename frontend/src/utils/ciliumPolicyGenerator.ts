@@ -10,7 +10,7 @@ import {
 } from '../types/ciliumPolicy';
 import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
-import { quoteYamlValue } from './networkPolicyGenerator';
+import { observedPort, observedProtocol, quoteYamlValue } from './networkPolicyGenerator';
 import { peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import { specNodeName } from './hostNetwork';
@@ -58,7 +58,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
 
   // Process traffic rules
   rows.forEach((traffic) => {
-    const protocol = traffic.ip_protocol || 'TCP';
+    const protocol = observedProtocol(traffic.ip_protocol);
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) return;
@@ -79,7 +79,9 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
 
     const map = trafficType === 'ingress' ? ingressMap : trafficType === 'egress' ? egressMap : null;
     if (!map) return;
-    const port = (trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port) || '80';
+    const port = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
+    // No usable port: skip the row, as the standard generator and the advisor do.
+    if (port === null) return;
 
     const entry = map.get(key);
     if (!entry) {
@@ -416,6 +418,29 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
 export function ciliumRuleHasPeers(rule: CiliumIngressRule | CiliumEgressRule): boolean {
   const r = rule as CiliumIngressRule & CiliumEgressRule;
   return [r.fromEndpoints, r.fromCIDR, r.fromEntities, r.toEndpoints, r.toCIDR, r.toEntities].some((peers) => (peers?.length ?? 0) > 0);
+}
+
+/** A Cilium `toPorts` port: 0-65535 (0 is any port) or a named port. */
+export function isValidCiliumPort(port: string): boolean {
+  return /^[0-9]+$/.test(port) ? Number(port) <= 65535 : /^(?=.{1,15}$)(?=.*[a-z])[a-z0-9]+(-[a-z0-9]+)*$/.test(port);
+}
+
+/**
+ * Every port the CRD rejects in the rules that render, as
+ * `<direction> rule <n>: port "<value>"`. Cilium takes 0-65535 (0 is any
+ * port) or a named port. The editor's port field is free text, and nothing in
+ * it says an empty field means "any port", so empty is flagged, not guessed.
+ */
+export function invalidCiliumPorts(policy: CiliumNetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule: CiliumIngressRule | CiliumEgressRule, i) => {
+      if (!ciliumRuleHasPeers(rule)) return;
+      (rule.toPorts ?? []).flatMap((r) => r.ports).filter((p) => !isValidCiliumPort(p.port))
+        .forEach((p) => out.push(`${dir} rule ${i + 1}: port "${p.port}"`));
+    });
+  });
+  return out;
 }
 
 export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
