@@ -2762,7 +2762,8 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     let p = pool.clone();
     match tokio::task::spawn_blocking(move || -> Result<i64, RetentionError> {
         let mut conn = p.get().map_err(RetentionError::Pool)?;
-        crate::supplychain_read::refresh_cve_summary(&mut conn).map_err(RetentionError::Diesel)
+        with_supplychain_lock(&mut conn, crate::supplychain_read::refresh_cve_summary)
+            .map_err(RetentionError::Diesel)
     })
     .await
     {
@@ -2878,8 +2879,10 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let mut conn = p.get().map_err(|e| e.to_string())?;
-                    s::refresh_package_use_batch(&mut conn, after.as_deref(), batch)
-                        .map_err(|e| e.to_string())
+                    with_supplychain_lock(&mut conn, |c| {
+                        s::refresh_package_use_batch(c, after.as_deref(), batch)
+                    })
+                    .map_err(|e| e.to_string())
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
@@ -2910,21 +2913,21 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
     let r =
         tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), RetentionError> {
             let mut conn = p.get().map_err(RetentionError::Pool)?;
-            let pruned = if available {
-                s::prune_package_use(&mut conn)
-            } else {
-                s::clear_package_use(&mut conn)
-            }
-            .map_err(RetentionError::Diesel)?;
-            let t = crate::in_use::TierSettings::from_env();
-            let cov =
-                s::refresh_coverage(&mut conn, &t, &evidence).map_err(RetentionError::Diesel)?;
-            let exp = s::refresh_exposure(
-                &mut conn,
-                crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
-            )
-            .map_err(RetentionError::Diesel)?;
-            Ok((pruned, cov, exp))
+            with_supplychain_lock(&mut conn, |conn| {
+                let pruned = if available {
+                    s::prune_package_use(conn)
+                } else {
+                    s::clear_package_use(conn)
+                }?;
+                let t = crate::in_use::TierSettings::from_env();
+                let cov = s::refresh_coverage(conn, &t, &evidence)?;
+                let exp = s::refresh_exposure(
+                    conn,
+                    crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
+                )?;
+                Ok((pruned, cov, exp))
+            })
+            .map_err(RetentionError::Diesel)
         })
         .await;
     match r {
@@ -2938,6 +2941,30 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
         Ok(Err(e)) => warn!(error = %e, "in-use: coverage/exposure refresh failed"),
         Err(e) => warn!(error = %e, "in-use: coverage/exposure task panicked"),
     }
+}
+
+/// Transaction-scoped advisory lock key for the supply-chain pass's
+/// rebuilt tables.
+const SUPPLYCHAIN_LOCK_KEY: &str = "kguardian:supplychain_derived";
+
+/// Run `f` in a transaction holding [`SUPPLYCHAIN_LOCK_KEY`]. The CVE summary
+/// and in-use coverage are rebuilt by DELETE-then-INSERT; two overlapping
+/// rebuilds (an old leader's pass and the new leader's first, during a
+/// hand-off) would each insert a full set, and the second would fail on the
+/// first's rows or duplicate them. Serialised, the second rebuilds on top
+/// of the first. Relink, page expiry and GC are per-row idempotent and run
+/// without it; so are the peer late-resolve (`peer_kind IS NULL` guard) and
+/// the stale-alive sweep (`is_dead = false` guard).
+fn with_supplychain_lock<T, E: From<diesel::result::Error>>(
+    conn: &mut PgConnection,
+    f: impl FnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E> {
+    conn.transaction(|conn| {
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<diesel::sql_types::Text, _>(SUPPLYCHAIN_LOCK_KEY)
+            .execute(conn)?;
+        f(conn)
+    })
 }
 
 /// Repeat `step` until it reports 0 or the per-pass cap.
@@ -4077,6 +4104,50 @@ mod tests {
         );
         conn.batch_execute("TRUNCATE pod_compute_history")
             .expect("leave the table empty for the other live tests");
+    }
+
+    /// Two overlapping supply-chain rebuilds are serialised: the second
+    /// waits for the first to commit, then rebuilds on top of it and
+    /// succeeds (unserialised, both DELETE-then-INSERT the same summary).
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_overlapping_supplychain_rebuilds_are_serialised() {
+        use diesel::sql_types::BigInt;
+        let mut conn = live_conn();
+        let mut watcher = live_conn();
+        #[derive(QueryableByName)]
+        struct Waiting {
+            #[diesel(sql_type = BigInt)]
+            n: i64,
+        }
+        let second = with_supplychain_lock(&mut conn, |conn| {
+            crate::supplychain_read::refresh_cve_summary(conn)?;
+            let second = std::thread::spawn(|| {
+                with_supplychain_lock(&mut live_conn(), crate::supplychain_read::refresh_cve_summary)
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let waiting = sql_query(
+                    "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+                )
+                .get_result::<Waiting>(&mut watcher)?
+                .n;
+                if waiting > 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the second rebuild never waited on the lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok::<_, diesel::result::Error>(second)
+        })
+        .expect("first rebuild");
+        second
+            .join()
+            .expect("join")
+            .expect("the second rebuild succeeds after the first commits");
     }
 
     /// Two folds of the same range (an old leader's last batch overlapping
