@@ -253,8 +253,8 @@ function App() {
   // get the whole map back without losing what you were reading. Folding them
   // together would make Esc either close the card or do nothing.
   const selectPod = useCallback(
-    (pod: PodNodeData | null) => navigate('map', paramsForSelection(pod?.id, loc.params.ns), { replace: true }),
-    [navigate, loc.params.ns],
+    (pod: PodNodeData | null) => navigate('map', paramsForSelection(pod?.id, loc.params.ns, loc.params.lens), { replace: true }),
+    [navigate, loc.params.ns, loc.params.lens],
   );
 
   // Graph focus mode is URL state (`?focus=<node id>`) so a focused view can
@@ -262,8 +262,8 @@ function App() {
   // it if the node disappears.
   const focusedNodeId = loc.params.focus ?? null;
   const setFocusedNodeId = useCallback(
-    (id: string | null) => navigate('map', { ns: loc.params.ns, pod: loc.params.pod, focus: id ?? undefined }, { replace: true }),
-    [navigate, loc.params.ns, loc.params.pod],
+    (id: string | null) => navigate('map', { ns: loc.params.ns, pod: loc.params.pod, focus: id ?? undefined, lens: loc.params.lens }, { replace: true }),
+    [navigate, loc.params.ns, loc.params.pod, loc.params.lens],
   );
 
   // On cluster switch, point the URL at the new cluster's remembered namespace
@@ -454,14 +454,14 @@ function App() {
 
   // Jump from a finding straight to that workload on the map (one history entry).
   const handleFindingSelect = useCallback((pod: PodNodeData) => {
-    navigate('map', { ns: loc.params.ns, pod: pod.id });
-  }, [navigate, loc.params.ns]);
+    navigate('map', { ns: loc.params.ns, pod: pod.id, lens: loc.params.lens });
+  }, [navigate, loc.params.ns, loc.params.lens]);
 
   // A palette pick behaves like a click on the card: it opens AND focuses
   // the workload (utils/mapSelection), with one history entry for the jump.
   const handlePaletteSelect = useCallback((pod: PodNodeData) => {
-    navigate('map', paramsForSelection(pod.id, loc.params.ns));
-  }, [navigate, loc.params.ns]);
+    navigate('map', paramsForSelection(pod.id, loc.params.ns, loc.params.lens));
+  }, [navigate, loc.params.ns, loc.params.lens]);
 
   // "View workload" on a compute finding (D7): the pod may live in another
   // namespace (a noisy neighbour is cross-namespace by nature), so resolve
