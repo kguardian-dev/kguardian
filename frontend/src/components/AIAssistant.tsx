@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { X, Send, Square, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
-import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
+import { chatContext, streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 import { initialViewMode, storeViewMode, type AssistantViewMode } from '../utils/assistantViewMode';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -501,13 +501,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     const patchAssistant = (patch: (m: Message) => Message) =>
       setMessages(prev => prev.map(m => (m.id === assistantId ? patch(m) : m)));
 
-    // Build structured context for every message
-    const context = JSON.stringify({
-      namespace: namespace || undefined,
-      // Cap at 20 to match the bridge's getSystemPrompt truncation — sending
-      // more just gets dropped server-side.
-      podNames: podNames?.slice(0, 20),
-    });
+    const context = chatContext(namespace, podNames);
 
     // Cancel any prior in-flight stream, then start a fresh abortable one.
     abortRef.current?.abort();

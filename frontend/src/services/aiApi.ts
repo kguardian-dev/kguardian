@@ -40,6 +40,25 @@ const CLIPPED = '\n\n[… the rest of this message was not sent]';
 /** Room left in the body for JSON punctuation and the fields around the history. */
 const BODY_SLACK_BYTES = 256;
 
+/** llm-bridge refuses a request whose `context` is longer (ChatRequestSchema, llm-bridge/src/types/index.ts). */
+export const BRIDGE_MAX_CONTEXT_CHARS = 2000;
+/** The bridge's system prompt names at most 20 pods; more would be dropped there. */
+const CONTEXT_MAX_PODS = 20;
+
+/**
+ * The page context sent with a message: the namespace and the first pod
+ * names, as many whole names as fit the bridge's limit, so long names never
+ * make every message fail.
+ */
+export function chatContext(namespace: string | undefined, podNames: readonly string[] | undefined): string | undefined {
+  const pods = podNames?.slice(0, CONTEXT_MAX_PODS);
+  const encode = (n: number) => JSON.stringify({ namespace: namespace || undefined, podNames: pods?.slice(0, n) });
+  let n = pods?.length ?? 0;
+  while (n > 0 && encode(n).length > BRIDGE_MAX_CONTEXT_CHARS) n--;
+  const context = encode(n);
+  return context.length <= BRIDGE_MAX_CONTEXT_CHARS ? context : undefined;
+}
+
 const jsonBytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).length;
 
 /** The longest start of `text` whose JSON-encoded form, with the clip marker, fits `maxBytes`. */

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import AIAssistant from './AIAssistant';
 import { streamChatMessage, type StreamHandlers, type StreamOptions } from '../services/aiApi';
 
-vi.mock('../services/aiApi', () => ({ streamChatMessage: vi.fn() }));
+vi.mock('../services/aiApi', async (actual) => ({ ...(await actual<typeof import('../services/aiApi')>()), streamChatMessage: vi.fn() }));
 
 interface Stream {
   handlers: StreamHandlers;
@@ -255,6 +255,22 @@ it('keeps a same-origin reply link in this tab', async () => {
   send(QUESTION);
   const link = await screen.findByRole('link', { name: 'the map' });
   expect(link.getAttribute('target')).toBeNull();
+});
+
+it("clips the context to llm-bridge's 2,000 characters, so long pod names never make every message fail", async () => {
+  replyWith('ok');
+  // Kubernetes allows 253-character pod names; 20 of them are about 5,000 characters.
+  const podNames = Array.from({ length: 20 }, (_, i) => `${'a'.repeat(240)}-${i}`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="payments" podNames={podNames} />);
+  send(QUESTION);
+  await waitFor(() => expect(streamChatMessage).toHaveBeenCalled());
+  const context = vi.mocked(streamChatMessage).mock.calls[0][2]!;
+  expect(context.length).toBeLessThanOrEqual(2000);
+  const parsed = JSON.parse(context);
+  expect(parsed.namespace).toBe('payments');
+  // As many whole names as fit, in order.
+  expect(parsed.podNames.length).toBeGreaterThan(0);
+  expect(parsed.podNames).toEqual(podNames.slice(0, parsed.podNames.length));
 });
 
 it('sends only completed exchanges as history: failed, stopped and empty replies are left out', async () => {
