@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.20.8](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.7...frontend/v1.20.8) (2026-09-29)
+
+
+### Bug Fixes
+
+* **frontend:** keep the assistant readable to screen readers beside a drawer ([0f82dde](https://github.com/kguardian-dev/kguardian/commit/0f82ddeda867ba82cd46faf00aaa0fd794513aef))
+* **frontend:** never leave a drawer under a wide docked assistant ([b58fa23](https://github.com/kguardian-dev/kguardian/commit/b58fa23d38efb0096b600d8c8f204de9505f4ea5))
+* **frontend:** open the docked assistant beside the CVE drawer, not over it ([c309530](https://github.com/kguardian-dev/kguardian/commit/c3095306082a64bd11a90c2e5de57e4a9205d020))
+* **frontend:** open the docked assistant beside the CVE drawer, not over it ([27b8f6f](https://github.com/kguardian-dev/kguardian/commit/27b8f6fb079db7f231dc621317364b99284eb123))
+
 ## [1.20.7](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.6...frontend/v1.20.7) (2026-09-29)
 
 
