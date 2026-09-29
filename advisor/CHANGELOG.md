@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.3](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.2...advisor/v1.11.3) (2026-09-29)
+
+
+### Bug Fixes
+
+* **advisor:** say the vulns list is ordered by tier ([4e6ed92](https://github.com/kguardian-dev/kguardian/commit/4e6ed92f34e352e164b87f47f50fd5cd323f751a))
+* **broker:** filter image findings by CVE and rank the CVE list by tier from an index ([6b53778](https://github.com/kguardian-dev/kguardian/commit/6b537788db624bb84a318069ec32b48a4dec33f1))
+
 ## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.1...advisor/v1.11.2) (2026-09-28)
 
 
