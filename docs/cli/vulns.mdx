@@ -53,8 +53,8 @@ default are Helm values (`broker.supplychain.tiers`); see the
 ## vulns list
 
 Calls `GET /vulnerabilities`: every vulnerability affecting an inventory
-image, grouped by id, most urgent tier first (`P0`, then tier not computed
-yet, then `P1`, `P2`, `Background`), then most severe. It reads a summary the broker
+image, grouped by id, in tier order (`P0`, then not yet computed, then
+`P1`, `P2`, `Background`), most severe first within a tier. It reads a summary the broker
 rebuilds every few minutes; when it was computed is printed on stderr.
 
 | Flag | Type | Description | Default |

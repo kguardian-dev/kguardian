@@ -3306,8 +3306,14 @@ fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
     }
     // Another scope's row never shows in the cluster-wide list.
     summary_row(&mut conn, NS, "CVE-0", 5, Some(0));
+    // Values nothing writes today: a tier outside 0..3 sorts as not yet
+    // computed (never below a known tier), a severity outside 0..5 is
+    // clamped, and the cursor built from either still parses.
+    summary_row(&mut conn, "", "CVE-CC", 9, Some(7));
+    summary_row(&mut conn, "", "CVE-DD", -2, Some(-1));
     let expected = [
-        "CVE-B", "CVE-A", "CVE-C", "CVE-D", "CVE-E", "CVE-F", "CVE-G", "CVE-H", "CVE-J", "CVE-I",
+        "CVE-B", "CVE-A", "CVE-C", "CVE-CC", "CVE-D", "CVE-DD", "CVE-E", "CVE-F", "CVE-G", "CVE-H",
+        "CVE-J", "CVE-I",
     ];
     let walk = |conn: &mut PgConnection, f: &ListFilters, limit: i64| {
         let mut out: Vec<String> = Vec::new();
@@ -3327,7 +3333,7 @@ fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
         out
     };
     let all = ListFilters::default();
-    for limit in 1..=11 {
+    for limit in 1..=13 {
         assert_eq!(walk(&mut conn, &all, limit), expected, "limit {limit}");
     }
     let first = list_cves_filtered(&mut conn, &all, None, false, None, 3).unwrap();
@@ -3360,10 +3366,136 @@ fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
         walk(&mut conn, &crit, 2),
         ["CVE-B", "CVE-C", "CVE-E", "CVE-H", "CVE-I"]
     );
+    exec(
+        &mut conn,
+        "DELETE FROM vuln_cve_summary WHERE vuln_id IN ('CVE-CC', 'CVE-DD')",
+    );
     // A namespace scope is its own list.
     let ns = list_cves_filtered(&mut conn, &all, Some(NS), false, None, 10).unwrap();
     assert_eq!(ns.items.len(), 1);
     assert_eq!(ns.items[0].summary.id, "CVE-0");
+}
+
+/// The tier-ordered CVE list is read off idx_vuln_cve_summary_list: the
+/// first page and a deep page both walk the index in order, with no sort
+/// and the cursor as the index range.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_list_pages_are_served_by_the_list_index() {
+    use diesel::connection::SimpleConnection;
+    use diesel::sql_types::{Double, SmallInt};
+    let mut conn = live_conn();
+    for i in 0..200 {
+        summary_row(
+            &mut conn,
+            "",
+            &format!("CVE-2026-{i:04}"),
+            (i % 6) as i16,
+            [Some(0), None, Some(1), Some(2), Some(3)][i % 5],
+        );
+    }
+    exec(&mut conn, "ANALYZE vuln_cve_summary");
+    #[derive(QueryableByName)]
+    struct PlanLine {
+        #[diesel(sql_type = Text)]
+        #[diesel(column_name = "QUERY PLAN")]
+        line: String,
+    }
+    // Penalised heap walks, as in the minute-index test: at this size the
+    // planner may not need the index, but it must be able to answer from it
+    // in order.
+    conn.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off")
+        .expect("penalise the heap walks");
+    let plan = |conn: &mut PgConnection, after: Option<(i16, &str)>| {
+        sql_query(format!("EXPLAIN {}", crate::supplychain_read::CVES_SQL))
+            .bind::<Nullable<Array<SmallInt>>, _>(None::<Vec<i16>>)
+            .bind::<Nullable<Bool>, _>(None::<bool>)
+            .bind::<Nullable<Text>, _>(None::<String>)
+            .bind::<Bool, _>(false)
+            .bind::<Nullable<SmallInt>, _>(after.map(|a| a.0))
+            .bind::<Text, _>(after.map(|a| a.1).unwrap_or(""))
+            .bind::<BigInt, _>(101)
+            .bind::<Nullable<Bool>, _>(None::<bool>)
+            .bind::<Nullable<Double>, _>(None::<f64>)
+            .bind::<Nullable<Array<Text>>, _>(None::<Vec<String>>)
+            .bind::<Nullable<Array<SmallInt>>, _>(None::<Vec<i16>>)
+            .load::<PlanLine>(conn)
+            .expect("explain")
+            .into_iter()
+            .map(|l| l.line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let first = plan(&mut conn, None);
+    let deep = plan(&mut conn, Some((32, "CVE-2026-0100")));
+    conn.batch_execute("RESET enable_seqscan; RESET enable_bitmapscan")
+        .expect("restore the planner");
+    for (name, p) in [("first", &first), ("deep", &deep)] {
+        assert!(
+            p.contains("idx_vuln_cve_summary_list"),
+            "{name} page served by the list index:\n{p}"
+        );
+        assert!(!p.contains("Sort"), "{name} page needs no sort:\n{p}");
+    }
+    let cond = deep
+        .lines()
+        .find(|l| l.contains("Index Cond"))
+        .unwrap_or_default();
+    assert!(
+        cond.contains("ROW(") && !deep.contains("Filter"),
+        "the cursor is the index range, not a filter:\n{deep}"
+    );
+}
+
+/// The exposure endpoint matches an id case-insensitively, like the
+/// per-image `vuln_id` filter: by the variants scanners write, and by any
+/// other spelling the CVE summary holds.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_exposure_matches_the_id_case_insensitively() {
+    use crate::supplychain_read::vulnerability_exposure;
+    let mut conn = live_conn();
+    seed_inventory(
+        &mut conn,
+        &d(63),
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "api",
+        0,
+    );
+    let mut v = vulns_json(
+        &d(63),
+        "2026-09-20T08:00:00Z",
+        &[
+            ("GHSA-abcd-1234-efgh", "HIGH", None),
+            ("CVE-2024-0003", "LOW", None),
+            ("Odd-Case-Id", "LOW", None),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    store_v(&mut conn, v);
+    let found = |conn: &mut PgConnection, id: &str| {
+        vulnerability_exposure(conn, id, 168)
+            .unwrap()
+            .map(|e| e.images.len())
+    };
+    for id in [
+        "GHSA-abcd-1234-efgh",
+        "ghsa-ABCD-1234-EFGH",
+        "GHSA-ABCD-1234-EFGH",
+        "cve-2024-0003",
+        "CVE-2024-0003",
+    ] {
+        assert_eq!(found(&mut conn, id), Some(1), "{id}");
+    }
+    assert_eq!(found(&mut conn, "CVE-2024-000"), None);
+    // A spelling no variant produces: found once the summary holds it.
+    assert_eq!(found(&mut conn, "oDD-cASE-iD"), None);
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(found(&mut conn, "oDD-cASE-iD"), Some(1));
+    assert_eq!(found(&mut conn, "Odd-Case-Id"), Some(1));
 }
 
 /// Over HTTP: `vuln_id` on the per-image list, the CVE list's `order`,

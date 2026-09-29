@@ -306,10 +306,9 @@ not included.
 
 ## GET /vulnerabilities
 
-Every CVE affecting a digest in the inventory, grouped by id, most urgent
-tier first: `P0`, then rows whose tier is not computed yet (`null`, never
-ranked below a known tier), then `P1`, `P2` and `Background`; within a tier,
-most severe first, then by id. The response says so with `"order": "tier"`;
+Every CVE affecting a digest in the inventory, grouped by id, in tier
+order: `P0`, then not yet computed (`tier: null`), then `P1`, `P2`,
+`Background`. Within a tier, most severe first, then by id. The response says so with `"order": "tier"`;
 a broker from before this order omits `order` and sorts by severity, then
 id. It reads a summary the retention pass rebuilds each interval, so it
 costs the same however many findings there are; `computedAt` and
@@ -354,7 +353,8 @@ by tag only.
 ## GET /vulnerabilities/\{id\}/exposure
 
 Which images, workloads and namespaces a CVE affects, running or not, and
-what traffic reached them. `window_hours` (default 168, max 720) sets how
+what traffic reached them. `{id}` is matched case-insensitively, like the
+`vuln_id` filter. `window_hours` (default 168, max 720) sets how
 far back flows count. Up to 200 images and 200 workload containers are
 listed; `truncated` says when there are more. `404` when no inventory
 digest is affected.
