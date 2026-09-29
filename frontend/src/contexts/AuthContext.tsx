@@ -23,8 +23,10 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 // with or without SSO. On load it asks the identity-aware proxy (oauth2-proxy)
 // who the user is via `/oauth2/userinfo` (same-origin; the SSO cookie is sent):
 //   - 200 with an identity  -> SSO is active, show the real user (mode 'oidc')
-//   - 401 / 404 / error      -> no proxy in front, run in local/no-auth mode
-//     (shown honestly in the account menu — no fake login).
+//   - 204 / 401 / 404 / error -> no proxy in front, run in local/no-auth mode
+//     (shown honestly in the account menu — no fake login). The UI's own
+//     server answers 204 when the request reaches it, so an install without
+//     SSO logs no failed request (vite.config.ts noSsoUserinfo).
 // To turn SSO on, front the route with oauth2-proxy + a `/oauth2/*` route (the
 // chart's frontend.sso.* templates, or the cluster's Envoy SecurityPolicy). The
 // rest of the app consumes `useAuth()` and needs no change.

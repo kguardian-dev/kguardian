@@ -204,6 +204,40 @@ function allowedHostsWarning(): Plugin {
   }
 }
 
+interface MiddlewareRequest {
+  method?: string
+  url?: string
+}
+
+/**
+ * Answers `/oauth2/userinfo` with 204 No Content. With SSO on, the gateway
+ * routes `/oauth2/*` to oauth2-proxy (the chart's frontend.sso.* templates),
+ * so the request never gets here; when it does, nothing is in front of this
+ * server and the UI runs in local mode. Without this it fell through to a
+ * 404 (the SPA fallback serves HTML requests only), a console error on every
+ * page load of an install without SSO.
+ */
+export function noSsoUserinfo(req: MiddlewareRequest, res: BypassResponse, next: () => void): void {
+  const path = (req.url ?? '').split('?')[0]
+  const m = (req.method ?? '').toUpperCase()
+  if (path !== '/oauth2/userinfo' || (m !== 'GET' && m !== 'HEAD')) return next()
+  res.statusCode = 204
+  res.setHeader('Cache-Control', 'no-store')
+  res.end()
+}
+
+function noSsoUserinfoPlugin(): Plugin {
+  return {
+    name: 'kguardian:no-sso-userinfo',
+    configureServer(server) {
+      server.middlewares.use(noSsoUserinfo)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(noSsoUserinfo)
+    },
+  }
+}
+
 /**
  * Headers vite preview (the production server) sends. The UI is never meant
  * to be framed. The CSP allows only the app's own scripts, connections and
@@ -231,7 +265,7 @@ export const SECURITY_HEADERS: Record<string, string> = {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), allowedHostsWarning()],
+  plugins: [react(), allowedHostsWarning(), noSsoUserinfoPlugin()],
 
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),

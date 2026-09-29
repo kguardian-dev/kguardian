@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
+import { createServer } from 'vite'
 import config, {
   allowedHostsFromEnv, applyBrokerAuth, brokerAuthHeader, brokerProxy, brokerProxyDecision, llmProxy, llmProxyDecision,
   refuseDisallowed, SECURITY_HEADERS,
@@ -194,4 +195,26 @@ describe('llm-bridge proxy', () => {
     proxy.emit('proxyReq', req, { method: 'POST', url: '/llm-api/api/chat/stream' })
     expect(req.headers.has('authorization')).toBe(false)
   })
+})
+
+// With SSO, the gateway routes /oauth2/* to oauth2-proxy, so a request for
+// /oauth2/userinfo that reaches this server means nothing is in front of it.
+// It used to fall through to a 404 (the SPA fallback serves HTML requests
+// only), a console error on every page load of an install without SSO.
+describe('SSO user info without a proxy in front', () => {
+  it('answers /oauth2/userinfo with 204 No Content, not a 404', async () => {
+    const server = await createServer({ configFile: './vite.config.ts', logLevel: 'silent', server: { port: 0, strictPort: false } })
+    await server.listen()
+    try {
+      const base = server.resolvedUrls!.local[0]
+      const res = await fetch(new URL('/oauth2/userinfo', base), { headers: { Accept: 'application/json' } })
+      expect(res.status).toBe(204)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      expect(await res.text()).toBe('')
+      // Only that path: the rest of /oauth2/ is the proxy's, never answered here.
+      expect((await fetch(new URL('/oauth2/sign_out', base), { headers: { Accept: 'application/json' } })).status).not.toBe(204)
+    } finally {
+      await server.close()
+    }
+  }, 20_000)
 })
