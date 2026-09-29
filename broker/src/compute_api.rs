@@ -197,6 +197,12 @@ fn upsert_node(conn: &mut PgConnection, row: &NodeComputeLatest) -> Result<(), D
 /// UPDATE SET <every column> = EXCLUDED.<column>`. This is the 5 s hot
 /// path for every node, so it is one round-trip per node per interval
 /// rather than one per container.
+///
+/// Every one of these updates must stay HOT, which means no column that
+/// changes between samples may be indexed: an index on `updated_at` once
+/// grew the table to 86 GB for 15 k live rows (see migration
+/// `2026-10-01-100000_pod_compute_latest_hot_updates`, and
+/// `live_database_latest_upserts_are_hot_updates` below).
 fn upsert_latest(conn: &mut PgConnection, rows: &[PodComputeLatest]) -> Result<(), DbError> {
     use schema::pod_compute_latest::dsl::*;
     if rows.is_empty() {
@@ -1234,5 +1240,273 @@ mod tests {
             Some("payments".into())
         );
         assert_eq!(non_empty(None), None);
+    }
+
+    // ---- live database ---------------------------------------------------
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    fn live_conn() -> PgConnection {
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+        let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
+            panic!("set KG_TEST_DATABASE_URL to run this test");
+        };
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("apply the shipped migrations");
+        conn.batch_execute("TRUNCATE pod_compute_latest")
+            .expect("reset the table this test uses");
+        conn
+    }
+
+    /// One container's row as `upsert_latest` receives it, sampled at `at`.
+    fn latest_row(i: usize, at: NaiveDateTime) -> PodComputeLatest {
+        PodComputeLatest {
+            container_uid: format!("pod-{i:03}/app"),
+            pod_uid: format!("pod-{i:03}"),
+            namespace: "payments".into(),
+            pod_name: format!("api-{i:03}"),
+            container: "app".into(),
+            node: format!("worker-{}", i % 3),
+            cgroup_id: i as i64,
+            ts: at,
+            interval_ms: 5000,
+            cpu_usage_millis: f64::from(at.and_utc().timestamp_subsec_millis()),
+            cpu_quota_usec: Some(100_000),
+            cpu_period_usec: 100_000,
+            cpu_request_millis: Some(250),
+            cpu_limit_millis: Some(1000),
+            cpu_nr_periods: 50,
+            cpu_nr_throttled: 0,
+            cpu_throttled_usec: 0,
+            cpu_psi_some10: 0.0,
+            cpu_psi_full10: 0.0,
+            mem_current: 64 << 20,
+            mem_working_set: 48 << 20,
+            mem_limit: Some(256 << 20),
+            mem_request: Some(128 << 20),
+            mem_psi_some10: 0.0,
+            mem_psi_full10: 0.0,
+            mem_events_high: 0,
+            mem_events_max: 0,
+            mem_oom_kill: 0,
+            mem_refault: 0,
+            mem_pgmajfault: 0,
+            runq_count: Some(10),
+            runq_p50_us: Some(20),
+            runq_p95_us: Some(80),
+            runq_p99_us: Some(120),
+            runq_max_us: Some(400),
+            runq_overflow: Some(0),
+            blame: serde_json::json!([]),
+            updated_at: at,
+        }
+    }
+
+    #[derive(QueryableByName)]
+    struct XactUpdates {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        updated: i64,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        hot: i64,
+    }
+
+    /// The property that keeps `pod_compute_latest` the size of the live
+    /// container set: an upsert of a known container is a HOT update, so it
+    /// adds no index entries and its old version is pruned from the page
+    /// without VACUUM. While `updated_at` was indexed none of them was (741 M
+    /// updates, 0 HOT, 86 GB on the dev cluster). Several rounds, each its
+    /// own transaction like the ingest's, because a round only stays HOT if
+    /// the fillfactor headroom is there and the previous round's versions
+    /// get pruned out of it.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_latest_upserts_are_hot_updates() {
+        const CONTAINERS: usize = 200;
+        let mut conn = live_conn();
+        let t0 = chrono::Utc::now().naive_utc();
+        let rows: Vec<_> = (0..CONTAINERS).map(|i| latest_row(i, t0)).collect();
+        upsert_latest(&mut conn, &rows).expect("first sample inserts");
+
+        for round in 1..=5i64 {
+            let at = t0 + chrono::Duration::seconds(5 * round);
+            let rows: Vec<_> = (0..CONTAINERS).map(|i| latest_row(i, at)).collect();
+            // The xact counters also hold earlier transactions' counts until
+            // the backend flushes them, which it only does while idle, so
+            // the round is the difference of two reads inside it.
+            let (before, after) = conn
+                .transaction::<_, DbError, _>(|conn| {
+                    let read = |conn: &mut PgConnection| {
+                        diesel::sql_query(
+                            "SELECT \
+                               pg_stat_get_xact_tuples_updated('pod_compute_latest'::regclass) AS updated, \
+                               pg_stat_get_xact_tuples_hot_updated('pod_compute_latest'::regclass) AS hot",
+                        )
+                        .get_result::<XactUpdates>(conn)
+                    };
+                    let before = read(conn)?;
+                    upsert_latest(conn, &rows)?;
+                    Ok((before, read(conn)?))
+                })
+                .expect("upsert round");
+            let updated = after.updated - before.updated;
+            let hot = after.hot - before.hot;
+            assert_eq!(updated, CONTAINERS as i64, "round {round}");
+            assert_eq!(
+                hot, updated,
+                "round {round}: every upsert of a known container must be HOT"
+            );
+        }
+    }
+
+    #[derive(QueryableByName)]
+    struct Name {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+
+    fn index_names(conn: &mut PgConnection, table: &str) -> Vec<String> {
+        diesel::sql_query(
+            "SELECT indexname::text AS name FROM pg_indexes \
+             WHERE schemaname = current_schema() AND tablename = $1 ORDER BY indexname",
+        )
+        .bind::<diesel::sql_types::Text, _>(table)
+        .load::<Name>(conn)
+        .expect("list indexes")
+        .into_iter()
+        .map(|n| n.name)
+        .collect()
+    }
+
+    fn reloptions(conn: &mut PgConnection, table: &str) -> Vec<String> {
+        diesel::sql_query(
+            "SELECT o AS name FROM pg_class, unnest(coalesce(reloptions, '{}')) AS o \
+             WHERE pg_class.oid = $1::regclass ORDER BY o",
+        )
+        .bind::<diesel::sql_types::Text, _>(table)
+        .load::<Name>(conn)
+        .expect("read reloptions")
+        .into_iter()
+        .map(|n| n.name)
+        .collect()
+    }
+
+    /// The TOAST table behind `table`, as a name `::regclass` accepts.
+    fn toast_of(conn: &mut PgConnection, table: &str) -> String {
+        diesel::sql_query(
+            "SELECT reltoastrelid::regclass::text AS name FROM pg_class WHERE oid = $1::regclass",
+        )
+        .bind::<diesel::sql_types::Text, _>(table)
+        .get_result::<Name>(conn)
+        .expect("the table has a TOAST table")
+        .name
+    }
+
+    /// The bloat migrations apply, revert and re-apply cleanly, and each
+    /// direction leaves the schema it says it does. Reverted by name rather
+    /// than with `revert_last_migration`, so a later migration does not turn
+    /// this into a test of something else.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_bloat_migrations_revert_and_reapply() {
+        use diesel::connection::SimpleConnection;
+        use diesel::migration::MigrationSource;
+        use diesel_migrations::MigrationHarness;
+        const OURS: [&str; 2] = ["pod_compute_latest_hot_updates", "seccomp_crs_reclaim"];
+        let mut conn = live_conn();
+        let all = MigrationSource::<diesel::pg::Pg>::migrations(&TEST_MIGRATIONS)
+            .expect("list the shipped migrations");
+        let ours: Vec<_> = OURS
+            .iter()
+            .map(|suffix| {
+                all.iter()
+                    .find(|m| m.name().to_string().ends_with(suffix))
+                    .unwrap_or_else(|| panic!("migration *_{suffix} is shipped"))
+            })
+            .collect();
+        let toast = toast_of(&mut conn, "pod_compute_latest");
+
+        let assert_applied = |conn: &mut PgConnection| {
+            assert_eq!(
+                index_names(conn, "pod_compute_latest"),
+                [
+                    "idx_pod_compute_latest_namespace",
+                    "pod_compute_latest_pkey"
+                ]
+                .map(String::from)
+            );
+            assert_eq!(
+                reloptions(conn, "pod_compute_latest"),
+                [
+                    "autovacuum_vacuum_cost_delay=0",
+                    "autovacuum_vacuum_scale_factor=0",
+                    "autovacuum_vacuum_threshold=1000",
+                    "fillfactor=50",
+                ]
+                .map(String::from)
+            );
+            assert_eq!(
+                reloptions(conn, &toast),
+                [
+                    "autovacuum_vacuum_scale_factor=0",
+                    "autovacuum_vacuum_threshold=1000",
+                ]
+                .map(String::from)
+            );
+        };
+        assert_applied(&mut conn);
+
+        for m in ours.iter().rev() {
+            conn.revert_migration(m.as_ref())
+                .unwrap_or_else(|e| panic!("revert {}: {e}", m.name()));
+        }
+        assert_eq!(
+            index_names(&mut conn, "pod_compute_latest"),
+            [
+                "idx_pod_compute_latest_namespace",
+                "idx_pod_compute_latest_node",
+                "idx_pod_compute_latest_updated_at",
+                "pod_compute_latest_pkey",
+            ]
+            .map(String::from)
+        );
+        assert!(reloptions(&mut conn, "pod_compute_latest").is_empty());
+        assert!(reloptions(&mut conn, &toast).is_empty());
+
+        // A healthy seccomp_crs keeps its rows: the reclaim empties the
+        // mirror only when it is bloated, because an empty mirror shows as
+        // "no CR" on every workload until the Controllers re-send.
+        conn.batch_execute(
+            "TRUNCATE seccomp_crs; \
+             INSERT INTO seccomp_crs (namespace, name, workload_kind, workload_name) \
+             VALUES ('prod', 'deployment-web', 'Deployment', 'web')",
+        )
+        .expect("seed a mirror row");
+
+        for m in &ours {
+            conn.run_migration(m.as_ref())
+                .unwrap_or_else(|e| panic!("re-apply {}: {e}", m.name()));
+        }
+        assert_applied(&mut conn);
+        #[derive(QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            n: i64,
+        }
+        let mirrored = diesel::sql_query("SELECT count(*) AS n FROM seccomp_crs")
+            .get_result::<Count>(&mut conn)
+            .expect("count mirror rows")
+            .n;
+        assert_eq!(mirrored, 1, "a small seccomp_crs is left alone");
+        conn.batch_execute("TRUNCATE seccomp_crs")
+            .expect("leave the table empty for the other live tests");
+        assert!(
+            conn.pending_migrations(TEST_MIGRATIONS)
+                .expect("list pending migrations")
+                .is_empty(),
+            "the schema is back where the other live tests expect it"
+        );
     }
 }

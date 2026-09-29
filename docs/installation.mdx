@@ -517,6 +517,17 @@ kubectl get pods -n kguardian -o jsonpath='{range .items[*]}{.metadata.name}{"\t
 Always review the [Release Notes](https://github.com/kguardian-dev/kguardian/releases) before upgrading, especially for breaking changes in major versions.
 </Warning>
 
+<Note>
+**Upgrading the Broker past 1.19.4 with a bloated `pod_compute_latest`.** The first Broker after 1.19.4 truncates `pod_compute_latest` in a migration that gives up on its table lock after 5 seconds. If the table is already tens of GB, the old Broker's queries on it can outlast that on every attempt, and the new Broker pod crash-loops while the old one keeps serving. Before upgrading, run the truncate yourself from `psql`, retrying until it succeeds (the table is a live cache and refills within one sample interval):
+
+```sql
+SET lock_timeout = '5s';
+TRUNCATE pod_compute_latest;
+```
+
+Or scale the old Broker to zero for the moment the new one migrates. Either way, the migration then finds an empty table.
+</Note>
+
 ---
 
 ## Uninstall

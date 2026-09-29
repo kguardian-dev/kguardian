@@ -543,11 +543,23 @@ minute (`avg` / `max` / `last` for gauges, sums for counters, `hist: int8[24]`).
 ### Tables (Diesel migrations, `broker/db/migrations/2026-09-*`)
 
 - `pod_compute_latest` — PK `container_uid`; every field above flattened;
-  `updated_at`. Upsert on conflict.
+  `updated_at`. Upsert on conflict. The only other index is `(namespace)`:
+  nothing that changes on an upsert is indexed, so every upsert is a HOT
+  update, and the table runs at `fillfactor = 50` so each page has room
+  for one. That keeps it the size of the live container set without
+  relying on VACUUM. An index on `updated_at` made every upsert non-HOT and
+  grew the table to 86 GB for 15 k rows (migration
+  `2026-10-01-100000_pod_compute_latest_hot_updates`). The stale prune
+  scans it sequentially instead.
 - `pod_compute_history` — `id`, `container_uid`, `pod_uid`, `namespace`,
   `pod_name`, `container`, `node`, `ts`, `resolution_secs` (60 or 300),
   gauges (avg/max/last), counters, `runq_hist int8[]`, quantiles. Index
-  `(pod_uid, ts desc)`, `(node, ts desc)`.
+  `(pod_uid, ts desc)`, `(node, ts desc)`, `(ts)` for the prune, and
+  `(ts) WHERE resolution_secs = 60` for the downsample. That last one is
+  not a migration: the Broker builds it with `CREATE INDEX CONCURRENTLY`
+  from a background task after startup (and rebuilds it if a build left it
+  INVALID), because a plain build on a large table would block history
+  inserts and could outlast the liveness probe.
 - `pod_contention_history` — `id`, `ts`, `node`, `victim_container_uid`,
   `culprit_cgroup_id`, `culprit_kind` (`pod` / `system` / `kernel` /
   `unknown`), `culprit_ref`, `count`, `wait_ns`. Index
