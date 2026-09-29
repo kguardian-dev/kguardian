@@ -215,9 +215,10 @@ diesel::table! {
     // Live compute gauge per container: one row per LIVE container,
     // upserted on every sample interval by `POST /pod/compute/batch`.
     // Counters are deltas over `interval_ms`; gauges are instantaneous;
-    // `cpu_usage_millis` is derived at ingest. `blame` is the wire
-    // culprit list stored verbatim as a JSONB array. See
-    // src/compute_api.rs and the migration.
+    // `cpu_usage_millis` is derived at ingest. `blame` is the heaviest
+    // few culprits of the wire list as a JSONB array, and the two
+    // `blame_omitted*` columns count the rest (`bound_blame` in
+    // src/compute_types.rs). See src/compute_api.rs and the migrations.
     pod_compute_latest (container_uid) {
         container_uid -> Text,
         pod_uid -> Text,
@@ -257,6 +258,8 @@ diesel::table! {
         runq_overflow -> Nullable<Int8>,
         blame -> Jsonb,
         updated_at -> Timestamp,
+        blame_omitted -> Int4,
+        blame_omitted_wait_ns -> Int8,
     }
 }
 

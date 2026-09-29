@@ -68,6 +68,9 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `LEADER_ELECTION_RENEW_DEADLINE_SECS` | `10` | How long the leader keeps running the jobs without a successful renewal; must be below the lease duration |
 | `LEADER_ELECTION_RETRY_PERIOD_SECS` | `2` | Renew/acquire cadence; must be below renew deadline / 1.2 (a bad combination falls back to 15/10/2) |
 | `POD_NAME` | hostname | Lease holder identity (downward API). Lease requests go straight to the in-cluster API server and ignore `HTTP(S)_PROXY` |
+| `BROKER_MAINTENANCE_VACUUM_ENABLED` | `true` | Leader-only `VACUUM (ANALYZE)` of the small high-churn tables when autovacuum falls behind (see below); `false` disables |
+| `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` | `300` | How often the leader checks those tables' dead tuples (min 60). One schedule across replicas, like the retention loops (`leader_task_runs`) |
+| `BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES` | `10000` | Dead tuples (heap + TOAST) a table needs, and at least a fifth of its live rows, before it is vacuumed (min 1000) |
 | `RUST_LOG` | `info` | Log level |
 
 ### Running more than one replica
@@ -75,9 +78,9 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 Every replica serves the whole API, but the background jobs that prune or
 derive shared data (retention prunes, the compute downsample, the workload
 profile snapshotter, the peer late-resolve and stale-pod sweep, the
-supply-chain rollups, the image attestation prune) run only on the replica
-holding a Lease. The rest, which feed each replica's own `/metrics` and
-`GET /version`, run everywhere. The full list is in `src/leader.rs`.
+supply-chain rollups, the image attestation prune, the maintenance VACUUM) run
+only on the replica holding a Lease. The rest, which feed each replica's own
+`/metrics` and `GET /version`, run everywhere. The full list is in `src/leader.rs`.
 
 A leader that stops renewing stops those jobs after the renew deadline; a
 follower takes over once the lease has gone unrenewed for the lease duration
@@ -101,6 +104,35 @@ elects normally. `/metrics` shows the state:
 - `broker_leader_election_active{mode="elected|disabled|fallback_forbidden|fallback_misconfigured"}`: 1 only while contending for the Lease
 - `broker_leader_transitions_total`: acquisitions and losses on this replica
 - `broker_leader_election_errors_total`: failed Lease requests; rising on every replica means no replica can lead and the jobs are paused
+
+### Maintenance VACUUM
+
+A few tables are rewritten every few seconds but stay small:
+`pod_compute_latest` (every live container, every 5 s), `node_compute_latest`,
+`seccomp_crs`, `seccomp_denial_nodes`, `runtime_in_use_coverage` and
+`workload_containers`. Autovacuum normally keeps them clean (the migrations
+give the compute tables aggressive per-table settings), but the broker does
+not depend on it: with autovacuum stopped on a shared cluster,
+`pod_compute_latest` once grew to about 1 GB an hour.
+
+Every `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` the leader reads each table's
+dead tuples (heap plus its TOAST table) from the statistics collector and runs
+a plain `VACUUM (ANALYZE)` on the ones past the threshold, on a dedicated
+connection (VACUUM cannot run in a transaction) with a 300 s statement timeout
+and a 5 s lock timeout. It never runs `VACUUM FULL`, and it leaves the large
+append-and-prune tables (`pod_compute_history`, `pod_traffic`, ...) to
+autovacuum and the operator. While autovacuum keeps up, a pass is one catalog
+query. VACUUM needs only table ownership, which the broker's database user has
+for every table its migrations created (or `MAINTAIN` on PostgreSQL 17+); a
+table it may not vacuum is warned about once and skipped. A failed pass backs
+off, doubling up to an hour. `/metrics`:
+
+- `broker_maintenance_vacuum_total{table,outcome}`: `vacuumed`, `skipped`
+  (under the threshold), `busy` (another VACUUM or DDL held the lock),
+  `denied` (not the owner), `failed`
+- `broker_maintenance_vacuum_last_success_timestamp_seconds`: the last pass
+  that checked every table without a failure (0 on followers). Steady
+  `vacuumed` counts mean autovacuum is not doing its job on this database.
 
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
 natively in CI and the broker image is smoke-executed on both amd64 and arm64

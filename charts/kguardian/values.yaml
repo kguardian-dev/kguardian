@@ -975,6 +975,16 @@ broker:
     # timings out of this order (the broker would ignore them and use 15/10/2).
     retryPeriodSeconds: 2
 
+  maintenanceVacuum:
+    # -- Run a plain VACUUM (ANALYZE) (never FULL) on the broker's small,
+    # constantly rewritten tables (live compute gauges, the SeccompProfile
+    # mirror, ...) when their dead tuples show autovacuum is not keeping up.
+    # Leader only, and a single catalog query per pass while autovacuum is
+    # healthy. Needs no privilege beyond owning the tables.
+    enabled: true
+    # -- Seconds between checks (minimum 60), on one schedule across replicas.
+    intervalSeconds: 300
+
   # -- Scoped bearer-token auth on the broker HTTP API. Without it any pod
   # that can reach the broker Service can read everything and forge
   # rows (pod specs, syscalls, mark_dead, seccomp status). With it, every

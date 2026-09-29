@@ -35,6 +35,36 @@ test('blame share is computed over the full blame list, and only the top 10 rows
   expect(rows).toHaveLength(10);
   const share = rows[0].querySelectorAll('td')[3].textContent;
   expect(share).toBe('15%'); // 100 / 650, not 100 / (100 + 9×50) = 18%
+  // The two rows cut off are said to exist: 100 of 650 ns is 15%.
+  expect(screen.getByTestId('compute-blame-hidden').textContent).toBe('2 more culprits not listed · 15% of the wait');
+});
+
+// The broker keeps only the heaviest few culprits per container and reports
+// the rest as a count and a summed wait. Shares are over both, and the panel
+// says the list is not complete.
+test('culprits the broker left off count toward the shares and are said to exist', () => {
+  const bounded = {
+    ...container,
+    blame: blame.slice(0, 5), // 100 + 4×50 = 300 listed
+    blame_omitted: 7,
+    blame_omitted_wait_ns: 350_000_000,
+  } as unknown as ComputeContainer;
+  const pod1 = { ...selected, compute: { ...compute, containers: [bounded] } };
+  const { container: root } = render(<DataTable selectedPod={pod1} allPodsLookup={[pod]} services={[]} />);
+  fireEvent.click(screen.getByRole('button', { name: /^Compute \(/ }));
+  const rows = [...root.querySelectorAll('[data-testid="compute-blame"] tbody tr')];
+  expect(rows).toHaveLength(5);
+  expect(rows[0].querySelectorAll('td')[3].textContent).toBe('15%'); // 100 / 650, not 100 / 300
+  expect(screen.getByTestId('compute-blame-hidden').textContent).toBe('7 more culprits not listed · 54% of the wait');
+});
+
+test('a complete blame list claims nothing hidden', () => {
+  const whole = { ...container, blame: blame.slice(0, 3), blame_omitted: 0, blame_omitted_wait_ns: 0 } as unknown as ComputeContainer;
+  const pod1 = { ...selected, compute: { ...compute, containers: [whole] } };
+  render(<DataTable selectedPod={pod1} allPodsLookup={[pod]} services={[]} />);
+  fireEvent.click(screen.getByRole('button', { name: /^Compute \(/ }));
+  expect(screen.getByTestId('compute-blame')).not.toBeNull();
+  expect(screen.queryByTestId('compute-blame-hidden')).toBeNull();
 });
 
 // The compute header and empty state must not blame the node when it is the

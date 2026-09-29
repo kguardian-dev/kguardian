@@ -23,6 +23,7 @@
 //! | Image attestation prune | `attestation::spawn_retention` | leader |
 //! | Peer late-resolve + stale-alive (dead-node) sweep | `peer::spawn` | leader |
 //! | Workload profile snapshotter | `workload_profile::spawn` | leader |
+//! | Maintenance VACUUM of small high-churn tables | `maintenance::spawn` | leader |
 //! | Seccomp denial workload gauge | `seccomp_denial::spawn_metrics_refresh` | every replica (feeds its own /metrics; read-only) |
 //! | Drift gauge | `profile_drift::spawn_metrics_refresh` | every replica (feeds its own /metrics; read-only) |
 //! | Version check-in | `version_check::spawn` | every replica (fills its own GET /version) |
