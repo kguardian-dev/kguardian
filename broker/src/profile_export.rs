@@ -399,6 +399,11 @@ impl BrokerData for DbData<'_> {
                 .as_ref()
                 .map(NpSvc::selector_from_service_spec)
                 .unwrap_or_default(),
+            ports: s
+                .service_spec
+                .as_ref()
+                .map(NpSvc::ports_from_service_spec)
+                .unwrap_or_default(),
         });
         self.svc.borrow_mut().insert(ip.to_string(), v.clone());
         v
