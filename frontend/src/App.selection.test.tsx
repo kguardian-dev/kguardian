@@ -43,6 +43,8 @@ vi.mock('./components/NetworkGraph', () => ({
             own synthesised nodes: hand App the node's data. */}
         <button onClick={() => report(externalFixture)}>report-external</button>
         <button onClick={() => select(null)}>clear</button>
+        {/* Esc, the focus pill and the focus self-heal all end here. */}
+        <button onClick={() => (props.onFocusChange as (id: string | null) => void)(null)}>unfocus</button>
         <span data-testid="focused">{String(props.focusedNodeId ?? '')}</span>
         <span data-testid="selected">{String(props.selectedPodId ?? '')}</span>
       </div>
@@ -73,6 +75,7 @@ vi.mock('./hooks/usePodData', () => ({
       compute: { findings: [], enabled: false, supported: false, history: new Map() },
       allPodsLookup: [],
       services: [],
+      failedReads: { traffic: 0, syscalls: 0 },
       loading: false,
       error: null,
       refreshData: () => {},
@@ -232,4 +235,27 @@ test('the bottom panel is capped, not pinned, so it can shrink to its content', 
   expect(scroller).toBeTruthy();
   expect(scroller!.style.maxHeight).not.toBe('');
   expect(scroller!.style.height).toBe('');
+});
+
+// The map lens lives only in the URL. Selecting a card, or leaving focus,
+// rebuilt the params without it, so opening a card's panel on the
+// Vulnerabilities lens dropped the map back to Traffic.
+test('selecting a card and leaving focus keep the map lens', async () => {
+  window.location.hash = '#/map?ns=payments&lens=vulns';
+  const { getByText, getByTestId } = renderApp();
+  await waitFor(() => expect(getByText('select-api')).toBeTruthy());
+  const params = () => new URLSearchParams(window.location.hash.split('?')[1] ?? '');
+
+  fireEvent.click(getByText('select-api'));
+  await waitFor(() => expect(getByTestId('focused').textContent).toBe('payments-api'));
+  expect(params().get('lens')).toBe('vulns');
+
+  fireEvent.click(getByText('unfocus'));
+  await waitFor(() => expect(getByTestId('focused').textContent).toBe(''));
+  expect(params().get('pod')).toBe('payments-api');
+  expect(params().get('lens')).toBe('vulns');
+
+  fireEvent.click(getByText('clear'));
+  await waitFor(() => expect(getByTestId('selected').textContent).toBe(''));
+  expect(params().get('lens')).toBe('vulns');
 });

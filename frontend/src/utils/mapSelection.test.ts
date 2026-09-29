@@ -37,4 +37,10 @@ describe('paramsForSelection', () => {
     expect(paramsForSelection('a', undefined).ns).toBeUndefined();
     expect(paramsForSelection('a', 'media').ns).toBe('media');
   });
+
+  // The map lens rides along untouched: a selection is not a lens change.
+  test('the lens passes through', () => {
+    expect(paramsForSelection('a', 'media', 'vulns')).toEqual({ ns: 'media', pod: 'a', focus: 'a', lens: 'vulns' });
+    expect(paramsForSelection(null, 'media', 'coverage').lens).toBe('coverage');
+  });
 });

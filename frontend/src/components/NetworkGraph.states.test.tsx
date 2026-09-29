@@ -134,3 +134,42 @@ test('a failing compute poll is named in the summary instead of gauges silently 
   await waitFor(() => expect(healthy.container.querySelectorAll('.react-flow__node').length).toBeGreaterThan(0));
   expect(healthy.queryAllByTestId('compute-unavailable')).toHaveLength(0);
 });
+
+// The focus pill was its own panel at top-center and the toolbar a later
+// panel at top-right, both absolutely positioned at the same z-index. Once
+// the lens group and toggles grew past half the map (a 1280px laptop with the
+// rail open) the toolbar was drawn over the pill and its "Show all" could not
+// be clicked. The pill now stacks under the toolbar in the same panel, so the
+// two can never overlap.
+test('the focus pill stacks under the toolbar, in the same panel, and its exit control works', async () => {
+  const onFocusChange = vi.fn();
+  const pods = [node('repo-server', { traffic: [egressTo('140.82.112.3')] })];
+  const { container, getByRole, getAllByLabelText } = render(
+    graph(pods, { focusedNodeId: 'repo-server', onFocusChange, lens: 'vulns', onLensChange: () => {} }),
+  );
+  const exit = await waitFor(() => getByRole('button', { name: /Show all/ }));
+
+  // Not a separately positioned panel that another panel can cover.
+  expect(container.querySelector('.react-flow__panel.top.center')).toBeNull();
+  const panel = exit.closest('.react-flow__panel')!;
+  expect(panel.classList.contains('right')).toBe(true);
+  // After the toolbar in document order, i.e. below it in the flex stack.
+  const lens = getAllByLabelText('Map lens')[0];
+  expect(panel.contains(lens)).toBe(true);
+  expect(lens.compareDocumentPosition(exit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(panel.textContent).toMatch(/Focused on repo-server/);
+
+  // A native button: in the tab order, and a click leaves focus.
+  expect(exit.tagName).toBe('BUTTON');
+  expect(exit.tabIndex).toBe(0);
+  fireEvent.click(exit);
+  expect(onFocusChange).toHaveBeenCalledWith(null);
+
+  // Esc still leaves focus too.
+  onFocusChange.mockClear();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(onFocusChange).toHaveBeenCalledWith(null);
+
+  // The lens picker stays usable while focused.
+  expect((lens as HTMLSelectElement).disabled).toBe(false);
+});

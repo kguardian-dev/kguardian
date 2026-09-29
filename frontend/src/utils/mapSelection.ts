@@ -20,7 +20,10 @@ export type MapParams = Record<string, string | undefined>;
  * current params. Carrying the existing focus forward would pin the map to
  * whichever card was focused first and leave every later selection isolating
  * the wrong workload.
+ *
+ * `lens` is carried through as given: it lives only in the url, and a
+ * selection that dropped it put the map back on Traffic.
  */
-export function paramsForSelection(podId: string | null | undefined, ns: string | undefined): MapParams {
-  return { ns, pod: podId ?? undefined, focus: podId ?? undefined };
+export function paramsForSelection(podId: string | null | undefined, ns: string | undefined, lens?: string): MapParams {
+  return { ns, pod: podId ?? undefined, focus: podId ?? undefined, lens };
 }

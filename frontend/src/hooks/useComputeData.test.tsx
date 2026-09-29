@@ -244,6 +244,54 @@ describe('useComputeData', () => {
     expect(result.current.supported).toBe(true); // a timeout is not an older broker
   });
 
+  // The same pile-up on the findings poll: a statement that hit the Broker's
+  // timeout was reissued every 15 s while the client-aborted one still ran.
+  test('consecutive findings failures back off like the latest poll, and one success resets it', async () => {
+    let fail = true;
+    const api = fakeApi(
+      () => ({ containers: [], nodes: [node()] }),
+      () => { if (fail) throw new Error('canceling statement due to statement timeout'); return { findings: [] }; },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await flush(); // T0: attempt 1 fails; next not before T+30
+    expect(api.getComputeFindings).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); }); // T+15: skipped
+    expect(api.getComputeFindings).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); }); // T+30: attempt 2
+    expect(api.getComputeFindings).toHaveBeenCalledTimes(2);
+    // An hour of failures is a handful of attempts at the 5 min cap, not 240.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60_000); });
+    expect(api.getComputeFindings.mock.calls.length).toBeLessThan(20);
+    expect(result.current.supported).toBe(true);
+
+    fail = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(300_000); }); // the next attempt lands
+    const after = api.getComputeFindings.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); }); // back on the interval
+    expect(api.getComputeFindings.mock.calls.length).toBe(after + 1);
+  });
+
+  // The comment said a transient /compute/nodes failure was retried by "the
+  // next poll tick", but the tick only polled latest: only a visibility
+  // change reloaded the nodes, so their state stayed unknown for the session.
+  test('a failed /compute/nodes read is retried by the next latest poll, then not again', async () => {
+    let fail = true;
+    const api = fakeApi(
+      () => ({ containers: [], nodes: [] }),
+      () => ({ findings: [] }),
+      () => { if (fail) throw new Error('Service Unavailable'); return [node({ node: 'worker-9' })]; },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await flush();
+    expect(api.getComputeNodes).toHaveBeenCalledTimes(1);
+    fail = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(api.getComputeNodes).toHaveBeenCalledTimes(2);
+    expect(result.current.nodesByName.has('worker-9')).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.getComputeNodes).toHaveBeenCalledTimes(2); // loaded: the tick is a no-op for it
+  });
+
   test('a latest poll still in flight is not joined by another', async () => {
     const pending: Array<(r: ComputeLatestResponse) => void> = [];
     const api = {

@@ -10,7 +10,11 @@ import type { PodInfo, PodNodeData } from './types';
 // and heavy children are stubbed; each of those has its own tests.
 
 const podDataCalls: unknown[][] = [];
-const podDataState = { pods: [] as PodNodeData[], loading: false };
+const podDataState = {
+  pods: [] as PodNodeData[], loading: false, error: null as string | null,
+  servicesError: null as string | null, servicesListing: [] as unknown[] | null,
+  failedReads: { traffic: 0, syscalls: 0 } as { traffic: number; syscalls: number; shed?: true },
+};
 const nsState = { namespaces: ['payments', 'other'], loading: false, error: null as string | null };
 
 vi.mock('./components/NetworkGraph', () => ({ default: () => <div data-testid="map" /> }));
@@ -18,8 +22,8 @@ vi.mock('./components/DataTable', () => ({ default: () => <div /> }));
 vi.mock('./components/ImagesView', () => ({ default: () => <div data-testid="images" /> }));
 vi.mock('./components/WorkloadsView', () => ({ default: () => <div data-testid="workloads" /> }));
 vi.mock('./components/PolicyBuilderModal', () => ({
-  PolicyBuilderModal: (p: { loading?: boolean; podsLookup?: unknown[]; services?: unknown[] }) => (
-    <div data-testid="policy-builder" data-loading={String(p.loading)} data-lookup={String(p.podsLookup !== undefined && p.services !== undefined)} />
+  PolicyBuilderModal: (p: { loading?: boolean; podsLookup?: unknown[]; services?: unknown[]; error?: string | null }) => (
+    <div data-testid="policy-builder" data-loading={String(p.loading)} data-lookup={String(p.podsLookup !== undefined && p.services !== undefined)} data-services={String(p.services !== undefined)} data-error={p.error ?? ''} />
   ),
 }));
 vi.mock('./hooks/usePodData', () => ({
@@ -30,9 +34,11 @@ vi.mock('./hooks/usePodData', () => ({
       compute: { findings: [], enabled: false, supported: false, unavailable: false, history: new Map() },
       allPodsLookup: [],
       services: [],
-      failedReads: { traffic: 0, syscalls: 0 },
+      servicesListing: podDataState.servicesListing,
+      servicesError: podDataState.servicesError,
+      failedReads: podDataState.failedReads,
       loading: podDataState.loading,
-      error: null,
+      error: podDataState.error,
       refreshData: () => {},
     };
   },
@@ -55,6 +61,10 @@ beforeEach(() => {
   podDataCalls.length = 0;
   podDataState.pods = [];
   podDataState.loading = false;
+  podDataState.error = null;
+  podDataState.servicesError = null;
+  podDataState.servicesListing = [];
+  podDataState.failedReads = { traffic: 0, syscalls: 0 };
   nsState.namespaces = ['payments', 'other'];
   nsState.loading = false;
   nsState.error = null;
@@ -252,4 +262,86 @@ test('a palette pick matches a member pod name and focuses the workload like a c
 
   await waitFor(() => expect(hashParams().get('pod')).toBe('payments-api'));
   expect(hashParams().get('focus')).toBe('payments-api'); // opened AND focused, as a card click does
+});
+
+// A timed-out or shed /pod/info used to come back as `[]`, and the map said
+// "No workloads in payments — This namespace has no observed pods yet".
+test('a pod listing that failed shows the error, never the empty state', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Workloads in payments could not be loaded')).not.toBeNull());
+  expect(screen.getByText('timeout of 35000ms exceeded')).not.toBeNull();
+  expect(screen.queryByText(/No workloads in/)).toBeNull();
+  expect(screen.queryByTestId('map')).toBeNull();
+});
+
+test('a Refresh that failed keeps the loaded graph, with the error above it', async () => {
+  podDataState.pods = workloads();
+  podDataState.error = 'Service Unavailable';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
+  expect(screen.getByText('Error: Service Unavailable')).not.toBeNull();
+  expect(screen.queryByText(/could not be loaded/)).toBeNull();
+});
+
+test('a failed pod listing: the header says so instead of "0 workloads · 0 pods"', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Workloads in payments could not be loaded')).not.toBeNull());
+  expect(screen.getByText('Could not load')).not.toBeNull();
+  expect(screen.queryByText(/0 workloads/)).toBeNull();
+});
+
+test('a failed pod listing reaches the Policy Builder, so its picker does not say "No workloads"', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Could not load')).not.toBeNull());
+  fireEvent.click(screen.getAllByText('Policy Builder')[0].closest('button')!);
+  await waitFor(() => expect(screen.getByTestId('policy-builder').dataset.error).toBe('timeout of 35000ms exceeded'));
+});
+
+// A failed Service read used to blank the whole map with the pod listing's
+// error state. It is a warning over a map that still loads.
+test('a failed Service listing is a warning over the map, and the Policy Builder is told the listing is unknown', async () => {
+  podDataState.pods = workloads();
+  podDataState.servicesError = 'Service Unavailable';
+  podDataState.servicesListing = null;
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
+  expect(screen.getByText(/Service attribution is unavailable/).textContent).toMatch(/Refresh to retry/);
+  expect(screen.queryByText(/could not be loaded/)).toBeNull();
+  fireEvent.click(screen.getAllByText('Policy Builder')[0].closest('button')!);
+  // Not `[]` ("no Services"): absent, so the generators look Services up by IP.
+  await waitFor(() => expect(screen.getByTestId('policy-builder').dataset.services).toBe('false'));
+});
+
+test('reads the Broker shed are explained on the map, not only as badges on each card', async () => {
+  podDataState.pods = workloads();
+  podDataState.failedReads = { traffic: 3, syscalls: 2, shed: true };
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
+  expect(screen.getByText(/5 reads were refused by the Broker because it is busy/).textContent).toMatch(/Refresh to read them again/);
+});
+
+test('other failed reads are explained too', async () => {
+  podDataState.pods = workloads();
+  podDataState.failedReads = { traffic: 1, syscalls: 0 };
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
+  expect(screen.getByText(/1 read failed/).textContent).toMatch(/Refresh to read them again/);
+});
+
+test('a first load that takes a while says so on the skeleton; a quick one does not flash it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    podDataState.loading = true;
+    renderAt('#/map?ns=payments');
+    await vi.waitFor(() => expect(screen.getByText('Loading…')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(screen.queryByTestId('pods-elapsed')).toBeNull();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(screen.getByTestId('pods-elapsed').textContent).toMatch(/Reading the workloads… \d+s\. .*up to 35 s/));
+  } finally {
+    vi.useRealTimers();
+  }
 });

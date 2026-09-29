@@ -284,15 +284,27 @@ export function useMapLens(
   const profileApi = apis.profileApi ?? defaultProfileApi;
   const [state, setState] = useState<MapLensState>({ byWorkload: new Map(), loading: false, error: null, truncated: false, readFailures: 0 });
   const seq = useRef(0);
+  /** The lens and namespace the badges on screen were read for. */
+  const shownFor = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     const id = ++seq.current;
     const current = () => id === seq.current;
     if (lens === 'traffic') {
+      shownFor.current = null;
       setState({ byWorkload: new Map(), loading: false, error: null, truncated: false, readFailures: 0 });
       return;
     }
-    setState((s) => ({ ...s, byWorkload: s.byWorkload, loading: true, error: null }));
+    // A refresh keeps its badges while it reloads. A different lens or
+    // namespace starts empty, so App says "Reading…": the previous lens's
+    // badges are not this lens's, and another namespace's match no card.
+    const key = `${lens}/${namespace}`;
+    if (shownFor.current === key) {
+      setState((s) => ({ ...s, loading: true, error: null }));
+    } else {
+      shownFor.current = key;
+      setState({ byWorkload: new Map(), loading: true, error: null, truncated: false, readFailures: 0 });
+    }
     try {
       const out = new Map<string, LensBadge>();
       let truncated = false;

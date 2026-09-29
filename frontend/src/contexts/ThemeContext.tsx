@@ -11,9 +11,12 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize theme from localStorage or default to dark
+  // Initialize theme from localStorage or default to dark. A browser that
+  // blocks site data throws on any storage access: fall back to the default
+  // rather than taking the whole app down.
   const [theme, setThemeState] = useState<Theme>(() => {
-    const savedTheme = localStorage.getItem('kguardian-theme');
+    let savedTheme: string | null = null;
+    try { savedTheme = localStorage.getItem('kguardian-theme'); } catch { /* storage blocked */ }
     return (savedTheme === 'light' || savedTheme === 'dark') ? savedTheme : 'dark';
   });
 
@@ -22,7 +25,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const root = document.documentElement;
     root.classList.remove('light', 'dark');
     root.classList.add(theme);
-    localStorage.setItem('kguardian-theme', theme);
+    try { localStorage.setItem('kguardian-theme', theme); } catch { /* storage blocked: the choice lasts this session */ }
   }, [theme]);
 
   const toggleTheme = () => {

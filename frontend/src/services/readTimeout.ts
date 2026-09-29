@@ -18,6 +18,14 @@ export const BROKER_STATEMENT_TIMEOUT_MS = 30_000;
  */
 export const PROFILE_READ_TIMEOUT_MS = BROKER_STATEMENT_TIMEOUT_MS + 5_000;
 
+/**
+ * The pod and Service listings are the heaviest responses the Broker builds
+ * (72 MB of pods on a 43k-pod cluster) and can legitimately take most of its
+ * statement timeout. Giving up at the default 10 s turned every slow listing
+ * into a failure while the statement kept running server-side.
+ */
+export const LISTING_READ_TIMEOUT_MS = BROKER_STATEMENT_TIMEOUT_MS + 5_000;
+
 /** An AbortSignal that fires after `ms` (AbortSignal.timeout where it exists). */
 export function timeoutSignal(ms: number): AbortSignal {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);

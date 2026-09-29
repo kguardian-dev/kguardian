@@ -14,6 +14,16 @@ const oneLine = (s: string, max = 200) => {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
 
+/**
+ * A non-JSON error body as an on-screen message: one line of it, or '' for
+ * an HTML page (an ingress 502/504, the sign-in proxy's 401/403 after the
+ * session expired), which says nothing a status line does not and would
+ * otherwise become the whole error text. Callers fall back to the status.
+ */
+export function errorBodyText(body: string): string {
+  return /^\s*</.test(body) ? '' : oneLine(body);
+}
+
 export function busyMessage(body: string): string {
   const text = oneLine(body);
   if (/^database busy:/i.test(text)) {

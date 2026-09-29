@@ -41,8 +41,10 @@ const ImagesView = lazyRetry(() => import('./components/ImagesView'));
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
-import { Server } from 'lucide-react';
+import { CloudOff, Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
+import { useElapsedSeconds } from './hooks/useWorkloadProfile';
+import { LISTING_READ_TIMEOUT_MS } from './services/readTimeout';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { MapLens, PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
@@ -50,6 +52,9 @@ import { UI_DIMENSIONS } from './constants/ui';
 const MAP_LENSES: readonly MapLens[] = ['traffic', 'vulns', 'supply', 'coverage'];
 /** Views whose data is the resolved namespace's, so an unknown URL namespace is corrected there. */
 const NAMESPACE_DATA_VIEWS: ReadonlySet<View> = new Set<View>(['map', 'risks']);
+
+/** After this many seconds of waiting, the map skeleton says why the first load can be slow. */
+const SLOW_READ_HINT_AFTER_S = 5;
 
 function App() {
   const { settings, updateSettings, toggleSetting } = useSettings();
@@ -163,7 +168,9 @@ function App() {
   // The desktop rail preference: expanded unless the user collapsed it.
   // Narrow screens never read it (they always show the icon column, see
   // `narrow` below), so a phone-first visit cannot leave desktop collapsed.
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('kg-rail-collapsed') === '1'; } catch { return false; } // storage blocked
+  });
 
   const { namespaces, loading: namespacesLoading, error: namespacesError } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
@@ -185,7 +192,7 @@ function App() {
   const namespaceKnown = loc.params.ns !== undefined || !namespacesLoading;
   const podDataEnabled = namespaceKnown && (view !== 'images' || isPolicyBuilderOpen || isAIAssistantOpen);
   const computeEnabled = namespaceKnown && (view === 'map' || view === 'risks');
-  const { pods: rawPods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
+  const { pods: rawPods, compute, allPodsLookup, services, servicesListing, servicesError, failedReads, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
     enabled: podDataEnabled,
     compute: computeEnabled,
   });
@@ -193,6 +200,10 @@ function App() {
   // way: that wait is loading too, or `#/map` would flash "No workloads in
   // default" for the whole of it.
   const podsSettling = loading || !namespaceKnown;
+  // The first load of a large namespace can take most of the listing
+  // timeout; after a few seconds the skeleton says so, as the workload
+  // profile's does, instead of sitting silent until an error appears.
+  const podsWaited = useElapsedSeconds(podsSettling && rawPods.length === 0);
   // The header Refresh is the one refresh control. Views with their own
   // broker data (seccomp profiles, audit verdicts) reload when this ticks.
   const [refreshTick, setRefreshTick] = useState(0);
@@ -253,8 +264,8 @@ function App() {
   // get the whole map back without losing what you were reading. Folding them
   // together would make Esc either close the card or do nothing.
   const selectPod = useCallback(
-    (pod: PodNodeData | null) => navigate('map', paramsForSelection(pod?.id, loc.params.ns), { replace: true }),
-    [navigate, loc.params.ns],
+    (pod: PodNodeData | null) => navigate('map', paramsForSelection(pod?.id, loc.params.ns, loc.params.lens), { replace: true }),
+    [navigate, loc.params.ns, loc.params.lens],
   );
 
   // Graph focus mode is URL state (`?focus=<node id>`) so a focused view can
@@ -262,8 +273,8 @@ function App() {
   // it if the node disappears.
   const focusedNodeId = loc.params.focus ?? null;
   const setFocusedNodeId = useCallback(
-    (id: string | null) => navigate('map', { ns: loc.params.ns, pod: loc.params.pod, focus: id ?? undefined }, { replace: true }),
-    [navigate, loc.params.ns, loc.params.pod],
+    (id: string | null) => navigate('map', { ns: loc.params.ns, pod: loc.params.pod, focus: id ?? undefined, lens: loc.params.lens }, { replace: true }),
+    [navigate, loc.params.ns, loc.params.pod, loc.params.lens],
   );
 
   // On cluster switch, point the URL at the new cluster's remembered namespace
@@ -337,7 +348,7 @@ function App() {
     }
     refocusRailToggle.current = true;
     setRailCollapsed((c) => {
-      localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
+      try { localStorage.setItem('kg-rail-collapsed', c ? '0' : '1'); } catch { /* storage blocked */ }
       return !c;
     });
   }, [narrow]);
@@ -454,14 +465,14 @@ function App() {
 
   // Jump from a finding straight to that workload on the map (one history entry).
   const handleFindingSelect = useCallback((pod: PodNodeData) => {
-    navigate('map', { ns: loc.params.ns, pod: pod.id });
-  }, [navigate, loc.params.ns]);
+    navigate('map', { ns: loc.params.ns, pod: pod.id, lens: loc.params.lens });
+  }, [navigate, loc.params.ns, loc.params.lens]);
 
   // A palette pick behaves like a click on the card: it opens AND focuses
   // the workload (utils/mapSelection), with one history entry for the jump.
   const handlePaletteSelect = useCallback((pod: PodNodeData) => {
-    navigate('map', paramsForSelection(pod.id, loc.params.ns));
-  }, [navigate, loc.params.ns]);
+    navigate('map', paramsForSelection(pod.id, loc.params.ns, loc.params.lens));
+  }, [navigate, loc.params.ns, loc.params.lens]);
 
   // "View workload" on a compute finding (D7): the pod may live in another
   // namespace (a noisy neighbour is cross-namespace by nature), so resolve
@@ -586,11 +597,20 @@ function App() {
   // `pods` is one entry per workload identity; the pod count is its members.
   const podTotal = useMemo(() => pods.reduce((n, p) => n + (p.pods?.length || 1), 0), [pods]);
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  // Per-pod reads that did not answer: each card says so, and this says why.
+  const failedReadCount = failedReads.traffic + failedReads.syscalls;
+  const readNote = failedReadCount === 0
+    ? null
+    : failedReads.shed
+      ? `${plural(failedReadCount, 'read')} ${failedReadCount === 1 ? 'was' : 'were'} refused by the Broker because it is busy; those cards say "read failed". Refresh to read them again.`
+      : `${plural(failedReadCount, 'read')} failed; those cards say "read failed". Refresh to read them again.`;
   const sectionSubtitle =
     view === 'map'
       ? podsSettling && pods.length === 0
         ? 'Loading…'
-        : `${plural(pods.length, 'workload')} · ${plural(podTotal, 'pod')}`
+        : error && pods.length === 0
+          ? 'Could not load'
+          : `${plural(pods.length, 'workload')} · ${plural(podTotal, 'pod')}`
       : view === 'workload'
         ? loc.params.kind ?? ''
         : '';
@@ -755,6 +775,9 @@ function App() {
             onOpenWorkloads={(control) => navigate('workloads', { ns: effectiveNamespace, scope: 'ns', control })}
             pods={pods}
             namespace={effectiveNamespace}
+            podsLoading={podsSettling}
+            podsError={error}
+            failedReads={failedReads}
             onSelectPod={handleFindingSelect}
             onBuildPolicy={handleBuildPolicyForFinding}
             onOpenAudit={() => setIsAuditPanelOpen(true)}
@@ -766,17 +789,58 @@ function App() {
           />
         ) : (
         <>
-        {error && (
+        {/* A failed Refresh keeps the graph it had, under this banner. */}
+        {error && pods.length > 0 && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
             <p className="text-sm">Error: {error}</p>
           </div>
         )}
+        {/* Partial data: the map is drawn, but part of what it is drawn from
+            did not arrive. Same shape as the node-reporting banner. */}
+        {pods.length > 0 && (servicesError || readNote) && (
+          <div role="status" className="flex flex-col gap-0.5 px-4 py-1.5 border-b border-hubble-border bg-severity-medium/10 text-xs text-severity-medium">
+            {servicesError && (
+              <span className="flex items-center gap-2" title={servicesError}>
+                <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                Service attribution is unavailable: the Service listing could not be read ({servicesError}). Refresh to retry.
+              </span>
+            )}
+            {readNote && (
+              <span className="flex items-center gap-2">
+                <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                {readNote}
+              </span>
+            )}
+          </div>
+        )}
 
         {podsSettling && pods.length === 0 ? (
-          <div className="flex-1 min-h-0">
-            <GraphSkeleton />
+          <div className="flex-1 min-h-0 flex flex-col">
+            {podsWaited >= SLOW_READ_HINT_AFTER_S && (
+              <p role="status" className="px-4 py-1.5 text-xs text-tertiary tabular-nums" data-testid="pods-elapsed">
+                Reading the workloads… {podsWaited}s. The pod listing is the Broker's largest read; on a large cluster it can take up to {Math.round(LISTING_READ_TIMEOUT_MS / 1000)} s.
+              </p>
+            )}
+            <div className="flex-1 min-h-0">
+              <GraphSkeleton />
+            </div>
           </div>
-        ) : !error && pods.length === 0 ? (
+        ) : error && pods.length === 0 ? (
+          // The listing failed: say so, never "No workloads", which is a claim
+          // about the namespace the Broker did not get to make.
+          <div className="flex-1 flex items-center justify-center">
+            <EmptyState
+              icon={CloudOff}
+              title={`Workloads in ${effectiveNamespace} could not be loaded`}
+              description={error}
+              action={
+                <Button variant="secondary" size="sm" leftIcon={RefreshCw} onClick={refreshData}>
+                  Refresh
+                </Button>
+              }
+            />
+          </div>
+        ) : pods.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
             <EmptyState
               icon={Server}
@@ -900,8 +964,11 @@ function App() {
             // the inventory; `loading` so the picker never reads "No workloads"
             // while the namespace is still on its way.
             podsLookup={allPodsLookup}
-            services={services}
+            // Absent, not `[]`, while no Service listing has been read: the
+            // generators then look Services up by IP instead of reading "none".
+            services={servicesListing ?? undefined}
             loading={podsSettling}
+            error={error}
           />
         </Suspense>
       )}

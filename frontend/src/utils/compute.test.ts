@@ -388,6 +388,79 @@ describe('buildPodComputeData', () => {
     expect(d.status).toBe('warning');
     expect(hasComputeGauges(d)).toBe(true);
   });
+  // The history buffers are per pod uid, and a card's sparkline reads the
+  // first replica's. The gauges divide by every replica's capacity, so they
+  // must read every replica's usage too: 3 replicas each at 400m of a 500m
+  // limit used to read 400m of 1.50 cores, 26.7% instead of 80%.
+  test('a multi-replica card reads every replica\'s usage against every replica\'s capacity', () => {
+    const replica = (i: number) => container({
+      container_uid: `uid-${i}/app`, pod_uid: `uid-${i}`, pod_name: `api-${i}`,
+      cpu_usage_millis: 400, cpu_limit_millis: 500, mem_working_set: 100, mem_limit: 200,
+    });
+    const containers = [replica(0), replica(1), replica(2)];
+    const now = Date.parse('2026-09-14T10:00:00Z');
+    // What the hooks do: one buffer per uid, and the card reads the first uid's.
+    const buf = new RingBuffer<ComputeSample>();
+    appendSample(buf, podLevelSample([containers[0]], now));
+    const d = buildPodComputeData({ containers, nodesByName: new Map([['worker-1', node()]]), findings: [], samples: buf.values(), now });
+    expect(d.cpuMillis).toBe(1200);
+    expect(d.cpuCapacityMillis).toBe(1500);
+    expect(d.cpuPct).toBeCloseTo(80);
+    expect(d.memBytes).toBe(300);
+    expect(d.memPct).toBeCloseTo(50);
+    // The sparkline is still the one replica it always drew.
+    expect(d.sparkCpu).toEqual([{ at: now, value: 400 }]);
+  });
+  // With no limits or requests the card falls back to node capacity. The
+  // usage is every replica's, so the capacity must be every node they run
+  // on: 3 BestEffort replicas on 3 nodes, each at 30% of its node, read 90%
+  // against one node's capacity.
+  describe('multi-replica node-capacity fallback', () => {
+    const now = Date.parse('2026-09-14T10:00:00Z');
+    const bestEffort = (i: number, nodeName: string, over: Partial<ComputeContainer> = {}) => container({
+      container_uid: `uid-${i}/app`, pod_uid: `uid-${i}`, pod_name: `api-${i}`, node: nodeName,
+      cpu_limit_millis: null, cpu_request_millis: null, mem_limit: null, mem_request: null,
+      cpu_usage_millis: 1200, mem_working_set: 2400, ...over,
+    });
+    const nodes = new Map(['worker-1', 'worker-2', 'worker-3'].map((n) => [n, node({ node: n })])); // 4 cores, 8000 bytes each
+    const build = (containers: ComputeContainer[], nodesByName = nodes) =>
+      buildPodComputeData({ containers, nodesByName, findings: [], samples: [], now });
+
+    test('replicas on different nodes: every node counts', () => {
+      const d = build([bestEffort(0, 'worker-1'), bestEffort(1, 'worker-2'), bestEffort(2, 'worker-3')]);
+      expect(d.cpuDenominator).toBe('node');
+      expect(d.cpuCapacityMillis).toBe(12_000);
+      expect(d.cpuPct).toBeCloseTo(30);
+      expect(d.memCapacityBytes).toBe(24_000);
+      expect(d.memPct).toBeCloseTo(30);
+    });
+
+    test('replicas sharing a node count it once', () => {
+      const d = build([bestEffort(0, 'worker-1'), bestEffort(1, 'worker-1'), bestEffort(2, 'worker-2')]);
+      expect(d.cpuCapacityMillis).toBe(8_000);
+      expect(d.cpuPct).toBeCloseTo(45);
+    });
+
+    test('a mix of limits and none falls back to the requests, else to every node', () => {
+      const withRequests = build([
+        bestEffort(0, 'worker-1', { cpu_limit_millis: 2000, cpu_request_millis: 1500 }),
+        bestEffort(1, 'worker-2', { cpu_request_millis: 1500 }),
+      ]);
+      expect(withRequests.cpuDenominator).toBe('request');
+      expect(withRequests.cpuCapacityMillis).toBe(3000);
+      expect(withRequests.cpuPct).toBeCloseTo(80);
+      const without = build([bestEffort(0, 'worker-1', { cpu_limit_millis: 2000 }), bestEffort(1, 'worker-2')]);
+      expect(without.cpuDenominator).toBe('node');
+      expect(without.cpuCapacityMillis).toBe(8_000);
+      expect(without.cpuPct).toBeCloseTo(30);
+    });
+
+    test('a node without a row leaves the capacity unknown rather than understated', () => {
+      const d = build([bestEffort(0, 'worker-1'), bestEffort(1, 'worker-9')]);
+      expect(d.cpuDenominator).toBeNull();
+      expect(d.cpuPct).toBeNull();
+    });
+  });
   test('falls back to node capacity (cores × 1000) when nothing is set', () => {
     const rows = [container({ cpu_limit_millis: null, cpu_request_millis: null, mem_limit: null, mem_request: null, cpu_usage_millis: 400, mem_working_set: 4000 })];
     const d = buildPodComputeData({ containers: rows, nodesByName: new Map([['worker-1', node()]]), findings: [], samples: [] })!;

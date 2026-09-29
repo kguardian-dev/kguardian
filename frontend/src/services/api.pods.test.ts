@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { AxiosError } from 'axios';
 import { apiClient } from './api';
+import { BROKER_STATEMENT_TIMEOUT_MS } from './readTimeout';
 
 // `/pod/info` is the heaviest response the broker produces, and a page load
 // asked for it more than once: usePodData wants the listing, useNamespaces
@@ -65,68 +66,68 @@ test('a failed request does not poison the next one', async () => {
       : Promise.resolve({ data: [POD] });
   }) as never);
 
-  expect(await apiClient.getAllPods()).toEqual([]);
+  await expect(apiClient.getAllPods()).rejects.toThrow('broker unavailable');
   expect(await apiClient.getAllPods()).toHaveLength(1);
   expect(calls).toBe(2);
 });
 
-test('mounting the map and the picker together costs one pod listing and one namespace read', async () => {
-  // useNamespaces and usePodData mount at once. The picker no longer derives
-  // its list from the pod inventory, so that overlap is one /pod/info plus
-  // one small /pod/namespaces, never a second copy of the whole inventory.
-  const urls: string[] = [];
-  vi.spyOn(axiosOf(apiClient), 'get').mockImplementation(((url: string) => {
-    urls.push(url);
-    const payload = url === '/pod/namespaces'
-      ? ['payments', 'other']
-      : [POD, { ...POD, pod_name: 'w-1', pod_namespace: 'other' }];
-    return new Promise((resolve) => setTimeout(() => resolve({ data: payload }), 5));
-  }) as never);
+// A timeout, a 503 shed or a dropped connection used to come back as `[]`,
+// and the map read that as "No workloads in <ns>". A Refresh that failed
+// replaced a loaded graph with the same false empty state. The listing now
+// rejects like the per-pod reads, so the caller can show the error.
+test('a failed pod listing rejects instead of reading as an empty cluster', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(axiosOf(apiClient), 'get').mockRejectedValue(new Error('timeout of 10000ms exceeded') as never);
 
-  const [pods, namespaces] = await Promise.all([
-    apiClient.getAllPods(),
-    apiClient.getNamespaces(),
-  ]);
-
-  expect(urls.filter((u) => u === '/pod/info')).toHaveLength(1);
-  expect(urls.filter((u) => u === '/pod/namespaces')).toHaveLength(1);
-  expect(pods).toHaveLength(2);
-  expect(namespaces).toEqual(['other', 'payments']);
+  await expect(apiClient.getAllPods()).rejects.toThrow('timeout of 10000ms exceeded');
 });
 
-test('the namespace picker reads /pod/namespaces, never the pod inventory', async () => {
-  // On a busy cluster /pod/info outgrows the client timeout and the picker
-  // used to fall back to just "default". The namespaces endpoint is one
-  // DISTINCT over the live rows, so the picker no longer depends on it.
-  const urls: string[] = [];
-  vi.spyOn(axiosOf(apiClient), 'get').mockImplementation((async (url: string) => {
-    urls.push(url);
-    return { data: ['payments', 'default', 'argocd'] };
-  }) as never);
+test('every caller sharing a failed listing sees the failure', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(axiosOf(apiClient), 'get').mockImplementation(
+    (() => new Promise((_, reject) => setTimeout(() => reject(new Error('Service Unavailable')), 5))) as never,
+  );
 
-  await expect(apiClient.getNamespaces()).resolves.toEqual(['default', 'argocd', 'payments']);
-  expect(urls).toEqual(['/pod/namespaces']);
+  const results = await Promise.allSettled([apiClient.getAllPods(), apiClient.getAllPods()]);
+  expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
 });
 
-test('a broker without /pod/namespaces falls back to deriving them from live pods', async () => {
-  const urls: string[] = [];
+// Same for the service listing: `[]` silently dropped every Service
+// attribution on the map and told the policy generators there were none.
+test('a failed service listing rejects instead of reading as no services', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(axiosOf(apiClient), 'get').mockRejectedValue(new Error('Service Unavailable') as never);
+
+  await expect(apiClient.getAllServices()).rejects.toThrow('Service Unavailable');
+});
+
+// The listing is the heaviest response the broker produces, and the broker
+// may spend its whole statement timeout building it. A client that gives up
+// first turns every slow read into a failure while the query keeps running.
+test('the pod and service listings wait past the broker statement timeout', async () => {
+  const configs: { url: string; timeout?: number }[] = [];
+  vi.spyOn(axiosOf(apiClient), 'get').mockImplementation((async (url: string, config?: { timeout?: number }) => {
+    configs.push({ url, timeout: config?.timeout });
+    return { data: [] };
+  }) as never);
+
+  await apiClient.getAllPods();
+  await apiClient.getAllServices();
+
+  for (const c of configs) expect(c.timeout).toBeGreaterThan(BROKER_STATEMENT_TIMEOUT_MS);
+  expect(configs.map((c) => c.url)).toEqual(['/pod/info', '/svc/info']);
+});
+
+test('the namespace fallback rethrows a failed pod listing, so the caller keeps the namespace it had', async () => {
+  // Same contract as a failed /pod/namespaces: a failure is not a list of one
+  // `default`, which would rewrite a deep link's namespace.
+  vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(axiosOf(apiClient), 'get').mockImplementation((async (url: string) => {
-    urls.push(url);
     if (url === '/pod/namespaces') {
       throw new AxiosError('Not Found', 'ERR_BAD_REQUEST', undefined, undefined, { status: 404 } as never);
     }
-    return { data: [POD, { ...POD, pod_name: 'old-1', pod_namespace: 'retired', is_dead: true }] };
+    throw new Error('broker down');
   }) as never);
-
-  await expect(apiClient.getNamespaces()).resolves.toEqual(['payments']);
-  expect(urls).toEqual(['/pod/namespaces', '/pod/info']);
-});
-
-test('any other failure of /pod/namespaces is rethrown, so the caller keeps the namespace it had', async () => {
-  // A 503 shed or a statement timeout used to come back as `['default']`,
-  // which replaced a deep link's namespace and rewrote its URL to default.
-  vi.spyOn(console, 'error').mockImplementation(() => {});
-  vi.spyOn(axiosOf(apiClient), 'get').mockRejectedValue(new Error('broker down') as never);
 
   await expect(apiClient.getNamespaces()).rejects.toThrow('broker down');
 });

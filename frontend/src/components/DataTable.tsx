@@ -16,7 +16,8 @@ import {
 import type { ComputeBlame, ComputeContainer } from '../types/compute';
 import { describeDrop, isDrop } from '../utils/dropCause';
 import { displaySyscallList } from '../utils/syscalls';
-import { UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeer } from '../utils/peerResolution';
+import { PRIVATE_PEER_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeer } from '../utils/peerResolution';
+import { isPrivateAddress } from '../utils/ipCidr';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -155,14 +156,21 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         </div>
       );
     } else {
-      // External, or a former IP holder no live pod matched at flow time
+      // No pod or Service record: a former IP holder no live pod matched at
+      // flow time, a private address (a load balancer, a VPC endpoint), or
+      // the Internet. The same split as the map's aggregate cards.
+      const kind = identity.unattributed
+        ? { label: 'Unattributed', title: UNATTRIBUTED_PEER_TOOLTIP }
+        : !ip ? { label: 'External', title: undefined }
+        : isPrivateAddress(ip) ? { label: 'Private IP', title: PRIVATE_PEER_TOOLTIP }
+        : { label: 'Internet', title: undefined };
       return (
         <div className="flex flex-col gap-0.5">
           <span
             className="px-1.5 py-0.5 bg-hubble-border/30 text-secondary rounded text-xs font-medium w-fit"
-            title={identity.unattributed ? UNATTRIBUTED_PEER_TOOLTIP : undefined}
+            title={kind.title}
           >
-            {identity.unattributed ? 'Unattributed' : 'External'}
+            {kind.label}
           </span>
           <span className="font-mono text-xs text-secondary pl-1">
             {ip}{port ? `:${port}` : ''}
@@ -716,16 +724,14 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                         podNamespace: traffic.pod_namespace || undefined,
                         isExternal: false,
                       };
-                      const externalIdentity: TrafficIdentity = {
-                        podName: selectedPod.pod.pod_name,
-                        podIdentity: selectedPod.pod.pod_identity || undefined,
-                        podNamespace: selectedPod.pod.pod_namespace || undefined,
-                        isExternal: true,
-                      };
+                      // The remote side is the row's own peer. It used to fall
+                      // back to the card's first member, labelled as a pod:
+                      // every row of the Private network or Internet card then
+                      // read "Pod <first IP>", whatever address it went to.
 
                       if (isIngress) {
                         // Local pod received from external: external → local
-                        source = remoteIdentity.isExternal ? externalIdentity : remoteIdentity;
+                        source = remoteIdentity;
                         sourceIP = traffic.traffic_in_out_ip;
                         sourcePort = traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' ? traffic.traffic_in_out_port : null;
                         destination = localPodIdentity;
@@ -736,7 +742,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                         source = localPodIdentity;
                         sourceIP = traffic.pod_ip;
                         sourcePort = traffic.pod_port && traffic.pod_port !== '0' ? traffic.pod_port : null;
-                        destination = remoteIdentity.isExternal ? externalIdentity : remoteIdentity;
+                        destination = remoteIdentity;
                         destinationIP = traffic.traffic_in_out_ip;
                         destinationPort = traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' ? traffic.traffic_in_out_port : null;
                       }

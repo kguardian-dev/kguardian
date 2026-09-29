@@ -25,10 +25,17 @@ import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
 import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
+import type { FailedReads } from '../hooks/usePodData';
 
 interface RisksViewProps {
   pods: PodNodeData[];
   namespace: string;
+  /** The namespace's pods are still being read (hooks/usePodData). */
+  podsLoading?: boolean;
+  /** The pod listing failed (hooks/usePodData `error`). */
+  podsError?: string | null;
+  /** Per-pod reads the Broker did not answer: those pods' traffic or syscalls are unknown. */
+  failedReads?: FailedReads;
   onSelectPod: (pod: PodNodeData) => void;
   /** Opens the Policy Builder on the tab relevant to the finding kind. */
   onBuildPolicy: (pod: PodNodeData, kind: FindingKind) => void;
@@ -54,6 +61,8 @@ interface RisksViewProps {
   /** Increments on the header Refresh; re-reads the would-deny verdicts (a failed read is retried this way). */
   refreshTick?: number;
 }
+
+const NO_FAILED_READS: FailedReads = { traffic: 0, syscalls: 0 };
 
 /** Sensitive-syscall and compute findings use the upper three steps of the
  *  shared scale (utils/severity); nothing here is ranked `low`. */
@@ -131,6 +140,9 @@ function podLabel(pod: PodNodeData): string {
 export function RisksView({
   pods,
   namespace,
+  podsLoading = false,
+  podsError = null,
+  failedReads = NO_FAILED_READS,
   onSelectPod,
   onBuildPolicy,
   onOpenAudit,
@@ -265,6 +277,25 @@ export function RisksView({
   const totalDrops = dropFindings.reduce((sum, f) => sum + f.drops, 0);
   const findingCount = dropFindings.length + syscallFindings.length + fanoutFindings.length + computeFindings.length;
 
+  // What the pod-derived counts can honestly claim. With no pods yet because
+  // they are still loading, or because the listing failed, every count is
+  // unknown. A pod whose traffic or syscall read failed contributes nothing
+  // to those counts, so a zero from them is unknown too (a non-zero count is
+  // still at least that many).
+  const podsUnknown = workloads.length === 0 && (podsLoading || podsError !== null);
+  const trafficUnknown = podsUnknown || failedReads.traffic > 0;
+  const syscallsUnknown = podsUnknown || failedReads.syscalls > 0;
+  const computeUnknown = computeEnabled && computeUnavailable && computeFindings.length === 0;
+  const partialNote = failedReads.traffic + failedReads.syscalls > 0
+    ? `${[
+        failedReads.traffic > 0 ? `${failedReads.traffic} traffic ${failedReads.traffic === 1 ? 'read' : 'reads'}` : null,
+        failedReads.syscalls > 0 ? `${failedReads.syscalls} syscall ${failedReads.syscalls === 1 ? 'read' : 'reads'}` : null,
+      ].filter(Boolean).join(' and ')} failed: blocked connections, sensitive syscalls and egress fan-out count only the workloads that answered. Refresh to read them again.`
+    : null;
+  const unknownTile = (value: number, unknown: boolean, why: string) =>
+    unknown && value === 0 ? { value: '—', tone: 'text-tertiary', title: why } : null;
+  const podsWhy = podsLoading ? `Reading the workloads in ${namespace}…` : podsError !== null ? `The workloads in ${namespace} could not be read: ${podsError}` : (partialNote ?? '');
+
   // Posture: how many of this namespace's profiled workloads have an
   // enforcing SeccompProfile CR. Counted from the broker's profile list, so a
   // workload with no syscalls reported yet is not in the denominator.
@@ -275,10 +306,10 @@ export function RisksView({
   }, [seccompProfiles, namespace]);
 
   const stats: StatTileProps[] = [
-    { label: 'Workloads', value: workloads.length, icon: ShieldCheck, tone: 'text-hubble-accent' },
-    { label: 'Blocked connections', value: totalDrops, icon: ShieldAlert, tone: totalDrops > 0 ? 'text-hubble-error' : 'text-secondary' },
-    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? SEVERITY_TEXT_CLASS[syscallFindings[0].worst] : 'text-secondary' },
-    { label: 'Egress fan-out', value: fanoutFindings.length, icon: Radar, tone: fanoutFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary' },
+    { label: 'Workloads', value: workloads.length, icon: ShieldCheck, tone: 'text-hubble-accent', ...unknownTile(workloads.length, podsUnknown, podsWhy) },
+    { label: 'Blocked connections', value: totalDrops, icon: ShieldAlert, tone: totalDrops > 0 ? 'text-hubble-error' : 'text-secondary', ...unknownTile(totalDrops, trafficUnknown, podsWhy) },
+    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? SEVERITY_TEXT_CLASS[syscallFindings[0].worst] : 'text-secondary', ...unknownTile(syscallFindings.length, syscallsUnknown, podsWhy) },
+    { label: 'Egress fan-out', value: fanoutFindings.length, icon: Radar, tone: fanoutFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary', ...unknownTile(fanoutFindings.length, trafficUnknown, podsWhy) },
     ...(computeEnabled
       ? [{
           // Retention off means the engine has nothing to score: say so on
@@ -329,7 +360,28 @@ export function RisksView({
           {stats.map((s) => <StatTile key={s.label} {...s} />)}
         </StatStrip>
 
-        {findingCount === 0 && !auditLoading && auditError === null && topWouldDeny.length === 0 ? (
+        {/* What the pod-derived findings below cannot see. */}
+        {podsUnknown && podsLoading ? (
+          <div role="status" aria-label={`Reading the workloads in ${namespace}`} className="rounded-surface border border-hubble-border bg-hubble-card space-y-2 p-3">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-2/3" />
+          </div>
+        ) : podsError !== null ? (
+          <div className="rounded-surface border border-hubble-border bg-hubble-card">
+            <p role="alert" className="px-4 py-3 text-xs text-hubble-error">
+              Could not read the workloads in {namespace}: {podsError}.{' '}
+              {workloads.length > 0
+                ? 'The findings below are from the last successful read.'
+                : 'Blocked connections, sensitive syscalls and egress fan-out are unknown, not zero.'}
+            </p>
+          </div>
+        ) : partialNote !== null ? (
+          <div className="rounded-surface border border-hubble-border bg-hubble-card">
+            <p role="status" className="px-4 py-3 text-xs text-tertiary">{partialNote}</p>
+          </div>
+        ) : null}
+
+        {findingCount === 0 && !auditLoading && auditError === null && topWouldDeny.length === 0 && !podsUnknown && partialNote === null ? (
           <div className="rounded-surface border border-hubble-border bg-hubble-card">
             <EmptyState
               icon={ShieldCheck}
@@ -337,7 +389,9 @@ export function RisksView({
               description={
                 computeMeta?.historyDisabled
                   ? 'No blocked connections, sensitive syscalls, or unusual egress fan-out in this namespace. Compute findings cannot be computed: history retention is disabled on the broker (compute.history.retentionDays is 0).'
-                  : `No blocked connections, sensitive syscalls,${computeEnabled ? ' compute contention,' : ''} or unusual egress fan-out in this namespace. Keep an eye on the map for changes.`
+                  : computeUnknown
+                    ? 'No blocked connections, sensitive syscalls, or unusual egress fan-out in this namespace. Compute findings are unknown: the live compute feed is not answering.'
+                    : `No blocked connections, sensitive syscalls,${computeEnabled ? ' compute contention,' : ''} or unusual egress fan-out in this namespace. Keep an eye on the map for changes.`
               }
             />
           </div>

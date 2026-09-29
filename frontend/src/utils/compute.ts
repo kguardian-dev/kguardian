@@ -494,16 +494,35 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
   const series = windowedSamples(samples, now);
   // The newest sample INSIDE the window, else the live rows: a buffer whose
   // newest bucket has aged out must not keep reporting it as the current value.
-  const latest = series.latest ?? podLevelSample(containers, now);
+  // The samples describe ONE pod uid (the sparkline's). When the card spans
+  // several replicas the gauges read every replica's live rows instead: the
+  // denominators below sum every replica's capacity, and one replica's usage
+  // over all of it under-reported the card by the replica count.
+  const multiReplica = containers.some((c) => c.pod_uid !== containers[0].pod_uid);
+  const latest = (multiReplica ? undefined : series.latest) ?? podLevelSample(containers, now);
+  // The node-capacity fallback covers the same pods as the usage: every
+  // distinct node the card's containers run on, each counted once. One
+  // node's capacity under the usage of replicas spread over three read up to
+  // three times too high. A node without a row leaves the capacity unknown
+  // rather than understated.
+  const nodeCapacity = (of: (n: ComputeNode) => number | null | undefined): number | null => {
+    let total = 0;
+    for (const name of new Set(containers.map((c) => c.node))) {
+      const v = of(nodesByName.get(name) ?? ({} as ComputeNode));
+      if (v === null || v === undefined || !(v > 0)) return null;
+      total += v;
+    }
+    return total;
+  };
   const cpuDen = pickDenominator(
     containers.map((c) => c.cpu_limit_millis),
     containers.map((c) => c.cpu_request_millis),
-    nodeRow?.cpu_cores != null ? nodeRow.cpu_cores * 1000 : null,
+    nodeCapacity((n) => (n.cpu_cores != null ? n.cpu_cores * 1000 : null)),
   );
   const memDen = pickDenominator(
     containers.map((c) => c.mem_limit),
     containers.map((c) => c.mem_request),
-    nodeRow?.memory_bytes ?? null,
+    nodeCapacity((n) => n.memory_bytes),
   );
 
   // Rows exist, so the node is reporting: `pending` cannot apply here. A
@@ -533,6 +552,16 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
     containers: [...containers],
     probeDrops,
   };
+}
+
+/**
+ * The same findings, in the same order, field for field. The findings poll
+ * answers with a new array every 15 s whether or not anything changed; this
+ * lets a consumer keep the one it has. The list is bounded, so comparing the
+ * serialised rows is cheap.
+ */
+export function sameFindings(a: readonly ComputeFinding[], b: readonly ComputeFinding[]): boolean {
+  return a === b || (a.length === b.length && a.every((f, i) => f === b[i] || JSON.stringify(f) === JSON.stringify(b[i])));
 }
 
 /** Throttled share of the sample's CFS periods (D3), 0..1, or null without periods. */

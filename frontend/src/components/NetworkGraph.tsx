@@ -22,7 +22,7 @@ import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { EDGE_COLOR_CONTENTION, buildContentionEdges } from '../utils/contentionEdges';
 import { focusEdges, focusNeighborhood as focusNeighborhoodOf } from '../utils/focus';
-import { hasComputeGauges, nodeHeight } from '../utils/compute';
+import { hasComputeGauges, nodeHeight, sameFindings } from '../utils/compute';
 import {
   isRectInView,
   keepOnMap,
@@ -101,6 +101,14 @@ const edgeTypes = {
 
 const NO_FINDINGS: ComputeFinding[] = [];
 
+/** Same cards with the same members and traffic rows: only gauges or badges differ. */
+function sameTrafficInputs(a: readonly PodNodeData[], b: readonly PodNodeData[]): boolean {
+  return a.length === b.length && a.every((p, i) => {
+    const q = b[i];
+    return p.id === q.id && p.pod === q.pod && p.pods === q.pods && p.traffic === q.traffic && p.isExternal === q.isExternal;
+  });
+}
+
 const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
   allPodsLookup,
@@ -143,6 +151,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // The focused id lives in the URL hash (see App) so the view is shareable.
   const setFocusedNodeId = onFocusChange;
 
+  // The pods as the traffic-derived structures below see them. The compute
+  // poll hands over a new `pods` array every 5 s (each pod re-spread with its
+  // gauges) and a lens re-spreads them with badges; neither touches what
+  // these read (ids, members, traffic rows). Keyed on `pods` they re-ran peer
+  // resolution over every row, the external peers and the edges on every
+  // poll: 150-250 ms of main-thread work on 300 pods with 1,000 flows each.
+  // This keeps the previous array while those inputs are unchanged. Set
+  // during render, like DataTable's per-selection reset, so no frame ever
+  // sees the two disagree.
+  const [trafficPods, setTrafficPods] = useState(pods);
+  if (trafficPods !== pods && !sameTrafficInputs(trafficPods, pods)) setTrafficPods(pods);
+
   // Peer attribution per traffic ROW (utils/peerResolution): the row's
   // stored peer_* identity first, else a by-IP lookup guarded by the flow
   // time. Pod IPs are recycled, so this — not an IP → pod map — decides
@@ -150,28 +170,28 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   const peerIndex = useMemo(() => buildPeerIndex(allPodsLookup, services), [allPodsLookup, services]);
   const rowPeers = useMemo(() => {
     const map = new Map<NetworkTraffic, PeerResolution>();
-    pods.forEach((pod) => {
+    trafficPods.forEach((pod) => {
       pod.traffic?.forEach((traffic) => {
         if (traffic.traffic_in_out_ip) map.set(traffic, resolvePeer(traffic, peerIndex));
       });
     });
     return map;
-  }, [pods, peerIndex]);
+  }, [trafficPods, peerIndex]);
 
   // Build name-to-PodNodeData lookup for in-namespace pods (a resolved peer
   // is matched to its node by NAME, never by IP)
   const localPodByName = useMemo(() => {
     const map = new Map<string, PodNodeData>();
-    pods.forEach((pod) => {
+    trafficPods.forEach((pod) => {
       map.set(pod.pod.pod_name, pod);
       pod.pods?.forEach((p) => map.set(p.pod_name, pod));
     });
     return map;
-  }, [pods]);
+  }, [trafficPods]);
 
   // Stored workload → local node, for a stored peer whose record is gone or
   // superseded (its name may no longer be in the listing).
-  const localPodByWorkload = useMemo(() => localWorkloadIndex(pods), [pods]);
+  const localPodByWorkload = useMemo(() => localWorkloadIndex(trafficPods), [trafficPods]);
 
   // Build service ClusterIP → local PodNodeData map by matching selectors
   const svcIpToLocalPodMap = useMemo(() => {
@@ -188,7 +208,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       if (!selectorLabels || Object.keys(selectorLabels).length === 0) return;
 
       // Find a local pod whose workload_selector_labels match the service selector
-      for (const pod of pods) {
+      for (const pod of trafficPods) {
         const podLabels = pod.pod.workload_selector_labels;
         if (!podLabels) continue;
 
@@ -203,7 +223,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return map;
-  }, [services, pods]);
+  }, [services, trafficPods]);
 
   // Map backing pod NAME → service ClusterIP. A resolved peer is matched by
   // NAME — an IP is ambiguous once it has changed hands.
@@ -231,7 +251,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   const externalNodes = useMemo(() => {
     if (!showExternalNodes || !showTraffic) return [];
     return buildExternalNodes({
-      pods,
+      pods: trafficPods,
       services,
       rowPeers,
       localPodByName,
@@ -239,7 +259,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       svcIpToLocalPod: svcIpToLocalPodMap,
       podNameToSvcIp,
     });
-  }, [pods, showExternalNodes, showTraffic, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName, localPodByWorkload]);
+  }, [trafficPods, showExternalNodes, showTraffic, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName, localPodByWorkload]);
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic
@@ -276,9 +296,15 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // findings. Built against every external node (hidden DaemonSet peers
   // included) so a culprit that already is a traffic peer reuses its node;
   // edges to a node that is not drawn are dropped below.
+  // The findings poll hands over a new array every 15 s even when the answer
+  // is unchanged; keep the one we have then, like `trafficPods` above, so the
+  // contention edges, the drawn external nodes and the traffic edges built
+  // from them are not rebuilt for nothing.
+  const [findings, setFindings] = useState(computeFindings);
+  if (findings !== computeFindings && !sameFindings(findings, computeFindings)) setFindings(computeFindings);
   const contention = useMemo(
-    () => buildContentionEdges(computeFindings, pods, externalNodes, allPodsLookup),
-    [computeFindings, pods, externalNodes, allPodsLookup],
+    () => buildContentionEdges(findings, trafficPods, externalNodes, allPodsLookup),
+    [findings, trafficPods, externalNodes, allPodsLookup],
   );
   const contentionCount = contention.edges.length;
 
@@ -294,10 +320,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // the controller ignores, hits this on every install).
   const hiddenByTrafficFilter = pods.length - visiblePods.length;
 
-  const allDisplayPods = useMemo(() => {
-    const culprits = showContention ? contention.externalCulprits : [];
-    return [...visiblePods, ...daemonSetPartition.visible, ...culprits];
-  }, [visiblePods, daemonSetPartition, showContention, contention]);
+  // The drawn external nodes, apart from the local ones: the edges index
+  // these, and unlike the local cards they do not change with every poll.
+  const displayExternals = useMemo(
+    () => [...daemonSetPartition.visible, ...(showContention ? contention.externalCulprits : [])],
+    [daemonSetPartition, showContention, contention],
+  );
+  const allDisplayPods = useMemo(() => [...visiblePods, ...displayExternals], [visiblePods, displayExternals]);
 
   // The traffic panel lives in App and resolves the selection against the
   // namespace's own pods; a Service, Unattributed or Internet card exists
@@ -379,7 +408,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     // they answer for (utils/externalPeers). Nothing is indexed by IP.
     const ingressExternalByKey = new Map<string, PodNodeData>();
     const egressExternalByKey = new Map<string, PodNodeData>();
-    allDisplayPods.forEach((pod) => {
+    displayExternals.forEach((pod) => {
       if (!pod.isExternal) return;
       const isInNode = pod.id.endsWith('-in');
       const isOutNode = pod.id.endsWith('-out');
@@ -389,7 +418,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       });
     });
 
-    pods.forEach((pod) => {
+    trafficPods.forEach((pod) => {
       pod.traffic?.forEach((traffic) => {
         let sourcePod: PodNodeData | undefined;
         let destPod: PodNodeData | undefined;
@@ -508,7 +537,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return edges;
-  }, [pods, allDisplayPods, svcIpToLocalPodMap, showTraffic, wellKnownPorts, rowPeers, localPodByName, localPodByWorkload]);
+  }, [trafficPods, displayExternals, svcIpToLocalPodMap, showTraffic, wellKnownPorts, rowPeers, localPodByName, localPodByWorkload]);
 
   // Contention edges as React Flow edges: dashed, error-coloured, labelled
   // with the blame share (components/ContentionEdge). Only between nodes
@@ -907,26 +936,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       >
         <Controls className="bg-hubble-card border-hubble-border" />
 
-        {/* Focus pill — shown while a node's neighborhood is isolated */}
-        {focusedNodeId && focusNeighborhood && (
-          <Panel position="top-center">
-            <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
-              <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
-              <span className="text-primary">
-                Focused on <span className="font-semibold">{focusedLabel}</span>
-              </span>
-              <button
-                onClick={() => setFocusedNodeId(null)}
-                className="flex items-center gap-1 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
-                title="Show all nodes (Esc)"
-              >
-                <X className="w-3 h-3" />
-                Show all
-              </button>
-            </div>
-          </Panel>
-        )}
-
         {/* Security Summary Panel */}
         {/* Summary, top-left, only when the map is wide enough for it beside the toolbar. */}
         <Panel position="top-left" className="hidden @xl:block">
@@ -970,6 +979,32 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
             lens={lens}
             onLensChange={onLensChange}
           />
+          {/* Focus pill, shown while a node's neighbourhood is isolated. It
+              stacks under the toolbar rather than sitting in a panel of its
+              own: a top-center panel was covered by this one as soon as the
+              lens group and toggles grew past half the map, and "Show all"
+              could not be clicked. Here it is also inside the strip the fit
+              keeps clear, so no focused card starts under it. */}
+          {focusedNodeId && focusNeighborhood && (
+            <div className="mt-2 flex justify-end">
+              <div className="flex items-center gap-2 min-w-0 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
+                <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
+                <span className="text-primary truncate max-w-[16rem]" title={focusedLabel ?? undefined}>
+                  Focused on <span className="font-semibold">{focusedLabel}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFocusedNodeId(null)}
+                  className="flex items-center gap-1 shrink-0 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
+                  title="Show all nodes (Esc)"
+                  aria-keyshortcuts="Escape"
+                >
+                  <X className="w-3 h-3" />
+                  Show all
+                </button>
+              </div>
+            </div>
+          )}
           {/* Narrow map: the summary stacks under the toolbar, so no number of toolbar rows can cover it. */}
           <div className="mt-2 flex justify-end @xl:hidden">{summaryBadge}</div>
           {lensLegend && <div className="mt-2 flex justify-end">{lensLegend}</div>}

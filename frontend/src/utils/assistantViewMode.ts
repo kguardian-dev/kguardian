@@ -25,5 +25,8 @@ export function storeViewMode(mode: AssistantViewMode): void {
 }
 
 export function initialViewMode(): AssistantViewMode {
-  return readStoredViewMode(typeof localStorage !== 'undefined' ? localStorage : null);
+  // Reading the `localStorage` global itself throws when site data is blocked.
+  let storage: Storage | null = null;
+  try { storage = typeof localStorage !== 'undefined' ? localStorage : null; } catch { /* storage blocked */ }
+  return readStoredViewMode(storage);
 }
