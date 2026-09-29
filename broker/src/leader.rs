@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | Audit verdict + dead-pod prune | `retention::spawn` | leader |
 //! | Compute downsample, history prune, stale latest rows | `retention::spawn_compute` | leader |
-//! | Compute minute-index ensure | `retention::spawn_minute_index` | leader (plus its session advisory lock) |
+//! | Background `CREATE INDEX CONCURRENTLY` ensure (compute minute index, large-table indexes) | `background_index::spawn` | leader (plus a session advisory lock per index) |
 //! | Seccomp denial attribution backfill + prune, stale denial nodes | `retention::spawn_seccomp_denials` | leader |
 //! | Pod traffic prune and per-pod cap | `retention::spawn_pod_traffic` | leader |
 //! | Image inventory prune | `retention::spawn_image_inventory` | leader |
@@ -23,6 +23,7 @@
 //! | Image attestation prune | `attestation::spawn_retention` | leader |
 //! | Peer late-resolve + stale-alive (dead-node) sweep | `peer::spawn` | leader |
 //! | Workload profile snapshotter | `workload_profile::spawn` | leader |
+//! | Maintenance VACUUM of small high-churn tables | `maintenance::spawn` | leader |
 //! | Seccomp denial workload gauge | `seccomp_denial::spawn_metrics_refresh` | every replica (feeds its own /metrics; read-only) |
 //! | Drift gauge | `profile_drift::spawn_metrics_refresh` | every replica (feeds its own /metrics; read-only) |
 //! | Version check-in | `version_check::spawn` | every replica (fills its own GET /version) |

@@ -602,6 +602,10 @@ TRUNCATE pod_compute_latest;
 Or scale the old Broker to zero for the moment the new one migrates. Either way, the migration then finds an empty table.
 </Note>
 
+<Note>
+**Upgrading from an older Broker with large tables.** A few migrations add indexes to tables that grow large: `pod_traffic` and `pod_syscalls` (2026-06-01, 2026-07-06, 2026-09-26) and `image_sbom_components` (2026-09-28). When the table is under 256 MiB the migration builds the index itself. When it is larger the migration skips the build, because a plain `CREATE INDEX` blocks every insert into the table for as long as it runs and could outlast the new pod's liveness probe. The leader Broker then builds the same index with `CREATE INDEX CONCURRENTLY` in the background, which blocks no writes; the log shows `building index CONCURRENTLY` and `index built`. Until it finishes, reads that use the index are as slow as they were before the upgrade. The compute history indexes are built the same way, on every install.
+</Note>
+
 ---
 
 ## Uninstall

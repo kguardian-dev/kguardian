@@ -3676,3 +3676,179 @@ async fn live_database_http_vuln_id_filter_and_tier_ordered_cves() {
         "{text:?}"
     );
 }
+
+/// Rows written to `table` by this backend and not yet flushed to the
+/// cumulative statistics (the current transaction's, and possibly earlier
+/// ones').
+fn tuples_written(conn: &mut PgConnection, table: &str) -> i64 {
+    count(
+        conn,
+        &format!(
+            "SELECT COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::bigint AS n \
+             FROM pg_stat_xact_user_tables WHERE relname = '{table}'"
+        ),
+    )
+}
+
+/// The CVE rebuilds write only what changed: a pass over unchanged inputs
+/// writes no row of either table (it used to delete and re-insert every
+/// one), a change rewrites just the rows it touches, a CVE gone from the
+/// findings loses its rows, and the result is exactly what a rebuild into
+/// empty tables produces.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_rebuilds_write_only_what_changed() {
+    use crate::supplychain_read::{
+        refresh_cve_facts, refresh_cve_summary, refresh_cve_summary_only,
+    };
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    let (a, b) = (d(130), d(131));
+    seed_inventory(
+        &mut conn,
+        &a,
+        "ghcr.io/example/api",
+        "1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    seed_inventory(
+        &mut conn,
+        &b,
+        "ghcr.io/example/web",
+        "1",
+        "Deployment",
+        "web",
+        "web",
+        0,
+    );
+    let mut on_a = vulns_json(
+        &a,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0701", "HIGH", None),
+            ("CVE-2026-0702", "LOW", Some("2")),
+        ],
+    );
+    on_a["observed_in"] = json!([]);
+    store_v(&mut conn, on_a);
+    let mut on_b = vulns_json(
+        &b,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0701", "HIGH", None),
+            ("CVE-2026-0703", "MEDIUM", None),
+        ],
+    );
+    on_b["source"] = json!("grype");
+    on_b["sbom_source"] = json!("registry");
+    on_b["observed_in"] = json!([]);
+    on_b["vulnerabilities"][1]["kev"] = json!(true);
+    on_b["vulnerabilities"][1]["epss"] = json!(0.4);
+    store_v(&mut conn, on_b);
+    relink_batch(&mut conn, None, 100).unwrap();
+    refresh_cve_summary(&mut conn).unwrap();
+    let rows = count(&mut conn, "SELECT count(*) AS n FROM vuln_cve_summary");
+    assert_eq!(rows, 6, "three CVEs, cluster-wide and in the namespace");
+
+    let pass = |conn: &mut PgConnection| -> (i64, i64) {
+        conn.transaction::<_, diesel::result::Error, _>(|c| {
+            // The view also holds counts of this backend's earlier
+            // transactions not yet flushed, so measure the difference.
+            let before = (
+                tuples_written(c, "vuln_cve_facts"),
+                tuples_written(c, "vuln_cve_summary"),
+            );
+            refresh_cve_facts(c)?;
+            refresh_cve_summary_only(c)?;
+            Ok((
+                tuples_written(c, "vuln_cve_facts") - before.0,
+                tuples_written(c, "vuln_cve_summary") - before.1,
+            ))
+        })
+        .unwrap()
+    };
+    assert_eq!(pass(&mut conn), (0, 0), "nothing changed, nothing written");
+
+    // CVE-0703's EPSS decays and CVE-0702's only image stops reporting it.
+    exec(
+        &mut conn,
+        "UPDATE image_vulnerabilities SET epss = 0.1 WHERE vuln_id = 'CVE-2026-0703'; \
+         DELETE FROM image_vulnerabilities WHERE vuln_id = 'CVE-2026-0702'",
+    );
+    let (facts, summary) = pass(&mut conn);
+    assert_eq!(facts, 1, "one fact changed");
+    assert_eq!(
+        summary, 4,
+        "CVE-0703's two rows rewritten, CVE-0702's two deleted, CVE-0701 untouched"
+    );
+    assert_eq!(pass(&mut conn), (0, 0), "and settled again");
+
+    // The same content as a rebuild from nothing.
+    exec(
+        &mut conn,
+        "CREATE TEMP TABLE kept_summary AS SELECT * FROM vuln_cve_summary; \
+         CREATE TEMP TABLE kept_facts AS SELECT vuln_id, kev, kev_date_added, epss, \
+            epss_percentile FROM vuln_cve_facts; \
+         TRUNCATE vuln_cve_summary, vuln_cve_facts",
+    );
+    refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM ( \
+                (SELECT * FROM kept_summary EXCEPT SELECT * FROM vuln_cve_summary) \
+                UNION ALL (SELECT * FROM vuln_cve_summary EXCEPT SELECT * FROM kept_summary)) x"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM ( \
+                (SELECT * FROM kept_facts EXCEPT SELECT vuln_id, kev, kev_date_added, epss, \
+                    epss_percentile FROM vuln_cve_facts) \
+                UNION ALL (SELECT vuln_id, kev, kev_date_added, epss, epss_percentile \
+                    FROM vuln_cve_facts EXCEPT SELECT * FROM kept_facts)) x"
+        ),
+        0
+    );
+    exec(&mut conn, "DROP TABLE kept_summary, kept_facts");
+}
+
+/// The CVE summary rebuild writes and compares exactly the table's columns:
+/// a column added to `vuln_cve_summary` but not to `CVE_SUMMARY_VALUES`
+/// would never be updated once its row exists.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_summary_rebuild_names_every_column() {
+    let mut conn = live_conn();
+    #[derive(QueryableByName)]
+    struct Col {
+        #[diesel(sql_type = Text)]
+        column_name: String,
+    }
+    let mut table: Vec<String> = sql_query(
+        "SELECT column_name::text AS column_name FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'vuln_cve_summary'",
+    )
+    .load::<Col>(&mut conn)
+    .unwrap()
+    .into_iter()
+    .map(|c| c.column_name)
+    .collect();
+    table.sort();
+    let mut written: Vec<String> = ["scope_namespace", "vuln_id"]
+        .iter()
+        .chain(crate::supplychain_read::CVE_SUMMARY_VALUES.iter())
+        .map(|c| c.to_string())
+        .collect();
+    written.sort();
+    assert_eq!(written, table);
+}

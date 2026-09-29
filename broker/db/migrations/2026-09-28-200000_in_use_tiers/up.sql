@@ -118,8 +118,37 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- Package lookups by name within one SBOM (has-file-list checks).
-CREATE INDEX IF NOT EXISTS idx_image_sbom_components_name
-    ON image_sbom_components (digest, source, name);
+--
+-- Built here only while the table is small (256 MiB of heap by default;
+-- the session setting kguardian.inline_index_max_bytes overrides it, which
+-- is how the tests force either path). A plain CREATE INDEX holds a SHARE
+-- lock that blocks every insert for the whole build, and an install
+-- upgrading with a large table would sit in that build past the liveness
+-- probe (docs/installation.mdx, Upgrade). On a larger table this skips,
+-- and the Broker builds the same index CONCURRENTLY after startup
+-- (broker/src/background_index.rs). Fresh installs have empty tables and
+-- always get it here. lock_timeout: a queued SHARE lock request blocks
+-- every later insert too, so give up after 5 s and let the migration
+-- retry rather than wait behind a long transaction. It stays set for the
+-- rest of this migration, so the ALTER TABLEs below give up the same way on
+-- a busy table: the migration fails and the Broker retries it.
+SET LOCAL lock_timeout = '5s';
+
+DO $$
+DECLARE
+    max_bytes bigint := COALESCE(
+        NULLIF(current_setting('kguardian.inline_index_max_bytes', true), '')::bigint,
+        256 * 1024 * 1024);
+BEGIN
+    IF pg_relation_size('image_sbom_components') > max_bytes THEN
+        RAISE NOTICE 'image_sbom_components is % bytes; its indexes are built CONCURRENTLY by the Broker after startup',
+            pg_relation_size('image_sbom_components');
+    ELSE
+        CREATE INDEX IF NOT EXISTS idx_image_sbom_components_name
+            ON image_sbom_components (digest, source, name);
+    END IF;
+END
+$$;
 
 -- The in-use state of package p_pkg in one workload container running
 -- inventory digest p_image. Mirrors in_use::in_use_of():

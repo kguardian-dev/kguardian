@@ -363,6 +363,12 @@ async fn main() -> Result<(), std::io::Error> {
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
 
+    // Plain VACUUM (ANALYZE) of the small tables rewritten every few
+    // seconds, when their dead tuples say autovacuum is not keeping up
+    // (maintenance.rs). Leader only, on its own connection. Disable with
+    // BROKER_MAINTENANCE_VACUUM_ENABLED=false.
+    api::spawn_maintenance(pool.clone());
+
     // Image attestation results not re-checked within
     // IMAGE_ATTESTATION_RETENTION_DAYS (attestation.rs). Results for
     // digests that left the inventory are deleted by the same pass.
@@ -787,6 +793,8 @@ pub async fn metrics(
     body.push_str(&drift.get_ref().render());
     // Atomic loads (leader.rs).
     body.push_str(&api::leader::render_metrics());
+    // Atomic loads and a short lock (maintenance.rs).
+    body.push_str(&api::maintenance_metrics());
 
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")
