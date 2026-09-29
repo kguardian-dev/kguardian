@@ -110,3 +110,59 @@ describe('CVE drawer: an image with more findings than one read', () => {
     expect(labels).toContain('1 unknown');
   });
 });
+
+describe('CVE drawer: reads stop once the drawer has moved on', () => {
+  /** Every image read is held until `step()`; each page has more after it, so every image would page to the budget. */
+  function held(e: Exposure) {
+    const waiting: Array<{ resolve: () => void; signal: AbortSignal | null | undefined }> = [];
+    const signals: Array<AbortSignal | null | undefined> = [];
+    let imageReads = 0;
+    const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const u = new URL(String(input), 'http://x');
+      if (u.pathname.endsWith('/exposure')) {
+        return Promise.resolve(u.pathname.includes(e.id) ? new Response(JSON.stringify(e), { status: 200 }) : new Response('', { status: 404 }));
+      }
+      imageReads += 1;
+      signals.push(init?.signal);
+      const i = Number((u.searchParams.get('after') ?? 'c0').slice(1));
+      const body = JSON.stringify({ ...ledgerPage, items: filler(500), nextAfter: `c${i + 1}` });
+      return new Promise<Response>((resolve) => waiting.push({ resolve: () => resolve(new Response(body, { status: 200 })), signal: init?.signal }));
+    }) as typeof fetch;
+    const step = async () => {
+      await act(async () => {
+        waiting.splice(0).forEach((w) => w.resolve());
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    };
+    return { api: new VulnApi({ fetchImpl }), step, reads: () => imageReads, signals };
+  }
+
+  const drawerFor = (api: VulnApi, id: string) => (
+    <CveDrawer id={id} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />
+  );
+
+  test('closing the drawer mid-paging starts no further image reads, and aborts the ones in flight', async () => {
+    const h = held(exposure);
+    const { unmount } = render(drawerFor(h.api, exposure.id));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    await h.step();
+    const before = h.reads();
+    expect(before).toBeGreaterThan(0);
+    unmount();
+    expect(h.signals.at(-1)?.aborted).toBe(true);
+    for (let i = 0; i < CVE_FINDING_PAGES; i++) await h.step();
+    expect(h.reads()).toBe(before);
+  });
+
+  test('switching to another CVE mid-paging starts no further reads for the first one', async () => {
+    const h = held(exposure);
+    const { rerender } = render(drawerFor(h.api, exposure.id));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    await h.step();
+    const before = h.reads();
+    rerender(drawerFor(h.api, 'CVE-2099-9999'));
+    await screen.findByText(/affects nothing in the inventory/);
+    for (let i = 0; i < CVE_FINDING_PAGES; i++) await h.step();
+    expect(h.reads()).toBe(before);
+  });
+});

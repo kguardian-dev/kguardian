@@ -156,15 +156,17 @@ export const CVE_FINDING_PAGES = 4;
  * carries it. Pages until each package the exposure lists is found, the
  * findings (most severe first) are past the CVE's least severe package, or
  * the image has no more. `complete` is false when CVE_FINDING_PAGES ran out
- * first: what was found is part of the answer, not all of it.
+ * first: what was found is part of the answer, not all of it. Stops (and
+ * `signal` aborts the read in flight) once the drawer has moved on.
  */
-async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage): Promise<{ matches: Finding[]; complete: boolean }> {
+async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage, current: () => boolean, signal: AbortSignal): Promise<{ matches: Finding[]; complete: boolean }> {
   const missing = new Set(img.packages.map((p) => `${p.name}@${p.installedVersion}`));
   const floor = Math.min(...img.packages.map((p) => VULN_SEVERITY_RANK[p.severity] ?? 0));
   const matches: Finding[] = [];
   let after: string | undefined;
   for (let page = 0; page < CVE_FINDING_PAGES; page++) {
-    const v = await api.getImageVulns(img.digest, { limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) });
+    if (!current()) break;
+    const v = await api.getImageVulns(img.digest, { limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
     for (const f of v.items) {
       if (f.id !== id) continue;
       matches.push(f);
@@ -202,18 +204,24 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  // The run in flight: a closed drawer or another CVE aborts its reads, so up to CVE_IMAGE_READS x CVE_FINDING_PAGES heavy reads are not left paging.
+  const inFlight = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
-    if (!id) return;
+    inFlight.current?.abort();
     const current = begin();
-    setLoading(true);
+    const abort = new AbortController();
+    inFlight.current = abort;
+    setLoading(Boolean(id));
     setExposure(null);
     setFindings(new Map());
     setFailed(new Set());
     setIncomplete(new Set());
     setPending(0);
+    setError(null);
+    if (!id) return;
     try {
-      const e = await api.getExposure(id);
+      const e = await api.getExposure(id, undefined, abort.signal);
       if (!current()) return;
       const toRead = e.images.slice(0, CVE_IMAGE_READS);
       setExposure(e);
@@ -221,8 +229,9 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
       setError(null);
       await withConcurrencyLimit(
         toRead.map((img) => async () => {
+          if (!current()) return;
           try {
-            const { matches, complete } = await cveFindingsIn(api, id, img);
+            const { matches, complete } = await cveFindingsIn(api, id, img, current, abort.signal);
             if (!current()) return;
             setFindings((prev) => new Map(prev).set(img.digest, mergeFindings(matches)));
             if (!complete) setIncomplete((prev) => new Set(prev).add(img.digest));
@@ -246,6 +255,14 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch when the drawer opens / id changes
     void load();
   }, [load]);
+  // Unmounted (the drawer closed): stop its reads, and nothing of the run counts as current.
+  useEffect(
+    () => () => {
+      inFlight.current?.abort();
+      begin();
+    },
+    [begin],
+  );
 
   // Descriptive text only (title, advisory link): the first image's finding.
   let finding: Finding | null = null;
