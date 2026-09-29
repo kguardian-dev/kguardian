@@ -163,7 +163,9 @@ function App() {
   // The desktop rail preference: expanded unless the user collapsed it.
   // Narrow screens never read it (they always show the icon column, see
   // `narrow` below), so a phone-first visit cannot leave desktop collapsed.
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('kg-rail-collapsed') === '1'; } catch { return false; } // storage blocked
+  });
 
   const { namespaces, loading: namespacesLoading, error: namespacesError } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
@@ -337,7 +339,7 @@ function App() {
     }
     refocusRailToggle.current = true;
     setRailCollapsed((c) => {
-      localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
+      try { localStorage.setItem('kg-rail-collapsed', c ? '0' : '1'); } catch { /* storage blocked */ }
       return !c;
     });
   }, [narrow]);

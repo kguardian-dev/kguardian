@@ -41,7 +41,8 @@ const ClusterContext = createContext<ClusterContextValue | undefined>(undefined)
 export function ClusterProvider({ children }: { children: ReactNode }) {
   const clusters = LOCAL_CLUSTERS;
   const [activeId, setActiveId] = useState<string>(() => {
-    const saved = localStorage.getItem(ACTIVE_KEY);
+    let saved: string | null = null;
+    try { saved = localStorage.getItem(ACTIVE_KEY); } catch { /* storage blocked: first cluster */ }
     return saved && clusters.some((c) => c.id === saved) ? saved : clusters[0].id;
   });
 
