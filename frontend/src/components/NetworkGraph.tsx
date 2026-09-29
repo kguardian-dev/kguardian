@@ -907,26 +907,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       >
         <Controls className="bg-hubble-card border-hubble-border" />
 
-        {/* Focus pill — shown while a node's neighborhood is isolated */}
-        {focusedNodeId && focusNeighborhood && (
-          <Panel position="top-center">
-            <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
-              <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
-              <span className="text-primary">
-                Focused on <span className="font-semibold">{focusedLabel}</span>
-              </span>
-              <button
-                onClick={() => setFocusedNodeId(null)}
-                className="flex items-center gap-1 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
-                title="Show all nodes (Esc)"
-              >
-                <X className="w-3 h-3" />
-                Show all
-              </button>
-            </div>
-          </Panel>
-        )}
-
         {/* Security Summary Panel */}
         {/* Summary, top-left, only when the map is wide enough for it beside the toolbar. */}
         <Panel position="top-left" className="hidden @xl:block">
@@ -970,6 +950,32 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
             lens={lens}
             onLensChange={onLensChange}
           />
+          {/* Focus pill, shown while a node's neighbourhood is isolated. It
+              stacks under the toolbar rather than sitting in a panel of its
+              own: a top-center panel was covered by this one as soon as the
+              lens group and toggles grew past half the map, and "Show all"
+              could not be clicked. Here it is also inside the strip the fit
+              keeps clear, so no focused card starts under it. */}
+          {focusedNodeId && focusNeighborhood && (
+            <div className="mt-2 flex justify-end">
+              <div className="flex items-center gap-2 min-w-0 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
+                <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
+                <span className="text-primary truncate max-w-[16rem]" title={focusedLabel ?? undefined}>
+                  Focused on <span className="font-semibold">{focusedLabel}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setFocusedNodeId(null)}
+                  className="flex items-center gap-1 shrink-0 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
+                  title="Show all nodes (Esc)"
+                  aria-keyshortcuts="Escape"
+                >
+                  <X className="w-3 h-3" />
+                  Show all
+                </button>
+              </div>
+            </div>
+          )}
           {/* Narrow map: the summary stacks under the toolbar, so no number of toolbar rows can cover it. */}
           <div className="mt-2 flex justify-end @xl:hidden">{summaryBadge}</div>
           {lensLegend && <div className="mt-2 flex justify-end">{lensLegend}</div>}
