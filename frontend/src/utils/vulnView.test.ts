@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import { canonicalCveId, canonicalDigest, cveAiPrompt, groupNotCovered, impactCounts, mergeFindings, PROMPT_WORKLOADS_MAX, sbomFromMatcher } from './vulnView';
+import { canonicalCveId, canonicalDigest, cveAiPrompt, groupNotCovered, impactCounts, mergeFindings, PROMPT_WORKLOADS_MAX, sbomFromMatcher, workloadFactors } from './vulnView';
 import { exposureOf, imageVulns } from '../fixtures/vulns';
-import type { ExposedVia, ExposedWorkload, Report } from '../types/vulns';
+import type { ExposedVia, ExposedWorkload, Exposure, Finding, Report } from '../types/vulns';
 import type { Factor } from './tiers';
 
 const exposure = exposureOf('CVE-2099-0001');
@@ -153,5 +153,27 @@ describe('canonicalCveId / canonicalDigest (URL params)', () => {
     expect(canonicalCveId('GO-2024-2687')).toBe('GO-2024-2687');
     expect(canonicalDigest(`SHA256:${'AB'.repeat(32)}`)).toBe(`sha256:${'ab'.repeat(32)}`);
     expect(canonicalDigest('latest')).toBe('latest');
+  });
+});
+
+describe('workloadFactors: the fix chip is the workload image\'s own', () => {
+  const pkg = (name: string, fixedVersions: string[]) => ({ name, installedVersion: '1', fixedVersions, severity: 'HIGH', sources: [] });
+  const img = (digest: string, packages: ReturnType<typeof pkg>[]) => ({ digest, repository: digest, tags: [], sources: [], reportDigests: [], join: 'image_id', severity: 'HIGH', packages });
+  const cve = (images: ReturnType<typeof img>[]) => ({ ...exposure, fixable: true, images, workloads: [] }) as unknown as Exposure;
+  const onImage = (digest: string) => row({ imageDigest: digest });
+  const fix = (f: Factor[]) => f.find((x) => x.key === 'fix');
+
+  test('an image with no fixed package is not "Fix available" because another image has one', () => {
+    const e = cve([img('sha256:a', [pkg('p', ['2'])]), img('sha256:b', [pkg('q', [])])]);
+    expect(fix(workloadFactors(onImage('sha256:b'), e, null, undefined))).toMatchObject({ tone: 'warn', label: 'No fix yet' });
+    expect(fix(workloadFactors(onImage('sha256:a'), e, null, undefined))).toMatchObject({ tone: 'good', label: 'Fix: 2' });
+  });
+
+  test("one fixed and one unfixed package: the merged finding's no fix wins over the other package's fixed version", () => {
+    const e = cve([img('sha256:a', [pkg('p', ['2']), pkg('q', [])])]);
+    const merged = { id: 'CVE-1', fixable: false, fixedVersions: ['2'], tier: 'P1', tierFactors: ['no_fix'], kev: false, epss: null, score: null } as unknown as Finding;
+    expect(fix(workloadFactors(onImage('sha256:a'), e, merged, undefined))?.label).toBe('No fix yet');
+    // Without a finding read, the image's packages say the same.
+    expect(fix(workloadFactors(onImage('sha256:a'), e, null, undefined))?.label).toBe('No fix yet');
   });
 });
