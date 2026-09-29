@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.1...chart/v1.28.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* **chart:** move to broker 1.19.5 and frontend 1.20.4 ([#1806](https://github.com/kguardian-dev/kguardian/issues/1806)) ([375aee6](https://github.com/kguardian-dev/kguardian/commit/375aee649067844ef60b8ccd1a59c35a24c08f03))
+
 ## [1.28.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.0...chart/v1.28.1) (2026-09-28)
 
 
