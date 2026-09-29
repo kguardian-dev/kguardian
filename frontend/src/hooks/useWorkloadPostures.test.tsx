@@ -125,3 +125,41 @@ test('a loadMore while a first page is in flight is ignored, so it cannot supers
   expect(result.current.pages).toBe(1);
   expect(result.current.hasMore).toBe(false);
 });
+
+test('a new filter drops the previous filter\'s rows at once, and a failed first page leaves none behind', async () => {
+  const { api, pending, page } = deferredApi();
+  const { result, rerender } = renderHook(({ status }) => useWorkloadPostures(undefined, status, undefined, 0, api, 2), {
+    initialProps: { status: 'ok' as PostureStatus | undefined },
+  });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await act(async () => pending.shift()!.resolve(page(listPage1.body.items, 'payments/Deployment/checkout')));
+  await waitFor(() => expect(result.current.byKey.size).toBe(listPage1.body.items.length));
+
+  rerender({ status: 'risk' });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  // The OK rows are not answers for Risk, not even while Risk loads.
+  expect(result.current.byKey.size).toBe(0);
+  expect(result.current.hasMore).toBe(false);
+  await act(async () => pending.shift()!.resolve(new Response('canceling statement due to statement timeout', { status: 500 })));
+  await waitFor(() => expect(result.current.error).not.toBeNull());
+  expect(result.current.byKey.size).toBe(0);
+  expect(result.current.pages).toBe(0);
+});
+
+test('a refresh that fails drops the rows it could not confirm', async () => {
+  const { api, pending, page } = deferredApi();
+  const { result, rerender } = renderHook(({ tick }) => useWorkloadPostures(undefined, 'risk', undefined, tick, api, 2), {
+    initialProps: { tick: 0 },
+  });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await act(async () => pending.shift()!.resolve(page(listPage1.body.items, null)));
+  await waitFor(() => expect(result.current.byKey.size).toBe(listPage1.body.items.length));
+
+  rerender({ tick: 1 });
+  await waitFor(() => expect(pending).toHaveLength(1));
+  // Same filter: the rows stay on screen while the refresh is in flight.
+  expect(result.current.byKey.size).toBe(listPage1.body.items.length);
+  await act(async () => pending.shift()!.resolve(new Response('timeout', { status: 500 })));
+  await waitFor(() => expect(result.current.error).not.toBeNull());
+  expect(result.current.byKey.size).toBe(0);
+});

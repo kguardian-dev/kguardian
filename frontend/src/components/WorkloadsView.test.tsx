@@ -342,6 +342,57 @@ test('postures are requested with the narrowed namespace, posture filter and deb
   expect(postureArgs.at(-1)![6]).toBe(false);
 });
 
+test('the name filter narrows the posture request only when the Broker\'s name search finds the same rows', async () => {
+  postureArgs.length = 0;
+  renderView();
+  // "graf" matches only by name: the Broker's search answers for the same rows.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'graf' } });
+  await waitFor(() => expect(postureArgs.at(-1)![2]).toBe('graf'));
+  expect(rows()).toHaveLength(1);
+  // "payments" matches payments/Deployment/api by its namespace, which the
+  // Broker's name-only search would miss: the posture pages are read unsearched.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'payments' } });
+  await waitFor(() => expect(rows()).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 350));
+  expect(postureArgs.at(-1)![2]).toBeUndefined();
+  // Same for a kind.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'deploy' } });
+  await new Promise((r) => setTimeout(r, 350));
+  expect(postureArgs.at(-1)![2]).toBeUndefined();
+});
+
+test('posture filter with a failed posture read says the posture could not be read, not that no workload has it', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.error = new Error('canceling statement due to statement timeout');
+  try {
+    renderView({ allPods: capturedPods });
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+    expect(screen.queryByText(/has posture Risk/)).toBeNull();
+    expect(screen.queryByText('No matching workloads')).toBeNull();
+    expect(screen.getByText('Posture could not be read')).not.toBeNull();
+    expect(screen.getByText(/statement timeout/)).not.toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.error = null;
+  }
+});
+
+test('posture filter while its first page loads shows the skeleton, not an empty result', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.loading = true;
+  try {
+    renderView({ allPods: capturedPods });
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+    expect(screen.queryByText('No matching workloads')).toBeNull();
+    expect(screen.getByLabelText('Loading')).not.toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.loading = false;
+  }
+});
+
 test('a posture filter keeps only the rows the Broker returned for it', () => {
   const saved = postureState.byKey;
   // What the captured ?status=risk page returned.

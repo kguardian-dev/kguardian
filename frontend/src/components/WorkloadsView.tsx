@@ -84,9 +84,18 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
     [allNamespaces, namespace, q],
   );
   const { rows: allRows, loading, error, profiles, seccompUnavailable, verdictsUnavailable } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace, { visible });
+  // The filter matches namespace/kind/name; the Broker's search matches the
+  // name only. It narrows the posture request only while it finds the same
+  // rows, so a namespace or kind match is not read as "no snapshot".
+  const nameSearch = useMemo(
+    () => (search && allRows.filter(visible).every((r) => r.name.toLowerCase().includes(q)) ? search : undefined),
+    [search, q, allRows, visible],
+  );
   // The posture column only exists on the all-controls table; the seccomp
   // columns never ask for it.
-  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, search || undefined, refreshTick, undefined, undefined, !seccompMode);
+  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, nameSearch, refreshTick, undefined, undefined, !seccompMode);
+  // Under a posture filter the rows are the Broker's answer; without one there is nothing to filter by.
+  const postureFilterUnread = !seccompMode && !!postureFilter && postures.byKey.size === 0 && (postures.loading || postures.error != null);
 
   const rows = useMemo(() => {
     const qi = query.trim().toLowerCase();
@@ -233,12 +242,19 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
             </div>
           </header>
 
-          {loading && profiles.length === 0 && (seccompMode || allRows.length === 0) ? (
+          {(loading && profiles.length === 0 && (seccompMode || allRows.length === 0)) || (postureFilterUnread && postures.loading) ? (
             <div className="space-y-2 p-3" aria-busy="true" aria-label="Loading">
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-5/6" />
               <Skeleton className="h-8 w-2/3" />
             </div>
+          ) : postureFilterUnread ? (
+            <EmptyState
+              icon={CloudOff}
+              title="Posture could not be read"
+              description={`The Broker did not answer the posture list, so the ${STATUS_LABEL[postureFilter as PostureStatus]} filter has nothing to show: ${errorMessage(postures.error)}. Refresh from the header to try again, or set Posture to Any.`}
+              compact
+            />
           ) : rows.length === 0 ? (
             seccompMode && seccompUnavailable ? (
               <EmptyState
