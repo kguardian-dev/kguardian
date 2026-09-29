@@ -178,6 +178,87 @@ pub(crate) fn parse_cursor(raw: Option<&str>) -> Result<Option<(i16, String)>, S
     Ok(Some((rank, tail.to_string())))
 }
 
+/// Keyset cursor of the CVE list, in its sort order: tier, severity, id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CveCursor {
+    /// Where the tier sorts: 0 P0, 1 not yet computed, 2 P1, 3 P2,
+    /// 4 Background.
+    pub tier_order: i16,
+    pub severity_rank: i16,
+    pub vuln_id: String,
+}
+
+impl CveCursor {
+    /// The row after which the next page starts, from its list rank
+    /// ([`cve_list_rank_sql`]: tier position * 10 + (5 - severity), both
+    /// already clamped there, so every rank maps to a cursor that parses).
+    pub fn from_list_rank(list_rank: i16, vuln_id: String) -> Self {
+        CveCursor {
+            tier_order: list_rank / 10,
+            severity_rank: 5 - list_rank % 10,
+            vuln_id,
+        }
+    }
+
+    /// The inverse of [`CveCursor::from_list_rank`]: the `list_rank` the
+    /// keyset compares against.
+    pub fn list_rank(&self) -> i16 {
+        self.tier_order * 10 + (5 - self.severity_rank)
+    }
+
+    /// `t<tier order>.<severity rank>.<id>`.
+    pub fn encode(&self) -> String {
+        format!(
+            "t{}.{}.{}",
+            self.tier_order, self.severity_rank, self.vuln_id
+        )
+    }
+}
+
+/// Parses [`CveCursor::encode`]. A `<rank>.<id>` cursor from a broker
+/// that ordered the list by severity alone is refused with its own
+/// message: continuing it under the tier order would skip and repeat
+/// rows, so the client has to start again from the first page.
+pub(crate) fn parse_cve_cursor(raw: Option<&str>) -> Result<Option<CveCursor>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let bad = || "after must be the nextAfter of the previous page".to_string();
+    let Some(rest) = raw.strip_prefix('t') else {
+        return Err(if parse_cursor(Some(raw)).is_ok() {
+            "after is a cursor from an older list order; the list is now ordered by tier: \
+             request the first page again"
+                .into()
+        } else {
+            bad()
+        });
+    };
+    let (tier, tail) = rest.split_once('.').ok_or_else(bad)?;
+    let tier_order: i16 = tier
+        .parse()
+        .ok()
+        .filter(|t| (0..=4).contains(t))
+        .ok_or_else(bad)?;
+    let (severity_rank, vuln_id) = parse_cursor(Some(tail))?.ok_or_else(bad)?;
+    Ok(Some(CveCursor {
+        tier_order,
+        severity_rank,
+        vuln_id,
+    }))
+}
+
+/// `vuln_id=<id>` -> the id, trimmed like stored ids. It is matched
+/// case-insensitively.
+pub(crate) fn parse_vuln_id(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if !valid_vuln_id(raw) {
+        return Err("vuln_id must be a vulnerability id such as CVE-2024-1234".into());
+    }
+    Ok(Some(raw.to_string()))
+}
+
 /// Public (internet-routable) address: not private, loopback, link-local,
 /// CGNAT, ULA, multicast, unspecified or documentation space.
 pub fn is_public_ip(ip: &IpAddr) -> bool {
@@ -315,6 +396,8 @@ pub struct ImageVulnsQuery {
     pub in_use: Option<String>,
     /// Comma-separated tiers: P0, P1, P2, Background.
     pub tier: Option<String>,
+    /// Only findings of this vulnerability id, compared case-insensitively.
+    pub vuln_id: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
 }
@@ -328,6 +411,8 @@ pub struct ListFilters {
     pub epss_min: Option<f64>,
     pub in_use: Option<Vec<String>>,
     pub tiers: Option<Vec<i16>>,
+    /// One vulnerability id, case-insensitive. The per-image list only.
+    pub vuln_id: Option<String>,
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -579,11 +664,15 @@ pub struct ImageVulnsPage {
 /// own per-finding values; a NULL facts value never overrides a finding's
 /// true, so the merge only pushes up. Findings, filters and
 /// tiers use the result. Same rule in refresh_cve_summary_sql.
+/// `vuln_id` ($15) narrows the rows before anything is grouped or tiered:
+/// every row of a group has the same id, so this equals filtering the
+/// result, but the per-container in-use and tier work runs for that id only.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
     SELECT v.* FROM image_vulnerabilities v \
     JOIN unnest($1::text[], $2::text[]) AS k(digest, source) \
         ON v.digest = k.digest AND v.source = k.source \
+    WHERE ($15::text IS NULL OR upper(v.vuln_id) = upper($15)) \
 ), g0 AS ( \
     SELECT min(id) AS rep, vuln_id, pkg_name, installed_version, \
         max(severity_rank) AS severity_rank, max(score) AS score, \
@@ -712,6 +801,7 @@ pub fn image_vulnerabilities_filtered(
             .bind::<Nullable<Double>, _>(f.epss_min)
             .bind::<Nullable<Array<Text>>, _>(f.in_use.as_deref())
             .bind::<Nullable<Array<SmallInt>>, _>(f.tiers.as_deref())
+            .bind::<Nullable<Text>, _>(f.vuln_id.as_deref())
             .load(conn)?
     };
     let next_after = if rows.len() as i64 > limit {
@@ -743,6 +833,7 @@ fn list_filters(
         epss_min: parse_epss_min(epss_min)?,
         in_use: parse_in_use(in_use)?,
         tiers: parse_tiers(tier)?,
+        vuln_id: None,
     })
 }
 
@@ -785,7 +876,13 @@ pub async fn get_image_vulnerabilities(
         q.epss_min,
         q.in_use.as_deref(),
         q.tier.as_deref(),
-    ) {
+    )
+    .and_then(|f| {
+        Ok(ListFilters {
+            vuln_id: parse_vuln_id(q.vuln_id.as_deref())?,
+            ..f
+        })
+    }) {
         Ok(f) => f,
         Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
     };
@@ -1435,9 +1532,6 @@ pub struct CveSummary {
     pub id: String,
     #[diesel(sql_type = Text)]
     pub severity: String,
-    #[serde(skip)]
-    #[diesel(sql_type = SmallInt)]
-    pub severity_rank: i16,
     #[diesel(sql_type = Nullable<Float>)]
     pub max_score: Option<f32>,
     /// Some affected package has a fixed version.
@@ -1477,6 +1571,11 @@ pub struct CveSummary {
     /// a low tier.
     #[diesel(sql_type = Nullable<Text>)]
     pub tier: Option<String>,
+    /// The row's place in the list order (tier, then severity), the
+    /// first key of the sort and the cursor ([`CveCursor::from_list_rank`]).
+    #[serde(skip)]
+    #[diesel(sql_type = SmallInt)]
+    pub list_rank: i16,
     /// Strongest in-use state over the affected workloads in scope.
     #[serde(skip)]
     #[diesel(sql_type = Text)]
@@ -1507,6 +1606,10 @@ pub struct CveItem {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CvePage {
+    /// Always `tier`: items are in tier order (P0, then not yet computed,
+    /// then P1, P2, Background), then severity, then id. Older brokers omit it and
+    /// order by severity, then id.
+    pub order: &'static str,
     pub items: Vec<CveItem>,
     pub next_after: Option<String>,
     /// When the summary these rows come from was last rebuilt (the
@@ -1534,11 +1637,12 @@ fn effective_cte(filter: &str) -> String {
     )
 }
 
-/// Only images some payload holding `$1` (a vuln id) links to. The choice
-/// of payload per image still considers every link of those images.
+/// Only images some payload holding one of `$1` (the stored spellings of
+/// a vuln id, [`vuln_id_spellings`]) links to. The choice of payload per
+/// image still considers every link of those images.
 const FOR_VULN: &str = "l.image_digest IN (SELECT l2.image_digest FROM supplychain_image_links l2 \
     JOIN image_vulnerabilities v2 ON v2.digest = l2.digest AND v2.source = l2.source \
-    WHERE v2.vuln_id = $1)";
+    WHERE v2.vuln_id = ANY($1::text[]))";
 
 /// Rebuild `vuln_cve_summary`: one row per CVE cluster-wide
 /// (`scope_namespace = ''`) and one per (namespace, CVE), from the
@@ -1724,15 +1828,40 @@ pub(crate) fn refresh_cve_summary_only(conn: &mut PgConnection) -> QueryResult<i
     })
 }
 
-const CVES_SQL: &str = "\
+/// A CVE summary row's place in the list order as one ascending number:
+/// tier position * 10 + (5 - severity), the tier position being 0 P0,
+/// 1 not yet computed (and any tier outside 0..3), 2 P1, 3 P2,
+/// 4 Background, and severity clamped to 0..5 ([`CveCursor::from_list_rank`]
+/// inverts it). It must be character for character the expression of
+/// idx_vuln_cve_summary_list (migration 2026-10-02-100000), or the
+/// planner cannot use that index.
+macro_rules! cve_list_rank_sql {
+    () => {
+        "(((CASE WHEN tier = 0 THEN 0 WHEN tier BETWEEN 1 AND 3 THEN tier + 1 ELSE 1 END) * 10 + (5 - LEAST(GREATEST(severity_rank, 0), 5)))::smallint)"
+    };
+}
+
+/// Ordered by tier first, as the UI ranks it: P0, then not yet computed,
+/// then P1, P2, Background; then severity, then id. That order is
+/// [`cve_list_rank_sql`] then `vuln_id`, which idx_vuln_cve_summary_list
+/// serves; the keyset ($5, $6) is the last row's (list rank, vuln_id), a
+/// row comparison the index reads as a range, so a deep page costs the
+/// same as the first. $12 ([`list_ranks_for`]) is the list ranks a tier
+/// or severity filter allows: the index reads just those (in order, with
+/// the cursor), rather than walking the scope and filtering. The tier and
+/// severity predicates stay as the exact test.
+pub(crate) const CVES_SQL: &str = concat!(
+    "\
 SELECT vuln_id AS id, \
     CASE severity_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH' WHEN 3 THEN 'MEDIUM' \
         WHEN 2 THEN 'LOW' WHEN 1 THEN 'NONE' ELSE 'UNKNOWN' END AS severity, \
-    severity_rank, max_score, fixable, kev, max_epss, packages, sources, images, workloads, \
+    max_score, fixable, kev, max_epss, packages, sources, images, workloads, \
     running_workloads, namespaces, \
     CASE weakest_rank WHEN 1 THEN 'image_id' WHEN 2 THEN 'platform_manifest' \
         ELSE 'workload_tag' END AS weakest_join, \
-    CASE tier WHEN 0 THEN 'P0' WHEN 1 THEN 'P1' WHEN 2 THEN 'P2' WHEN 3 THEN 'Background' END AS tier, \
+    CASE tier WHEN 0 THEN 'P0' WHEN 1 THEN 'P1' WHEN 2 THEN 'P2' WHEN 3 THEN 'Background' END AS tier, ",
+    cve_list_rank_sql!(),
+    " AS list_rank, \
     in_use AS in_use_raw, executed_workloads, loaded_workloads, \
     unknown_workloads, not_observed_workloads, exposed_workloads \
 FROM vuln_cve_summary \
@@ -1744,9 +1873,49 @@ WHERE scope_namespace = COALESCE($3, '') \
   AND ($1::smallint[] IS NULL OR severity_rank = ANY($1)) \
   AND ($2::bool IS NULL OR fixable = $2) \
   AND ($4::bool IS NOT TRUE OR running_workloads > 0) \
-  AND ($5::smallint IS NULL OR severity_rank < $5 OR (severity_rank = $5 AND vuln_id > $6)) \
-ORDER BY severity_rank DESC, vuln_id \
-LIMIT $7";
+  AND ($12::smallint[] IS NULL OR ",
+    cve_list_rank_sql!(),
+    " = ANY($12)) \
+  AND ($5::smallint IS NULL OR (",
+    cve_list_rank_sql!(),
+    ", vuln_id) > ($5, $6)) \
+ORDER BY ",
+    cve_list_rank_sql!(),
+    ", vuln_id \
+LIMIT $7"
+);
+
+/// The list ranks ([`cve_list_rank_sql`]) a tier and severity filter can
+/// match, ascending, or `None` with neither filter. A tier filter (0..3,
+/// [`parse_tiers`]) never includes the not-yet-computed position, as
+/// `tier = ANY(...)` never matches a NULL tier.
+pub(crate) fn list_ranks_for(
+    tiers: Option<&[i16]>,
+    severities: Option<&[i16]>,
+) -> Option<Vec<i16>> {
+    if tiers.is_none() && severities.is_none() {
+        return None;
+    }
+    let positions: Vec<i16> = match tiers {
+        Some(t) => t
+            .iter()
+            .filter(|t| (0..=3).contains(*t))
+            .map(|&t| if t == 0 { 0 } else { t + 1 })
+            .collect(),
+        None => (0..=4).collect(),
+    };
+    let sevs: Vec<i16> = match severities {
+        Some(s) => s.iter().copied().filter(|s| (0..=5).contains(s)).collect(),
+        None => (0..=5).collect(),
+    };
+    let mut out: Vec<i16> = positions
+        .iter()
+        .flat_map(|p| sevs.iter().map(move |s| p * 10 + (5 - s)))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
 
 #[derive(QueryableByName)]
 struct SummaryState {
@@ -1765,7 +1934,7 @@ pub fn list_cves(
     fixable: Option<bool>,
     namespace: Option<&str>,
     running_only: bool,
-    after: Option<(i16, String)>,
+    after: Option<CveCursor>,
     limit: i64,
 ) -> Result<CvePage, DbError> {
     let f = ListFilters {
@@ -1781,7 +1950,7 @@ pub fn list_cves_filtered(
     f: &ListFilters,
     namespace: Option<&str>,
     running_only: bool,
-    after: Option<(i16, String)>,
+    after: Option<CveCursor>,
     limit: i64,
 ) -> Result<CvePage, DbError> {
     let mut rows: Vec<CveSummary> = sql_query(CVES_SQL)
@@ -1789,13 +1958,17 @@ pub fn list_cves_filtered(
         .bind::<Nullable<Bool>, _>(f.fixable)
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Bool, _>(running_only)
-        .bind::<Nullable<SmallInt>, _>(after.as_ref().map(|a| a.0))
-        .bind::<Text, _>(after.as_ref().map(|a| a.1.clone()).unwrap_or_default())
+        .bind::<Nullable<SmallInt>, _>(after.as_ref().map(CveCursor::list_rank))
+        .bind::<Text, _>(after.as_ref().map(|a| a.vuln_id.as_str()).unwrap_or(""))
         .bind::<BigInt, _>(limit + 1)
         .bind::<Nullable<Bool>, _>(f.kev)
         .bind::<Nullable<Double>, _>(f.epss_min)
         .bind::<Nullable<Array<Text>>, _>(f.in_use.as_deref())
         .bind::<Nullable<Array<SmallInt>>, _>(f.tiers.as_deref())
+        .bind::<Nullable<Array<SmallInt>>, _>(list_ranks_for(
+            f.tiers.as_deref(),
+            f.severities.as_deref(),
+        ))
         .load(conn)?;
     let state: Option<SummaryState> = sql_query(
         "SELECT refreshed_at, \
@@ -1806,11 +1979,13 @@ pub fn list_cves_filtered(
     .optional()?;
     let next_after = if rows.len() as i64 > limit {
         rows.truncate(limit as usize);
-        rows.last().map(|r| format!("{}.{}", r.severity_rank, r.id))
+        rows.last()
+            .map(|r| CveCursor::from_list_rank(r.list_rank, r.id.clone()).encode())
     } else {
         None
     };
     Ok(CvePage {
+        order: "tier",
         items: rows
             .into_iter()
             .map(|summary| {
@@ -1843,7 +2018,7 @@ pub async fn get_vulnerabilities(
         Ok(s) => s,
         Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
     };
-    let after = match parse_cursor(q.after.as_deref()) {
+    let after = match parse_cve_cursor(q.after.as_deref()) {
         Ok(a) => a,
         Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
     };
@@ -2066,7 +2241,7 @@ fn exposure_images_sql() -> String {
             SELECT e.image_digest, e.source, e.digest, e.join_rank, v.pkg_name, \
                 v.installed_version, v.fixed_version, v.severity_rank \
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
-            WHERE v.vuln_id = $1 \
+            WHERE v.vuln_id = ANY($1::text[]) \
          ), \
          pk AS ( \
             SELECT image_digest, pkg_name, installed_version, \
@@ -2109,13 +2284,13 @@ fn exposure_workloads_sql() -> String {
          hit AS ( \
             SELECT e.image_digest, min(e.join_rank) AS join_rank FROM eff e \
             WHERE EXISTS (SELECT 1 FROM image_vulnerabilities v \
-                WHERE v.digest = e.digest AND v.source = e.source AND v.vuln_id = $1) \
+                WHERE v.digest = e.digest AND v.source = e.source AND v.vuln_id = ANY($1::text[])) \
             GROUP BY e.image_digest \
          ), \
          pk AS ( \
             SELECT e.image_digest, v.pkg_name, bool_or(kg_pkg_observable(v.pkg_type, v.class)) AS obs \
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
-            WHERE v.vuln_id = $1 GROUP BY e.image_digest, v.pkg_name \
+            WHERE v.vuln_id = ANY($1::text[]) GROUP BY e.image_digest, v.pkg_name \
          ) \
          SELECT wc.cluster_id, wc.pod_namespace AS namespace, wc.workload_kind, \
             wc.workload_name, wc.container_name, wc.image_digest, \
@@ -2293,13 +2468,60 @@ fn summarise_namespaces(workloads: &[ExposedWorkload]) -> Vec<NamespaceExposure>
         .collect()
 }
 
+/// The case variants of `id` a scanner may have stored: as given, upper
+/// case (CVE-...), lower case, and GitHub's own spelling of a GHSA id
+/// (`GHSA-` then the lower-case groups).
+fn vuln_id_case_variants(id: &str) -> Vec<String> {
+    let up = id.to_ascii_uppercase();
+    let mut out = vec![id.to_string(), up.clone(), id.to_ascii_lowercase()];
+    if let Some(rest) = up.strip_prefix("GHSA-") {
+        out.push(format!("GHSA-{}", rest.to_ascii_lowercase()));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+const VULN_ID_SPELLINGS_SQL: &str = "\
+SELECT DISTINCT vuln_id FROM ( \
+    SELECT unnest($1::text[]) AS vuln_id \
+    UNION ALL \
+    SELECT vuln_id FROM vuln_cve_summary WHERE upper(vuln_id) = upper($2) \
+) s";
+
+/// Every stored spelling of `id`, compared case-insensitively, so the
+/// exposure queries can match them with `vuln_id = ANY(...)` on
+/// idx_image_vulns_vuln_id. `upper(vuln_id) = upper($1)` on the findings
+/// table itself would need an expression index on its largest table; the
+/// spellings come instead from the case variants scanners use and from
+/// the CVE summary (idx_vuln_cve_summary_upper), which holds every id of
+/// an inventory image as of its last rebuild. A spelling that is none of
+/// the variants and was first ingested after that rebuild is found on the
+/// next one.
+fn vuln_id_spellings(conn: &mut PgConnection, id: &str) -> QueryResult<Vec<String>> {
+    #[derive(QueryableByName)]
+    struct S {
+        #[diesel(sql_type = Text)]
+        vuln_id: String,
+    }
+    Ok(sql_query(VULN_ID_SPELLINGS_SQL)
+        .bind::<Array<Text>, _>(vuln_id_case_variants(id))
+        .bind::<Text, _>(id)
+        .load::<S>(conn)?
+        .into_iter()
+        .map(|s| s.vuln_id)
+        .collect())
+}
+
+/// One CVE's exposure. `id` is matched case-insensitively.
 pub fn vulnerability_exposure(
     conn: &mut PgConnection,
     id: &str,
     window_hours: i64,
 ) -> Result<Option<Exposure>, DbError> {
+    let ids = vuln_id_spellings(conn, id)?;
     let mut images: Vec<ExposedImageRow> = sql_query(exposure_images_sql())
-        .bind::<Text, _>(id)
+        .bind::<Array<Text>, _>(&ids)
         .bind::<BigInt, _>(EXPOSURE_MAX_IMAGES + 1)
         .load(conn)?;
     if images.is_empty() {
@@ -2308,7 +2530,7 @@ pub fn vulnerability_exposure(
     let mut truncated = images.len() as i64 > EXPOSURE_MAX_IMAGES;
     images.truncate(EXPOSURE_MAX_IMAGES as usize);
     let mut rows: Vec<ExposedWorkloadRow> = sql_query(exposure_workloads_sql())
-        .bind::<Text, _>(id)
+        .bind::<Array<Text>, _>(&ids)
         .bind::<BigInt, _>(EXPOSURE_MAX_WORKLOADS + 1)
         .bind::<Double, _>(running_window_secs() as f64)
         .load(conn)?;
@@ -2504,6 +2726,97 @@ mod tests {
         assert!(parse_cursor(Some("9.x")).is_err());
         assert!(parse_cursor(Some("x")).is_err());
         assert!(parse_cursor(Some("3.")).is_err());
+    }
+
+    #[test]
+    fn cve_cursor_round_trips_and_refuses_the_severity_first_format() {
+        assert_eq!(parse_cve_cursor(None).unwrap(), None);
+        assert_eq!(parse_cve_cursor(Some(" ")).unwrap(), None);
+        let c = CveCursor {
+            tier_order: 1,
+            severity_rank: 5,
+            vuln_id: "GHSA-x.y".into(),
+        };
+        assert_eq!(c.encode(), "t1.5.GHSA-x.y");
+        assert_eq!(parse_cve_cursor(Some(&c.encode())).unwrap(), Some(c));
+        // An older broker's `<rank>.<id>`: its own message, still a 400.
+        let old = parse_cve_cursor(Some("5.CVE-2024-1")).unwrap_err();
+        assert!(old.contains("request the first page again"), "{old}");
+        for bad in ["t5.5.CVE-1", "t1.9.CVE-1", "t1.5.", "t1", "tx.5.CVE-1", "x"] {
+            let e = parse_cve_cursor(Some(bad)).unwrap_err();
+            assert!(e.contains("nextAfter"), "{bad}: {e}");
+        }
+    }
+
+    /// Every `list_rank` the migration's total mapping can produce (tier
+    /// position 0..=4, severity 0..=5) makes a cursor that parses back to
+    /// the same rank, so paging never dead-ends on an odd tier.
+    #[test]
+    fn every_list_rank_makes_a_cursor_that_parses_back() {
+        for tier_order in 0..=4i16 {
+            for sev in 0..=5i16 {
+                let rank = tier_order * 10 + (5 - sev);
+                let c = CveCursor::from_list_rank(rank, "CVE-1".into());
+                assert_eq!((c.tier_order, c.severity_rank), (tier_order, sev));
+                let back = parse_cve_cursor(Some(&c.encode())).unwrap().unwrap();
+                assert_eq!(back.list_rank(), rank, "{}", c.encode());
+            }
+        }
+        // P0 critical first, Background unknown-severity last.
+        assert_eq!(CveCursor::from_list_rank(0, "a".into()).encode(), "t0.5.a");
+        assert_eq!(CveCursor::from_list_rank(45, "a".into()).encode(), "t4.0.a");
+    }
+
+    /// The planner uses idx_vuln_cve_summary_list only for the identical
+    /// expression.
+    #[test]
+    fn list_rank_expression_is_the_index_expression() {
+        let up =
+            include_str!("../db/migrations/2026-10-02-100000_vuln_cve_summary_list_rank/up.sql");
+        assert!(up.contains(cve_list_rank_sql!()));
+        assert_eq!(CVES_SQL.matches(cve_list_rank_sql!()).count(), 4);
+    }
+
+    #[test]
+    fn tier_and_severity_filters_become_list_ranks() {
+        assert_eq!(list_ranks_for(None, None), None);
+        // P1 is position 2: ranks 20 (critical) .. 25 (unknown).
+        assert_eq!(
+            list_ranks_for(Some(&[1]), None),
+            Some(vec![20, 21, 22, 23, 24, 25])
+        );
+        // P0 and Background, high only; never the not-yet-computed 10..15.
+        assert_eq!(list_ranks_for(Some(&[3, 0]), Some(&[4])), Some(vec![1, 41]));
+        // Severity alone spans every position, not-yet-computed included.
+        assert_eq!(
+            list_ranks_for(None, Some(&[5])),
+            Some(vec![0, 10, 20, 30, 40])
+        );
+        assert_eq!(list_ranks_for(Some(&[2]), Some(&[])), Some(vec![]));
+    }
+
+    #[test]
+    fn exposure_ids_try_the_case_variants_scanners_write() {
+        assert_eq!(
+            vuln_id_case_variants("cve-2024-1"),
+            ["CVE-2024-1", "cve-2024-1"]
+        );
+        let g = vuln_id_case_variants("ghsa-ABCD-1234-efgh");
+        assert!(g.contains(&"GHSA-abcd-1234-efgh".to_string()), "{g:?}");
+        assert!(g.contains(&"GHSA-ABCD-1234-EFGH".to_string()), "{g:?}");
+        assert!(g.contains(&"ghsa-ABCD-1234-efgh".to_string()), "{g:?}");
+    }
+
+    #[test]
+    fn vuln_id_filter_is_trimmed_and_validated() {
+        assert_eq!(parse_vuln_id(None).unwrap(), None);
+        assert_eq!(parse_vuln_id(Some("  ")).unwrap(), None);
+        assert_eq!(
+            parse_vuln_id(Some(" cve-2024-3094 ")).unwrap().as_deref(),
+            Some("cve-2024-3094")
+        );
+        assert!(parse_vuln_id(Some("CVE 1")).is_err());
+        assert!(parse_vuln_id(Some("CVE-1%")).is_err());
     }
 
     #[test]

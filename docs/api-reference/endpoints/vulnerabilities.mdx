@@ -255,6 +255,7 @@ severe first.
 | `epss_min` | | Only findings with EPSS at or above this (0-1). Unknown EPSS is excluded. |
 | `in_use` | all | Comma-separated `inUseState` values. |
 | `tier` | all | Comma-separated: `P0,P1,P2,Background`. |
+| `vuln_id` | all | Only findings of this vulnerability id (`CVE-2024-3094`, `GHSA-…`), compared case-insensitively. Combines with the other filters and `after`. A malformed id is a `400`. |
 | `limit` | 100 | Clamped to `[1, 500]`. |
 | `after` | | The previous page's `nextAfter`. |
 
@@ -305,8 +306,11 @@ not included.
 
 ## GET /vulnerabilities
 
-Every CVE affecting a digest in the inventory, grouped by id, most severe
-first. It reads a summary the retention pass rebuilds each interval, so it
+Every CVE affecting a digest in the inventory, grouped by id, in tier
+order: `P0`, then not yet computed (`tier: null`), then `P1`, `P2`,
+`Background`. Within a tier, most severe first, then by id. The response says so with `"order": "tier"`;
+a broker from before this order omits `order` and sorts by severity, then
+id. It reads a summary the retention pass rebuilds each interval, so it
 costs the same however many findings there are; `computedAt` and
 `staleSeconds` say how fresh it is (`null` until the first rebuild).
 
@@ -319,8 +323,14 @@ costs the same however many findings there are; `computedAt` and
 | `kev`, `epss_min`, `in_use`, `tier` | all | As above, on the CVE's values in scope. |
 | `limit`, `after` | 100 | As above. |
 
+`nextAfter` is opaque: pass it back as `after` unchanged. A cursor from a
+broker that sorted by severity first (`5.CVE-…`) is refused with a `400`
+saying to request the first page again, since continuing it in tier order
+would skip and repeat rows.
+
 ```json
 {
+  "order": "tier",
   "items": [
     {"id": "CVE-2099-1002", "severity": "CRITICAL", "maxScore": 9.8, "fixable": true,
      "kev": null, "maxEpss": null, "packages": ["openssl"],
@@ -330,7 +340,7 @@ costs the same however many findings there are; `computedAt` and
      "notObservedWorkloads": 0, "exposedWorkloads": 1,
      "inUse": true, "inUseState": "loaded"}
   ],
-  "nextAfter": "5.CVE-2099-1002",
+  "nextAfter": "t2.5.CVE-2099-1002",
   "computedAt": "2026-09-27T12:00:00",
   "staleSeconds": 42
 }
@@ -343,7 +353,11 @@ by tag only.
 ## GET /vulnerabilities/\{id\}/exposure
 
 Which images, workloads and namespaces a CVE affects, running or not, and
-what traffic reached them. `window_hours` (default 168, max 720) sets how
+what traffic reached them. `{id}` is matched case-insensitively, like the
+`vuln_id` filter; an id stored in an unusual spelling (not upper, lower or
+GitHub's GHSA casing) that was ingested since the last summary rebuild is
+matched case-insensitively after the next rebuild, within minutes.
+`window_hours` (default 168, max 720) sets how
 far back flows count. Up to 200 images and 200 workload containers are
 listed; `truncated` says when there are more. `404` when no inventory
 digest is affected.
