@@ -954,6 +954,35 @@ assert_render_fails "allowed-hosts-map" "frontend.allowedHosts must be a list" -
 # The full in-cluster name follows global.clusterDomain.
 render "allowed-hosts-cluster-domain" -n kg --set 'frontend.allowedHosts[0]=x.example.com' --set global.clusterDomain=corp.internal && \
   assert_has "allowed-hosts-cluster-domain" "kguardian-frontend.kg.svc.corp.internal\""
+# The UI container runs read-only, with writable /tmp and the .vite-temp
+# directory older frontend images bundle their config into at startup.
+if dep="$(helm template compat "$CHART" -n kg -s templates/frontend/deployment.yaml 2>/dev/null)"; then
+  grep -q "readOnlyRootFilesystem: true" <<<"$dep" || \
+    { echo "FAIL [frontend-read-only]: frontend root filesystem must be read-only"; fail=1; }
+  for path in /tmp /app/node_modules/.vite-temp; do
+    grep -q "mountPath: $path$" <<<"$dep" || \
+      { echo "FAIL [frontend-read-only]: expected a writable mount at $path"; fail=1; }
+  done
+  [ "$(grep -c 'emptyDir:' <<<"$dep")" = 2 ] || \
+    { echo "FAIL [frontend-read-only]: expected two emptyDir volumes"; fail=1; }
+else
+  echo "FAIL [frontend-read-only]: frontend Deployment did not render"; fail=1
+fi
+# NOTES prints the same list the Deployment gets (one helper feeds both), or
+# says the check is off and how to turn it on.
+if notes="$(helm install compat "$CHART" -n kg --dry-run=client --set 'frontend.allowedHosts[0]=x.example.com' 2>/dev/null)"; then
+  grep -q "UI answers only these host names" <<<"$notes" && \
+    grep -q "  x.example.com, kguardian-frontend, kguardian-frontend.kg," <<<"$notes" || \
+    { echo "FAIL [allowed-hosts-notes]: NOTES must print the effective host list"; fail=1; }
+else
+  echo "FAIL [allowed-hosts-notes]: dry-run install failed"; fail=1
+fi
+if notes="$(helm install compat "$CHART" -n kg --dry-run=client 2>/dev/null)"; then
+  grep -q "UI host check: OFF" <<<"$notes" && grep -q "frontend.allowedHosts={" <<<"$notes" || \
+    { echo "FAIL [allowed-hosts-notes-off]: NOTES must say the UI answers any host and how to restrict it"; fail=1; }
+else
+  echo "FAIL [allowed-hosts-notes-off]: dry-run install failed"; fail=1
+fi
 
 # 15. Broker leader election. On by default at any replica count: a Role
 # limited to the broker's own Lease in the release namespace, the downward
@@ -996,6 +1025,32 @@ render "leader-election-custom-sa" -n kg --set broker.serviceAccount.name=kg-bro
 # Timings reach the broker.
 render "leader-election-timings" -n kg --set broker.leaderElection.leaseDurationSeconds=30 && \
   assert_has "leader-election-timings" 'value: "30"'
+render "leader-election-timings-30-20-4" -n kg --set broker.leaderElection.leaseDurationSeconds=30 \
+  --set broker.leaderElection.renewDeadlineSeconds=20 --set broker.leaderElection.retryPeriodSeconds=4
+# Off is fine at one replica, and refused at more: every replica would run
+# every background job.
+render "leader-election-off-one-replica" -n kg --set broker.leaderElection.enabled=false --set broker.replicaCount=1
+assert_render_fails "leader-election-off-replicas" "every broker replica would run every background job" \
+  -n kg --set broker.leaderElection.enabled=false --set broker.replicaCount=2
+# Timings the broker would silently replace with 15/10/2 (leader.rs
+# Timings::from_secs: lease > renew > 1.2 x retry, retry > 0) are refused.
+LE_ORDER="leaseDurationSeconds > renewDeadlineSeconds > 1.2 x retryPeriodSeconds"
+assert_render_fails "leader-election-renew-equals-lease" "$LE_ORDER" \
+  -n kg --set broker.leaderElection.renewDeadlineSeconds=15
+assert_render_fails "leader-election-renew-above-lease" "$LE_ORDER" \
+  -n kg --set broker.leaderElection.leaseDurationSeconds=10 --set broker.leaderElection.renewDeadlineSeconds=12
+assert_render_fails "leader-election-retry-zero" "$LE_ORDER" \
+  -n kg --set broker.leaderElection.retryPeriodSeconds=0
+# 1.2 x 5 = 6: renew must be strictly above it.
+assert_render_fails "leader-election-retry-jitter" "$LE_ORDER" \
+  -n kg --set broker.leaderElection.renewDeadlineSeconds=6 --set broker.leaderElection.retryPeriodSeconds=5
+render "leader-election-retry-jitter-edge" -n kg --set broker.leaderElection.renewDeadlineSeconds=7 \
+  --set broker.leaderElection.retryPeriodSeconds=5
+assert_render_fails "leader-election-not-a-number" "must be a whole number of seconds" \
+  -n kg --set-string broker.leaderElection.leaseDurationSeconds=15s
+# Timings are not checked when election is off (the broker never reads them).
+render "leader-election-off-bad-timings" -n kg --set broker.leaderElection.enabled=false \
+  --set broker.leaderElection.retryPeriodSeconds=0
 
 # 16. Database connections vs broker pools. Every broker pod of a rolling
 # update (replicaCount + 25% surge, rounded up) may hold a full pool, plus 13

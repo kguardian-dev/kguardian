@@ -481,3 +481,103 @@ single-replica install's database spec never changes.
 {{- mul (div (add $required 9) 10) 10 -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Refuses broker settings under which the background jobs would run more than
+once, or under which the broker would ignore the configured lease timings.
+
+- Leader election off with more than one replica: every replica runs every
+  background job (retention, compute downsample, profile snapshotter,
+  sweeps), duplicating work and rows.
+- Timings out of order: the broker requires lease > renew deadline >
+  1.2 x retry period, all whole seconds and retry above 0 (leader.rs
+  Timings::from_secs), and otherwise silently uses 15/10/2. Checked here in
+  integers: renew > 1.2 x retry is 5 x renew > 6 x retry.
+*/}}
+{{- define "kguardian.brokerLeaderElectionGuard" -}}
+{{- $le := .Values.broker.leaderElection | default dict -}}
+{{- $replicas := int .Values.broker.replicaCount -}}
+{{- if not $le.enabled -}}
+{{- if gt $replicas 1 -}}
+{{- fail (printf "broker.leaderElection.enabled=false with broker.replicaCount=%d: every broker replica would run every background job (retention, compute downsample, profile snapshotter, sweeps), duplicating work and rows. Set broker.leaderElection.enabled=true, or broker.replicaCount=1." $replicas) -}}
+{{- end -}}
+{{- else -}}
+{{- range $k := list "leaseDurationSeconds" "renewDeadlineSeconds" "retryPeriodSeconds" -}}
+{{- $v := toString (index $le $k) -}}
+{{- if not (regexMatch "^[0-9]+$" $v) -}}
+{{- fail (printf "broker.leaderElection.%s must be a whole number of seconds, got %q" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $lease := int (toString $le.leaseDurationSeconds) -}}
+{{- $renew := int (toString $le.renewDeadlineSeconds) -}}
+{{- $retry := int (toString $le.retryPeriodSeconds) -}}
+{{- if or (lt $retry 1) (le $lease $renew) (le (mul $renew 5) (mul $retry 6)) -}}
+{{- fail (printf "broker.leaderElection timings must satisfy leaseDurationSeconds > renewDeadlineSeconds > 1.2 x retryPeriodSeconds, with retryPeriodSeconds at least 1 (got lease %d, renew %d, retry %d); the broker would ignore them and use 15/10/2. Example: 15/10/2, or 30/20/4." $lease $renew $retry) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Host names the UI server answers (vite allowedHosts), comma-separated, or ""
+when it answers any host. Used for the frontend's ALLOWED_HOSTS and by NOTES,
+so the two cannot drift.
+
+Set only when the chart knows every external name, so that a page that
+rebinds its own name to the UI cannot use the /api proxy. An ingress rule or
+SSO hostname left empty is a catch-all: the operator accepts any name, so
+those values alone do not restrict the server. frontend.allowedHosts always
+does. The frontend Service's in-cluster names are added whenever the list
+is set.
+*/}}
+{{- define "kguardian.frontendAllowedHosts" -}}
+{{- $extra := .Values.frontend.allowedHosts | default list -}}
+{{- if kindIs "string" $extra -}}
+{{- $extra = splitList "," $extra -}}
+{{- end -}}
+{{- if not (kindIs "slice" $extra) -}}
+{{- fail "frontend.allowedHosts must be a list of host names, or one comma-separated string" -}}
+{{- end -}}
+{{- $known := list -}}
+{{- $catchAll := false -}}
+{{- if .Values.frontend.ingress.enabled -}}
+{{- range .Values.frontend.ingress.hosts -}}
+{{- if .host -}}
+{{- $known = append $known .host -}}
+{{- else -}}
+{{- $catchAll = true -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.frontend.ingress.tls -}}
+{{- $known = concat $known (.hosts | default list) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.frontend.sso.enabled -}}
+{{- $ssoHosts := .Values.frontend.sso.hostnames | default list -}}
+{{- if not (kindIs "slice" $ssoHosts) -}}
+{{- fail "frontend.sso.hostnames must be a list of host names" -}}
+{{- end -}}
+{{- range $ssoHosts -}}
+{{- if . -}}
+{{- $known = append $known . -}}
+{{- else -}}
+{{- $catchAll = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $explicit := list -}}
+{{- range $extra -}}
+{{- $explicit = append $explicit (trim .) -}}
+{{- end -}}
+{{- $explicit = compact $explicit -}}
+{{- $hosts := list -}}
+{{- if or $explicit (not $catchAll) -}}
+{{- $hosts = compact (concat $known $explicit) -}}
+{{- end -}}
+{{- if $hosts -}}
+{{- $svc := .Values.frontend.service.name -}}
+{{- $ns := include "kguardian.namespace" . | trim -}}
+{{- $domain := .Values.global.clusterDomain | default "cluster.local" -}}
+{{- $hosts = concat $hosts (list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.%s" $svc $ns $domain)) -}}
+{{- $hosts | uniq | join "," -}}
+{{- end -}}
+{{- end -}}

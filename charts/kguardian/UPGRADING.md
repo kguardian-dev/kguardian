@@ -1,6 +1,53 @@
 # Upgrading the kguardian Helm chart
 
-## Check this before upgrading if you use the chart's ingress or SSO: the UI now refuses unknown host names (`frontend.allowedHosts`)
+## Upgrading to 1.28.5: broker setting guards and a read-only UI
+
+**`helm upgrade` now fails** on two broker settings the chart used to accept
+silently. Fix the values before upgrading:
+
+- `broker.leaderElection.enabled=false` with `broker.replicaCount` above 1.
+  Every replica would run every background job, duplicating work and rows.
+  Leave election on (the default), or run one replica.
+- Lease timings out of order. `leaseDurationSeconds` must be above
+  `renewDeadlineSeconds`, which must be above 1.2 x `retryPeriodSeconds`
+  (at least 1), all in whole seconds. The Broker would otherwise ignore them
+  and use 15/10/2. The defaults are valid, and the timings are not checked
+  while election is off.
+
+The UI container now runs with a read-only root filesystem
+(`frontend.securityContext.readOnlyRootFilesystem: true`), with two small
+emptyDir volumes: `/tmp`, and `/app/node_modules/.vite-temp`, where frontend
+images up to 1.20.6 write their server config at startup. Newer frontend
+images write nothing and are also half the size. If you run your own UI
+image that writes elsewhere, set
+`frontend.securityContext.readOnlyRootFilesystem: false`.
+
+`helm install` and `helm upgrade` now print the UI host check: either the host
+names the UI answers, or that it answers any host and how to restrict it
+(`frontend.allowedHosts`).
+
+## Upgrading to 1.28.4: broker leader election and database connections
+
+With `broker.replicaCount` of 2 or more, the Broker replicas now elect a
+leader through a Lease, and only the leader runs the background jobs that
+prune or derive shared data. `broker.leaderElection.enabled` (default true)
+adds a Role and RoleBinding in the release namespace and mounts a service
+account token into the Broker pod.
+
+The bundled database is now sized for every Broker pod of a rolling update:
+the chart sets `max_connections` from `broker.replicaCount` and
+`broker.dbPoolMaxSize` whenever PostgreSQL's default of 100 is not enough
+(150 for three replicas). **If you already run two or more Broker replicas
+with the bundled database, the database pod restarts once during this
+upgrade** to apply it (its strategy is `Recreate`, so expect a brief outage
+of Broker writes). Single-replica installs are unchanged. With an external
+database, check its `max_connections` against the formula in
+`docs/installation.mdx`; `helm install` prints the number.
+
+## Upgrading to 1.28.3: the UI host check
+
+**Check this before upgrading if you use the chart's ingress or SSO: the UI
+now refuses unknown host names (`frontend.allowedHosts`).**
 
 **If users open the UI on a name the chart does not know, they get a 403
 after this upgrade.** The browser shows exactly:
@@ -59,24 +106,6 @@ What to do:
 `*.example.com` in `frontend.allowedHosts` matches `example.com` itself and
 its subdomains at any depth, which is broader than a Kubernetes wildcard (one
 label).
-
-## Broker leader election, and the bundled database's `max_connections` (multi-replica installs)
-
-With `broker.replicaCount` of 2 or more, the Broker replicas now elect a
-leader through a Lease, and only the leader runs the background jobs that
-prune or derive shared data. `broker.leaderElection.enabled` (default true)
-adds a Role and RoleBinding in the release namespace and mounts a service
-account token into the Broker pod.
-
-The bundled database is now sized for every Broker pod of a rolling update:
-the chart sets `max_connections` from `broker.replicaCount` and
-`broker.dbPoolMaxSize` whenever PostgreSQL's default of 100 is not enough
-(150 for three replicas). **If you already run two or more Broker replicas
-with the bundled database, the database pod restarts once during this
-upgrade** to apply it (its strategy is `Recreate`, so expect a brief outage
-of Broker writes). Single-replica installs are unchanged. With an external
-database, check its `max_connections` against the formula in
-`docs/installation.mdx`; `helm install` prints the number.
 
 ## Upgrading to 1.27.0
 

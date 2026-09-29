@@ -30,6 +30,7 @@ spec:
   {{- if .Values.broker.autoscaling.enabled }}
   {{- fail "broker.autoscaling.enabled=true is not supported: this chart ships no HorizontalPodAutoscaler, so enabling it removes spec.replicas, lets the replica count default to 1, and disarms the PDB singleton guard (causing kubectl drain to stall). Set broker.autoscaling.enabled=false and use broker.replicaCount." }}
   {{- end }}
+  {{- include "kguardian.brokerLeaderElectionGuard" . }}
   replicas: {{ .Values.broker.replicaCount }}
   selector:
     matchLabels:

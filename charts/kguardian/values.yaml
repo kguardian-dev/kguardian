@@ -960,7 +960,8 @@ broker:
     # -- Enable leader election. Adds a Role/RoleBinding limited to the
     # broker's own Lease in the release namespace and mounts a service
     # account token into the broker pod. With it off, every replica runs
-    # every background job, which is only safe at replicaCount 1.
+    # every background job, so the chart refuses to render it off with
+    # replicaCount above 1.
     enabled: true
     # -- Seconds a follower waits after the leader's last renewal before it
     # takes over (how long the jobs pause when a leader dies without a
@@ -970,7 +971,8 @@ broker:
     # renewal. Must be below leaseDurationSeconds.
     renewDeadlineSeconds: 10
     # -- Seconds between renew/acquire attempts. Must be below
-    # renewDeadlineSeconds / 1.2. An invalid combination falls back to 15/10/2.
+    # renewDeadlineSeconds / 1.2, and at least 1. The chart refuses to render
+    # timings out of this order (the broker would ignore them and use 15/10/2).
     retryPeriodSeconds: 2
 
   # -- Scoped bearer-token auth on the broker HTTP API. Without it any pod
@@ -1382,13 +1384,16 @@ frontend:
     seccompProfile:
       type: RuntimeDefault
 
-  # -- Frontend container security context. Hardened with read-only root filesystem
+  # -- Frontend container security context. The root filesystem is
+  # read-only: the chart mounts an emptyDir at /tmp, and one at
+  # /app/node_modules/.vite-temp, where frontend images up to 1.20.6 write
+  # their bundled server config at startup (later images write nothing).
   securityContext:
     privileged: false
     capabilities:
       drop:
       - ALL
-    readOnlyRootFilesystem: false
+    readOnlyRootFilesystem: true
     runAsNonRoot: true
     runAsUser: 1337
     allowPrivilegeEscalation: false

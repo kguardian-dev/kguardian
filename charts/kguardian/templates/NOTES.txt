@@ -41,6 +41,23 @@ To resolve, choose one:
 For fresh installs this notice does not apply.
 {{- end }}
 
+{{- with include "kguardian.frontendAllowedHosts" . }}
+
+UI host check: the UI answers only these host names (plus localhost and IP addresses):
+  {{ . | replace "," ", " }}
+Any other name gets a 403 ("Blocked request. This host ... is not allowed").
+Add names users open the UI on that the chart cannot see (a server-alias, a
+load balancer's DNS name) to frontend.allowedHosts.
+{{- else }}
+
+UI host check: OFF. The UI answers any host name, so a web page can reach its
+/api proxy (and the broker read token it holds) through DNS rebinding. The
+chart turns the check on only when it knows the names: named frontend.ingress
+or frontend.sso hosts (a rule or hostname with no host is a catch-all), or
+frontend.allowedHosts. Restrict it to the names users open the UI on:
+  --set 'frontend.allowedHosts={kguardian.example.com}'
+{{- end }}
+
 To check status:
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
 
