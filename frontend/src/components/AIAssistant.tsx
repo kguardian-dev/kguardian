@@ -175,8 +175,12 @@ function leavesOrigin(href: string): boolean {
   }
 }
 
+// react-markdown blanks unsafe hrefs (javascript:, data:) to "". An <a href="">
+// would reload the page and lose the conversation, so those render as text.
 const ReplyLink: React.FC<{ href?: string; children?: React.ReactNode }> = ({ href, children }) =>
-  href && leavesOrigin(href) ? (
+  !href ? (
+    <span>{children}</span>
+  ) : leavesOrigin(href) ? (
     <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
   ) : (
     <a href={href}>{children}</a>

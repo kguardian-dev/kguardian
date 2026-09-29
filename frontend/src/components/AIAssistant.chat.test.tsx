@@ -249,6 +249,16 @@ it.each(['https:evil.example/x', 'HTTP:evil.example/x', '/\\evil.example/x', '\\
   expect(link.getAttribute('rel')).toBe('noopener noreferrer');
 });
 
+it.each(['javascript:alert(1)', 'data:text/html,<b>x</b>'])('renders a reply link to %s as plain text, so clicking it cannot reload the page', async (href) => {
+  replyWith(`See [the page](${href}) now.`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const text = await screen.findByText('the page');
+  expect(text.tagName).toBe('SPAN');
+  expect(text.closest('a')).toBeNull();
+  expect(screen.queryByRole('link', { name: 'the page' })).toBeNull();
+});
+
 it('keeps a same-origin reply link in this tab', async () => {
   replyWith('Open [the map](#/map?ns=argocd).');
   render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);

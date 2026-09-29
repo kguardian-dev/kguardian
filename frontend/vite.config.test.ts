@@ -210,6 +210,7 @@ describe('SSO user info without a proxy in front', () => {
       const res = await fetch(new URL('/oauth2/userinfo', base), { headers: { Accept: 'application/json' } })
       expect(res.status).toBe(204)
       expect(res.headers.get('cache-control')).toBe('no-store')
+      expect(res.headers.get('x-kguardian-sso')).toBe('none')
       expect(await res.text()).toBe('')
       // Only that path: the rest of /oauth2/ is the proxy's, never answered here.
       expect((await fetch(new URL('/oauth2/sign_out', base), { headers: { Accept: 'application/json' } })).status).not.toBe(204)

@@ -26,7 +26,9 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 //   - 204 / 401 / 404 / error -> no proxy in front, run in local/no-auth mode
 //     (shown honestly in the account menu — no fake login). The UI's own
 //     server answers 204 when the request reaches it, so an install without
-//     SSO logs no failed request (vite.config.ts noSsoUserinfo).
+//     SSO logs no failed request (vite.config.ts noSsoUserinfo). That 204
+//     carries `X-Kguardian-Sso: none`, so an operator can tell the request
+//     never reached oauth2-proxy.
 // To turn SSO on, front the route with oauth2-proxy + a `/oauth2/*` route (the
 // chart's frontend.sso.* templates, or the cluster's Envoy SecurityPolicy). The
 // rest of the app consumes `useAuth()` and needs no change.
@@ -43,21 +45,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           credentials: 'include',
           headers: { Accept: 'application/json' },
         });
-        if (!res.ok) throw new Error(String(res.status));
-        const info = await res.json();
-        const id = info.user ?? info.email;
-        if (!id) throw new Error('no identity');
+        // Anything but a 200 carrying a JSON user or email is local mode:
+        // 204 (the UI's own server, no proxy in front), 401, 404, a body that
+        // is not JSON, or JSON without an identity.
+        if (res.status !== 200) return;
+        const info: unknown = await res.json().catch(() => null);
+        if (!info || typeof info !== 'object') return;
+        const { user: u, email, preferredUsername, name, groups } = info as Record<string, unknown>;
+        const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+        const id = str(u) ?? str(email);
+        if (!id) return;
         if (!cancelled) {
           setUser({
             id,
-            name: info.preferredUsername ?? info.name ?? info.user ?? info.email ?? 'User',
-            email: info.email,
-            groups: info.groups,
+            name: str(preferredUsername) ?? str(name) ?? id,
+            email: str(email),
+            groups: Array.isArray(groups) ? groups.filter((g): g is string => typeof g === 'string') : undefined,
           });
           setMode('oidc');
         }
       } catch {
-        // No session / proxy not present — local/no-auth mode.
+        // Network error — local/no-auth mode.
       } finally {
         if (!cancelled) setLoading(false);
       }

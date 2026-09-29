@@ -40,8 +40,10 @@ export function NetworkPill({ network }: { network: NetworkCoverage }) {
  * Observed syscalls vs the deployed SeccompProfile CR. Only observed syscalls
  * the CR lacks are a drift (they would be blocked when enforcing); syscalls
  * the CR allows but were never observed just mean the CR is broader.
+ *
+ * `known`: whether the CR state is known (see WorkloadRow.seccomp); without it
+ * no drift is "no CR".
  */
-/** `known`: whether the CR state is known (see WorkloadRow.seccomp); without it no drift is "no CR". */
 export function DriftCell({ drift, known }: { drift: CrDrift | null; known: boolean }) {
   if (!drift && !known) {
     return <span className="text-tertiary" title="Unknown until the seccomp profile list has been read" data-testid="drift-unknown">—</span>;

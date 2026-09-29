@@ -223,6 +223,8 @@ export function noSsoUserinfo(req: MiddlewareRequest, res: BypassResponse, next:
   if (path !== '/oauth2/userinfo' || (m !== 'GET' && m !== 'HEAD')) return next()
   res.statusCode = 204
   res.setHeader('Cache-Control', 'no-store')
+  // The only sign left that /oauth2/* is not routed to oauth2-proxy.
+  res.setHeader('X-Kguardian-Sso', 'none')
   res.end()
 }
 
