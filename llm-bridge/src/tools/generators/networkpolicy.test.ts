@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateNetworkPolicy, generateCiliumPolicy, type PeerResolver, type PodInfo } from "./networkpolicy.js";
+import { generateNetworkPolicy, generateCiliumPolicy, parsePort, servicePortFor, type PeerResolver, type PodInfo } from "./networkpolicy.js";
 
 // Peer CIDR behavior, exercised through the public generators because peerCIDR
 // is module-private. This file guards llm-bridge's OWN copy of the address
@@ -118,4 +118,25 @@ test("peer order: bytewise, matching Go's sort.Strings, not locale collation", a
     policy.spec.egress.map((r: any) => r.toCIDR[0]),
     ["10.96.0.10/32", "fd00:96::a/128", "fd00::7/128"],
   );
+});
+
+// Ports are decimal digits only, 1-65535, exactly as the advisor, broker and
+// frontend parse them; Number() used to accept all of the rejected forms.
+test("parsePort — decimal digits only", () => {
+  for (const bad of ["", " 80", "80 ", "0x50", "0b1010", "1e2", "+80", "-80", "80.0", "0", "65536"]) {
+    assert.equal(parsePort(bad), null, JSON.stringify(bad));
+  }
+  assert.equal(parsePort("0080"), 80);
+  assert.equal(parsePort("65535"), 65535);
+});
+
+test("servicePortFor — maps through spec.ports by port and protocol", () => {
+  const id = (ports?: unknown[]) => ({ selector: { app: "api" }, namespace: "prod", svcPorts: { name: "api", namespace: "prod", ports: ports as never } });
+  assert.deepEqual(servicePortFor(null, 80, "TCP"), { port: 80, mapped: true });
+  assert.deepEqual(servicePortFor({ selector: { app: "x" } }, 80, "TCP"), { port: 80, mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, targetPort: 8080 }]), 80, "TCP"), { port: 8080, mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP", targetPort: "http" }]), 80, "TCP"), { port: "http", mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP" }]), 80, "TCP"), { port: 80, mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 53, protocol: "TCP", targetPort: 5354 }]), 53, "UDP"), { port: 53, mapped: false });
+  assert.deepEqual(servicePortFor(id(), 80, "TCP"), { port: 80, mapped: false });
 });

@@ -327,7 +327,7 @@ const storedPods: BrokerPodListEntry[] = [
     { host_network: true, pod_obj: { metadata: { uid: "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3" } } }),
 ];
 const storedSvcs: Record<string, BrokerServiceRecord> = {
-  "10.96.0.10": { svc_name: "db", svc_namespace: "game-servers", service_spec: { spec: { selector: { app: "db" } } } },
+  "10.96.0.10": { svc_name: "db", svc_namespace: "game-servers", service_spec: { spec: { selector: { app: "db" }, ports: [{ port: 5432, protocol: "TCP" }] } } },
 };
 
 const attributionCases: { name: string; traffic: TrafficRow[]; lookup: () => PeerLookup }[] = [
@@ -352,6 +352,74 @@ for (const tc of attributionCases) {
     assert.deepEqual(commentLines(text), commentLines(goldenText(file)));
   });
 }
+
+// ---- Service port -> targetPort ----------------------------------------------
+// Egress to a Service is observed pre-DNAT on the Service port; the policy
+// must allow the backend targetPort. Mirrors advisor serviceTargetPortFixture
+// (case list there); resolved through makePeerResolver so the service_spec
+// ports are read the way execute.ts reads them. The malformed ports to
+// 10.96.1.99 are skipped by every generator (decimal digits only).
+const targetPortSvcs: Record<string, BrokerServiceRecord> = {
+  "10.96.1.10": { svc_name: "api", svc_namespace: "prod", service_spec: { spec: { selector: { app: "api" }, ports: [
+    { name: "http", port: 80, protocol: "TCP", targetPort: 8080 },
+    { name: "metrics", port: 9090, protocol: "TCP", targetPort: "metrics" },
+  ] } } },
+  "10.96.1.20": { svc_name: "cache", svc_namespace: "prod", service_spec: { spec: { selector: { app: "cache" }, ports: [{ port: 6379 }] } } },
+  "10.96.1.30": { svc_name: "legacy", svc_namespace: "prod", service_spec: { spec: { selector: { app: "legacy" } } } },
+  "10.96.1.40": { svc_name: "exporter", svc_namespace: "monitoring", service_spec: { spec: { selector: { app: "node-exporter" }, ports: [
+    { name: "metrics", port: 80, protocol: "TCP", targetPort: 9100 },
+  ] } } },
+  "10.96.1.53": { svc_name: "dns", svc_namespace: "kube-system", service_spec: { spec: { selector: { "k8s-app": "kube-dns" }, ports: [
+    { name: "dns", port: 53, protocol: "UDP", targetPort: 5353 },
+    { name: "dns-tcp", port: 53, protocol: "TCP", targetPort: 5354 },
+  ] } } },
+};
+const targetPortPods: BrokerPodListEntry[] = [
+  { pod_name: "node-exporter-abc12", pod_namespace: "monitoring", pod_ip: "192.168.50.101", host_network: true, node_name: "worker-1", workload_name: "node-exporter",
+    pod_obj: { metadata: { labels: { app: "node-exporter" } } } },
+];
+const tpEgress = (ip: string, port: string, proto = "TCP"): TrafficRow =>
+  ({ traffic_type: "EGRESS", traffic_in_out_ip: ip, traffic_in_out_port: port, ip_protocol: proto });
+const targetPortTraffic: TrafficRow[] = [
+  tpEgress("10.96.1.10", "9090"), tpEgress("10.96.1.10", "80"),
+  tpEgress("10.96.1.20", "6380"), tpEgress("10.96.1.20", "6379"),
+  tpEgress("10.96.1.30", "8443"),
+  tpEgress("10.96.1.40", "80"),
+  tpEgress("10.96.1.53", "53", "UDP"), tpEgress("10.96.1.53", "53"),
+  tpEgress("10.96.1.99", " 80"), tpEgress("10.96.1.99", "0x50"), tpEgress("10.96.1.99", "1e2"),
+  tpEgress("10.96.1.99", "+80"), tpEgress("10.96.1.99", "80.0"),
+];
+
+test("standard policy — service_target_port matches advisor golden (policy + comments)", async () => {
+  const { policy, comments } = await generateNetworkPolicyWithComments(web, targetPortTraffic, makePeerResolver(memoryLookup(targetPortPods, targetPortSvcs)));
+  const text = policyToYAML(policy, comments);
+  assert.deepEqual(parse(text), golden("standard_service_target_port.golden.yaml"));
+  assert.deepEqual(commentLines(text), commentLines(goldenText("standard_service_target_port.golden.yaml")));
+});
+
+test("cilium policy — service_target_port matches advisor golden (policy + comments)", async () => {
+  const { policy, comments } = await generateCiliumPolicyWithComments(web, targetPortTraffic, makePeerResolver(memoryLookup(targetPortPods, targetPortSvcs)));
+  const text = policyToYAML(policy, comments);
+  assert.deepEqual(parse(text), golden("cilium_service_target_port.golden.yaml"));
+  assert.deepEqual(commentLines(text), commentLines(goldenText("cilium_service_target_port.golden.yaml")));
+});
+
+test("service ports — ingress keeps the target's own port, two Service ports on one targetPort collapse", async () => {
+  const svcs: Record<string, BrokerServiceRecord> = {
+    "10.96.0.10": { svc_name: "api", svc_namespace: "prod", service_spec: { spec: { selector: { app: "api" }, ports: [
+      { port: 80, protocol: "TCP", targetPort: 8080 }, { port: 8080, protocol: "TCP", targetPort: 8080 },
+    ] } } },
+  };
+  const rows: TrafficRow[] = [
+    tpEgress("10.96.0.10", "80"), tpEgress("10.96.0.10", "8080"),
+    { traffic_type: "INGRESS", pod_port: "80", traffic_in_out_ip: "10.96.0.10", ip_protocol: "TCP" },
+  ];
+  const { policy, comments } = await generateNetworkPolicyWithComments(web, rows, makePeerResolver(memoryLookup([], svcs)));
+  const spec = policy.spec as { egress: { ports: unknown[] }[]; ingress: { ports: unknown[] }[] };
+  assert.deepEqual(spec.egress[0].ports, [{ protocol: "TCP", port: 8080 }]);
+  assert.deepEqual(spec.ingress[0].ports, [{ protocol: "TCP", port: 80 }]);
+  assert.deepEqual(comments.egress, {});
+});
 
 test("parseBrokerTime — naive broker timestamps are UTC, not local", () => {
   assert.equal(parseBrokerTime("2026-07-23T10:00:00"), Date.UTC(2026, 6, 23, 10, 0, 0));
