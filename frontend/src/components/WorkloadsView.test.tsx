@@ -514,7 +514,7 @@ test('drift: syscalls the CR allows but never observed are not a drift and do no
     renderView();
     const api = rowNamed('api');
     expect(within(api).getByText('in sync')).not.toBeNull();
-    expect(within(api).getByTestId('drift-unobserved').textContent).toBe('· 2 allowed but unobserved');
+    expect(within(api).getByTestId('drift-unobserved').textContent).toBe('2 allowed but unobserved');
     expect(within(api).queryByText(/extra/)).toBeNull();
     const grafana = rowNamed('grafana');
     expect(within(grafana).getByText('1 missing')).not.toBeNull();

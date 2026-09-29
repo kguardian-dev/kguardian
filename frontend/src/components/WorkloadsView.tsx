@@ -310,26 +310,34 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                       onClick={() => onOpenWorkload(target)}
                       className="cursor-pointer hover:bg-hubble-hover/40 transition-colors"
                     >
-                      <td className="px-4 py-2.5 min-w-0">
-                        <a
-                          href={routeHref('workload', target)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="font-medium text-primary truncate hover:underline"
-                        >
-                          {r.name}
-                        </a>
-                        <div className="text-[11px] text-tertiary font-mono truncate">
-                          {r.kind}
-                          {allNamespaces && ` · ${r.namespace}`}
+                      <td className="px-4 py-2.5">
+                        {/* Long names are cut, not allowed to push the table wider than a laptop screen. */}
+                        <div className="max-w-[13rem] 2xl:max-w-[18rem]" title={`${r.namespace}/${r.kind}/${r.name}`}>
+                          <a
+                            href={routeHref('workload', target)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="block font-medium text-primary truncate hover:underline"
+                          >
+                            {r.name}
+                          </a>
+                          <div className="text-[11px] text-tertiary font-mono truncate">
+                            {r.kind}
+                            {allNamespaces && ` · ${r.namespace}`}
+                          </div>
                         </div>
                       </td>
                       {seccompMode && r.profile ? (
                         <>
                           <td className="px-3 py-2.5">{r.capture && <CaptureBadge capture={r.capture} />}</td>
                           <td className="px-3 py-2.5">
-                            <span className="inline-flex items-center gap-1.5">
+                            {/* The CR name under the pill, cut to the column. */}
+                            <span className="inline-flex flex-col items-start gap-0.5">
                               <StatePill state={r.seccomp} />
-                              {r.profile.cr && <span className="font-mono text-[11px] text-tertiary">{r.profile.cr.name}</span>}
+                              {r.profile.cr && (
+                                <span className="block font-mono text-[11px] text-tertiary truncate max-w-[11rem]" title={r.profile.cr.name}>
+                                  {r.profile.cr.name}
+                                </span>
+                              )}
                             </span>
                           </td>
                           <td className="px-3 py-2.5">{r.profile.cr ? <CrNodes cr={r.profile.cr} /> : <span className="font-mono text-xs text-tertiary">—</span>}</td>
