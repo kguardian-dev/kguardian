@@ -2,8 +2,8 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { ProfileApi } from '../services/profileApi';
-import { useElapsedSeconds, useProfileVersions, useWorkloadProfile } from './useWorkloadProfile';
-import { checkoutProfile } from '../fixtures/profile';
+import { useElapsedSeconds, useProfileDiff, useProfileVersions, useWorkloadProfile } from './useWorkloadProfile';
+import { checkoutDiff2to4, checkoutProfile } from '../fixtures/profile';
 
 afterEach(() => vi.useRealTimers());
 
@@ -185,4 +185,37 @@ test('useProfileVersions: another workload drops the old list at once, and a "Lo
   expect(result.current.data?.name).toBe('refunds');
   expect(result.current.data?.items.map((v) => v.revision)).toEqual([3]);
   expect(result.current.loadingMore).toBe(false);
+});
+
+test('useProfileDiff: a new revision pair clears the previous diff while it loads, and a late answer for the old pair is dropped', async () => {
+  const { api, answer } = deferredByUrl();
+  const { result, rerender } = renderHook(({ from, to }) => useProfileDiff(...W, from, to, true, api), { initialProps: { from: 2, to: 4 } });
+  await act(async () => answer(/diff\?from=2&to=4$/, checkoutDiff2to4.body));
+  expect(result.current.diff?.to.revision).toBe(4);
+
+  rerender({ from: 1, to: 3 });
+  // The pickers now name v1 → v3: the v2 → v4 diff must not stay under them.
+  expect(result.current.diff).toBeNull();
+  expect(result.current.loading).toBe(true);
+
+  // A pair the user has moved on from answers after the new one: dropped.
+  rerender({ from: 2, to: 3 });
+  await act(async () => answer(/diff\?from=1&to=3$/, { ...checkoutDiff2to4.body, from: { ...checkoutDiff2to4.body.from, revision: 1 }, to: { ...checkoutDiff2to4.body.to, revision: 3 } }));
+  expect(result.current.diff).toBeNull();
+  expect(result.current.loading).toBe(true);
+  await act(async () => answer(/diff\?from=2&to=3$/, { ...checkoutDiff2to4.body, to: { ...checkoutDiff2to4.body.to, revision: 3 } }));
+  expect(result.current.diff?.from?.revision).toBe(2);
+  expect(result.current.diff?.to.revision).toBe(3);
+  expect(result.current.loading).toBe(false);
+});
+
+test('useProfileDiff: a refresh of the same pair keeps the diff on screen until the new one lands', async () => {
+  const { api, answer } = deferredByUrl();
+  const { result } = renderHook(() => useProfileDiff(...W, 2, 4, true, api));
+  await act(async () => answer(/diff\?from=2&to=4$/, checkoutDiff2to4.body));
+  act(() => {
+    void result.current.reload();
+  });
+  expect(result.current.loading).toBe(true);
+  expect(result.current.diff?.to.revision).toBe(4);
 });

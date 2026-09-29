@@ -197,19 +197,34 @@ export function useProfileVersions(ns: string, kind: string, name: string, refre
   return { data, loading, loadingMore, error, reload: load, loadMore };
 }
 
-/** The diff between two stored revisions (either may be omitted: broker defaults). */
+/**
+ * The diff between two stored revisions (either may be omitted: broker
+ * defaults). Another pair (or workload) clears the diff until its own
+ * answers, so the pickers never name revisions above another pair's diff;
+ * a Refresh of the same pair keeps it on screen meanwhile.
+ */
 export function useProfileDiff(ns: string, kind: string, name: string, from: number | undefined, to: number | undefined, enabled: boolean, api: ProfileApi = profileApi) {
   const [diff, setDiff] = useState<ProfileDiff | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
 
+  const read = useCallback(() => api.getDiff(ns, kind, name, { from, to }), [api, ns, kind, name, from, to]);
+
+  // The pair the diff on screen answers.
+  const diffFor = useRef(read);
+
   const load = useCallback(async () => {
     if (!enabled) return;
     const current = begin();
     setLoading(true);
+    if (diffFor.current !== read) {
+      diffFor.current = read;
+      setDiff(null);
+      setError(null);
+    }
     try {
-      const d = await api.getDiff(ns, kind, name, { from, to });
+      const d = await read();
       if (!current()) return;
       setDiff(d);
       setError(null);
@@ -221,7 +236,7 @@ export function useProfileDiff(ns: string, kind: string, name: string, from: num
     } finally {
       if (current()) setLoading(false);
     }
-  }, [api, ns, kind, name, from, to, enabled, begin]);
+  }, [read, enabled, begin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on selection change
