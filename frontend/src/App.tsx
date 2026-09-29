@@ -859,7 +859,12 @@ function App() {
                 className="border-t border-hubble-border bg-hubble-dark overflow-auto"
                 style={{ maxHeight: `${tableHeight}px` }}
               >
-                <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} services={services} />
+                <DataTable
+                  selectedPod={selectedPod}
+                  allPodsLookup={allPodsLookup}
+                  services={services}
+                  computeUnavailable={compute.supported && compute.unavailable}
+                />
               </div>
             </div>
           </>
