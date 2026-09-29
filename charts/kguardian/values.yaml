@@ -1444,6 +1444,19 @@ frontend:
     #    hosts:
     #      - kguardian.example.com
 
+  # -- Extra host names the UI server answers, for a proxy or route this chart
+  # does not render (your own HTTPRoute or ingress). The server refuses any
+  # other Host header, so a web page cannot reach its /api proxy, and the
+  # broker token it holds, through DNS rebinding. The chart builds the list
+  # from these, `ingress.hosts` and `ingress.tls[].hosts` (when ingress is
+  # enabled), `sso.hostnames` (when SSO is enabled) and the frontend
+  # Service's own DNS names. localhost and IP addresses are always answered,
+  # so `kubectl port-forward` and probes keep working. When the list would be
+  # empty the server answers every host, as before, and logs a warning.
+  # `*.example.com` matches every subdomain of example.com.
+  allowedHosts: []
+  #  - kguardian.internal.example.com
+
   # SSO (opt-in). For Gateway API environments with an identity-aware proxy
   # (oauth2-proxy -> OIDC, e.g. Dex/Keycloak/Authentik). When enabled the chart
   # renders an Envoy Gateway SecurityPolicy that gates your frontend HTTPRoute

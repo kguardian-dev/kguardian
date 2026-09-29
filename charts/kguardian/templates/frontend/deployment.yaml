@@ -56,6 +56,31 @@ spec:
             {{- if or (eq (include "kguardian.brokerAuthMode" $) "scoped") .Values.frontend.brokerAuth.allowSharedToken }}
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
             {{- end }}
+            {{- /* Host names the UI server answers (vite allowedHosts), so a page
+                   that rebinds its own name to the UI cannot use the /api proxy.
+                   Set only when the chart knows the external names; otherwise the
+                   server answers any host and logs a warning. */}}
+            {{- $hosts := list }}
+            {{- if .Values.frontend.ingress.enabled }}
+            {{- range .Values.frontend.ingress.hosts }}
+            {{- $hosts = append $hosts .host }}
+            {{- end }}
+            {{- range .Values.frontend.ingress.tls }}
+            {{- $hosts = concat $hosts (.hosts | default list) }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.frontend.sso.enabled }}
+            {{- $hosts = concat $hosts (.Values.frontend.sso.hostnames | default list) }}
+            {{- end }}
+            {{- $hosts = concat $hosts (.Values.frontend.allowedHosts | default list) }}
+            {{- $hosts = compact $hosts }}
+            {{- if $hosts }}
+            {{- $svc := .Values.frontend.service.name }}
+            {{- $ns := include "kguardian.namespace" . | trim }}
+            {{- $hosts = concat $hosts (list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) }}
+            - name: ALLOWED_HOSTS
+              value: {{ $hosts | uniq | join "," | quote }}
+            {{- end }}
             {{- if include "kguardian.llmBridgeEnabled" . }}
             - name: VITE_LLM_BRIDGE_URL
               value: "http://{{ .Values.llmBridge.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.llmBridge.service.port }}"

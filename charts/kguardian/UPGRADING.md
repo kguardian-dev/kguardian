@@ -1,5 +1,31 @@
 # Upgrading the kguardian Helm chart
 
+## The UI answers only the host names the chart knows (`frontend.allowedHosts`)
+
+The UI server used to answer requests for any `Host` header. Its `/api` proxy
+attaches the broker read token, so a web page that rebinds its own DNS name to
+the UI's address could read the broker through a user's browser. When the
+chart knows the names users open the UI on, it now passes them to the UI as
+`ALLOWED_HOSTS` and the server refuses every other host with a 403. The names
+come from `frontend.ingress.hosts` and `frontend.ingress.tls[].hosts` (with
+`frontend.ingress.enabled`), `frontend.sso.hostnames` (with
+`frontend.sso.enabled`) and the new `frontend.allowedHosts`, plus the frontend
+Service's in-cluster DNS names. `localhost` and IP addresses are always
+answered, so `kubectl port-forward` and kubelet probes are unaffected.
+
+What to do:
+
+- **You use the chart's ingress or SSO route, and users reach the UI only on
+  those names:** nothing.
+- **Users also reach the UI on a name the chart does not render** (your own
+  HTTPRoute, an external proxy, a second DNS name): add it to
+  `frontend.allowedHosts`, or those requests get
+  `Blocked request. This host (...) is not allowed.` `*.example.com` covers
+  every subdomain.
+- **Neither ingress, SSO nor `frontend.allowedHosts` is set:** nothing changes.
+  The server answers every host as before and logs a warning at startup;
+  set `frontend.allowedHosts` to turn the check on.
+
 ## Upgrading to 1.27.0
 
 1.27.0 is a minor release that carries one breaking change for installs with

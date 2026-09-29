@@ -367,6 +367,21 @@ This gates the **UI route only**. The Broker API is a separate Service. To authe
 
 SSO guards the Gateway route, not the frontend Service itself. With broker auth on, anything in the cluster that can reach the frontend Service directly can read everything the broker holds, because the proxy adds the read token for it. Restrict ingress to the frontend pods with a NetworkPolicy that admits only your Gateway.
 
+### Restrict the UI's Host Names
+
+The UI server answers only the host names the chart knows: `frontend.ingress.hosts` (and the TLS hosts) when the chart's ingress is on, `frontend.sso.hostnames` when SSO is on, the frontend Service's in-cluster DNS names, and anything in `frontend.allowedHosts`. Any other `Host` header gets a 403, so a web page cannot rebind its own name to the UI and use the `/api` proxy, and the read token it adds, from a user's browser. `localhost` and IP addresses are always answered, so `kubectl port-forward` keeps working.
+
+If you expose the UI through a route or proxy the chart does not render, list its host names:
+
+```yaml
+frontend:
+  allowedHosts:
+    - kguardian.internal.example.com
+    - "*.corp.example.com"   # every subdomain
+```
+
+With none of these set, the server answers every host, as earlier releases did, and logs a warning at startup.
+
 ---
 
 ## Install the CLI Plugin

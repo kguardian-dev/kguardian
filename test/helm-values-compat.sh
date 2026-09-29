@@ -909,6 +909,21 @@ render "seccomp-stale-window-disabled" --set seccomp.distribute=true \
 # Without distribution no node ever posts, so the interval is not checked.
 render "seccomp-stale-window-no-distribution" --set seccomp.distributeIntervalSeconds=3600
 
+# UI host allowlist (ALLOWED_HOSTS). Set only when the chart knows the names
+# users open the UI on; with none, an existing install keeps answering every
+# host (the server logs a warning), so an upgrade never locks anyone out.
+SVC_HOSTS="kguardian-frontend,kguardian-frontend.kg,kguardian-frontend.kg.svc,kguardian-frontend.kg.svc.cluster.local"
+render "allowed-hosts-default" -n kg && assert_absent "allowed-hosts-default" "ALLOWED_HOSTS"
+render "allowed-hosts-ingress" -n kg --set frontend.ingress.enabled=true \
+  --set 'frontend.ingress.tls[0].secretName=kg-tls' --set 'frontend.ingress.tls[0].hosts[0]=kguardian.example.com' \
+  --set 'frontend.ingress.tls[0].hosts[1]=alt.example.com' && \
+  assert_has "allowed-hosts-ingress" "value: \"kguardian.example.com,alt.example.com,$SVC_HOSTS\""
+render "allowed-hosts-sso" -n kg --set frontend.sso.enabled=true --set frontend.sso.httpRouteName=kg \
+  --set 'frontend.sso.hostnames[0]=kg.example.com' --set 'frontend.sso.parentRefs[0].name=gw' && \
+  assert_has "allowed-hosts-sso" "value: \"kg.example.com,$SVC_HOSTS\""
+render "allowed-hosts-extra" -n kg --set 'frontend.allowedHosts[0]=*.corp.example.com' && \
+  assert_has "allowed-hosts-extra" "value: \"\*.corp.example.com,$SVC_HOSTS\""
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

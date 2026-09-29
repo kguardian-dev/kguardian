@@ -317,6 +317,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | evaluator.tolerations | list | `[]` | Tolerations for evaluator pod assignment |
 | evaluator.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to evaluator pods. |
 | frontend.affinity | object | `{}` | Affinity rules for frontend pod assignment |
+| frontend.allowedHosts | list | `[]` | Extra host names the UI server answers, for a proxy or route this chart does not render (your own HTTPRoute or ingress). The server refuses any other Host header, so a web page cannot reach its /api proxy, and the broker token it holds, through DNS rebinding. The chart builds the list from these, `ingress.hosts` and `ingress.tls[].hosts` (when ingress is enabled), `sso.hostnames` (when SSO is enabled) and the frontend Service's own DNS names. localhost and IP addresses are always answered, so `kubectl port-forward` and probes keep working. When the list would be empty the server answers every host, as before, and logs a warning. `*.example.com` matches every subdomain of example.com. |
 | frontend.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for frontend |
 | frontend.autoscaling.maxReplicas | int | `100` | Maximum number of frontend replicas |
 | frontend.autoscaling.minReplicas | int | `1` | Minimum number of frontend replicas |
