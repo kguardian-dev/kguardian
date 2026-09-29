@@ -31,6 +31,8 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
   const seccomp = useSeccompProfiles();
   const [verdicts, setVerdicts] = useState<AuditVerdict[]>([]);
   const [verdictsUnavailable, setVerdictsUnavailable] = useState(false);
+  // True until the first verdict read settles; a refresh keeps the window it replaces.
+  const [verdictsLoading, setVerdictsLoading] = useState(true);
 
   const loadVerdicts = useCallback(async () => {
     // A failed verdict read leaves the window empty and is flagged: the
@@ -47,6 +49,7 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
     const ok = results.filter((r): r is PromiseFulfilledResult<AuditVerdict[]> => r.status === 'fulfilled');
     setVerdicts(ok.flatMap((r) => r.value));
     setVerdictsUnavailable(ok.length < results.length);
+    setVerdictsLoading(false);
   }, []);
 
   useEffect(() => {
@@ -99,6 +102,8 @@ export function useWorkloadCoverage(allPods: readonly PodInfo[], refreshTick = 0
     seccompUnavailable,
     /** A verdict read failed: the would-deny tile is unknown, not 0. */
     verdictsUnavailable,
+    /** The first verdict read is in flight: no workload's network state is known yet. */
+    verdictsLoading,
     verdictCount: scoped.length,
     refresh,
   };
