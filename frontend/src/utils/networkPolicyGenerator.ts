@@ -2,7 +2,7 @@ import type { NetworkTraffic, PodInfo, PodNodeData } from '../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer, NetworkPolicyPort } from '../types/networkPolicy';
 import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
-import { peerCIDR } from './ipCidr';
+import { isValidCidr, peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import {
   hostNetworkPeerComment,
@@ -242,7 +242,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
       if (!identity.svcSelector) {
         const cidr = peerCIDR(peerInfo.ip);
         if (cidr === null) return null;
-        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(peerInfo.ip, undefined) };
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(peerInfo.ip, undefined, `${identity.svcNamespace || 'default'}/${identity.svcName}`) };
       }
 
       const peer: NetworkPolicyPeer = {
@@ -311,7 +311,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
       // A guarded-out peer (the flow predates every pod that held the IP)
       // is the same ipBlock, with a comment saying no pod could be matched.
       if (identity.unattributed) {
-        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at) };
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
       }
       return { peers: [{ ipBlock: { cidr } }] };
     }
@@ -557,10 +557,29 @@ export function invalidPolicyPorts(policy: NetworkPolicy): string[] {
   return out;
 }
 
-/** A port number is written bare; a named port is a string, quoted when YAML
- *  would read it as something else (`no`, `on`). */
+/** Every malformed ipBlock CIDR (or `except` entry) in the rules that render,
+ *  as `<direction> rule <n>: cidr "<value>"`. Typed values only: the
+ *  generators emit peerCIDR output, which always parses. */
+export function invalidPolicyCidrs(policy: NetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule, i) => {
+      if (!ruleHasPeers(rule)) return;
+      rule.peers.forEach(({ ipBlock }) => {
+        if (!ipBlock) return;
+        if (!isValidCidr(ipBlock.cidr)) out.push(`${dir} rule ${i + 1}: cidr "${ipBlock.cidr}"`);
+        (ipBlock.except ?? []).filter((e) => !isValidCidr(e)).forEach((e) => out.push(`${dir} rule ${i + 1}: except "${e}"`));
+      });
+    });
+  });
+  return out;
+}
+
+/** A port number is written as a plain decimal: a digit string with a leading
+ *  zero, bare, is octal to a YAML 1.1 decoder (`0100` reads as 64). A named
+ *  port is a string, quoted when YAML would read it as something else (`no`). */
 const portValue = (port: string | number): string =>
-  typeof port === 'number' || /^[0-9]+$/.test(port) ? String(port) : quoteYamlValue(port);
+  typeof port === 'number' || /^[0-9]+$/.test(port) ? String(Number(port)) : quoteYamlValue(port);
 
 /** A peer's selector. No labels is written `{}`, the API's "select all"
  *  (every pod in the namespace, or every namespace), rather than a bare

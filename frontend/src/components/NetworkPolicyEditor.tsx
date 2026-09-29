@@ -16,6 +16,7 @@ import {
   type DenyAllCause,
 } from '../utils/cniPolicySupport';
 import { ipBlockScope } from '../utils/ipBlockScope';
+import { isValidCidr } from '../utils/ipCidr';
 import { isValidPolicyPort, ruleHasPeers } from '../utils/networkPolicyGenerator';
 import { ciliumRuleHasPeers, isValidCiliumPort } from '../utils/ciliumPolicyGenerator';
 import type { IdentitySources } from '../utils/trafficIdentity';
@@ -66,6 +67,14 @@ const PeerlessRuleNotice: React.FC<{ missing: string; add: string }> = ({ missin
   </p>
 );
 
+/** In place of the label chips of a selector with no labels: an empty selector
+ *  selects everything in its scope, and the chip row says so. */
+const EmptySelectorBadge: React.FC<{ text: string }> = ({ text }) => (
+  <div className="flex flex-wrap gap-1 mb-2">
+    <span className="bg-hubble-accent/20 text-hubble-accent px-2 py-1 rounded text-xs">{text}</span>
+  </div>
+);
+
 /** On a rule with peers but no ports: an empty port list matches every port. */
 const AllPortsNote = () => <p className="text-xs text-tertiary italic">All ports: no port restriction</p>;
 
@@ -84,6 +93,24 @@ const InvalidPortsNotice: React.FC<{ issues: string[]; lowest: 0 | 1 }> = ({ iss
     container port (for example http).
   </div>
 );
+
+/** Shown in place of a policy with a typed CIDR the API server rejects. */
+const InvalidCidrsNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    Nothing to export: {issues.join(', ')} is not a valid CIDR. A CIDR is an IPv4 or IPv6 address with a prefix
+    length (for example 10.0.0.0/8 or fd00::/64).
+  </div>
+);
+
+/** Border and a11y state for a CIDR input. */
+const cidrFieldProps = (cidr: string) => {
+  const valid = isValidCidr(cidr);
+  return {
+    'aria-invalid': !valid,
+    title: valid ? undefined : 'An IPv4 or IPv6 address with a prefix length, e.g. 10.0.0.0/8',
+    border: valid ? 'border-hubble-border' : 'border-hubble-error',
+  };
+};
 
 /** The kguardian CR's allowed values, plus the current one when it falls
  *  outside them, so the editor shows what is selected rather than silently
@@ -247,7 +274,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   } = useSyscallAutocomplete();
 
   // Export functionality
-  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues, portIssues } = usePolicyExport({
+  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues, portIssues, cidrIssues } = usePolicyExport({
     policyType,
     policy,
     ciliumPolicy,
@@ -405,8 +432,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 )}
                 {crIssues.length > 0 ? (
                   <CrBlockedNotice issues={crIssues} />
-                ) : portIssues.length > 0 ? (
-                  <InvalidPortsNotice issues={portIssues} lowest={policyType === 'cilium' ? 0 : 1} />
+                ) : portIssues.length > 0 || cidrIssues.length > 0 ? (
+                  <>
+                    {portIssues.length > 0 && <InvalidPortsNotice issues={portIssues} lowest={policyType === 'cilium' ? 0 : 1} />}
+                    {cidrIssues.length > 0 && <InvalidCidrsNotice issues={cidrIssues} />}
+                  </>
                 ) : (
                   <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
                     {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
@@ -544,8 +574,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={peer.ipBlock.cidr}
                                             onChange={(e) => updatePeerCIDR(rule.id, peerIndex, e.target.value, 'ingress')}
-                                            className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(peer.ipBlock.cidr)['aria-invalid']}
+                                            title={cidrFieldProps(peer.ipBlock.cidr).title}
+                                            className={`flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border ${cidrFieldProps(peer.ipBlock.cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0 or 10.0.0.0/8"
                                           />
                                         </div>
@@ -559,6 +591,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs font-medium text-secondary">Pod Labels (Same Namespace)</span>
                                             </div>
                                             {/* Show existing labels */}
+                                            {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the namespace" />}
                                             {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -648,6 +681,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs text-tertiary italic">Leave empty to match all namespaces</span>
                                             </div>
                                             {/* Show existing labels */}
+                                            {Object.keys(peer.namespaceSelector.matchLabels).length === 0 && <EmptySelectorBadge text="matches every namespace" />}
                                             {Object.entries(peer.namespaceSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.namespaceSelector.matchLabels).map(([key, value]) => (
@@ -739,6 +773,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               </div>
                                               <span className="text-xs text-tertiary italic block mb-2">Leave empty to match all pods in namespace</span>
                                               {/* Show existing labels */}
+                                              {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the selected namespaces" />}
                                               {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                                 <div className="flex flex-wrap gap-1 mb-2">
                                                   {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -1001,8 +1036,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               type="text"
                                               value={peer.ipBlock.cidr}
                                               onChange={(e) => updatePeerCIDR(rule.id, peerIndex, e.target.value, 'egress')}
-                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                              aria-invalid={cidrFieldProps(peer.ipBlock.cidr)['aria-invalid']}
+                                              title={cidrFieldProps(peer.ipBlock.cidr).title}
+                                              className={`flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border ${cidrFieldProps(peer.ipBlock.cidr).border}
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                               placeholder="0.0.0.0/0 or 10.0.0.0/8"
                                             />
                                           </div>
@@ -1022,6 +1059,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs font-medium text-secondary">Pod Labels (Same Namespace)</span>
                                             </div>
                                             {/* Show existing labels as chips */}
+                                            {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the namespace" />}
                                             {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -1121,6 +1159,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs text-tertiary italic">Leave empty to match all namespaces</span>
                                             </div>
                                             {/* Show existing namespace labels as chips */}
+                                            {Object.keys(peer.namespaceSelector.matchLabels).length === 0 && <EmptySelectorBadge text="matches every namespace" />}
                                             {Object.entries(peer.namespaceSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.namespaceSelector.matchLabels).map(([key, value]) => (
@@ -1221,6 +1260,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 Leave empty to match all pods in namespace
                                               </span>
                                               {/* Show existing pod labels as chips */}
+                                              {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the selected namespaces" />}
                                               {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                                 <div className="flex flex-wrap gap-1 mb-2">
                                                   {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -1704,8 +1744,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={cidr}
                                             onChange={(e) => updateIngressCIDR(rule.id, cidrIndex, e.target.value)}
-                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(cidr)['aria-invalid']}
+                                            title={cidrFieldProps(cidr).title}
+                                            className={`flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border ${cidrFieldProps(cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0"
                                           />
                                           <button
@@ -1961,8 +2003,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={cidr}
                                             onChange={(e) => updateEgressCIDR(rule.id, cidrIndex, e.target.value)}
-                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(cidr)['aria-invalid']}
+                                            title={cidrFieldProps(cidr).title}
+                                            className={`flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border ${cidrFieldProps(cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0"
                                           />
                                           <button

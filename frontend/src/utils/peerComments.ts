@@ -12,10 +12,15 @@ import { parseBrokerTime } from './peerResolution';
  * no pod may be selected for the flow (the start-time guard excluded every
  * pod that ever held the IP, or the stored peer is gone). `at` is the NEWEST
  * `time_stamp` among the rule's rows, printed verbatim; when none parses the
- * ` at …` part is omitted.
+ * ` at …` part is omitted. `service` (frontend only; the advisor has no such
+ * case) adds why a Service ClusterIP ended up here.
  */
-export function unattributedPeerComment(ip: string, at: string | undefined): string {
-  return at !== undefined && parseBrokerTime(at) !== null ? `unattributed peer ${ip} at ${at}` : `unattributed peer ${ip}`;
+export function unattributedPeerComment(ip: string, at: string | undefined, service?: string): string {
+  const lead = at !== undefined && parseBrokerTime(at) !== null ? `unattributed peer ${ip} at ${at}` : `unattributed peer ${ip}`;
+  // A ClusterIP of a Service whose selector is unknown (its spec was never
+  // stored): say what the address is and what to put in its place.
+  if (service) return `${lead} — ClusterIP of Service ${service}, selector unknown: will not match after DNAT; replace with the Service's selector`;
+  return lead;
 }
 
 /**

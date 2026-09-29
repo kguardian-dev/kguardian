@@ -165,3 +165,55 @@ test('cilium: an emptied port field is flagged and blocks the export instead of 
   toYaml();
   expect(parse(yamlText()).spec.egress[0].toPorts).toEqual([{ ports: [{ port: '0', protocol: 'TCP' }] }]);
 });
+
+// A selector left with no labels selects everything in its scope; the chip
+// row, where the labels were, says so rather than going blank.
+test('removing the last pod label: the chip row reads "all pods in the namespace" and the YAML has podSelector {}', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
+  await waitForYaml('app: api');
+  toVisual();
+  expect(screen.queryByText('all pods in the namespace')).toBeNull();
+  fireEvent.click(screen.getByTitle('Remove label'));
+  expect(screen.getByText('all pods in the namespace')).toBeTruthy();
+  toYaml();
+  expect(parse(yamlText()).spec.egress[0].to).toEqual([{ podSelector: {} }]);
+});
+
+test('switching a peer to any namespace shows "matches every namespace" until a label is added', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
+  await waitForYaml('app: api');
+  toVisual();
+  fireEvent.change(screen.getByDisplayValue('In Namespace (Same Namespace)'), { target: { value: 'inCluster' } });
+  expect(screen.getByText('matches every namespace')).toBeTruthy();
+});
+
+// A typed ipBlock CIDR gets the port field's treatment: `cidr: ""` used to export.
+test('an empty or malformed ipBlock CIDR is flagged and blocks the export, naming the field', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
+  await waitForYaml('app: api');
+  toVisual();
+  fireEvent.click(screen.getByText('Add Destination'));
+  const cidr = screen.getByDisplayValue('0.0.0.0/0') as HTMLInputElement;
+  fireEvent.change(cidr, { target: { value: '' } });
+  expect(cidr.getAttribute('aria-invalid')).toBe('true');
+  toYaml();
+  expect(document.querySelector('pre')).toBeNull();
+  expect(screen.getByText(/not a valid CIDR/).textContent).toContain('egress rule 1: cidr ""');
+
+  toVisual();
+  fireEvent.change(screen.getByPlaceholderText('0.0.0.0/0 or 10.0.0.0/8'), { target: { value: 'fd00::/64' } });
+  toYaml();
+  expect(parse(yamlText()).spec.egress[0].to).toEqual([{ podSelector: { matchLabels: { app: 'api' } } }, { ipBlock: { cidr: 'fd00::/64' } }]);
+});
+
+test('cilium: an emptied CIDR is flagged and blocks the export', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="cilium" />);
+  await waitForYaml('kind: CiliumNetworkPolicy');
+  toVisual();
+  fireEvent.click(screen.getByText('Add CIDR'));
+  const cidr = screen.getByDisplayValue('0.0.0.0/0') as HTMLInputElement;
+  fireEvent.change(cidr, { target: { value: '' } });
+  expect(cidr.getAttribute('aria-invalid')).toBe('true');
+  toYaml();
+  expect(screen.getByText(/not a valid CIDR/).textContent).toContain('egress rule 1: cidr ""');
+});

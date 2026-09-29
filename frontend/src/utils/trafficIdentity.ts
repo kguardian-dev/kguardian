@@ -38,8 +38,9 @@ export interface TrafficIdentity {
    *  every pod that ever held the IP (the flow predates the current holder),
    *  or the stored peer is gone from the broker. Rendered as an ipBlock
    *  with the `unattributed peer` comment, never as a selector. `at` is the
-   *  row's `time_stamp` verbatim. */
-  unattributed?: { ip: string; at: string };
+   *  row's `time_stamp` verbatim. `service` (`<ns>/<name>`) is set when the IP
+   *  is a Service ClusterIP whose selector is unknown (spec never stored). */
+  unattributed?: { ip: string; at: string; service?: string };
   isExternal: boolean;
 }
 
@@ -79,7 +80,10 @@ function serviceIdentity(serviceInfo: ServiceInfo): TrafficIdentity {
  *  (pinned ipBlock / CIDR with the comment), as a stored Service peer in the
  *  same state already is. `at` is the row's `time_stamp`. */
 function serviceRowIdentity(serviceInfo: ServiceInfo, ip: string, at: string): TrafficIdentity {
-  if (!serviceSelector(serviceInfo) && !serviceHasNoSelector(serviceInfo)) return { isExternal: true, unattributed: { ip, at } };
+  if (!serviceSelector(serviceInfo) && !serviceHasNoSelector(serviceInfo)) {
+    const service = `${serviceInfo.svc_namespace || 'default'}/${serviceInfo.svc_name}`;
+    return { isExternal: true, unattributed: { ip, at, service } };
+  }
   return serviceIdentity(serviceInfo);
 }
 

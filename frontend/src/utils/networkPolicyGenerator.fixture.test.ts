@@ -460,6 +460,10 @@ const storedKubeApi = { peer_kind: 'service', peer_namespace: 'default', peer_na
 const KUBE_API_IPBLOCK = '# Service default/kubernetes has no selector — ipBlock 10.96.0.1 is its ClusterIP and will not match after DNAT';
 const KUBE_API_ENTITY = '# Service default/kubernetes has no selector — kube-apiserver entity covers its endpoints';
 const METRICS_API_CIDR = '# Service kube-system/metrics-api has no selector — cidr 10.96.0.77 is its ClusterIP and will not match after DNAT';
+// By IP, a Service whose spec was never stored: still an unattributed peer
+// rule (as the stored path renders it), saying what the address is.
+const PG_UNKNOWN_SELECTOR =
+  "# unattributed peer 10.96.0.88 at 2026-09-03T00:00:00 — ClusterIP of Service db/pg, selector unknown: will not match after DNAT; replace with the Service's selector";
 
 describe('generateNetworkPolicy — no traffic and selector-less Services', () => {
   test('(g) no traffic: explicit policyTypes Ingress+Egress and no rules, as the default_deny golden', async () => {
@@ -528,7 +532,7 @@ describe('generateNetworkPolicy — no traffic and selector-less Services', () =
     // (`app: pg`, which this test used to expect and which matches nothing).
     yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [egressRow('10.96.0.88', '5432')])));
     expect(yaml).not.toContain('has no selector');
-    expect(ruleComments(yaml)).toEqual(['# unattributed peer 10.96.0.88 at 2026-09-03T00:00:00']);
+    expect(ruleComments(yaml)).toEqual([PG_UNKNOWN_SELECTOR]);
     expect(spec(parse(yaml)).egress).toEqual([
       { to: [{ ipBlock: { cidr: '10.96.0.88/32' } }], ports: [{ protocol: 'TCP', port: 5432 }] },
     ]);
@@ -732,7 +736,7 @@ describe('generators — a Service peer renders the Service selector', () => {
     const cnp = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(prometheus, [row])));
     expect(spec(parse(cnp)).egress).toEqual([{ toCIDR: ['10.96.0.88/32'], toPorts: [{ ports: [{ port: '5432', protocol: 'TCP' }] }] }]);
     for (const yaml of [std, cnp]) {
-      expect(ruleComments(yaml)).toEqual(['# unattributed peer 10.96.0.88 at 2026-09-03T00:00:00']);
+      expect(ruleComments(yaml)).toEqual([PG_UNKNOWN_SELECTOR]);
       expect(yaml).not.toContain('app: pg');
       expect(yaml).not.toContain('has no selector');
     }

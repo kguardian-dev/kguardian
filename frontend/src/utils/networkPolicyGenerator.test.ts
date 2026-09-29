@@ -10,8 +10,8 @@ vi.mock('../services/api', () => ({
 }));
 
 import { parse } from 'yaml';
-import { generateNetworkPolicy, invalidPolicyPorts, isValidPolicyPort, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
-import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers, invalidCiliumPorts } from './ciliumPolicyGenerator';
+import { generateNetworkPolicy, invalidPolicyCidrs, invalidPolicyPorts, isValidPolicyPort, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
+import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers, invalidCiliumCidrs, invalidCiliumPorts } from './ciliumPolicyGenerator';
 import type { NetworkPolicy, NetworkPolicyRule } from '../types/networkPolicy';
 import type { CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy } from '../types/ciliumPolicy';
 
@@ -355,5 +355,54 @@ describe('invalidCiliumPorts', () => {
 
   it.each([[''], ['65536'], ['-1'], ['8080 ']])('flags %j', (port) => {
     expect(invalidCiliumPorts(cnp(port))).toEqual([`egress rule 1: port "${port}"`]);
+  });
+
+  it('a digit string with a leading zero is written as its number', () => {
+    expect(ciliumPolicyToYAML(cnp('0080'))).toContain('      - port: "80"');
+  });
+
+  it('invalidCiliumCidrs names an empty or malformed typed CIDR', () => {
+    const policy = cnp('80');
+    policy.spec.egress![0].toCIDR = ['', '10.0.0.0/8', '10.0.0.0'];
+    expect(invalidCiliumCidrs(policy)).toEqual(['egress rule 1: cidr ""', 'egress rule 1: cidr "10.0.0.0"']);
+  });
+});
+
+// A digit string with a leading zero, written bare, is octal to a YAML 1.1
+// decoder (kubectl uses go-yaml v2): `port: 0100` is read as 64.
+describe('policyToYAML — numeric ports are written as plain decimals', () => {
+  it('0080 is written 80, 0100 is written 100', () => {
+    const policy: NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'web-policy', namespace: 'prod' },
+      spec: {
+        podSelector: { matchLabels: { app: 'web' } }, policyTypes: ['Ingress'],
+        ingress: [{ id: 'i', peers: [{ ipBlock: { cidr: '10.0.0.0/8' } }], ports: [{ protocol: 'TCP', port: '0080' }, { protocol: 'TCP', port: '0100' }] }],
+      },
+    };
+    const yaml = policyToYAML(policy);
+    expect(yaml).toContain('      port: 80\n');
+    expect(yaml).not.toContain('0100');
+    expect(parse(yaml).spec.ingress[0].ports).toEqual([{ protocol: 'TCP', port: 80 }, { protocol: 'TCP', port: 100 }]);
+  });
+});
+
+describe('invalidPolicyCidrs — a typed ipBlock CIDR must parse', () => {
+  const withCidr = (cidr: string, except?: string[]): NetworkPolicy => ({
+    apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'web-policy', namespace: 'prod' },
+    spec: {
+      podSelector: { matchLabels: { app: 'web' } }, policyTypes: ['Egress'],
+      egress: [{ id: 'e', peers: [{ podSelector: { matchLabels: { app: 'api' } } }, { ipBlock: { cidr, ...(except && { except }) } }], ports: [] }],
+    },
+  });
+
+  it('accepts IPv4 and IPv6 CIDRs', () => {
+    expect(invalidPolicyCidrs(withCidr('10.0.0.0/8'))).toEqual([]);
+    expect(invalidPolicyCidrs(withCidr('fd00::/64', ['fd00::1/128']))).toEqual([]);
+  });
+
+  it('names an empty cidr, a bare address, and a bad except entry', () => {
+    expect(invalidPolicyCidrs(withCidr(''))).toEqual(['egress rule 1: cidr ""']);
+    expect(invalidPolicyCidrs(withCidr('10.0.0.1'))).toEqual(['egress rule 1: cidr "10.0.0.1"']);
+    expect(invalidPolicyCidrs(withCidr('10.0.0.0/8', ['10.1.0.0/33']))).toEqual(['egress rule 1: except "10.1.0.0/33"']);
   });
 });

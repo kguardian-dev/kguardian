@@ -2,8 +2,8 @@ import { useState } from 'react';
 import type { NetworkPolicy } from '../../types/networkPolicy';
 import type { CiliumNetworkPolicy } from '../../types/ciliumPolicy';
 import type { SeccompProfile } from '../../types/seccompProfile';
-import { invalidPolicyPorts, policyToYAML } from '../../utils/networkPolicyGenerator';
-import { ciliumPolicyToYAML, invalidCiliumPorts } from '../../utils/ciliumPolicyGenerator';
+import { invalidPolicyCidrs, invalidPolicyPorts, policyToYAML } from '../../utils/networkPolicyGenerator';
+import { ciliumPolicyToYAML, invalidCiliumCidrs, invalidCiliumPorts } from '../../utils/ciliumPolicyGenerator';
 import { toAuditNetworkPolicy } from '../../utils/auditNetworkPolicy';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
 import { kguardianCrIssues, podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
@@ -100,13 +100,18 @@ export const usePolicyExport = ({
     policyType === 'network' && policy ? invalidPolicyPorts(policy)
       : policyType === 'cilium' && ciliumPolicy ? invalidCiliumPorts(ciliumPolicy)
         : [];
+  // CIDRs typed into an ipBlock / CIDR field that do not parse (`""` included).
+  const cidrIssues =
+    policyType === 'network' && policy ? invalidPolicyCidrs(policy)
+      : policyType === 'cilium' && ciliumPolicy ? invalidCiliumCidrs(ciliumPolicy)
+        : [];
 
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
-      if (portIssues.length > 0) return null;
+      if (portIssues.length > 0 || cidrIssues.length > 0) return null;
       return policyToYAML(networkFormat === 'audit' ? toAuditNetworkPolicy(policy) : policy);
     } else if (policyType === 'cilium' && ciliumPolicy) {
-      if (portIssues.length > 0) return null;
+      if (portIssues.length > 0 || cidrIssues.length > 0) return null;
       return ciliumPolicyToYAML(ciliumPolicy);
     } else if (policyType === 'seccomp' && seccompProfile) {
       if (seccompFormat === 'json') return profileToJSON(seccompProfile);
@@ -194,5 +199,6 @@ export const usePolicyExport = ({
     getExportContent,
     crIssues,
     portIssues,
+    cidrIssues,
   };
 };

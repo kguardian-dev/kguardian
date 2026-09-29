@@ -11,7 +11,7 @@ import {
 import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
 import { observedPort, observedProtocol, quoteYamlValue } from './networkPolicyGenerator';
-import { peerCIDR } from './ipCidr';
+import { isValidCidr, peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import { specNodeName } from './hostNetwork';
 import {
@@ -216,7 +216,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
       if (!identity.svcSelector) {
         const cidr = peerCIDR(peerInfo.ip);
         if (cidr === null) return {};
-        return { cidr, comment: unattributedPeerComment(peerInfo.ip, undefined) };
+        return { cidr, comment: unattributedPeerComment(peerInfo.ip, undefined, `${identity.svcNamespace || 'default'}/${identity.svcName}`) };
       }
       return { selector: { matchLabels: withPeerNamespace(identity.svcSelector, identity.svcNamespace) } };
     } else if (identity.podName) {
@@ -248,7 +248,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
       const cidr = peerCIDR(peerInfo.ip);
       if (cidr === null) return {};
       if (identity.unattributed) {
-        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at) };
+        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
       }
       return { cidr };
     }
@@ -443,6 +443,24 @@ export function invalidCiliumPorts(policy: CiliumNetworkPolicy): string[] {
   return out;
 }
 
+/** Every malformed CIDR in the rules that render, as
+ *  `<direction> rule <n>: cidr "<value>"`. Typed values only (see invalidPolicyCidrs). */
+export function invalidCiliumCidrs(policy: CiliumNetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule: CiliumIngressRule | CiliumEgressRule, i) => {
+      if (!ciliumRuleHasPeers(rule)) return;
+      const r = rule as CiliumIngressRule & CiliumEgressRule;
+      [...(r.fromCIDR ?? []), ...(r.toCIDR ?? [])].filter((c) => !isValidCidr(c))
+        .forEach((c) => out.push(`${dir} rule ${i + 1}: cidr "${c}"`));
+    });
+  });
+  return out;
+}
+
+/** A numeric port as a plain decimal (`0080` → `80`); names as typed. */
+const ciliumPortValue = (port: string): string => (/^[0-9]+$/.test(port) ? String(Number(port)) : port);
+
 export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -512,7 +530,7 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
         rule.toPorts.forEach((portRule) => {
           yaml.push('    - ports:');
           portRule.ports.forEach((pp) => {
-            yaml.push(`      - port: "${pp.port}"`);
+            yaml.push(`      - port: "${ciliumPortValue(pp.port)}"`);
             yaml.push(`        protocol: ${pp.protocol}`);
           });
         });
@@ -557,7 +575,7 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
         rule.toPorts.forEach((portRule) => {
           yaml.push('    - ports:');
           portRule.ports.forEach((pp) => {
-            yaml.push(`      - port: "${pp.port}"`);
+            yaml.push(`      - port: "${ciliumPortValue(pp.port)}"`);
             yaml.push(`        protocol: ${pp.protocol}`);
           });
         });
