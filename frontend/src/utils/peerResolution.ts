@@ -335,9 +335,20 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
  * (pruned, or not listed yet); the caller then shows the row's own name. A
  * legacy row with no `pod_name` falls back to its `pod_ip` under the
  * flow-time guard (`selectPodByIp`).
+ *
+ * A row with a name but no namespace matches the record of that name when
+ * only one exists; with several (the same name in two namespaces), the one
+ * among them that held `pod_ip` at the flow time. It never picks a pod of
+ * another name.
  */
 export function localPodForRow(row: NetworkTraffic, index: PeerIndex): PodInfo | null {
-  if (row.pod_name) return index.podsByNsName.get(`${row.pod_namespace ?? ''}/${row.pod_name}`) ?? null;
+  if (row.pod_name && row.pod_namespace) return index.podsByNsName.get(`${row.pod_namespace}/${row.pod_name}`) ?? null;
+  if (row.pod_name) {
+    const named = index.pods.filter((p) => p?.pod_name === row.pod_name);
+    if (named.length <= 1) return named[0] ?? null;
+    const holders = row.pod_ip ? named.filter((p) => podAddresses(p).includes(row.pod_ip!)) : [];
+    return selectPodByIp(holders, parseBrokerTime(row.time_stamp)).pod;
+  }
   if (!row.pod_ip) return null;
   return selectPodByIp(index.podsByIp.get(row.pod_ip), parseBrokerTime(row.time_stamp)).pod;
 }

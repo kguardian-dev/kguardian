@@ -326,4 +326,51 @@ describe('localPodForRow — a reused pod IP', () => {
     expect(late.kind === 'pod' && late.pod.pod_name).toBe(argocd.pod_name);
     expect(resolvePeer(to('2026-09-29T02:00:00'), index).kind).toBe('unattributed');
   });
+
+  test('two pods holding the IP at the flow time: the name picks the capturing pod, the IP alone cannot', () => {
+    // Host-network pods on one node share the node IP, both alive. The
+    // guarded IP lookup ranks the newer start first (node-exporter), so only
+    // the row's own name can say that kube-proxy captured the flow.
+    const nodeIp = '10.62.1.10';
+    const kubeProxy = pod({
+      pod_name: 'kube-proxy-x7k2p', pod_ip: nodeIp, pod_namespace: 'kube-system', host_network: true,
+      started_at: '2026-09-20T00:00:00', time_stamp: '2026-09-29T08:00:00',
+    });
+    const exporter = pod({
+      pod_name: 'node-exporter-9fq4d', pod_ip: nodeIp, pod_namespace: 'monitoring', host_network: true,
+      started_at: '2026-09-25T00:00:00', time_stamp: '2026-09-29T08:00:00',
+    });
+    const index = buildPeerIndex([kubeProxy, exporter]);
+    const captured = row({
+      pod_name: kubeProxy.pod_name, pod_namespace: 'kube-system', pod_ip: nodeIp,
+      traffic_in_out_ip: '10.62.2.89', time_stamp: '2026-09-29T04:00:00',
+    });
+    expect(selectPodByIp(index.podsByIp.get(nodeIp), parseBrokerTime(captured.time_stamp)).pod?.pod_name).toBe(exporter.pod_name);
+    expect(localPodForRow(captured, index)?.pod_name).toBe(kubeProxy.pod_name);
+    // Without a namespace on the row, the name still decides.
+    expect(localPodForRow({ ...captured, pod_namespace: null }, index)?.pod_name).toBe(kubeProxy.pod_name);
+  });
+
+  test('a row with a name but no namespace matches that name only', () => {
+    const noNs = (r: NetworkTraffic): NetworkTraffic => ({ ...r, pod_namespace: null });
+    // Unique name: its record, namespace and all.
+    const index = buildPeerIndex([php, argocd]);
+    expect(localPodForRow(noNs(argocdRow), index)?.pod_namespace).toBe('argocd');
+    // A name the listing lacks is never swapped for the other holder of the IP.
+    expect(localPodForRow(noNs(argocdRow), buildPeerIndex([php]))).toBeNull();
+    // The same name in two namespaces: the one that held the IP at the flow time.
+    const twinEarlier = pod({
+      pod_name: argocd.pod_name, pod_ip: ip, pod_namespace: 'argocd-staging', is_dead: true,
+      started_at: '2026-09-20T00:00:00', time_stamp: '2026-09-28T00:00:00',
+    });
+    const twinElsewhere = pod({
+      pod_name: argocd.pod_name, pod_ip: '10.62.7.7', pod_namespace: 'argocd-other',
+      started_at: '2026-09-01T00:00:00', time_stamp: '2026-09-29T08:00:00',
+    });
+    const twins = buildPeerIndex([php, twinEarlier, argocd, twinElsewhere]);
+    expect(localPodForRow(noNs(argocdRow), twins)?.pod_namespace).toBe('argocd');
+    expect(localPodForRow(noNs({ ...argocdRow, time_stamp: '2026-09-27T00:00:00' }), twins)?.pod_namespace).toBe('argocd-staging');
+    // Nobody of that name held the IP then: nothing, not the php pod.
+    expect(localPodForRow(noNs({ ...argocdRow, time_stamp: '2026-09-29T02:00:00' }), twins)).toBeNull();
+  });
 });
