@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.20.4](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.3...frontend/v1.20.4) (2026-09-29)
+
+
+### Bug Fixes
+
+* **frontend:** label the policy builder's save button "Save Policy" for every format ([a8b627e](https://github.com/kguardian-dev/kguardian/commit/a8b627eb03154ddab1b2b62c03014b3b8b7d0c14))
+* **frontend:** one save label for every policy format ([#1802](https://github.com/kguardian-dev/kguardian/issues/1802)) ([a8b627e](https://github.com/kguardian-dev/kguardian/commit/a8b627eb03154ddab1b2b62c03014b3b8b7d0c14))
+* **frontend:** say when compute is unavailable in the workload panel ([#1801](https://github.com/kguardian-dev/kguardian/issues/1801)) ([5cd2a30](https://github.com/kguardian-dev/kguardian/commit/5cd2a304565ec3e1f82ad563c2aa65e4bb83c929))
+
 ## [1.20.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.2...frontend/v1.20.3) (2026-09-28)
 
 
