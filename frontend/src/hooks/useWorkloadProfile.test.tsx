@@ -2,7 +2,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { ProfileApi } from '../services/profileApi';
-import { useElapsedSeconds, useWorkloadProfile } from './useWorkloadProfile';
+import { useElapsedSeconds, useProfileVersions, useWorkloadProfile } from './useWorkloadProfile';
 import { checkoutProfile } from '../fixtures/profile';
 
 afterEach(() => vi.useRealTimers());
@@ -131,4 +131,58 @@ test('useElapsedSeconds counts whole seconds while active and restarts from 0', 
   expect(result.current).toBe(0);
   act(() => vi.advanceTimersByTime(1000));
   expect(result.current).toBe(1);
+});
+
+/** A ProfileApi whose reads hang until the test answers them by URL. */
+function deferredByUrl() {
+  const pending: Array<{ url: string; resolve: (r: Response) => void }> = [];
+  const fetchImpl = ((input: RequestInfo | URL) => new Promise<Response>((resolve) => pending.push({ url: String(input), resolve }))) as unknown as typeof fetch;
+  const answer = (match: RegExp, body: unknown, status = 200) => {
+    const i = pending.findIndex((p) => match.test(p.url));
+    if (i < 0) throw new Error(`no pending read matches ${match}: ${pending.map((p) => p.url).join(', ')}`);
+    const [p] = pending.splice(i, 1);
+    p.resolve(new Response(JSON.stringify(body), { status }));
+  };
+  return { api: new ProfileApi({ fetchImpl }), pending, answer };
+}
+
+const version = (revision: number) => ({
+  revision,
+  createdAt: '2026-09-01T00:00:00Z',
+  contentHash: `sha256:${revision}`,
+  dimensionHashes: {},
+  changedDimensions: [],
+  posture: { status: 'ok', coverage: 1 },
+});
+const versionList = (name: string, revisions: number[], nextBefore: number | null) => ({
+  namespace: 'payments',
+  kind: 'Deployment',
+  name,
+  items: revisions.map(version),
+  nextBefore,
+});
+
+test('useProfileVersions: another workload drops the old list at once, and a "Load older" still in flight for the old one is not appended', async () => {
+  const { api, answer } = deferredByUrl();
+  const { result, rerender } = renderHook(({ name }) => useProfileVersions('payments', 'Deployment', name, 0, api), { initialProps: { name: 'checkout' } });
+  await act(async () => answer(/checkout\/profile\/versions$/, versionList('checkout', [9, 8], 8)));
+  expect(result.current.data?.items.map((v) => v.revision)).toEqual([9, 8]);
+  act(() => {
+    void result.current.loadMore();
+  });
+  expect(result.current.loadingMore).toBe(true);
+
+  rerender({ name: 'refunds' });
+  // The old workload's versions are not shown under the new one while it loads.
+  expect(result.current.data).toBeNull();
+  expect(result.current.loading).toBe(true);
+  expect(result.current.loadingMore).toBe(false);
+
+  // The old page answers late: dropped.
+  await act(async () => answer(/checkout\/profile\/versions\?before=8/, versionList('checkout', [7, 6], null)));
+  expect(result.current.data).toBeNull();
+  await act(async () => answer(/refunds\/profile\/versions$/, versionList('refunds', [3], null)));
+  expect(result.current.data?.name).toBe('refunds');
+  expect(result.current.data?.items.map((v) => v.revision)).toEqual([3]);
+  expect(result.current.loadingMore).toBe(false);
 });

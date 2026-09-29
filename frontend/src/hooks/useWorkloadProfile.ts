@@ -129,28 +129,50 @@ export function useElapsedSeconds(active: boolean): number {
   return active ? elapsed : 0;
 }
 
-/** Version history, newest first, with "load older" paging. */
+/**
+ * Version history, newest first, with "load older" paging. Another workload
+ * empties the list until its own first page answers, and a page of the
+ * previous workload's that answers late is dropped.
+ */
 export function useProfileVersions(ns: string, kind: string, name: string, refreshTick = 0, api: ProfileApi = profileApi) {
   const [data, setData] = useState<VersionList | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
+
+  const page = useCallback((before?: number) => api.listVersions(ns, kind, name, before === undefined ? {} : { before }), [api, ns, kind, name]);
+
+  // The workload the versions in `data` belong to: another one's are no answer for this one.
+  const dataFor = useRef(page);
 
   const load = useCallback(async () => {
     const current = begin();
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
+    if (dataFor.current !== page) {
+      dataFor.current = page;
+      setData(null);
+      setError(null);
+    }
     try {
-      const v = await api.listVersions(ns, kind, name);
+      const v = await page();
       if (!current()) return;
       setData(v);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
-  }, [api, ns, kind, name, begin]);
+  }, [page, begin]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / key change
@@ -158,17 +180,19 @@ export function useProfileVersions(ns: string, kind: string, name: string, refre
   }, [load, refreshTick]);
 
   const loadMore = useCallback(async () => {
-    if (!data?.nextBefore) return;
+    if (!data?.nextBefore || firstPageInFlight.current) return;
+    const current = begin();
     setLoadingMore(true);
     try {
-      const more = await api.listVersions(ns, kind, name, { before: data.nextBefore });
+      const more = await page(data.nextBefore);
+      if (!current()) return;
       setData((prev) => (prev ? { ...more, items: [...prev.items, ...more.items] } : more));
     } catch (err) {
-      setError(err);
+      if (current()) setError(err);
     } finally {
-      setLoadingMore(false);
+      if (current()) setLoadingMore(false);
     }
-  }, [api, ns, kind, name, data]);
+  }, [page, data, begin]);
 
   return { data, loading, loadingMore, error, reload: load, loadMore };
 }
