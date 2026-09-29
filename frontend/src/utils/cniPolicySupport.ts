@@ -198,3 +198,30 @@ export function incompleteTrafficAdvisory(): PolicyAdvisory {
       'Refresh and retry the read before relying on them.',
   };
 }
+
+/**
+ * The seccomp counterpart of the two traffic notices above. A profile built
+ * while a member pod's syscall read failed is missing whatever that replica
+ * uses, and enforced it blocks those syscalls: a dismissible warning. When no
+ * syscall came back at all, the empty list is not evidence of none: an
+ * error, never dismissible.
+ */
+export function incompleteSyscallsAdvisory(): PolicyAdvisory {
+  return {
+    severity: 'warning',
+    title: 'Syscalls for this workload are incomplete',
+    detail:
+      "A member pod's syscall read failed or timed out, so syscalls it makes may be missing from this profile, " +
+      'and enforcing it would block them. Refresh and retry the read before relying on it.',
+  };
+}
+
+export function syscallsReadFailedAdvisory(): PolicyAdvisory {
+  return {
+    severity: 'error',
+    title: 'Syscall read failed, so this profile allows no syscalls',
+    detail:
+      "kguardian could not read this workload's syscalls, so the empty list is not evidence that it makes none. " +
+      'Enforcing this profile denies every syscall the workload makes. Refresh and retry the read before saving.',
+  };
+}
