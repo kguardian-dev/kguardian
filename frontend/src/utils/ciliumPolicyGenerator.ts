@@ -89,16 +89,14 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
     // No usable port: skip the row, as the standard generator and the advisor do.
     if (observed === null) return;
     const rowSvcPorts = svcPorts.get(traffic);
-    const mapped = rowSvcPorts ? mapServicePort(rowSvcPorts, observed, protocol) : { port: observed, mapped: true };
-    const port = mapped.port;
+    const mapped = rowSvcPorts ? mapServicePort(rowSvcPorts, observed, protocol) : { ports: [observed], mapped: true };
 
     let entry = map.get(key);
     if (!entry) {
-      entry = { peer: { ip: remoteIP, identity }, ports: new Set([`${protocol}:${port}`]) };
+      entry = { peer: { ip: remoteIP, identity }, ports: new Set() };
       map.set(key, entry);
-    } else {
-      entry.ports.add(`${protocol}:${port}`);
     }
+    for (const port of mapped.ports) entry.ports.add(`${protocol}:${port}`);
     if (!mapped.mapped) (entry.unmapped ??= new Set()).add(`${protocol}:${observed}`);
     // The group's comment quotes the NEWEST unattributed flow.
     if (identity.unattributed && entry.peer.identity.unattributed && newerRow(identity.unattributed.at, entry.peer.identity.unattributed.at)) {

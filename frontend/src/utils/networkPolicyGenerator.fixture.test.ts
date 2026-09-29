@@ -762,25 +762,44 @@ describe('generators — Service port mapped to the backend targetPort', () => {
     { svc_name: 'api', svc_namespace: 'prod', svc_ip: '10.96.1.10', service_spec: { spec: { selector: { app: 'api' }, ports: [
       { name: 'http', port: 80, protocol: 'TCP', targetPort: 8080 },
       { name: 'metrics', port: 9090, protocol: 'TCP', targetPort: 'metrics' },
+      { name: 'alt', port: 8081, protocol: 'TCP', targetPort: '8080-tcp' },
+      { name: 'switch', port: 7000, protocol: 'TCP', targetPort: 'on' },
     ] } } },
     { svc_name: 'cache', svc_namespace: 'prod', svc_ip: '10.96.1.20', service_spec: { spec: { selector: { app: 'cache' }, ports: [{ port: 6379 }] } } },
     { svc_name: 'legacy', svc_namespace: 'prod', svc_ip: '10.96.1.30', service_spec: { spec: { selector: { app: 'legacy' } } } },
     { svc_name: 'exporter', svc_namespace: 'monitoring', svc_ip: '10.96.1.40', service_spec: { spec: { selector: { app: 'node-exporter' }, ports: [
-      { name: 'metrics', port: 80, protocol: 'TCP', targetPort: 9100 },
+      { name: 'metrics', port: 80, protocol: 'TCP', targetPort: 'metrics' },
+    ] } } },
+    { svc_name: 'agent', svc_namespace: 'monitoring', svc_ip: '10.96.1.41', service_spec: { spec: { selector: { app: 'agent' }, ports: [
+      { name: 'http', port: 80, protocol: 'TCP', targetPort: 'http' },
+      { name: 'gone', port: 81, protocol: 'TCP', targetPort: 'missing' },
     ] } } },
     { svc_name: 'dns', svc_namespace: 'kube-system', svc_ip: '10.96.1.53', service_spec: { spec: { selector: { 'k8s-app': 'kube-dns' }, ports: [
       { name: 'dns', port: 53, protocol: 'UDP', targetPort: 5353 },
       { name: 'dns-tcp', port: 53, protocol: 'TCP', targetPort: 5354 },
     ] } } },
   ];
-  // The exporter Service is backed by ONE host-network pod here, as in the advisor fixture.
-  const tpSources = { pods: [podsByIp['192.168.50.101']], services: tpServices };
+  // Host-network backends with their container ports, as in the advisor
+  // fixture: node-exporter names 9100 `metrics`; agent's two pods disagree on
+  // `http` (8080 / 8081) and name nothing `missing` over TCP.
+  const withPorts = (p: PodInfo, ports: Record<string, unknown>[]): PodInfo =>
+    ({ ...p, pod_obj: { ...p.pod_obj, spec: { hostNetwork: true, containers: [{ ports }] } } });
+  const agent = (name: string, ip: string, node: string, ports: Record<string, unknown>[]) => withPorts(podRecord({
+    pod_name: name, pod_ip: ip, pod_namespace: 'monitoring', node_name: node, workload_kind: 'DaemonSet', workload_name: 'agent',
+    workload_selector_labels: { app: 'agent' }, host_network: true,
+  }), ports);
+  const tpSources = { pods: [
+    withPorts(podsByIp['192.168.50.101'], [{ name: 'metrics', containerPort: 9100, protocol: 'TCP' }]),
+    agent('agent-a', '192.168.50.103', 'worker-3', [{ name: 'http', containerPort: 8080 }]),
+    agent('agent-b', '192.168.50.104', 'worker-4', [{ name: 'http', containerPort: 8081, protocol: 'TCP' }, { name: 'missing', containerPort: 9999, protocol: 'UDP' }]),
+  ], services: tpServices };
   const udp = (row: ReturnType<typeof egressRow>) => ({ ...row, ip_protocol: 'UDP' });
   const tpTarget = target(web, [
-    egressRow('10.96.1.10', '9090'), egressRow('10.96.1.10', '80'),
+    egressRow('10.96.1.10', '9090'), egressRow('10.96.1.10', '80'), egressRow('10.96.1.10', '8081'), egressRow('10.96.1.10', '7000'),
     egressRow('10.96.1.20', '6380'), egressRow('10.96.1.20', '6379'),
     egressRow('10.96.1.30', '8443'),
     egressRow('10.96.1.40', '80'),
+    egressRow('10.96.1.41', '80'), egressRow('10.96.1.41', '81'),
     udp(egressRow('10.96.1.53', '53')), egressRow('10.96.1.53', '53'),
     egressRow('10.96.1.99', ' 80'), egressRow('10.96.1.99', '0x50'), egressRow('10.96.1.99', '1e2'),
     egressRow('10.96.1.99', '+80'), egressRow('10.96.1.99', '80.0'),
@@ -793,6 +812,9 @@ describe('generators — Service port mapped to the backend targetPort', () => {
     expect(normaliseStandardRules(spec(parse(yaml)).egress, 'prod')).toEqual(normaliseStandardRules(spec(golden(file)).egress, 'prod'));
     expect(commentLines(yaml)).toEqual(commentLines(goldenText(file)));
     expect(yaml).not.toContain('10.96.1.99');
+    // A digit-led name stays a name; a YAML 1.1 boolean word is quoted.
+    expect(yaml).toContain('port: "8080-tcp"');
+    expect(yaml).toContain('port: "on"');
   });
 
   test('cilium: rules and comment lines match the golden', async () => {

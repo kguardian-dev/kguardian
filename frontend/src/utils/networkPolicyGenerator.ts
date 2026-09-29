@@ -111,16 +111,14 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
     // No usable port (ICMP rows carry "0"): skip the row, as the advisor does.
     if (observed === null) return;
     const rowSvcPorts = svcPorts.get(traffic);
-    const mapped = rowSvcPorts ? mapServicePort(rowSvcPorts, observed, protocol) : { port: observed, mapped: true };
-    const port = mapped.port;
+    const mapped = rowSvcPorts ? mapServicePort(rowSvcPorts, observed, protocol) : { ports: [observed], mapped: true };
 
     let entry = map.get(key);
     if (!entry) {
-      entry = { peer: { ip: remoteIP, identity }, ports: new Set([`${protocol}:${port}`]) };
+      entry = { peer: { ip: remoteIP, identity }, ports: new Set() };
       map.set(key, entry);
-    } else {
-      entry.ports.add(`${protocol}:${port}`);
     }
+    for (const port of mapped.ports) entry.ports.add(`${protocol}:${port}`);
     if (!mapped.mapped) (entry.unmapped ??= new Set()).add(`${protocol}:${observed}`);
     // The group's comment quotes the NEWEST unattributed flow.
     if (identity.unattributed && entry.peer.identity.unattributed && newerRow(identity.unattributed.at, entry.peer.identity.unattributed.at)) {
@@ -347,7 +345,9 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
       const [protocol, port] = portStr.split(':');
       return {
         protocol: protocol.toUpperCase(),
-        port: parseInt(port) || port,
+        // Digits only are a number; a name stays a name, even a digit-led
+        // one (`8080-tcp`), which parseInt would truncate to 8080.
+        port: /^[0-9]+$/.test(port) ? Number(port) : port,
       };
     });
 
