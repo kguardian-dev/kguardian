@@ -67,7 +67,7 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `LEADER_ELECTION_LEASE_DURATION_SECS` | `15` | How long a follower waits after the leader's last renewal before taking over |
 | `LEADER_ELECTION_RENEW_DEADLINE_SECS` | `10` | How long the leader keeps running the jobs without a successful renewal; must be below the lease duration |
 | `LEADER_ELECTION_RETRY_PERIOD_SECS` | `2` | Renew/acquire cadence; must be below renew deadline / 1.2 (a bad combination falls back to 15/10/2) |
-| `POD_NAME` | hostname | Lease holder identity (downward API) |
+| `POD_NAME` | hostname | Lease holder identity (downward API). Lease requests go straight to the in-cluster API server and ignore `HTTP(S)_PROXY` |
 | `RUST_LOG` | `info` | Log level |
 
 ### Running more than one replica

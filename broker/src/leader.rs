@@ -815,6 +815,9 @@ impl KubeLeaseApi {
         let ca = reqwest::Certificate::from_pem(&ca).map_err(|e| format!("parse ca.crt: {e}"))?;
         let client = reqwest::Client::builder()
             .tls_certs_only([ca])
+            // Never through HTTP(S)_PROXY: the API server is in-cluster, and
+            // a proxy that cannot reach it would stall every renewal.
+            .no_proxy()
             .timeout(timeout)
             .build()
             .map_err(|e| format!("build HTTP client: {e}"))?;
