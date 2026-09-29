@@ -146,6 +146,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   /** Consecutive failed latest polls, and the earliest time to poll again. */
   const latestFailures = useRef(0);
   const latestNotBefore = useRef(0);
+  /** The same for the findings poll, which pays the same statement timeout. */
+  const findingsFailures = useRef(0);
+  const findingsNotBefore = useRef(0);
 
   // Request generation: bumped on every namespace change. A response whose
   // generation is no longer current (the user switched namespace while it
@@ -351,12 +354,14 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   }, [api, namespace, pollMs, markUnsupported]);
 
   const refreshFindings = useCallback(async () => {
-    if (inflightFindings.current) return;
+    if (inflightFindings.current || Date.now() < findingsNotBefore.current) return;
     inflightFindings.current = true;
     const gen = generation.current;
     try {
       const res = await api.getComputeFindings({ namespace });
       if (gen !== generation.current) return;
+      findingsFailures.current = 0;
+      findingsNotBefore.current = 0;
       setFindings(res.findings);
       historyDisabledRef.current = res.history_disabled === true;
       setFindingsMeta({
@@ -367,11 +372,17 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     } catch (err) {
       if (gen !== generation.current) return;
       if (err instanceof ComputeUnsupportedError) markUnsupported(err);
-      else setError(describe(err));
+      else {
+        // Back off like the latest poll: re-polling on the interval stacked
+        // up statements the Broker was still running after the client gave up.
+        findingsFailures.current += 1;
+        findingsNotBefore.current = Date.now() + Math.min(Math.max(findingsPollMs, 0) * 2 ** findingsFailures.current, COMPUTE_POLL_MAX_BACKOFF_MS);
+        setError(describe(err));
+      }
     } finally {
       if (gen === generation.current) inflightFindings.current = false;
     }
-  }, [api, namespace, markUnsupported]);
+  }, [api, namespace, findingsPollMs, markUnsupported]);
 
   // Every node's row, once per namespace load, so a pod with no sample yet
   // can still say `off` / `unsupported` / `pending` from its node's state.
@@ -393,9 +404,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         markUnsupported(err);
         return;
       }
-      // Transient failure: let the next poll tick or visibility change retry
-      // the one-shot fetch instead of leaving cluster-wide node state unknown
-      // for the whole namespace session.
+      // Transient failure: the next latest poll tick or visibility change
+      // retries the one-shot fetch instead of leaving cluster-wide node state
+      // unknown for the whole namespace session.
       nodesLoadedGen.current = -1;
     }
   }, [api, markUnsupported]);
@@ -411,6 +422,8 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     inflightFindings.current = false;
     latestFailures.current = 0;
     latestNotBefore.current = 0;
+    findingsFailures.current = 0;
+    findingsNotBefore.current = 0;
     /* eslint-disable react-hooks/set-state-in-effect -- reset-on-namespace, same shape as DataTable's reset-on-pod */
     setContainers([]);
     setNodes([]);
@@ -434,7 +447,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       void refreshFindings();
     }
     const timers: ReturnType<typeof setInterval>[] = [];
-    if (pollMs > 0) timers.push(setInterval(() => { if (!hidden()) void refreshLatest(); }, pollMs));
+    // `loadNodes` is a no-op once it has run for this namespace session; on
+    // the tick it only retries a failed read.
+    if (pollMs > 0) timers.push(setInterval(() => { if (!hidden()) { void loadNodes(); void refreshLatest(); } }, pollMs));
     if (findingsPollMs > 0) timers.push(setInterval(() => { if (!hidden()) void refreshFindings(); }, findingsPollMs));
 
     // Coming back to a hidden tab: refresh at once rather than waiting out
