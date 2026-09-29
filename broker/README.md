@@ -83,7 +83,11 @@ A leader that stops renewing stops those jobs after the renew deadline; a
 follower takes over once the lease has gone unrenewed for the lease duration
 (by its own clock, so node clock skew does not matter). A leader shutting down
 gracefully clears the holder, and a follower takes over within one retry
-period. A pass that loses leadership stops at its next batch boundary.
+period. A pass that loses leadership stops at its next batch boundary. A new
+leader runs each job within a few seconds (plus up to 30 s of jitter) if its
+last pass, on any replica, is an interval old (recorded in
+`leader_task_runs`), and otherwise keeps that pass's schedule, so a hand-off
+neither skips a pass nor repeats one.
 
 If the Lease API refuses the broker at startup (no Role bound to its service
 account, e.g. hand-written manifests) or stays unreachable for about 20

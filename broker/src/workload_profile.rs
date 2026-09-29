@@ -3658,16 +3658,17 @@ pub fn spawn(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut cadence = crate::leader::Cadence::new("workload profile snapshotter", interval);
         loop {
             // Leader only (leader.rs): two replicas snapshotting the same
             // workload can both see the old hash and both write a version.
             if !crate::leader::is_leader() {
-                tokio::time::sleep(interval).await;
+                cadence.wait(&pool).await;
                 continue;
             }
-            let pool = pool.clone();
+            let tick_pool = pool.clone();
             let r = tokio::task::spawn_blocking(move || -> Result<TickStats, DbError> {
-                let mut conn = pool.get()?;
+                let mut conn = tick_pool.get()?;
                 snapshot_tick(&mut conn, batch, cap, budget)
             })
             .await;
@@ -3692,7 +3693,8 @@ pub fn spawn(pool: DbPool) {
                 Ok(Err(e)) => warn!(error = %e, "workload profile snapshotter tick failed"),
                 Err(e) => warn!(error = %e, "workload profile snapshotter task panicked"),
             }
-            tokio::time::sleep(interval).await;
+            cadence.completed(&pool).await;
+            cadence.wait(&pool).await;
         }
     });
 }

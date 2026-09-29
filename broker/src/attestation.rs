@@ -1945,6 +1945,8 @@ pub fn spawn_retention(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(180)).await;
+        let mut cadence =
+            crate::leader::Cadence::new("attestation retention", Duration::from_secs(3600));
         loop {
             // Leader only (leader.rs).
             if crate::leader::is_leader() {
@@ -1962,8 +1964,9 @@ pub fn spawn_retention(pool: DbPool) {
                     Ok(Err(e)) => warn!(error = %e, "image attestation retention failed"),
                     Err(e) => warn!(error = %e, "image attestation retention task failed"),
                 }
+                cadence.completed(&pool).await;
             }
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            cadence.wait(&pool).await;
         }
     });
 }

@@ -626,6 +626,171 @@ fn process_gate_defaults_to_always_leader() {
 }
 
 // ---------------------------------------------------------------------
+// Cadence: a new leader's first pass
+// ---------------------------------------------------------------------
+
+/// A cadence that polls fast and jitters little, so tests run in
+/// milliseconds; the logic is the production one.
+fn fast_cadence(interval: Duration) -> Cadence {
+    Cadence {
+        task: "test",
+        interval,
+        jitter_max: Duration::from_millis(20),
+        poll: Duration::from_millis(10),
+        seen_acquisitions: 0,
+    }
+}
+
+/// What the elector does on acquiring: open the gate, then count it.
+fn acquire(g: &LeaderGate) {
+    let mut d = Driver::new(RENEW);
+    d.on_attempt(&Ok(Attempt::Leading), mono_now(), g);
+}
+
+#[test]
+fn the_elector_counts_acquisitions_not_renewals() {
+    let g = elected_gate();
+    let mut d = Driver::new(RENEW);
+    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
+    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
+    assert_eq!(g.acquisitions(), 1);
+    d.on_attempt(
+        &Ok(Attempt::Following {
+            holder: "other".into(),
+        }),
+        mono_now(),
+        &g,
+    );
+    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
+    assert_eq!(g.acquisitions(), 2);
+}
+
+#[tokio::test]
+async fn a_new_leader_runs_an_overdue_pass_promptly() {
+    let g = elected_gate();
+    let mut c = fast_cadence(Duration::from_secs(3600));
+    let started = Instant::now();
+    let waiting = c.wait_with(&g, || async { None });
+    let acquiring = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        acquire(&g);
+    };
+    tokio::join!(waiting, acquiring);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "waited {:?} of an hour's interval",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_pass_another_replica_just_ran_keeps_its_schedule() {
+    // Due 3 s after the last pass, which ran 2 s ago: the new leader waits
+    // about 1 s, not the full 3 s interval and not zero.
+    let g = elected_gate();
+    let mut c = fast_cadence(Duration::from_secs(3));
+    acquire(&g);
+    let started = Instant::now();
+    c.wait_with(&g, || async { Some(Duration::from_secs(2)) })
+        .await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(800),
+        "ran early after {waited:?}"
+    );
+    assert!(waited < Duration::from_millis(2500), "waited {waited:?}");
+}
+
+#[tokio::test]
+async fn flapping_leadership_never_runs_passes_back_to_back() {
+    let g = elected_gate();
+    let mut c = fast_cadence(Duration::from_millis(600));
+    // The pass just ran (age 0); leadership is lost and regained twice.
+    let started = Instant::now();
+    let waiting = c.wait_with(&g, || async { Some(Duration::ZERO) });
+    let flapping = async {
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            g.clear();
+            acquire(&g);
+        }
+    };
+    tokio::join!(waiting, flapping);
+    assert!(
+        started.elapsed() >= Duration::from_millis(550),
+        "a regained lease cut the wait to {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_follower_waits_the_interval_and_an_acquisition_it_lost_is_ignored() {
+    let g = elected_gate();
+    let mut c = fast_cadence(Duration::from_millis(300));
+    let asked = Cell::new(0u32);
+    let started = Instant::now();
+    // Acquired then lost before the cadence looked: nothing to run.
+    acquire(&g);
+    g.clear();
+    c.wait_with(&g, || {
+        asked.set(asked.get() + 1);
+        async { None }
+    })
+    .await;
+    assert!(started.elapsed() >= Duration::from_millis(280));
+    assert_eq!(asked.get(), 0, "a follower never consults the last pass");
+}
+
+#[tokio::test]
+async fn disabled_election_is_a_plain_interval() {
+    let g = LeaderGate::new();
+    let mut c = fast_cadence(Duration::from_millis(200));
+    let started = Instant::now();
+    c.wait_with(&g, || async { None }).await;
+    assert!(started.elapsed() >= Duration::from_millis(190));
+}
+
+#[test]
+fn takeover_jitter_is_bounded_and_scales_with_the_interval() {
+    assert_eq!(
+        Cadence::new("t", Duration::from_secs(3600)).jitter_max,
+        MAX_TAKEOVER_JITTER
+    );
+    assert_eq!(
+        Cadence::new("t", Duration::from_secs(60)).jitter_max,
+        Duration::from_secs(6)
+    );
+    for _ in 0..100 {
+        assert!(random_up_to(Duration::from_millis(50)) <= Duration::from_millis(50));
+    }
+    assert_eq!(random_up_to(Duration::ZERO), Duration::ZERO);
+}
+
+/// The cluster-wide record a new leader reads, on a real database.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_records_the_last_completed_pass() {
+    use diesel::Connection;
+    use diesel_migrations::MigrationHarness;
+    const M: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+    let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+    let mut conn = diesel::PgConnection::establish(&url).expect("connect");
+    conn.run_pending_migrations(M).expect("migrate");
+    let task = format!("test-{}", uuid::Uuid::new_v4());
+    assert_eq!(last_pass_age(&mut conn, &task).unwrap(), None);
+    record_pass(&mut conn, &task).unwrap();
+    let age = last_pass_age(&mut conn, &task).unwrap().unwrap();
+    assert!(age < Duration::from_secs(5), "{age:?}");
+    record_pass(&mut conn, &task).unwrap();
+    use diesel::RunQueryDsl;
+    diesel::sql_query("DELETE FROM leader_task_runs WHERE task = $1")
+        .bind::<diesel::sql_types::Text, _>(&task)
+        .execute(&mut conn)
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------
 

@@ -225,18 +225,20 @@ pub fn spawn(pool: DbPool) {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
         tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut cadence = crate::leader::Cadence::new("audit retention", interval);
         loop {
             // Leader only (leader.rs): every replica pruning at once just
             // contends on the same rows.
-            crate::leader::singleton("audit retention", async {
-                // Audit pruning only when enabled; dead-pod pruning always.
-                if audit_days > 0 {
-                    run_pass(&pool, audit_days).await;
-                }
-                run_dead_pod_pass(&pool, dead_pod_days).await;
-            })
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, async {
+                    // Audit pruning only when enabled; dead-pod pruning always.
+                    if audit_days > 0 {
+                        run_pass(&pool, audit_days).await;
+                    }
+                    run_dead_pod_pass(&pool, dead_pod_days).await;
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
     spawn_compute(compute_pool);
@@ -265,15 +267,14 @@ fn spawn_compute(pool: DbPool) {
     }
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
+        let mut cadence = crate::leader::Cadence::new("compute retention", interval);
         loop {
             // Leader only: two replicas folding the same range both insert
             // its five-minute rows (see run_downsample_batch).
-            crate::leader::singleton(
-                "compute retention",
-                run_compute_pass(&pool, days, minute_hours),
-            )
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_compute_pass(&pool, days, minute_hours))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -336,6 +337,7 @@ fn spawn_seccomp_denials(pool: DbPool) {
         // Staggered against the other two loops' 60 s and 90 s warmups so
         // three full-table prunes do not land on a cold pool together.
         tokio::time::sleep(Duration::from_secs(120)).await;
+        let mut cadence = crate::leader::Cadence::new("seccomp denial retention", interval);
         loop {
             // Denial pruning only when enabled; attribution backfill always,
             // the same split the audit loop makes for dead pods. The backfill
@@ -346,18 +348,19 @@ fn spawn_seccomp_denials(pool: DbPool) {
             // Before the prune, so a row on the edge of the window is
             // attributed for whatever poll it has left rather than being
             // repaired and deleted in the same pass.
-            crate::leader::singleton("seccomp denial retention", async {
-                backfill_denial_attribution(&pool).await;
-                if days > 0 {
-                    run_seccomp_denial_pass(&pool, days).await;
-                    // Once per pass, after the denial prune: the node table
-                    // is one row per node, so it needs no batching and no
-                    // cadence of its own.
-                    prune_stale_denial_nodes(&pool, days).await;
-                }
-            })
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, async {
+                    backfill_denial_attribution(&pool).await;
+                    if days > 0 {
+                        run_seccomp_denial_pass(&pool, days).await;
+                        // Once per pass, after the denial prune: the node table
+                        // is one row per node, so it needs no batching and no
+                        // cadence of its own.
+                        prune_stale_denial_nodes(&pool, days).await;
+                    }
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -651,6 +654,7 @@ fn spawn_pod_traffic(pool: DbPool) {
         // Staggered after the 60 / 90 / 120 s warmups of the other loops.
         tokio::time::sleep(Duration::from_secs(150)).await;
         let mut cursor = None;
+        let mut cadence = crate::leader::Cadence::new("pod traffic retention", interval);
         loop {
             if crate::leader::is_leader() {
                 if days > 0 {
@@ -661,12 +665,13 @@ fn spawn_pod_traffic(pool: DbPool) {
                 if max_rows > 0 {
                     run_pod_traffic_cap(&pool, max_rows).await;
                 }
+                cadence.completed(&pool).await;
             } else {
                 // A cursor is only meaningful to the replica that walked
                 // it; start over if leadership comes back.
                 cursor = None;
             }
-            tokio::time::sleep(interval).await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2146,13 +2151,12 @@ fn spawn_image_inventory(pool: DbPool) {
     actix_web::rt::spawn(async move {
         // Staggered after the other loops' 60/90/120 s warmups.
         tokio::time::sleep(Duration::from_secs(150)).await;
+        let mut cadence = crate::leader::Cadence::new("image inventory retention", interval);
         loop {
-            crate::leader::singleton(
-                "image inventory retention",
-                run_image_inventory_pass(&pool, days),
-            )
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_image_inventory_pass(&pool, days))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2363,15 +2367,18 @@ fn spawn_runtime_inventory(pool: DbPool) {
         // Staggered between the image inventory (150 s) and profile
         // (180 s) warmups.
         tokio::time::sleep(Duration::from_secs(165)).await;
+        let mut cadence = crate::leader::Cadence::new("runtime inventory retention", interval);
         loop {
-            crate::leader::singleton("runtime inventory retention", async {
-                let window = crate::runtime_capabilities::evidence_window_hours();
-                for (table, sql, days) in runtime_inventory_prunes(days, window) {
-                    run_batched_prune(&pool, table, sql, days, image_inventory_batch_size()).await;
-                }
-            })
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, async {
+                    let window = crate::runtime_capabilities::evidence_window_hours();
+                    for (table, sql, days) in runtime_inventory_prunes(days, window) {
+                        run_batched_prune(&pool, table, sql, days, image_inventory_batch_size())
+                            .await;
+                    }
+                })
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2451,13 +2458,12 @@ fn spawn_workload_profiles(pool: DbPool) {
     }
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(180)).await;
+        let mut cadence = crate::leader::Cadence::new("workload profile retention", interval);
         loop {
-            crate::leader::singleton(
-                "workload profile retention",
-                run_workload_profiles_pass(&pool, days),
-            )
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_workload_profiles_pass(&pool, days))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -2697,13 +2703,12 @@ fn spawn_supplychain(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(45)).await;
+        let mut cadence = crate::leader::Cadence::new("supply-chain pass", interval);
         loop {
-            crate::leader::singleton(
-                "supply-chain pass",
-                run_supplychain_pass(&pool, days, grace),
-            )
-            .await;
-            tokio::time::sleep(interval).await;
+            cadence
+                .pass(&pool, run_supplychain_pass(&pool, days, grace))
+                .await;
+            cadence.wait(&pool).await;
         }
     });
 }

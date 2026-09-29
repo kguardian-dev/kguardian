@@ -32,7 +32,10 @@
 //!
 //! A leader-only loop checks [`is_leader`] before each pass, and a pass
 //! that loses leadership stops at its next batch boundary
-//! ([`still_leader`]); a batch already in its transaction finishes.
+//! ([`still_leader`]); a batch already in its transaction finishes. A
+//! replica that becomes the leader runs each loop's pass promptly when the
+//! last pass any replica completed is an interval old ([`Cadence`]),
+//! instead of waiting out its own timer.
 //!
 //! # Election
 //!
@@ -149,6 +152,9 @@ pub struct LeaderGate {
     /// Leading until this many ms after [`mono_now`]'s anchor; 0 = not.
     until_ms: AtomicU64,
     transitions: AtomicU64,
+    /// Bumped each time this replica acquires the lease, after the gate
+    /// opens; [`Cadence`] watches it to run a new leader's passes promptly.
+    acquisitions: AtomicU64,
 }
 
 impl LeaderGate {
@@ -158,6 +164,7 @@ impl LeaderGate {
             mode: AtomicU8::new(Mode::Disabled as u8),
             until_ms: AtomicU64::new(0),
             transitions: AtomicU64::new(0),
+            acquisitions: AtomicU64::new(0),
         }
     }
 
@@ -191,6 +198,14 @@ impl LeaderGate {
 
     fn transitioned(&self) {
         self.transitions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn acquired(&self) {
+        self.acquisitions.fetch_add(1, Ordering::Release);
+    }
+
+    fn acquisitions(&self) -> u64 {
+        self.acquisitions.load(Ordering::Acquire)
     }
 
     /// Batch-boundary check for a pass in progress: `false` (and one info
@@ -276,6 +291,181 @@ fn render_metrics_for(gate: &LeaderGate) -> String {
         active = u8::from(mode == Mode::Elected),
         transitions = gate.transitions.load(Ordering::Relaxed),
     )
+}
+
+// ---------------------------------------------------------------------
+// Cadence: pacing a leader-only loop across hand-offs
+// ---------------------------------------------------------------------
+
+type DbPool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::PgConnection>>;
+
+/// Most a new leader delays its first pass of a loop, so the dozen loops
+/// do not all start in the same second.
+const MAX_TAKEOVER_JITTER: Duration = Duration::from_secs(30);
+
+/// Paces one leader-only loop: a pass, then [`Cadence::wait`] for the next.
+///
+/// Waiting is the loop's interval, except that a replica which becomes the
+/// leader mid-wait does not sit out the rest of it (up to an hour for some
+/// loops): after a short random delay it runs the pass as soon as the last
+/// pass ANY replica completed (`leader_task_runs`) is an interval old. A
+/// pass the previous leader finished recently is not repeated: the wait is
+/// cut to when it falls due, so the cluster keeps one schedule and a
+/// replica flapping leadership cannot run passes back to back.
+pub struct Cadence {
+    task: &'static str,
+    interval: Duration,
+    jitter_max: Duration,
+    /// How often a waiting loop looks for an acquisition.
+    poll: Duration,
+    seen_acquisitions: u64,
+}
+
+impl Cadence {
+    pub fn new(task: &'static str, interval: Duration) -> Self {
+        Self {
+            task,
+            interval,
+            jitter_max: (interval / 10).min(MAX_TAKEOVER_JITTER),
+            poll: Duration::from_secs(1),
+            seen_acquisitions: 0,
+        }
+    }
+
+    /// Run `pass` if this replica is the leader, and record it as the
+    /// cluster's last completed pass when it finished still leading.
+    pub async fn pass<F: Future>(&mut self, pool: &DbPool, pass: F) -> Option<F::Output> {
+        let out = GATE.run(self.task, pass).await;
+        if out.is_some() {
+            self.completed(pool).await;
+        }
+        out
+    }
+
+    /// Record a pass run outside [`Cadence::pass`], if still leading. A pass
+    /// cut short by losing leadership is not recorded, so the new leader
+    /// runs its own promptly.
+    pub async fn completed(&mut self, pool: &DbPool) {
+        if !GATE.is_leader() {
+            return;
+        }
+        let (pool, task) = (pool.clone(), self.task);
+        let r = tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get().map_err(|e| e.to_string())?;
+            record_pass(&mut conn, task).map_err(|e| e.to_string())
+        })
+        .await;
+        if let Ok(Err(e)) | Err(e) = r.map_err(|e| e.to_string()) {
+            debug!(task, error = %e, "could not record the completed pass");
+        }
+    }
+
+    /// Wait for the next pass (see the type docs).
+    pub async fn wait(&mut self, pool: &DbPool) {
+        let task = self.task;
+        self.wait_with(&GATE, || {
+            let pool = pool.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = pool.get().ok()?;
+                    last_pass_age(&mut conn, task).ok().flatten()
+                })
+                .await
+                .ok()
+                .flatten()
+            }
+        })
+        .await
+    }
+
+    /// [`Cadence::wait`] against `gate`, with `last_pass_age` telling how
+    /// long ago the cluster last completed this pass (`None`: never, or
+    /// unknown, which runs it).
+    pub(crate) async fn wait_with<F, Fut>(&mut self, gate: &LeaderGate, last_pass_age: F)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Option<Duration>>,
+    {
+        let mut deadline = Instant::now() + self.interval;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            tokio::time::sleep(self.poll.min(deadline - now)).await;
+            let acquisitions = gate.acquisitions();
+            if acquisitions == self.seen_acquisitions {
+                continue;
+            }
+            self.seen_acquisitions = acquisitions;
+            if !gate.is_leader() {
+                continue;
+            }
+            tokio::time::sleep(random_up_to(self.jitter_max)).await;
+            match last_pass_age().await {
+                Some(age) if age < self.interval => {
+                    // Keep the cluster's schedule: due an interval after the
+                    // last pass, wherever it ran.
+                    deadline = deadline.min(Instant::now() + (self.interval - age));
+                    debug!(
+                        task = self.task,
+                        age_secs = age.as_secs(),
+                        "became leader; this pass ran recently, keeping its schedule"
+                    );
+                }
+                _ => {
+                    info!(task = self.task, "became leader; running this pass now");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn random_up_to(max: Duration) -> Duration {
+    if max.is_zero() {
+        return Duration::ZERO;
+    }
+    let r = u64::from_le_bytes(
+        uuid::Uuid::new_v4().as_bytes()[..8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+    Duration::from_millis(r % (max.as_millis() as u64 + 1))
+}
+
+/// Note that `task` just completed a pass (`leader_task_runs`).
+pub(crate) fn record_pass(conn: &mut diesel::PgConnection, task: &str) -> diesel::QueryResult<()> {
+    use diesel::RunQueryDsl;
+    diesel::sql_query(
+        "INSERT INTO leader_task_runs (task, finished_at) VALUES ($1, timezone('UTC', NOW())) \
+         ON CONFLICT (task) DO UPDATE SET finished_at = EXCLUDED.finished_at",
+    )
+    .bind::<diesel::sql_types::Text, _>(task)
+    .execute(conn)
+    .map(|_| ())
+}
+
+#[derive(diesel::QueryableByName)]
+struct PassAge {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+    secs: Option<f64>,
+}
+
+/// How long ago any replica completed `task`, by the database's clock
+/// (so replicas' clocks never enter it). `None` when it never has.
+pub(crate) fn last_pass_age(
+    conn: &mut diesel::PgConnection,
+    task: &str,
+) -> diesel::QueryResult<Option<Duration>> {
+    use diesel::RunQueryDsl;
+    let row = diesel::sql_query(
+        "SELECT (SELECT EXTRACT(EPOCH FROM timezone('UTC', NOW()) - finished_at)::float8 \
+                 FROM leader_task_runs WHERE task = $1) AS secs",
+    )
+    .bind::<diesel::sql_types::Text, _>(task)
+    .get_result::<PassAge>(conn)?;
+    Ok(row.secs.map(|s| Duration::from_secs_f64(s.max(0.0))))
 }
 
 // ---------------------------------------------------------------------
@@ -878,14 +1068,17 @@ impl Driver {
         match result {
             Ok(Attempt::Leading) => {
                 self.contacted = true;
-                if !self.leading {
-                    self.leading = true;
-                    gate.transitioned();
-                    info!("leader election: acquired the lease; running cluster-singleton jobs");
-                }
                 self.last_renew = now;
                 self.last_holder = None;
                 gate.hold_until(now + self.renew_deadline);
+                if !self.leading {
+                    self.leading = true;
+                    gate.transitioned();
+                    // After the gate opens, so a Cadence that sees the new
+                    // acquisition also sees this replica leading.
+                    gate.acquired();
+                    info!("leader election: acquired the lease; running cluster-singleton jobs");
+                }
             }
             Ok(Attempt::Following { holder }) => {
                 self.contacted = true;
