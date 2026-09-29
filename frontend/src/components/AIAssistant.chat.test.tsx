@@ -218,6 +218,14 @@ it('never loads an image named by the model: it shows the alt text, not an <img>
   expect(screen.getByText(/exfil/)).toBeTruthy();
 });
 
+it('an image with no alt text still says one was left out', async () => {
+  replyWith('Before ![](https://evil.example/p.png) after');
+  const { container } = render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  await waitFor(() => expect(screen.getByText('[image]')).toBeTruthy());
+  expect(container.querySelector('img')).toBeNull();
+});
+
 it('opens external links from a reply in a new tab without a referrer or opener', async () => {
   replyWith('See [the docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/).');
   render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);

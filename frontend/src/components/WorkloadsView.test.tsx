@@ -208,6 +208,25 @@ test('column filters: rows whose value is unknown are left out and the table say
   });
 });
 
+test('column filters: the network filter shows nothing and says why while the audit verdicts are loading, then after they fail', async () => {
+  let fail: (e: Error) => void = () => {};
+  const pending = () => new Promise<AuditVerdict[]>((_, reject) => { fail = reject; });
+  getAuditVerdicts.mockImplementationOnce(pending).mockImplementationOnce(async () => { throw new Error('timeout'); });
+  renderView();
+  choose('Network', 'would-deny');
+  // Loading: not "no would-deny workloads", and not every row either.
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(screen.getByTestId('filter-unknown').textContent).toBe('3 workloads are not shown because the network policy state is not known for them yet.');
+  expect(tileValue('Would-deny (recent)')).toBe('—');
+  fail(new Error('timeout'));
+  await waitFor(() => expect(screen.getByTestId('verdicts-unavailable')).not.toBeNull());
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(screen.getByTestId('filter-unknown').textContent).toMatch(/^3 workloads are not shown/);
+  choose('Network', '');
+  expect(rows()).toHaveLength(3);
+  expect(screen.queryByTestId('filter-unknown')).toBeNull();
+});
+
 test('seccomp mode offers the seccomp column filters, not Network or Posture', () => {
   renderView({ control: 'seccomp' });
   expect(screen.queryByLabelText('Network')).toBeNull();

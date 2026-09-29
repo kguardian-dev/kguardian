@@ -160,9 +160,10 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
 // Replies carry text the model read from tool results, which an attacker can
 // shape (pod names, DNS names, CVE text). An image would be fetched as soon as
 // it rendered, carrying whatever the injected text put in its URL, so an image
-// shows as its alt text only. Links need a click and open in a new tab
-// without a referrer or a handle back to this page.
-const ReplyImage: React.FC<{ alt?: string }> = ({ alt }) => (alt ? <span>[image: {alt}]</span> : null);
+// shows as its alt text only, or `[image]` so the reader knows one was left
+// out. Links need a click and open in a new tab without a referrer or a
+// handle back to this page.
+const ReplyImage: React.FC<{ alt?: string }> = ({ alt }) => <span>{alt ? `[image: ${alt}]` : '[image]'}</span>;
 
 const ReplyLink: React.FC<{ href?: string; children?: React.ReactNode }> = ({ href, children }) =>
   href && /^(https?:)?\/\//i.test(href) ? (

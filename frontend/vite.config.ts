@@ -165,7 +165,9 @@ export function llmProxy(env: NodeJS.ProcessEnv = process.env): ProxyOptions {
  * Host names the server answers, from ALLOWED_HOSTS (comma-separated; the
  * chart sets it from its ingress hosts, SSO hostnames, frontend.allowedHosts
  * and the Service's DNS names). An ingress-style `*.example.com` becomes
- * vite's `.example.com`. vite always accepts localhost and IP addresses, so
+ * vite's `.example.com`, which also matches `example.com` itself and
+ * subdomains at any depth (a Kubernetes wildcard matches one label only).
+ * vite always accepts localhost and IP addresses, so
  * port-forwarding and kubelet probes keep working.
  *
  * Unset, every Host is accepted, as before: the /api proxy then answers any
