@@ -6,7 +6,7 @@ import type { RunningSignaturePage } from '../types/attestations';
 import { signaturesByWorkload } from '../utils/signatures';
 import { workloadKey } from '../utils/workloads';
 import { listNamespacePayments } from '../fixtures/profile';
-import type { PodInfo, PodNodeData } from '../types';
+import type { MapLens, PodInfo, PodNodeData } from '../types';
 import type { ImageVulnsPage } from '../types/vulns';
 import { badgesByNode, coverageBadge, imagesByWorkload, sbomBadge, supplyBadge, useMapLens, vulnBadge, type ImageFacts } from './useMapLens';
 import { VulnApiError } from '../services/vulnApi';
@@ -215,6 +215,51 @@ describe('Coverage lens', () => {
     expect(result.current.error).toBeNull();
     expect(result.current.byWorkload.get('payments/Deployment/checkout')?.text).toBe(`${Math.round(checkout.posture!.coverage * 100)}% seen`);
     expect(result.current.byWorkload.get('payments/Deployment/reports')).toMatchObject({ tone: 'unknown', text: 'profile failed' });
+  });
+});
+
+// App shows "Reading…" only while the badge map is empty. Carrying the
+// previous lens's (or namespace's) badges into a new read drew vulnerability
+// chips as Coverage badges, or every card's definitive fallback, until the
+// slow read landed.
+describe('switching lens or namespace never shows the previous badges as current', () => {
+  const never = { listWorkloads: () => new Promise(() => {}) } as unknown as ProfileApi;
+  const checkout = listNamespacePayments.body.items.find((w) => w.name === 'checkout')!;
+
+  test('vulns -> coverage: no vulnerability badges while coverage loads', async () => {
+    const { api } = replayVulnApi();
+    const { result, rerender } = renderHook(({ lens }: { lens: MapLens }) => useMapLens('payments', lens, 0, { vulnApi: api, profileApi: never }), { initialProps: { lens: 'vulns' as MapLens } });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.byWorkload.size).toBeGreaterThan(0);
+    rerender({ lens: 'coverage' });
+    await waitFor(() => expect(result.current.loading).toBe(true));
+    expect(result.current.byWorkload.size).toBe(0);
+  });
+
+  test('a namespace switch drops the previous namespace\'s badges', async () => {
+    let calls = 0;
+    const profileApi = {
+      listWorkloads: () => (++calls === 1 ? Promise.resolve({ items: [checkout], nextAfter: null }) : new Promise(() => {})),
+    } as unknown as ProfileApi;
+    const vulnApi = replayVulnApi().api;
+    const { result, rerender } = renderHook(({ ns }: { ns: string }) => useMapLens(ns, 'coverage', 0, { vulnApi, profileApi }), { initialProps: { ns: 'payments' } });
+    await waitFor(() => expect(result.current.byWorkload.size).toBe(1));
+    rerender({ ns: 'other' });
+    await waitFor(() => expect(result.current.loading).toBe(true));
+    expect(result.current.byWorkload.size).toBe(0);
+  });
+
+  test('a refresh of the same lens and namespace keeps its badges while it reloads', async () => {
+    let calls = 0;
+    const profileApi = {
+      listWorkloads: () => (++calls === 1 ? Promise.resolve({ items: [checkout], nextAfter: null }) : new Promise(() => {})),
+    } as unknown as ProfileApi;
+    const vulnApi = replayVulnApi().api;
+    const { result, rerender } = renderHook(({ tick }: { tick: number }) => useMapLens('payments', 'coverage', tick, { vulnApi, profileApi }), { initialProps: { tick: 0 } });
+    await waitFor(() => expect(result.current.byWorkload.size).toBe(1));
+    rerender({ tick: 1 });
+    await waitFor(() => expect(result.current.loading).toBe(true));
+    expect(result.current.byWorkload.size).toBe(1);
   });
 });
 
