@@ -323,6 +323,26 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
 }
 
 /**
+ * The row's LOCAL side: the pod that captured it. Every row names that pod
+ * (`pod_name`, `pod_namespace`), so it is looked up by name, never by
+ * `pod_ip`: the IP is only what the pod held at the flow time, and
+ * `/pod/info` keeps every record that ever held it. On EKS (VPC CNI) an IP
+ * is reused within hours, and a by-IP lookup named a dead pod of another
+ * namespace as the destination of flows an argocd pod received on its own
+ * address.
+ *
+ * Returns the capturing pod's record, or null when the listing has none
+ * (pruned, or not listed yet); the caller then shows the row's own name. A
+ * legacy row with no `pod_name` falls back to its `pod_ip` under the
+ * flow-time guard (`selectPodByIp`).
+ */
+export function localPodForRow(row: NetworkTraffic, index: PeerIndex): PodInfo | null {
+  if (row.pod_name) return index.podsByNsName.get(`${row.pod_namespace ?? ''}/${row.pod_name}`) ?? null;
+  if (!row.pod_ip) return null;
+  return selectPodByIp(index.podsByIp.get(row.pod_ip), parseBrokerTime(row.time_stamp)).pod;
+}
+
+/**
  * An address no known pod holds, when whether it is a Service ClusterIP (the
  * Service listing or `/svc/ip` failed) or a pod (`/pod/ip` failed) could not
  * be established: ClusterIPs and pod IPs are allocated from the cluster's

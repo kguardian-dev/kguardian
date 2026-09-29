@@ -3,6 +3,7 @@ import type { NetworkTraffic, PodInfo, ServiceInfo } from '../types';
 import {
   buildPeerIndex,
   isPlaceholderPod,
+  localPodForRow,
   parseBrokerTime,
   peerGroupIdentity,
   peerKey,
@@ -266,5 +267,63 @@ describe('rankPods tie-break', () => {
     const a = pod({ pod_name: 'web-1', pod_ip: '10.0.0.1', pod_namespace: 'prod', is_dead: true, started_at: '2026-09-01T00:00:00', time_stamp: '2026-09-02T00:00:00' });
     const b = pod({ pod_name: 'job-new', pod_ip: '10.0.0.1', pod_namespace: 'prod', is_dead: true, started_at: '2026-09-01T00:00:00', time_stamp: '2026-09-02T00:00:00' });
     expect(rankPods([a, b]).map((p) => p.pod_name)).toEqual(['job-new', 'web-1']);
+  });
+});
+
+// Dev cluster, 2026-09-29 (EKS, VPC CNI): 10.62.98.20 was held by
+// php-monolith-payments-queue-worker (domain-monolith-dev-03) until it died
+// at 00:54 UTC, then by argocd-server-d6c47d55b-lwpsv (argocd) from 04:16.
+// The argocd namespace's Private network card named the php pod as the
+// destination of argocd-server's own ingress rows: the local side was looked
+// up by `pod_ip` in a map where the later (dead) record won.
+describe('localPodForRow — a reused pod IP', () => {
+  const ip = '10.62.98.20';
+  const php = pod({
+    pod_name: 'php-monolith-payments-queue-worker-deployment-6ff8d67689-6qvxr', pod_ip: ip,
+    pod_namespace: 'domain-monolith-dev-03', is_dead: true,
+    started_at: '2026-09-25T23:35:02', time_stamp: '2026-09-29T00:54:40.311056',
+  });
+  const argocd = pod({
+    pod_name: 'argocd-server-d6c47d55b-lwpsv', pod_ip: ip, pod_namespace: 'argocd',
+    pod_identity: 'argocd-server', started_at: '2026-09-29T04:16:18', time_stamp: '2026-09-29T08:37:35.266555',
+  });
+  const argocdRow = row({
+    pod_name: argocd.pod_name, pod_namespace: 'argocd', pod_ip: ip, pod_port: '8080',
+    traffic_in_out_ip: '10.62.2.89', time_stamp: '2026-09-29T04:16:42.368071',
+  });
+  const phpRow = row({
+    pod_name: php.pod_name, pod_namespace: php.pod_namespace, pod_ip: ip, pod_port: '8080',
+    traffic_in_out_ip: '10.62.2.89', time_stamp: '2026-09-28T20:00:00',
+  });
+  const unnamed = (r: NetworkTraffic, over: Partial<NetworkTraffic> = {}): NetworkTraffic => ({ ...r, pod_name: null, pod_namespace: null, ...over });
+
+  test('each row names the pod that captured it, whatever order the listing has', () => {
+    for (const listing of [[argocd, php], [php, argocd]]) {
+      const index = buildPeerIndex(listing);
+      expect(localPodForRow(argocdRow, index)?.pod_name).toBe(argocd.pod_name);
+      expect(localPodForRow(phpRow, index)?.pod_name).toBe(php.pod_name);
+    }
+  });
+
+  test('a capturing pod missing from the listing is not replaced by another holder of its IP', () => {
+    expect(localPodForRow(argocdRow, buildPeerIndex([php]))).toBeNull();
+  });
+
+  test('a legacy row with no pod_name falls back to its IP under the flow-time guard', () => {
+    const index = buildPeerIndex([php, argocd]);
+    expect(localPodForRow(unnamed(argocdRow), index)?.pod_name).toBe(argocd.pod_name);
+    expect(localPodForRow(unnamed(phpRow), index)?.pod_name).toBe(php.pod_name);
+    // Between the two holders nobody held it, so nobody is named.
+    expect(localPodForRow(unnamed(argocdRow, { time_stamp: '2026-09-29T02:00:00' }), index)).toBeNull();
+  });
+
+  test('the remote side follows the same windows: a flow to the IP gets the pod that held it then', () => {
+    const index = buildPeerIndex([php, argocd]);
+    const to = (time_stamp: string) => row({ traffic_type: 'EGRESS', traffic_in_out_ip: ip, traffic_in_out_port: '8080', time_stamp });
+    const early = resolvePeer(to('2026-09-28T20:00:00'), index);
+    const late = resolvePeer(to('2026-09-29T04:16:42'), index);
+    expect(early.kind === 'pod' && early.pod.pod_name).toBe(php.pod_name);
+    expect(late.kind === 'pod' && late.pod.pod_name).toBe(argocd.pod_name);
+    expect(resolvePeer(to('2026-09-29T02:00:00'), index).kind).toBe('unattributed');
   });
 });
