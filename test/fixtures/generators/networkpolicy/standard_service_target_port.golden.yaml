@@ -12,7 +12,11 @@ spec:
   - ports:
     - port: 8080
       protocol: TCP
+    - port: 8080-tcp
+      protocol: TCP
     - port: metrics
+      protocol: TCP
+    - port: "on"
       protocol: TCP
     to:
     - namespaceSelector:
@@ -52,6 +56,20 @@ spec:
     to:
     - ipBlock:
         cidr: 192.168.50.101/32
+  # host-network peer monitoring/svc/agent on node worker-3,worker-4 — podSelector cannot match host traffic
+  # service monitoring/svc/agent: port 81/TCP could not be mapped to a targetPort; allowing the Service port as observed
+  - ports:
+    - port: 81
+      protocol: TCP
+    - port: 8080
+      protocol: TCP
+    - port: 8081
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.168.50.103/32
+    - ipBlock:
+        cidr: 192.168.50.104/32
   - ports:
     - port: 5353
       protocol: UDP

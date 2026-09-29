@@ -211,8 +211,10 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 			// A Service peer was observed pre-DNAT on its Service port; the
 			// policy must allow the backend targetPort (service_port.go).
 			resolved := resolver.resolveRow(peer, traffic)
-			port, mapped := servicePortFor(resolved, portInt, protocolStr)
-			egressRules = mergeOrAppendResolvedRule(egressRules, resolved, port, protocolStr, traffic.TimeStamp)
+			ports, mapped := servicePortFor(resolved, portInt, protocolStr)
+			for _, port := range ports {
+				egressRules = mergeOrAppendResolvedRule(egressRules, resolved, port, protocolStr, traffic.TimeStamp)
+			}
 			if !mapped {
 				noteUnmappedPort(egressRules, resolved, portInt, protocolStr)
 			}

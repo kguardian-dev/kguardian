@@ -36,7 +36,7 @@ func TestServicePortFor(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got, mapped := servicePortFor(c.peer, c.port, c.proto)
-			assert.Equal(t, c.want, got)
+			assert.Equal(t, []intstr.IntOrString{c.want}, got)
 			assert.Equal(t, c.mapped, mapped)
 		})
 	}

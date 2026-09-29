@@ -636,12 +636,18 @@ func TestFixtureGolden_CrossNamespacePeer(t *testing.T) {
 // through spec.ports (port + protocol) to its targetPort — see
 // service_port.go. One policy covers every case:
 //
-//	api      80->8080 (numeric != port) and 9090->"metrics" (named): multi-port
+//	api      80->8080 (numeric != port), 9090->"metrics" (named), 8081->
+//	         "8080-tcp" (a digit-led name, never a number) and 7000->"on" (a
+//	         YAML 1.1 boolean word, emitted quoted): multi-port
 //	cache    6379 with targetPort and protocol omitted (targetPort defaults
 //	         to port, protocol to TCP); 6380 is not in spec.ports -> kept + comment
 //	legacy   no spec.ports at all (spec unknown) -> kept + comment
-//	exporter 80->9100 backed by a host-network pod: the node-IP ipBlock /
-//	         entities rule allows 9100
+//	exporter 80->"metrics" backed by a host-network pod whose container
+//	         names 9100 "metrics": an ipBlock / entities peer has no endpoints
+//	         to resolve a name against, so the rule allows 9100
+//	agent    host-network backed; 80->"http" is 8080 on one backend and 8081
+//	         on the other (both allowed); 81->"missing" names no container
+//	         port -> 81 kept + comment
 //	dns      53/UDP->5353 and 53/TCP->5354: protocol-specific mapping
 //
 // plus malformed egress ports (" 80", "0x50", "1e2", "+80", "80.0") to an
@@ -659,19 +665,32 @@ func serviceTargetPortFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffi
 		svcs: map[string]*api.SvcDetail{
 			"10.96.1.10": svc("api", "prod", "10.96.1.10", map[string]string{"app": "api"},
 				sp("http", 80, corev1.ProtocolTCP, intstr.FromInt(8080)),
-				sp("metrics", 9090, corev1.ProtocolTCP, intstr.FromString("metrics"))),
+				sp("metrics", 9090, corev1.ProtocolTCP, intstr.FromString("metrics")),
+				sp("alt", 8081, corev1.ProtocolTCP, intstr.FromString("8080-tcp")),
+				sp("switch", 7000, corev1.ProtocolTCP, intstr.FromString("on"))),
 			"10.96.1.20": svc("cache", "prod", "10.96.1.20", map[string]string{"app": "cache"},
 				sp("", 6379, "", intstr.IntOrString{})),
 			"10.96.1.30": svc("legacy", "prod", "10.96.1.30", map[string]string{"app": "legacy"}),
 			"10.96.1.40": svc("exporter", "monitoring", "10.96.1.40", map[string]string{"app": "node-exporter"},
-				sp("metrics", 80, corev1.ProtocolTCP, intstr.FromInt(9100))),
+				sp("metrics", 80, corev1.ProtocolTCP, intstr.FromString("metrics"))),
+			"10.96.1.41": svc("agent", "monitoring", "10.96.1.41", map[string]string{"app": "agent"},
+				sp("http", 80, corev1.ProtocolTCP, intstr.FromString("http")),
+				sp("gone", 81, corev1.ProtocolTCP, intstr.FromString("missing"))),
 			"10.96.1.53": svc("dns", "kube-system", "10.96.1.53", map[string]string{"k8s-app": "kube-dns"},
 				sp("dns", 53, corev1.ProtocolUDP, intstr.FromInt(5353)),
 				sp("dns-tcp", 53, corev1.ProtocolTCP, intstr.FromInt(5354))),
 		},
 		allPods: []api.PodDetail{
-			*hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
+			withContainerPorts(*hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
 				map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", true),
+				corev1.ContainerPort{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP}),
+			withContainerPorts(*hostFixturePodDetail("agent-a", "monitoring", "192.168.50.103",
+				map[string]string{"app": "agent"}, "worker-3", "agent", true),
+				corev1.ContainerPort{Name: "http", ContainerPort: 8080}),
+			withContainerPorts(*hostFixturePodDetail("agent-b", "monitoring", "192.168.50.104",
+				map[string]string{"app": "agent"}, "worker-4", "agent", true),
+				corev1.ContainerPort{Name: "http", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
+				corev1.ContainerPort{Name: "missing", ContainerPort: 9999, Protocol: corev1.ProtocolUDP}),
 		},
 	}
 	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
@@ -681,10 +700,14 @@ func serviceTargetPortFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffi
 	traffic := []api.PodTraffic{
 		egress("10.96.1.10", "9090", "TCP"),
 		egress("10.96.1.10", "80", "TCP"),
+		egress("10.96.1.10", "8081", "TCP"),
+		egress("10.96.1.10", "7000", "TCP"),
 		egress("10.96.1.20", "6380", "TCP"),
 		egress("10.96.1.20", "6379", "TCP"),
 		egress("10.96.1.30", "8443", "TCP"),
 		egress("10.96.1.40", "80", "TCP"),
+		egress("10.96.1.41", "80", "TCP"),
+		egress("10.96.1.41", "81", "TCP"),
 		egress("10.96.1.53", "53", "UDP"),
 		egress("10.96.1.53", "53", "TCP"),
 		egress("10.96.1.99", " 80", "TCP"),
@@ -694,6 +717,12 @@ func serviceTargetPortFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffi
 		egress("10.96.1.99", "80.0", "TCP"),
 	}
 	return stub, detail, traffic
+}
+
+// withContainerPorts gives a fixture pod one container exposing ports.
+func withContainerPorts(d api.PodDetail, ports ...corev1.ContainerPort) api.PodDetail {
+	d.Pod.Spec.Containers = []corev1.Container{{Name: "main", Ports: ports}}
+	return d
 }
 
 func TestFixtureGolden_ServiceTargetPort(t *testing.T) {

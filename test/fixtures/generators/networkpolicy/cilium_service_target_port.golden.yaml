@@ -18,7 +18,13 @@ spec:
       - port: "8080"
         protocol: TCP
     - ports:
+      - port: 8080-tcp
+        protocol: TCP
+    - ports:
       - port: metrics
+        protocol: TCP
+    - ports:
+      - port: "on"
         protocol: TCP
   # service prod/svc/cache: port 6380/TCP could not be mapped to a targetPort; allowing the Service port as observed
   - toEndpoints:
@@ -46,6 +52,21 @@ spec:
     toPorts:
     - ports:
       - port: "9100"
+        protocol: TCP
+  # host-network peer monitoring/svc/agent on node worker-3,worker-4 — endpointSelector cannot match host traffic
+  # service monitoring/svc/agent: port 81/TCP could not be mapped to a targetPort; allowing the Service port as observed
+  - toEntities:
+    - host
+    - remote-node
+    toPorts:
+    - ports:
+      - port: "81"
+        protocol: TCP
+    - ports:
+      - port: "8080"
+        protocol: TCP
+    - ports:
+      - port: "8081"
         protocol: TCP
   - toEndpoints:
     - matchLabels:

@@ -49,7 +49,7 @@ handoff so the TS ports can be written from it.
 | `standard_hostnetwork_service_peer`, `cilium_hostnetwork_service_peer` | Prometheus → node-exporter ClusterIP whose backing pods are `host_network: true`, plus a normally-backed db ClusterIP |
 | `standard_stale_ip_peer`, `cilium_stale_ip_peer` | legacy rows (no `peer_*`) from an IP whose only known holder started AFTER the flows ⇒ unattributed ipBlock/CIDR + comment, never that pod's selector |
 | `standard_stored_peer_identity`, `cilium_stored_peer_identity` | rows carry `peer_kind` pod / service / node; the pod IP is NOW held by another pod ⇒ the stored identity wins |
-| `standard_service_target_port`, `cilium_service_target_port` | egress to Services observed on the Service port ⇒ the backend `targetPort` (numeric ≠ port, named, omitted, multi-port, per-protocol, host-network backed); a port missing from `spec.ports` and a Service with no ports ⇒ kept + comment; malformed ports (`" 80"`, `0x50`, `1e2`, `+80`, `80.0`) skipped |
+| `standard_service_target_port`, `cilium_service_target_port` | egress to Services observed on the Service port ⇒ the backend `targetPort` (numeric ≠ port, named, digit-led name `8080-tcp`, YAML 1.1 word `on` emitted quoted, omitted, multi-port, per-protocol); host-network backed: a named targetPort resolved through the backends' container ports (disagreeing backends ⇒ each number, unresolvable ⇒ kept + comment); a port missing from `spec.ports` and a Service with no ports ⇒ kept + comment; malformed ports (`" 80"`, `0x50`, `1e2`, `+80`, `80.0`) skipped |
 
 ## Service ports → targetPort
 
@@ -59,7 +59,14 @@ socket, which under kube-proxy still holds the ClusterIP and the Service
 for a peer that resolves to a Service (selector or host-network backed) the
 observed port is looked up in `service_spec.spec.ports` by port AND protocol
 (`protocol` omitted = TCP) and replaced by its `targetPort`: a number as is,
-a name as the named port, omitted (or not 1-65535 / empty) = the port. With
+a name as the named port, omitted (or not 1-65535 / empty) = the port.
+For a Service backed by host-network pods a named targetPort is resolved
+through the backends' `pod_obj.spec.containers[].ports[]` (name AND protocol,
+protocol omitted = TCP) to every distinct `containerPort`, ascending: the
+ipBlock / entities peer has no endpoints to resolve a name against. A name
+no backend declares is unmapped. String values that YAML 1.1 reads as
+boolean/null (`y`, `yes`, `n`, `no`, `on`, `off`, `true`, `false`, `null`, `~`,
+any case) are emitted quoted. With
 no match, or no `spec.ports`, the observed port is kept and the rule carries
 `# service <ns>/svc/<name>: port <port>/<proto> could not be mapped to a targetPort; allowing the Service port as observed`,
 one line per such port (port order), after any peer comment. Ingress ports
