@@ -419,7 +419,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     let listener = broker_listener()?;
     info!(addr = %listener.local_addr()?, "broker HTTP server starting");
-    let served = HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
@@ -445,12 +445,49 @@ async fn main() -> Result<(), std::io::Error> {
             .service(metrics)
     })
     .listen(listener)?
-    .run()
-    .await;
-    // The server has drained (SIGTERM): hand the lease to a successor now
-    // rather than making it wait the lease out.
+    // Signals are handled below so leadership goes first.
+    .disable_signals()
+    .shutdown_timeout(HTTP_DRAIN_TIMEOUT_SECS)
+    .run();
+    let handle = server.handle();
+    actix_web::rt::spawn(async move {
+        shutdown_signal().await;
+        // Stop the leader-only jobs and hand the lease to a successor
+        // BEFORE draining: the drain can take up to HTTP_DRAIN_TIMEOUT_SECS
+        // and the kubelet's SIGKILL would otherwise land before the
+        // release, leaving the successor to wait the lease out.
+        info!("shutdown signal received; releasing leadership, then draining HTTP");
+        api::leader::shutdown().await;
+        handle.stop(true).await;
+    });
+    let served = server.await;
+    // A no-op after the signal path; covers the server stopping any other way.
     api::leader::shutdown().await;
     served
+}
+
+/// Graceful HTTP drain budget. With the lease release first (at most 5 s,
+/// leader.rs RELEASE_TIMEOUT) this ends within the pod's default 30 s
+/// terminationGracePeriodSeconds; actix's own default drain was the whole
+/// 30 s.
+const HTTP_DRAIN_TIMEOUT_SECS: u64 = 20;
+
+/// SIGTERM (the kubelet) or SIGINT (Ctrl-C in local runs), the two signals
+/// actix handled gracefully before its own handling was disabled.
+async fn shutdown_signal() {
+    use actix_web::rt::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = actix_web::rt::signal::ctrl_c() => {}
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "cannot listen for SIGTERM; only Ctrl-C stops the broker gracefully");
+            let _ = actix_web::rt::signal::ctrl_c().await;
+        }
+    }
 }
 
 // Verifying schema state on /health (rather than just connectivity) is
