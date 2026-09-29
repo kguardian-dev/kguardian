@@ -6,6 +6,7 @@ import { chatContext, streamChatMessage, type HistoryMessage } from '../services
 import { UI_DIMENSIONS } from '../constants/ui';
 import { initialViewMode, storeViewMode, type AssistantViewMode } from '../utils/assistantViewMode';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { assistantMaxBesideDrawer, useAssistantDock, useViewportWidth } from '../hooks/useAssistantDock';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 
@@ -397,6 +398,11 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [panelWidth, setPanelWidth] = useState<number>(UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
+  // Beside an open right drawer the panel leaves it its minimum width; the
+  // width the user chose comes back when the drawer closes.
+  const { drawerOpen, setResizing: shareResizing } = useAssistantDock();
+  const viewportWidth = useViewportWidth();
+  const shownWidth = drawerOpen ? Math.min(panelWidth, assistantMaxBesideDrawer(viewportWidth)) : panelWidth;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
@@ -439,9 +445,15 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Notify parent of layout changes
   useEffect(() => {
     if (onLayoutChange && isOpen) {
-      onLayoutChange(mode === 'side-panel', isCollapsed, panelWidth);
+      onLayoutChange(mode === 'side-panel', isCollapsed, shownWidth);
     }
-  }, [mode, isCollapsed, panelWidth, onLayoutChange, isOpen]);
+  }, [mode, isCollapsed, shownWidth, onLayoutChange, isOpen]);
+
+  // A drawer beside the panel follows a drag without its transition.
+  useEffect(() => {
+    shareResizing(isResizing);
+    return () => shareResizing(false);
+  }, [isResizing, shareResizing]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -621,14 +633,17 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     const newWidth = windowWidth - e.clientX;
 
     // Constrain between min and max widths
-    const maxWidth = windowWidth * UI_DIMENSIONS.AI_PANEL_MAX_WIDTH_RATIO;
+    const maxWidth = Math.min(
+      windowWidth * UI_DIMENSIONS.AI_PANEL_MAX_WIDTH_RATIO,
+      drawerOpen ? assistantMaxBesideDrawer(windowWidth) : Infinity,
+    );
     const constrainedWidth = Math.max(
       UI_DIMENSIONS.AI_PANEL_MIN_WIDTH,
       Math.min(maxWidth, newWidth)
     );
 
     setPanelWidth(constrainedWidth);
-  }, [isResizing]);
+  }, [isResizing, drawerOpen]);
 
   const handleMouseUp = useCallback(() => {
     setIsResizing(false);
@@ -707,6 +722,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       <div
         role="complementary"
         aria-label="AI Assistant"
+        data-docked-panel
         onKeyDown={onDockedKeyDown}
         className="fixed top-0 right-0 bottom-0 z-50 w-12 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl items-center justify-center"
       >
@@ -730,9 +746,10 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     <div
       role="complementary"
       aria-label="AI Assistant"
+      data-docked-panel
       onKeyDown={onDockedKeyDown}
       className="fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl"
-      style={{ width: `${panelWidth}px` }}
+      style={{ width: `${shownWidth}px` }}
     >
       {/* Resize Handle */}
       <div

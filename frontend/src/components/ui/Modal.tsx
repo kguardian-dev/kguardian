@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './Button';
-import { openModalDialogs } from '../../hooks/useDialogFocus';
+import { MODAL_DIALOG, openModalDialogs } from '../../hooks/useDialogFocus';
+import { useDrawerDock } from '../../hooks/useAssistantDock';
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | 'full';
 
@@ -55,7 +56,7 @@ function returnChain(): HTMLElement[] {
   if (typeof document === 'undefined') return [];
   const el = document.activeElement as HTMLElement | null;
   if (!el) return [];
-  const host = el.closest<HTMLElement>('[role="dialog"][aria-modal="true"]');
+  const host = el.closest<HTMLElement>(MODAL_DIALOG);
   return [el, ...(host ? returnChainOf.get(host) ?? [] : [])];
 }
 
@@ -175,6 +176,9 @@ export function Modal({
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' && e.key !== 'Tab') return;
+      // The docked assistant sits beside an open drawer, not in it: its keys
+      // are its own (Esc closes it, not the drawer; Tab is not pulled back).
+      if (e.target instanceof Element && e.target.closest('[data-docked-panel]')) return;
       const node = panelRef.current;
       if (!node || openModalDialogs().at(-1) !== node) return;
       if (e.key === 'Escape') {
@@ -203,16 +207,24 @@ export function Modal({
     return () => document.removeEventListener('keydown', onKey, true);
   }, [isOpen]);
 
+  const drawer = align === 'right';
+  // A drawer ends where the docked assistant begins, so both stay readable.
+  // Its edge follows a drag of the assistant's width without the transition.
+  const { offset: dockOffset, resizing: dockResizing } = useDrawerDock(drawer && mounted);
+
   if (!mounted) return null;
 
   // Let an explicit width/height in `className` win over the size defaults
   // instead of emitting a conflicting utility whose winner is order-dependent.
-  const drawer = align === 'right';
   const sizeClass = /(?:^|\s)(max-w-|w-)/.test(className) ? '' : `w-full ${SIZE_CLASS[size]}`;
   const heightClass = drawer ? 'h-full' : /(?:^|\s)(max-h-|h-)\[/.test(className) ? '' : 'max-h-[88vh]';
 
   return (
-    <div className="fixed inset-0 z-50" aria-hidden={!isOpen}>
+    <div
+      className={`fixed inset-0 z-50 ${drawer && !dockResizing ? 'transition-[right] duration-300' : ''}`}
+      style={dockOffset ? { right: `${dockOffset}px` } : undefined}
+      aria-hidden={!isOpen}
+    >
       <div
         className={`absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-200 ${
           entered ? 'opacity-100' : 'opacity-0'
@@ -227,7 +239,11 @@ export function Modal({
         <div
           ref={panelRef}
           role="dialog"
-          aria-modal="true"
+          // Docked beside the assistant, the drawer is not modal to assistive
+          // tech (the assistant's replies must stay readable); the marker keeps
+          // its Esc and focus handling (openModalDialogs).
+          data-modal-dialog=""
+          aria-modal={dockOffset ? undefined : true}
           aria-labelledby={title && !hideHeader ? labelId : undefined}
           aria-label={title && !hideHeader ? undefined : ariaLabel}
           tabIndex={-1}
