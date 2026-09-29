@@ -771,7 +771,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [focusedNodeId]);
+  }, [focusedNodeId, setFocusedNodeId]);
 
   /** Height of an overlay strip plus the panel margin above and below it; 0 when hidden. */
   const overlayInset = (el: HTMLElement | null): number => {

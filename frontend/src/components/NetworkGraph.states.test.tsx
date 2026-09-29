@@ -173,3 +173,19 @@ test('the focus pill stacks under the toolbar, in the same panel, and its exit c
   // The lens picker stays usable while focused.
   expect((lens as HTMLSelectElement).disabled).toBe(false);
 });
+
+test('Esc leaves focus through the current onFocusChange, so a lens changed while focused is kept', async () => {
+  const first = vi.fn();
+  const latest = vi.fn();
+  const pods = [node('api')];
+  const r = render(graph(pods, { focusedNodeId: 'api', selectedPodId: 'api', showTraffic: false, onFocusChange: first }));
+  await new Promise((res) => setTimeout(res, 0));
+  // App hands a new callback after e.g. a lens change (it closes over loc.params.lens).
+  r.rerender(graph(pods, { focusedNodeId: 'api', selectedPodId: 'api', showTraffic: false, onFocusChange: latest }));
+  await new Promise((res) => setTimeout(res, 0));
+  expect(first).not.toHaveBeenCalled();
+  expect(latest).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(first).not.toHaveBeenCalled();
+  expect(latest).toHaveBeenCalledWith(null);
+});
