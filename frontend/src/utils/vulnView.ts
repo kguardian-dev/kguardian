@@ -124,9 +124,7 @@ const factorFamily = (raw: string) =>
  */
 export function mergeFindings(matches: readonly Finding[]): Finding | null {
   if (matches.length === 0) return null;
-  // An unknown tier ranks above any known one, except P0: nothing outranks it.
-  const rank = (f: Finding) => (f.tier === 'P0' ? 5 : tierRank(brokerTier(f.tier)));
-  const sorted = [...matches].sort((a, b) => rank(b) - rank(a));
+  const sorted = [...matches].sort((a, b) => tierRank(brokerTier(b.tier)) - tierRank(brokerTier(a.tier)));
   const [worst, ...rest] = sorted;
   if (rest.length === 0) return worst;
   const factors = [...(worst.tierFactors ?? [])];

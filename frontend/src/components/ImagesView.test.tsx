@@ -298,3 +298,16 @@ describe('Background and null tiers', () => {
     expect(first.querySelector('[data-tier]')!.getAttribute('title')).toMatch(/not computed/);
   });
 });
+
+describe('Row order', () => {
+  const tiers = ['P1', null, 'Background', 'P0', 'P2'];
+  const mixed = { ...cvePage, items: tiers.map((tier, i) => ({ ...cvePage.items[i % cvePage.items.length], id: `CVE-2099-10${i}`, tier })) };
+  const rowTiers = (rows: HTMLElement[]) => rows.map((r) => r.querySelector('[data-tier]')!.getAttribute('data-tier'));
+
+  test("the loaded rows follow the Broker's tier order: P0, unknown, P1, P2, Background (unknown never above P0)", async () => {
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', mixed)]);
+    render(view({ api }));
+    const rows = await screen.findAllByTestId('cve-row');
+    expect(rowTiers(rows)).toEqual(['P0', 'unknown', 'P1', 'P2', 'Background']);
+  });
+});
