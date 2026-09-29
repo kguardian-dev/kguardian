@@ -187,7 +187,7 @@ function App() {
   const namespaceKnown = loc.params.ns !== undefined || !namespacesLoading;
   const podDataEnabled = namespaceKnown && (view !== 'images' || isPolicyBuilderOpen || isAIAssistantOpen);
   const computeEnabled = namespaceKnown && (view === 'map' || view === 'risks');
-  const { pods: rawPods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
+  const { pods: rawPods, compute, allPodsLookup, services, failedReads, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
     enabled: podDataEnabled,
     compute: computeEnabled,
   });
@@ -757,6 +757,9 @@ function App() {
             onOpenWorkloads={(control) => navigate('workloads', { ns: effectiveNamespace, scope: 'ns', control })}
             pods={pods}
             namespace={effectiveNamespace}
+            podsLoading={podsSettling}
+            podsError={error}
+            failedReads={failedReads}
             onSelectPod={handleFindingSelect}
             onBuildPolicy={handleBuildPolicyForFinding}
             onOpenAudit={() => setIsAuditPanelOpen(true)}
