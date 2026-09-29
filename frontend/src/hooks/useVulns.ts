@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
+import { vulnApi, VulnApiError, type CveListQuery, type VulnApi } from '../services/vulnApi';
 import type { CveSummary, ExposedImage, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
@@ -22,7 +22,10 @@ export const CVE_PAGE_SIZE = 50;
  * `GET /vulnerabilities`, one server page at a time (filters server-side),
  * with `loadMore`. The summary is rebuilt by the Broker on an interval;
  * `computedAt` / `staleSeconds` say how fresh it is (null until the first
- * rebuild, which is "not computed yet", not "no CVEs").
+ * rebuild, which is "not computed yet", not "no CVEs"). `order` is `tier`
+ * when the Broker ranks the whole list by tier, null from an older Broker.
+ * A Load more whose cursor the Broker refuses as one from an older list
+ * order (it was upgraded meanwhile) quietly reads the first page again.
  */
 export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick = 0, api: VulnApi = vulnApi) {
   const [items, setItems] = useState<CveSummary[]>([]);
@@ -31,6 +34,8 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   const [staleSeconds, setStaleSeconds] = useState<number | null>(null);
   // When `staleSeconds` was true (this browser's clock), so the age can keep counting.
   const [receivedAt, setReceivedAt] = useState<number | null>(null);
+  // The order the Broker says the list is in: `tier`, or null (an older Broker, most severe first).
+  const [order, setOrder] = useState<'tier' | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -61,6 +66,7 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
       setComputedAt(p.computedAt);
       setStaleSeconds(p.staleSeconds);
       setReceivedAt(Date.now());
+      setOrder(p.order === 'tier' ? 'tier' : null);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
@@ -88,14 +94,21 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
       setNextAfter(p.nextAfter);
       setError(null);
     } catch (err) {
-      if (current()) setError(err);
+      if (!current()) return;
+      // The Broker was upgraded while the list was open: its cursor belongs to the old order. Start again from the first page.
+      if (isOlderOrderCursor(err)) await load();
+      else setError(err);
     } finally {
       if (current()) setLoadingMore(false);
     }
-  }, [api, key, nextAfter, begin]);
+  }, [api, key, nextAfter, begin, load]);
 
-  return { items, computedAt, staleSeconds, receivedAt, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
+  return { items, computedAt, staleSeconds, receivedAt, order, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
 }
+
+/** The Broker's 400 for a `?after=` cursor from its previous (severity-first) list order. */
+const OLDER_ORDER_CURSOR = 'after is a cursor from an older list order';
+const isOlderOrderCursor = (err: unknown) => err instanceof VulnApiError && err.status === 400 && err.message.startsWith(OLDER_ORDER_CURSOR);
 
 /** Rows one scope-only read covers for the header tiles (the Broker clamps `limit` to 500). */
 export const CVE_TOTALS_LIMIT = 500;

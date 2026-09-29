@@ -41,7 +41,20 @@ describe('ImagesView: Vulnerabilities tab', () => {
     expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
   });
 
-  test('the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
+  test('a Broker that ranks the list by tier ("order": "tier"): the table says so, keeps its order, and needs no note about later pages', async () => {
+    const tiers = ['P0', 'P0', null, 'P1', 'P2'];
+    const ranked = { ...cvePage, order: 'tier', nextAfter: 't2.4.CVE-2099-104', items: tiers.map((tier, i) => ({ ...cvePage.items[i % cvePage.items.length], id: `CVE-2099-10${i}`, tier })) };
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', ranked)]);
+    render(view({ api }));
+    const rows = await screen.findAllByTestId('cve-row');
+    expect(rows.map((r) => r.querySelector('[data-tier]')!.getAttribute('data-tier'))).toEqual(['P0', 'P0', 'unknown', 'P1', 'P2']);
+    expect(rows.map((r) => within(r).getAllByText(/^CVE-2099-10\d$/)[0].textContent)).toEqual(ranked.items.map((c) => c.id));
+    expect(screen.getByText(/ranked by tier/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Load more CVEs' })).toBeTruthy();
+    expect(screen.queryByTestId('page-order-note')).toBeNull();
+  });
+
+  test('an older Broker (no "order"): the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
     const page1 = vulnCapture<CvePage>('vulnerabilities-page1-limit2').body;
     const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', page1)]);
     render(view({ api }));

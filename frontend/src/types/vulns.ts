@@ -68,6 +68,8 @@ export interface CvePage {
   /** When the summary was last rebuilt; null until the first rebuild. */
   computedAt: string | null;
   staleSeconds: number | null;
+  /** `tier`: the Broker ranks the whole list by tier (P0, unknown, P1, P2, Background), then severity. Absent from an older Broker, which pages most severe first. */
+  order?: 'tier';
 }
 
 // ── GET /vulnerabilities/{id}/exposure ───────────────────────────────────
