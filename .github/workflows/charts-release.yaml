@@ -42,6 +42,52 @@ jobs:
 
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v4.3.0 # keep in step with charts-lint.yaml
+
+      # Never publish a chart that points at an image that is not in GHCR:
+      # every install of it would sit in ImagePullBackOff. Renders with every
+      # optional component on, so their images are checked too, and fails if
+      # a kguardian repository in values.yaml did not render at all (a new
+      # component this list does not switch on yet). charts-lint already
+      # waited for the images on the release PR, so this only allows a short
+      # grace period for registry propagation.
+      - name: Check referenced images exist
+        run: |
+          set -euo pipefail
+          chart="charts/${CHARTS_SRC_DIR}"
+          images=$(helm template "$chart" \
+              --set ai.enabled=true \
+              --set evaluator.enabled=true \
+              --set supplychain.enabled=true \
+              --set supplychain.grype.enabled=true \
+              --set broker.auth.enabled=true \
+              --set broker.auth.existingSecret=release-check \
+            | grep -oE 'image: *"?[^"]+"?' \
+            | sed -E 's/image: *"?([^"]+)"?/\1/' \
+            | grep '^ghcr.io/kguardian-dev/' | sort -u)
+          echo "chart references:"; echo "$images"
+          missing_repo=0
+          while read -r repo; do
+            if ! grep -qE "^${repo}[:@]" <<<"$images"; then
+              echo "::error::${repo} is in values.yaml but did not render; switch its component on in this step"
+              missing_repo=1
+            fi
+          done < <(grep -oE 'repository: *"?ghcr.io/kguardian-dev/[^" ]+' "$chart/values.yaml" \
+            | sed -E 's/repository: *"?//' | sort -u)
+          [ "$missing_repo" -eq 0 ] || exit 1
+          deadline=$(( $(date +%s) + 600 ))
+          for img in $images; do
+            until docker manifest inspect "$img" >/dev/null 2>&1; do
+              if [ "$(date +%s)" -gt "$deadline" ]; then
+                echo "::error::$img is not in the registry; not publishing a chart that references it"
+                exit 1
+              fi
+              echo "waiting for $img ..."
+              sleep 30
+            done
+            echo "present: $img"
+          done
 
       - name: Publish Helm Chart to GHCR
         id: push
