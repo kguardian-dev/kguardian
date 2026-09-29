@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.28.6](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.5...chart/v1.28.6) (2026-09-29)
+
+
+### Bug Fixes
+
+* **chart:** move to frontend 1.20.8 ([#1846](https://github.com/kguardian-dev/kguardian/issues/1846)) ([66a2a2c](https://github.com/kguardian-dev/kguardian/commit/66a2a2c99337fe34d1601f4c313c6c3fbae5f101))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.20.7 - abandoned ([#1839](https://github.com/kguardian-dev/kguardian/issues/1839)) ([cc78192](https://github.com/kguardian-dev/kguardian/commit/cc781921c6ebf309798fe4eb5df25d2f860db458))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.12.5 - abandoned ([#1840](https://github.com/kguardian-dev/kguardian/issues/1840)) ([d0465a8](https://github.com/kguardian-dev/kguardian/commit/d0465a8d4689b4889d2f197a5e97584a28c42431))
+
 ## [1.28.5](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.4...chart/v1.28.5) (2026-09-29)
 
 
