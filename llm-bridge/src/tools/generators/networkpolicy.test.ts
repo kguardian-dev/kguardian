@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateNetworkPolicy, generateCiliumPolicy, parsePort, servicePortFor, type PeerResolver, type PodInfo } from "./networkpolicy.js";
+import { generateNetworkPolicy, generateCiliumPolicy, parsePort, policyToYAML, servicePortFor, type PeerResolver, type PodInfo } from "./networkpolicy.js";
 
 // Peer CIDR behavior, exercised through the public generators because peerCIDR
 // is module-private. This file guards llm-bridge's OWN copy of the address
@@ -132,11 +132,23 @@ test("parsePort — decimal digits only", () => {
 
 test("servicePortFor — maps through spec.ports by port and protocol", () => {
   const id = (ports?: unknown[]) => ({ selector: { app: "api" }, namespace: "prod", svcPorts: { name: "api", namespace: "prod", ports: ports as never } });
-  assert.deepEqual(servicePortFor(null, 80, "TCP"), { port: 80, mapped: true });
-  assert.deepEqual(servicePortFor({ selector: { app: "x" } }, 80, "TCP"), { port: 80, mapped: true });
-  assert.deepEqual(servicePortFor(id([{ port: 80, targetPort: 8080 }]), 80, "TCP"), { port: 8080, mapped: true });
-  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP", targetPort: "http" }]), 80, "TCP"), { port: "http", mapped: true });
-  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP" }]), 80, "TCP"), { port: 80, mapped: true });
-  assert.deepEqual(servicePortFor(id([{ port: 53, protocol: "TCP", targetPort: 5354 }]), 53, "UDP"), { port: 53, mapped: false });
-  assert.deepEqual(servicePortFor(id(), 80, "TCP"), { port: 80, mapped: false });
+  assert.deepEqual(servicePortFor(null, 80, "TCP"), { ports: [80], mapped: true });
+  assert.deepEqual(servicePortFor({ selector: { app: "x" } }, 80, "TCP"), { ports: [80], mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, targetPort: 8080 }]), 80, "TCP"), { ports: [8080], mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP", targetPort: "http" }]), 80, "TCP"), { ports: ["http"], mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 80, protocol: "TCP" }]), 80, "TCP"), { ports: [80], mapped: true });
+  assert.deepEqual(servicePortFor(id([{ port: 53, protocol: "TCP", targetPort: 5354 }]), 53, "UDP"), { ports: [53], mapped: false });
+  assert.deepEqual(servicePortFor(id(), 80, "TCP"), { ports: [80], mapped: false });
+  // Host-network backends: a named targetPort resolves to their container port(s).
+  const host = (backendPorts: unknown[]) => ({ ...id([{ port: 80, targetPort: "metrics" }]), hostNetwork: true, service: "api", backendPorts: backendPorts as never });
+  assert.deepEqual(servicePortFor(host([{ name: "metrics", containerPort: 9100 }]), 80, "TCP"), { ports: [9100], mapped: true });
+  assert.deepEqual(servicePortFor(host([{ name: "metrics", containerPort: 9200 }, { name: "metrics", containerPort: 9100, protocol: "TCP" }]), 80, "TCP"), { ports: [9100, 9200], mapped: true });
+  assert.deepEqual(servicePortFor(host([{ name: "metrics", containerPort: 9100, protocol: "UDP" }]), 80, "TCP"), { ports: [80], mapped: false });
+});
+
+test("policyToYAML — quotes YAML 1.1 boolean/null words, keeps real booleans", () => {
+  const y = policyToYAML({ spec: { words: ["on", "Yes", "n", "OFF", "~", "null", "8080-tcp"], flag: true } });
+  for (const w of ["on", "Yes", "n", "OFF", "~", "null"]) assert.ok(y.includes(`- "${w}"`), y);
+  assert.ok(y.includes("- 8080-tcp"), y);
+  assert.ok(y.includes("flag: true"), y);
 });

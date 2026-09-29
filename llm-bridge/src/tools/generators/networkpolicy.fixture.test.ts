@@ -221,7 +221,7 @@ test("hostNetworkServiceIdentity — filters backends like the advisor", () => {
   ];
   assert.deepEqual(hostNetworkServiceIdentity(svc, pods), {
     hostNetwork: true, namespace: "monitoring", service: "node-exporter", selector: svc.selector,
-    node: "worker-1,worker-2", backendIPs: ["192.168.50.101", "192.168.50.102"],
+    node: "worker-1,worker-2", backendIPs: ["192.168.50.101", "192.168.50.102"], backendPorts: [],
   });
   assert.equal(hostNetworkServiceIdentity(svc, [mk("ne-plain", "monitoring", "w", ne, false)]), null);
   assert.equal(hostNetworkServiceIdentity({ svc_name: "manual", svc_namespace: "monitoring", selector: {} }, pods), null);
@@ -363,11 +363,17 @@ const targetPortSvcs: Record<string, BrokerServiceRecord> = {
   "10.96.1.10": { svc_name: "api", svc_namespace: "prod", service_spec: { spec: { selector: { app: "api" }, ports: [
     { name: "http", port: 80, protocol: "TCP", targetPort: 8080 },
     { name: "metrics", port: 9090, protocol: "TCP", targetPort: "metrics" },
+    { name: "alt", port: 8081, protocol: "TCP", targetPort: "8080-tcp" },
+    { name: "switch", port: 7000, protocol: "TCP", targetPort: "on" },
   ] } } },
   "10.96.1.20": { svc_name: "cache", svc_namespace: "prod", service_spec: { spec: { selector: { app: "cache" }, ports: [{ port: 6379 }] } } },
   "10.96.1.30": { svc_name: "legacy", svc_namespace: "prod", service_spec: { spec: { selector: { app: "legacy" } } } },
   "10.96.1.40": { svc_name: "exporter", svc_namespace: "monitoring", service_spec: { spec: { selector: { app: "node-exporter" }, ports: [
-    { name: "metrics", port: 80, protocol: "TCP", targetPort: 9100 },
+    { name: "metrics", port: 80, protocol: "TCP", targetPort: "metrics" },
+  ] } } },
+  "10.96.1.41": { svc_name: "agent", svc_namespace: "monitoring", service_spec: { spec: { selector: { app: "agent" }, ports: [
+    { name: "http", port: 80, protocol: "TCP", targetPort: "http" },
+    { name: "gone", port: 81, protocol: "TCP", targetPort: "missing" },
   ] } } },
   "10.96.1.53": { svc_name: "dns", svc_namespace: "kube-system", service_spec: { spec: { selector: { "k8s-app": "kube-dns" }, ports: [
     { name: "dns", port: 53, protocol: "UDP", targetPort: 5353 },
@@ -376,15 +382,22 @@ const targetPortSvcs: Record<string, BrokerServiceRecord> = {
 };
 const targetPortPods: BrokerPodListEntry[] = [
   { pod_name: "node-exporter-abc12", pod_namespace: "monitoring", pod_ip: "192.168.50.101", host_network: true, node_name: "worker-1", workload_name: "node-exporter",
-    pod_obj: { metadata: { labels: { app: "node-exporter" } } } },
+    pod_obj: { metadata: { labels: { app: "node-exporter" } }, spec: { containers: [{ ports: [{ name: "metrics", containerPort: 9100, protocol: "TCP" }] }] } } },
+  { pod_name: "agent-a", pod_namespace: "monitoring", pod_ip: "192.168.50.103", host_network: true, node_name: "worker-3", workload_name: "agent",
+    pod_obj: { metadata: { labels: { app: "agent" } }, spec: { containers: [{ ports: [{ name: "http", containerPort: 8080 }] }] } } },
+  { pod_name: "agent-b", pod_namespace: "monitoring", pod_ip: "192.168.50.104", host_network: true, node_name: "worker-4", workload_name: "agent",
+    pod_obj: { metadata: { labels: { app: "agent" } }, spec: { containers: [{ ports: [
+      { name: "http", containerPort: 8081, protocol: "TCP" }, { name: "missing", containerPort: 9999, protocol: "UDP" },
+    ] }] } } },
 ];
 const tpEgress = (ip: string, port: string, proto = "TCP"): TrafficRow =>
   ({ traffic_type: "EGRESS", traffic_in_out_ip: ip, traffic_in_out_port: port, ip_protocol: proto });
 const targetPortTraffic: TrafficRow[] = [
-  tpEgress("10.96.1.10", "9090"), tpEgress("10.96.1.10", "80"),
+  tpEgress("10.96.1.10", "9090"), tpEgress("10.96.1.10", "80"), tpEgress("10.96.1.10", "8081"), tpEgress("10.96.1.10", "7000"),
   tpEgress("10.96.1.20", "6380"), tpEgress("10.96.1.20", "6379"),
   tpEgress("10.96.1.30", "8443"),
   tpEgress("10.96.1.40", "80"),
+  tpEgress("10.96.1.41", "80"), tpEgress("10.96.1.41", "81"),
   tpEgress("10.96.1.53", "53", "UDP"), tpEgress("10.96.1.53", "53"),
   tpEgress("10.96.1.99", " 80"), tpEgress("10.96.1.99", "0x50"), tpEgress("10.96.1.99", "1e2"),
   tpEgress("10.96.1.99", "+80"), tpEgress("10.96.1.99", "80.0"),
@@ -395,6 +408,11 @@ test("standard policy — service_target_port matches advisor golden (policy + c
   const text = policyToYAML(policy, comments);
   assert.deepEqual(parse(text), golden("standard_service_target_port.golden.yaml"));
   assert.deepEqual(commentLines(text), commentLines(goldenText("standard_service_target_port.golden.yaml")));
+});
+
+test("service_target_port — a YAML 1.1 boolean word port name is quoted", async () => {
+  const { policy, comments } = await generateNetworkPolicyWithComments(web, targetPortTraffic, makePeerResolver(memoryLookup(targetPortPods, targetPortSvcs)));
+  assert.match(policyToYAML(policy, comments), /port: "on"/);
 });
 
 test("cilium policy — service_target_port matches advisor golden (policy + comments)", async () => {
