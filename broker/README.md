@@ -89,15 +89,18 @@ last pass, on any replica, is an interval old (recorded in
 `leader_task_runs`), and otherwise keeps that pass's schedule, so a hand-off
 neither skips a pass nor repeats one.
 
-If the Lease API refuses the broker at startup (no Role bound to its service
-account, e.g. hand-written manifests) or stays unreachable for about 20
-seconds, the broker logs a warning and runs
-every job itself, which is the behaviour before leader election existed.
-`/metrics` shows the state:
+If the Lease API is unreachable or failing, every replica stays a follower
+and keeps retrying: the jobs pause rather than risk two leaders. If it refuses
+the broker (401/403) for about 20 seconds at startup, which means no Role is
+bound to its service account (e.g. hand-written manifests), the broker runs
+every job itself, which is the behaviour before leader election existed, warns
+every five minutes and retries every 30 seconds; once the API accepts it, it
+elects normally. `/metrics` shows the state:
 
 - `broker_leader`: 1 on the replica running the jobs
-- `broker_leader_election_active{mode="elected|disabled|fallback_forbidden|fallback_unreachable"}`: 1 only while contending for the Lease
+- `broker_leader_election_active{mode="elected|disabled|fallback_forbidden|fallback_misconfigured"}`: 1 only while contending for the Lease
 - `broker_leader_transitions_total`: acquisitions and losses on this replica
+- `broker_leader_election_errors_total`: failed Lease requests; rising on every replica means no replica can lead and the jobs are paused
 
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
 natively in CI and the broker image is smoke-executed on both amd64 and arm64

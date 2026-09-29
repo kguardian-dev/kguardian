@@ -69,17 +69,33 @@
 //!   `LEADER_ELECTION_RETRY_PERIOD_SECS` (2); the client-go defaults.
 //! - Identity: `POD_NAME`, then `HOSTNAME`.
 //!
-//! If the first contact with the Lease API is refused (401/403: typically
-//! a chart without the Role) or it stays unreachable for
-//! [`STARTUP_ATTEMPTS`] tries, the replica warns loudly and falls back to
-//! always-leader for its lifetime rather than crash-looping or leaving
-//! the loops unrun. That is the pre-election behaviour, so it is never a
-//! regression, and `broker_leader_election_active` reads 0 with the
-//! reason in its `mode` label.
+//! # When the Lease API does not cooperate
+//!
+//! - **Unreachable, timing out or failing (5xx)**, at startup or later:
+//!   the replica stays a follower and keeps retrying. The singleton jobs
+//!   pause until some replica can hold the lease, as with client-go. It
+//!   never assumes leadership it cannot prove: another replica may hold
+//!   the lease, and two leaders is the failure this module exists for.
+//! - **Refused (401/403) for [`STARTUP_ATTEMPTS`] tries in a row before
+//!   first contact**: RBAC is missing (a Deployment without the chart's
+//!   Role). Every replica shares the service account, so all are refused
+//!   alike; they fall back to always-leader, the pre-election behaviour,
+//!   warn every five minutes, and keep retrying every 30 s. Once the API
+//!   accepts them they close the gate and elect normally, so a RoleBinding
+//!   that was only slow to propagate never leaves two leaders.
+//!   `broker_leader_election_active{mode="fallback_forbidden"}` reads 0.
+//! - **Refused after first contact** (RBAC removed mid-life): as
+//!   unreachable, zero leaders rather than two.
+//! - **Election asked for but impossible to start** (no namespace or CA):
+//!   always-leader with a warning every five minutes
+//!   (`mode="fallback_misconfigured"`).
+//!
+//! `broker_leader_election_errors_total` rising on every replica means no
+//! replica can hold the lease and the jobs are paused.
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -91,13 +107,22 @@ const DEFAULT_LEASE_NAME: &str = "kguardian-broker-leader";
 const DEFAULT_LEASE_DURATION_SECS: u64 = 15;
 const DEFAULT_RENEW_DEADLINE_SECS: u64 = 10;
 const DEFAULT_RETRY_PERIOD_SECS: u64 = 2;
-/// Failed first contacts (network errors, 5xx) before falling back to
-/// always-leader. About 20 s at the default retry period: long enough to
-/// ride out an API server blip at startup, short enough that the
-/// leader-only loops (45 s and longer warmups) barely notice.
+/// Consecutive 401/403s at startup before falling back to always-leader:
+/// about 20 s at the default retry period, so a RoleBinding still
+/// propagating on a fresh install is not mistaken for missing RBAC.
 pub(crate) const STARTUP_ATTEMPTS: u32 = 10;
 /// How long [`shutdown`] waits for the release to reach the API server.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Retry cadence while in the 401/403 fallback, and how many refused
+/// retries between warnings (every 5 minutes).
+const FALLBACK_RETRY: Duration = Duration::from_secs(30);
+const FALLBACK_WARN_EVERY: u32 = 10;
+/// Failed attempts between repeated warnings while the API is failing
+/// (about a minute at the default retry period).
+const FAILURE_WARN_EVERY: u32 = 30;
+/// How often a replica left always-leader by a static misconfiguration
+/// repeats its warning.
+const MISCONFIGURED_WARN_EVERY: Duration = Duration::from_secs(300);
 
 const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -114,10 +139,10 @@ pub(crate) enum Mode {
     Disabled = 0,
     /// Contending for the Lease.
     Elected = 1,
-    /// The Lease API refused us at startup (missing RBAC).
+    /// The Lease API refused us at startup (missing RBAC). Still retried.
     FallbackDenied = 2,
-    /// The Lease API never answered at startup.
-    FallbackUnreachable = 3,
+    /// Election was asked for but cannot start (no namespace, no CA).
+    FallbackMisconfigured = 3,
 }
 
 impl Mode {
@@ -125,7 +150,7 @@ impl Mode {
         match v {
             1 => Mode::Elected,
             2 => Mode::FallbackDenied,
-            3 => Mode::FallbackUnreachable,
+            3 => Mode::FallbackMisconfigured,
             _ => Mode::Disabled,
         }
     }
@@ -135,7 +160,7 @@ impl Mode {
             Mode::Disabled => "disabled",
             Mode::Elected => "elected",
             Mode::FallbackDenied => "fallback_forbidden",
-            Mode::FallbackUnreachable => "fallback_unreachable",
+            Mode::FallbackMisconfigured => "fallback_misconfigured",
         }
     }
 }
@@ -155,6 +180,10 @@ pub struct LeaderGate {
     /// Bumped each time this replica acquires the lease, after the gate
     /// opens; [`Cadence`] watches it to run a new leader's passes promptly.
     acquisitions: AtomicU64,
+    /// Failed Lease requests, for `broker_leader_election_errors_total`.
+    errors: AtomicU64,
+    /// Set on shutdown: closed for good, whatever the mode or deadline.
+    stopped: AtomicBool,
 }
 
 impl LeaderGate {
@@ -165,6 +194,8 @@ impl LeaderGate {
             until_ms: AtomicU64::new(0),
             transitions: AtomicU64::new(0),
             acquisitions: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -173,6 +204,9 @@ impl LeaderGate {
     }
 
     pub(crate) fn is_leader_at(&self, now: Duration) -> bool {
+        if self.stopped.load(Ordering::Acquire) {
+            return false;
+        }
         match self.mode() {
             Mode::Elected => (now.as_millis() as u64) < self.until_ms.load(Ordering::Acquire),
             _ => true,
@@ -198,6 +232,16 @@ impl LeaderGate {
 
     fn transitioned(&self) {
         self.transitions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Close the gate for the rest of the process (shutdown).
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.clear();
+    }
+
+    fn errored(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
     fn acquired(&self) {
@@ -285,11 +329,15 @@ fn render_metrics_for(gate: &LeaderGate) -> String {
             "# HELP broker_leader_transitions_total Leadership changes on this replica (each acquire and each loss counts one)\n",
             "# TYPE broker_leader_transitions_total counter\n",
             "broker_leader_transitions_total {transitions}\n",
+            "# HELP broker_leader_election_errors_total Failed Lease API requests on this replica; rising on every replica means no replica can hold the lease and the cluster-singleton jobs are paused\n",
+            "# TYPE broker_leader_election_errors_total counter\n",
+            "broker_leader_election_errors_total {errors}\n",
         ),
         leader = u8::from(gate.is_leader()),
         mode = mode.label(),
         active = u8::from(mode == Mode::Elected),
         transitions = gate.transitions.load(Ordering::Relaxed),
+        errors = gate.errors.load(Ordering::Relaxed),
     )
 }
 
@@ -990,10 +1038,25 @@ impl<A: LeaseApi, C: Clock> Elector<A, C> {
     /// client-go does) so a follower acquires on its next retry. `false`
     /// when there was nothing of ours to release. A conflict means someone
     /// else already wrote it, so it is not ours to clear.
+    ///
+    /// Uses the lease as last written when it is still current; otherwise
+    /// (an attempt abandoned mid-flight may have renewed it, or none ever
+    /// returned) it re-reads, and clears the holder only if it is this
+    /// replica, with the fresh resourceVersion.
     pub async fn release(&mut self) -> Result<bool, LeaseError> {
-        let Some(mut lease) = self.held.take() else {
-            return Ok(false);
-        };
+        if let Some(lease) = self.held.take() {
+            match self.clear_holder(lease).await {
+                Err(LeaseError::Conflict) => {}
+                other => return other,
+            }
+        }
+        match self.api.get().await? {
+            Some(lease) => self.clear_holder(lease).await,
+            None => Ok(false),
+        }
+    }
+
+    async fn clear_holder(&mut self, mut lease: Lease) -> Result<bool, LeaseError> {
         if lease.holder() != Some(self.identity.as_str()) {
             return Ok(false);
         }
@@ -1010,23 +1073,16 @@ impl<A: LeaseApi, C: Clock> Elector<A, C> {
 // Driver: turns attempt results into gate updates
 // ---------------------------------------------------------------------
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum Step {
-    Continue,
-    /// Stop electing and act as leader for the process lifetime.
-    Fallback(Mode),
-}
-
 pub(crate) struct Driver {
     renew_deadline: Duration,
     pub leading: bool,
     last_renew: Duration,
-    /// The API has answered at least once (so errors are no longer a
-    /// reason to fall back).
+    /// The API has answered at least once with something other than a
+    /// refusal.
     contacted: bool,
-    startup_failures: u32,
-    /// Consecutive failed attempts after first contact, so a persistent
-    /// error warns once rather than every retry period.
+    /// Consecutive 401/403s before first contact.
+    denials: u32,
+    /// Consecutive failed attempts (any error), for periodic warnings.
     failing: u32,
     last_holder: Option<String>,
 }
@@ -1038,7 +1094,7 @@ impl Driver {
             leading: false,
             last_renew: Duration::ZERO,
             contacted: false,
-            startup_failures: 0,
+            denials: 0,
             failing: 0,
             last_holder: None,
         }
@@ -1050,27 +1106,59 @@ impl Driver {
         gate.transitioned();
     }
 
+    /// Apply one attempt's result. `started` is when the attempt began and
+    /// `now` when it returned, both on the elector's monotonic clock.
+    ///
+    /// Leadership runs from `started`, not from the response: a renewal
+    /// the API server committed at some instant in between keeps the gate
+    /// open for at most `renewDeadline` after it, so a slow response never
+    /// eats into the `leaseDuration - renewDeadline` margin a successor
+    /// waits out.
     pub fn on_attempt(
         &mut self,
         result: &Result<Attempt, LeaseError>,
+        started: Duration,
         now: Duration,
         gate: &LeaderGate,
-    ) -> Step {
-        if result.is_ok() {
-            if self.failing > 0 {
-                info!(
-                    failed_attempts = self.failing,
-                    "leader election: lease requests recovered"
-                );
+    ) {
+        if gate.mode() == Mode::FallbackDenied {
+            match result {
+                Ok(_) | Err(LeaseError::Conflict) => {
+                    // RBAC arrived (or was slow to propagate at install):
+                    // stop acting as leader, then compete like everyone else.
+                    gate.clear();
+                    gate.set_mode(Mode::Elected);
+                    info!("leader election: the Lease API now accepts this broker; leaving the always-leader fallback and electing");
+                }
+                Err(e) => {
+                    self.failing += 1;
+                    gate.errored();
+                    if self.failing.is_multiple_of(FALLBACK_WARN_EVERY) {
+                        warn!(error = %e, "leader election still refused; this replica keeps running every cluster-singleton job (see broker_leader_election_active)");
+                    }
+                    return;
+                }
             }
-            self.failing = 0;
+        }
+        match result {
+            Ok(_) | Err(LeaseError::Conflict) => {
+                if self.failing > 0 {
+                    info!(
+                        failed_attempts = self.failing,
+                        "leader election: lease requests recovered"
+                    );
+                }
+                self.failing = 0;
+                self.denials = 0;
+            }
+            Err(_) => gate.errored(),
         }
         match result {
             Ok(Attempt::Leading) => {
                 self.contacted = true;
-                self.last_renew = now;
+                self.last_renew = started;
                 self.last_holder = None;
-                gate.hold_until(now + self.renew_deadline);
+                gate.hold_until(started + self.renew_deadline);
                 if !self.leading {
                     self.leading = true;
                     gate.transitioned();
@@ -1100,35 +1188,32 @@ impl Driver {
                 debug!("leader election: lease update conflicted; re-reading");
             }
             Err(LeaseError::Denied(msg)) if !self.contacted => {
-                warn!(
-                    error = %msg,
-                    "leader election: the Lease API refused this broker (is the chart's leader \
-                     election Role installed?). Falling back to running every cluster-singleton \
-                     job on this replica, as before leader election existed. With more than one \
-                     replica they will duplicate work; fix the RBAC or set \
-                     LEADER_ELECTION_ENABLED=false"
-                );
-                return Step::Fallback(Mode::FallbackDenied);
-            }
-            Err(e) if !self.contacted => {
-                self.startup_failures += 1;
-                if self.startup_failures >= STARTUP_ATTEMPTS {
+                self.denials += 1;
+                if self.denials >= STARTUP_ATTEMPTS {
                     warn!(
-                        error = %e,
-                        attempts = self.startup_failures,
-                        "leader election: the Lease API is unreachable. Falling back to running \
-                         every cluster-singleton job on this replica, as before leader election \
-                         existed. With more than one replica they will duplicate work; allow \
-                         egress to the API server or set LEADER_ELECTION_ENABLED=false"
+                        error = %msg,
+                        attempts = self.denials,
+                        "leader election: the Lease API refuses this broker (is the chart's \
+                         leader election Role installed?). Falling back to running every \
+                         cluster-singleton job on this replica, as before leader election \
+                         existed, and retrying every 30 s. With more than one replica they \
+                         duplicate work until the RBAC exists; or set \
+                         LEADER_ELECTION_ENABLED=false"
                     );
-                    return Step::Fallback(Mode::FallbackUnreachable);
+                    self.failing = 0;
+                    gate.set_mode(Mode::FallbackDenied);
+                    return;
                 }
-                debug!(error = %e, attempt = self.startup_failures, "leader election: first contact failed; retrying");
+                debug!(error = %msg, attempt = self.denials, "leader election: refused; retrying (RBAC may still be propagating)");
             }
             Err(e) => {
+                // Unreachable, timing out, 5xx, or refused after first
+                // contact: stay a follower and keep trying. The singleton
+                // jobs pause rather than risk a second leader.
                 self.failing += 1;
-                if self.failing == 1 {
-                    warn!(error = %e, leading = self.leading, "leader election: lease request failed; retrying");
+                if self.failing == 1 || self.failing.is_multiple_of(FAILURE_WARN_EVERY) {
+                    warn!(error = %e, leading = self.leading, attempts = self.failing,
+                        "leader election: lease request failed; retrying (cluster-singleton jobs pause while no replica can hold the lease)");
                 } else {
                     debug!(error = %e, attempt = self.failing, "leader election: lease request failed");
                 }
@@ -1141,7 +1226,6 @@ impl Driver {
             );
             self.lose(gate);
         }
-        Step::Continue
     }
 }
 
@@ -1166,44 +1250,49 @@ fn jittered(period: Duration) -> Duration {
     period + period.mul_f64(f64::from(nanos % 1000) / 5000.0)
 }
 
+/// The elector loop. Shutdown is raced against the attempt in flight as
+/// well as the sleep: an attempt is abandoned, never applied to the gate
+/// once shutdown is requested, and the lease is released straight away.
 async fn run<A: LeaseApi, C: Clock>(
     mut elector: Elector<A, C>,
-    gate: &'static LeaderGate,
+    gate: &LeaderGate,
     timings: Timings,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     done: tokio::sync::oneshot::Sender<()>,
 ) {
     let mut driver = Driver::new(timings.renew_deadline);
     loop {
-        let result = elector.try_acquire_or_renew().await;
-        let now = elector.clock.mono();
-        if let Step::Fallback(mode) = driver.on_attempt(&result, now, gate) {
-            gate.set_mode(mode);
-            let _ = done.send(());
-            return;
-        }
-        let wait = if driver.leading {
+        let started = elector.clock.mono();
+        let result = tokio::select! {
+            r = elector.try_acquire_or_renew() => Some(r),
+            _ = shutdown.changed() => None,
+        };
+        let Some(result) = result.filter(|_| !*shutdown.borrow()) else {
+            break;
+        };
+        driver.on_attempt(&result, started, elector.clock.mono(), gate);
+        let wait = if gate.mode() == Mode::FallbackDenied {
+            FALLBACK_RETRY
+        } else if driver.leading {
             timings.retry_period
         } else {
             jittered(timings.retry_period)
         };
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = shutdown.changed() => {
-                // Stop leader-only work before giving the lease away.
-                gate.clear();
-                if driver.leading {
-                    match elector.release().await {
-                        Ok(true) => info!("leader election: released the lease for a successor"),
-                        Ok(false) => {}
-                        Err(e) => warn!(error = %e, "leader election: could not release the lease; a successor takes over once it expires"),
-                    }
-                }
-                let _ = done.send(());
-                return;
-            }
+            _ = shutdown.changed() => break,
         }
     }
+    // Stop leader-only work before giving the lease away.
+    gate.stop();
+    match elector.release().await {
+        Ok(true) => info!("leader election: released the lease for a successor"),
+        Ok(false) => {}
+        Err(e) => {
+            warn!(error = %e, "leader election: could not release the lease; a successor takes over once it expires")
+        }
+    }
+    let _ = done.send(());
 }
 
 /// Start leader election, or leave this replica as the permanent leader
@@ -1225,23 +1314,14 @@ pub fn spawn() {
         env_str("LEADER_ELECTION_LEASE_NAME").unwrap_or_else(|| DEFAULT_LEASE_NAME.into());
     let identity = identity();
     let Some(namespace) = namespace() else {
-        warn!(
-            "leader election: no namespace (set POD_NAMESPACE or LEADER_ELECTION_NAMESPACE); \
-             falling back to running every cluster-singleton job on this replica"
-        );
-        GATE.set_mode(Mode::FallbackUnreachable);
+        misconfigured("no namespace (set POD_NAMESPACE or LEADER_ELECTION_NAMESPACE)".into());
         return;
     };
     let timeout = (timings.renew_deadline / 2).max(Duration::from_secs(1));
     let api = match KubeLeaseApi::in_cluster(&namespace, &lease_name, timeout) {
         Ok(api) => api,
         Err(e) => {
-            warn!(
-                error = %e,
-                "leader election: cannot build the in-cluster API client; falling back to \
-                 running every cluster-singleton job on this replica"
-            );
-            GATE.set_mode(Mode::FallbackUnreachable);
+            misconfigured(format!("cannot build the in-cluster API client: {e}"));
             return;
         }
     };
@@ -1271,10 +1351,28 @@ pub fn spawn() {
     actix_web::rt::spawn(run(elector, &GATE, timings, rx, done_tx));
 }
 
-/// Stop leader-only work and release the lease, if held. Call once the
-/// HTTP server has stopped. Bounded by [`RELEASE_TIMEOUT`].
+/// Election was asked for but cannot start: act as the permanent leader,
+/// as before election existed (every replica shares this configuration, so
+/// they all do), and repeat the warning so it is not lost in startup logs.
+fn misconfigured(why: String) {
+    GATE.set_mode(Mode::FallbackMisconfigured);
+    actix_web::rt::spawn(async move {
+        loop {
+            warn!(
+                reason = %why,
+                "leader election cannot start; this replica runs every cluster-singleton job \
+                 (duplicated with more than one replica; see broker_leader_election_active)"
+            );
+            tokio::time::sleep(MISCONFIGURED_WARN_EVERY).await;
+        }
+    });
+}
+
+/// Stop leader-only work and release the lease, if held. Call when the
+/// shutdown signal arrives, before draining HTTP. Bounded by
+/// [`RELEASE_TIMEOUT`].
 pub async fn shutdown() {
-    GATE.clear();
+    GATE.stop();
     let Some(s) = SHUTDOWN.get() else {
         return;
     };

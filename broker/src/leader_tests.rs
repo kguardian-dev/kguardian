@@ -54,6 +54,8 @@ struct FakeState {
     /// Simulate a concurrent writer landing between our get and replace.
     race_next_replace: bool,
     replaces: u32,
+    /// How long every get takes (a slow or hung API server).
+    get_delay: Duration,
 }
 
 /// An in-memory Lease API with real resourceVersion semantics. Cloning
@@ -85,6 +87,10 @@ impl FakeApi {
 
 impl LeaseApi for FakeApi {
     async fn get(&self) -> Result<Option<Lease>, LeaseError> {
+        let delay = self.0.borrow().get_delay;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         self.take_failure()?;
         Ok(self.lease())
     }
@@ -315,7 +321,8 @@ async fn release_never_clears_a_lease_someone_else_took() {
     let mut l = api.lease().unwrap();
     l.spec.holder_identity = Some("broker-b".into());
     api.stamp(l);
-    assert_eq!(a.release().await, Err(LeaseError::Conflict));
+    // The held copy is stale (409); the re-read shows b, so nothing is ours.
+    assert_eq!(a.release().await, Ok(false));
     assert_eq!(api.lease().unwrap().holder(), Some("broker-b"));
 }
 
@@ -405,6 +412,105 @@ async fn api_errors_surface_and_the_next_attempt_renews() {
 }
 
 #[tokio::test]
+async fn release_rereads_when_the_held_copy_is_stale() {
+    // An attempt abandoned at shutdown may have renewed the lease after
+    // the elector last saw it: the release re-reads and still clears it.
+    let (api, clock) = (FakeApi::default(), FakeClock::new());
+    let mut a = elector(&api, &clock, "broker-a");
+    a.try_acquire_or_renew().await.unwrap();
+    api.stamp(api.lease().unwrap());
+    assert_eq!(a.release().await, Ok(true));
+    assert_eq!(api.lease().unwrap().holder(), None);
+}
+
+#[tokio::test]
+async fn release_with_nothing_held_clears_only_our_own_lease() {
+    let (api, clock) = (FakeApi::default(), FakeClock::new());
+    held_by(&api, "broker-a");
+    // A never saw its own acquisition return, but the lease names it.
+    let mut a = elector(&api, &clock, "broker-a");
+    assert_eq!(a.release().await, Ok(true));
+    held_by(&api, "broker-b");
+    assert_eq!(a.release().await, Ok(false));
+    assert_eq!(api.lease().unwrap().holder(), Some("broker-b"));
+}
+
+/// Drive `run` until `stop_after`, then request shutdown; returns how long
+/// `run` took to finish after the request.
+async fn run_then_shutdown(
+    elector: Elector<FakeApi, FakeClock>,
+    gate: &LeaderGate,
+    stop_after: Duration,
+) -> Duration {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+    let asked = Cell::new(None);
+    let running = run(elector, gate, Timings::default(), rx, done_tx);
+    let stopping = async {
+        tokio::time::sleep(stop_after).await;
+        asked.set(Some(Instant::now()));
+        tx.send(true).unwrap();
+    };
+    tokio::join!(running, stopping);
+    assert!(done_rx.try_recv().is_ok(), "run signals completion");
+    asked.get().unwrap().elapsed()
+}
+
+#[tokio::test]
+async fn shutdown_abandons_an_attempt_in_flight_and_releases_at_once() {
+    let (api, clock) = (FakeApi::default(), FakeClock::new());
+    let mut a = elector(&api, &clock, "broker-a");
+    a.try_acquire_or_renew().await.unwrap();
+    let g = elected_gate();
+    at(
+        &mut Driver::new(RENEW),
+        &Ok(Attempt::Leading),
+        mono_now(),
+        &g,
+    );
+    assert!(g.is_leader());
+    // The next renewal hangs on a slow API server.
+    api.0.borrow_mut().get_delay = Duration::from_secs(30);
+    let took = run_then_shutdown(a, &g, Duration::from_millis(50)).await;
+    assert!(
+        took < Duration::from_secs(2),
+        "waited {took:?} for the attempt"
+    );
+    assert_eq!(
+        api.lease().unwrap().holder(),
+        None,
+        "released for a successor"
+    );
+    assert!(!g.is_leader());
+}
+
+#[tokio::test]
+async fn an_attempt_finishing_after_shutdown_never_reopens_the_gate() {
+    // The renewal would succeed 100 ms in; shutdown lands at 20 ms. The
+    // result is never applied, so the gate cannot reopen for 10 s.
+    let (api, clock) = (FakeApi::default(), FakeClock::new());
+    let mut a = elector(&api, &clock, "broker-a");
+    a.try_acquire_or_renew().await.unwrap();
+    api.0.borrow_mut().get_delay = Duration::from_millis(100);
+    let g = elected_gate();
+    run_then_shutdown(a, &g, Duration::from_millis(20)).await;
+    assert!(!g.is_leader());
+    assert_eq!(api.lease().unwrap().holder(), None);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!g.is_leader());
+}
+
+#[tokio::test]
+async fn a_follower_shutting_down_leaves_the_leaders_lease_alone() {
+    let (api, clock) = (FakeApi::default(), FakeClock::new());
+    held_by(&api, "broker-a");
+    let b = elector(&api, &clock, "broker-b");
+    let g = elected_gate();
+    run_then_shutdown(b, &g, Duration::from_millis(50)).await;
+    assert_eq!(api.lease().unwrap().holder(), Some("broker-a"));
+}
+
+#[tokio::test]
 async fn keeps_unknown_fields_through_an_update() {
     let (api, clock) = (FakeApi::default(), FakeClock::new());
     let mut l: Lease = serde_json::from_value(serde_json::json!({
@@ -436,19 +542,28 @@ fn elected_gate() -> LeaderGate {
 
 const RENEW: Duration = Duration::from_secs(10);
 
+/// An attempt that returned the instant it started.
+fn at(d: &mut Driver, r: &Result<Attempt, LeaseError>, t: Duration, g: &LeaderGate) {
+    d.on_attempt(r, t, t, g);
+}
+
+fn refused() -> Result<Attempt, LeaseError> {
+    Err(LeaseError::Denied("HTTP 403".into()))
+}
+
 #[test]
 fn gate_opens_on_acquire_and_closes_on_loss() {
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let t0 = Duration::from_secs(100);
     assert!(!g.is_leader_at(t0), "elected mode starts closed");
-    assert_eq!(d.on_attempt(&Ok(Attempt::Leading), t0, &g), Step::Continue);
+    at(&mut d, &Ok(Attempt::Leading), t0, &g);
     assert!(g.is_leader_at(t0));
     assert!(g.is_leader_at(t0 + Duration::from_secs(9)));
     let lost = Ok(Attempt::Following {
         holder: "other".into(),
     });
-    d.on_attempt(&lost, t0 + Duration::from_secs(2), &g);
+    at(&mut d, &lost, t0 + Duration::from_secs(2), &g);
     assert!(!g.is_leader_at(t0 + Duration::from_secs(2)));
     assert_eq!(g.transitions.load(Ordering::Relaxed), 2);
 }
@@ -458,10 +573,33 @@ fn gate_closes_by_itself_when_renewals_stop() {
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let t0 = Duration::from_secs(100);
-    d.on_attempt(&Ok(Attempt::Leading), t0, &g);
+    at(&mut d, &Ok(Attempt::Leading), t0, &g);
     // No further attempt at all (a hung elector): the deadline alone closes it.
     assert!(g.is_leader_at(t0 + Duration::from_millis(9_999)));
     assert!(!g.is_leader_at(t0 + RENEW));
+}
+
+#[test]
+fn a_slow_renewal_counts_from_when_it_was_sent() {
+    // Sent at t0, answered 4.9 s later: the API server committed it
+    // somewhere in between, so the gate may stay open only until
+    // t0 + renewDeadline, keeping the full lease - renewDeadline margin
+    // before a successor could take over.
+    let g = elected_gate();
+    let mut d = Driver::new(RENEW);
+    let t0 = Duration::from_secs(100);
+    d.on_attempt(
+        &Ok(Attempt::Leading),
+        t0,
+        t0 + Duration::from_millis(4_900),
+        &g,
+    );
+    assert!(g.is_leader_at(t0 + Duration::from_millis(9_999)));
+    assert!(!g.is_leader_at(t0 + RENEW));
+    // And the renew deadline runs from the send too.
+    let slow_fail = Err(LeaseError::Unavailable("timeout".into()));
+    d.on_attempt(&slow_fail, t0 + Duration::from_secs(5), t0 + RENEW, &g);
+    assert!(!d.leading);
 }
 
 #[test]
@@ -469,15 +607,20 @@ fn failed_renewals_lose_leadership_at_the_renew_deadline_not_before() {
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let t0 = Duration::from_secs(100);
-    d.on_attempt(&Ok(Attempt::Leading), t0, &g);
+    at(&mut d, &Ok(Attempt::Leading), t0, &g);
     let err = Err(LeaseError::Unavailable("timeout".into()));
-    d.on_attempt(&err, t0 + Duration::from_secs(4), &g);
+    at(&mut d, &err, t0 + Duration::from_secs(4), &g);
     assert!(d.leading && g.is_leader_at(t0 + Duration::from_secs(4)));
-    d.on_attempt(&err, t0 + RENEW, &g);
+    at(&mut d, &err, t0 + RENEW, &g);
     assert!(!d.leading);
     assert!(!g.is_leader_at(t0 + RENEW));
     // Recovers on the next successful attempt.
-    d.on_attempt(&Ok(Attempt::Leading), t0 + Duration::from_secs(12), &g);
+    at(
+        &mut d,
+        &Ok(Attempt::Leading),
+        t0 + Duration::from_secs(12),
+        &g,
+    );
     assert!(g.is_leader_at(t0 + Duration::from_secs(12)));
 }
 
@@ -486,8 +629,13 @@ fn a_renew_conflict_does_not_extend_leadership() {
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let t0 = Duration::from_secs(100);
-    d.on_attempt(&Ok(Attempt::Leading), t0, &g);
-    d.on_attempt(&Err(LeaseError::Conflict), t0 + Duration::from_secs(9), &g);
+    at(&mut d, &Ok(Attempt::Leading), t0, &g);
+    at(
+        &mut d,
+        &Err(LeaseError::Conflict),
+        t0 + Duration::from_secs(9),
+        &g,
+    );
     assert!(!g.is_leader_at(t0 + RENEW));
 }
 
@@ -499,57 +647,131 @@ fn renew_deadline_is_shorter_than_the_lease_a_successor_waits_out() {
 }
 
 #[test]
-fn forbidden_at_startup_falls_back_to_always_leader() {
-    let g = elected_gate();
-    let mut d = Driver::new(RENEW);
-    let step = d.on_attempt(
-        &Err(LeaseError::Denied("HTTP 403".into())),
-        Duration::from_secs(1),
-        &g,
-    );
-    assert_eq!(step, Step::Fallback(Mode::FallbackDenied));
-    g.set_mode(Mode::FallbackDenied);
-    assert!(g.is_leader());
-    assert!(render_metrics_for(&g)
-        .contains("broker_leader_election_active{mode=\"fallback_forbidden\"} 0"));
-    assert!(render_metrics_for(&g).contains("broker_leader 1\n"));
-}
-
-#[test]
-fn unreachable_at_startup_falls_back_only_after_the_retry_budget() {
+fn an_unreachable_api_never_makes_a_replica_leader() {
+    // The split-brain case: another replica may hold the lease while this
+    // one cannot reach the API. It stays a follower however long it lasts.
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let err = Err(LeaseError::Unavailable("connection refused".into()));
-    for i in 1..STARTUP_ATTEMPTS {
-        assert_eq!(
-            d.on_attempt(&err, Duration::from_secs(u64::from(i) * 2), &g),
-            Step::Continue
-        );
-        assert!(!g.is_leader_at(Duration::from_secs(u64::from(i) * 2)));
+    for i in 0..500u64 {
+        at(&mut d, &err, Duration::from_secs(i * 2), &g);
+        assert!(!g.is_leader_at(Duration::from_secs(i * 2)));
     }
-    assert_eq!(
-        d.on_attempt(&err, Duration::from_secs(100), &g),
-        Step::Fallback(Mode::FallbackUnreachable)
-    );
+    assert_eq!(g.mode(), Mode::Elected);
+    let text = render_metrics_for(&g);
+    assert!(text.contains("broker_leader 0\n"));
+    assert!(text.contains("broker_leader_election_active{mode=\"elected\"} 1\n"));
+    assert!(text.contains("broker_leader_election_errors_total 500\n"));
+    // First contact: competes normally.
+    at(&mut d, &Ok(Attempt::Leading), Duration::from_secs(1000), &g);
+    assert!(g.is_leader_at(Duration::from_secs(1000)));
 }
 
 #[test]
-fn errors_after_first_contact_never_fall_back() {
+fn a_refusal_that_clears_up_during_startup_never_falls_back() {
+    // A RoleBinding still propagating on a fresh install.
+    let g = elected_gate();
+    let mut d = Driver::new(RENEW);
+    for i in 1..STARTUP_ATTEMPTS {
+        at(
+            &mut d,
+            &refused(),
+            Duration::from_secs(u64::from(i) * 2),
+            &g,
+        );
+        assert_eq!(g.mode(), Mode::Elected);
+        assert!(!g.is_leader_at(Duration::from_secs(u64::from(i) * 2)));
+    }
+    at(
+        &mut d,
+        &Ok(Attempt::Following {
+            holder: "other".into(),
+        }),
+        Duration::from_secs(30),
+        &g,
+    );
+    assert_eq!(g.mode(), Mode::Elected);
+}
+
+#[test]
+fn a_persistent_refusal_at_startup_falls_back_and_recovers_when_rbac_arrives() {
+    let g = elected_gate();
+    let mut d = Driver::new(RENEW);
+    for i in 1..=STARTUP_ATTEMPTS {
+        at(
+            &mut d,
+            &refused(),
+            Duration::from_secs(u64::from(i) * 2),
+            &g,
+        );
+    }
+    assert_eq!(g.mode(), Mode::FallbackDenied);
+    assert!(g.is_leader(), "missing RBAC keeps today's behaviour");
+    let text = render_metrics_for(&g);
+    assert!(text.contains("broker_leader_election_active{mode=\"fallback_forbidden\"} 0"));
+    assert!(text.contains("broker_leader 1\n"));
+    // Still refused: stays in the fallback.
+    for i in 0..30u64 {
+        at(&mut d, &refused(), Duration::from_secs(100 + i * 30), &g);
+    }
+    assert_eq!(g.mode(), Mode::FallbackDenied);
+    // RBAC arrives while another replica holds the lease: this one stops
+    // acting as leader at once and follows.
+    let t = Duration::from_secs(2000);
+    at(
+        &mut d,
+        &Ok(Attempt::Following {
+            holder: "other".into(),
+        }),
+        t,
+        &g,
+    );
+    assert_eq!(g.mode(), Mode::Elected);
+    assert!(!g.is_leader_at(t));
+    at(
+        &mut d,
+        &Ok(Attempt::Leading),
+        t + Duration::from_secs(20),
+        &g,
+    );
+    assert!(g.is_leader_at(t + Duration::from_secs(20)));
+}
+
+#[test]
+fn refusals_after_first_contact_never_fall_back() {
+    // RBAC removed mid-life: zero leaders (the jobs pause), never two.
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
     let following = Ok(Attempt::Following {
         holder: "other".into(),
     });
-    d.on_attempt(&following, Duration::from_secs(1), &g);
+    at(&mut d, &following, Duration::from_secs(1), &g);
     for i in 0..50 {
-        let step = d.on_attempt(
-            &Err(LeaseError::Denied("HTTP 403".into())),
-            Duration::from_secs(2 + i),
-            &g,
-        );
-        assert_eq!(step, Step::Continue);
+        at(&mut d, &refused(), Duration::from_secs(2 + i), &g);
     }
+    assert_eq!(g.mode(), Mode::Elected);
     assert!(!g.is_leader_at(Duration::from_secs(60)));
+}
+
+#[test]
+fn a_stopped_gate_stays_closed_in_every_mode() {
+    for mode in [
+        Mode::Disabled,
+        Mode::FallbackDenied,
+        Mode::FallbackMisconfigured,
+    ] {
+        let g = LeaderGate::new();
+        g.set_mode(mode);
+        assert!(g.is_leader());
+        g.stop();
+        assert!(!g.is_leader(), "{mode:?}");
+    }
+    let g = elected_gate();
+    g.hold_until(mono_now() + Duration::from_secs(60));
+    g.stop();
+    // Even a renewal landing after shutdown cannot reopen it.
+    g.hold_until(mono_now() + Duration::from_secs(60));
+    assert!(!g.is_leader());
 }
 
 #[test]
@@ -644,24 +866,25 @@ fn fast_cadence(interval: Duration) -> Cadence {
 /// What the elector does on acquiring: open the gate, then count it.
 fn acquire(g: &LeaderGate) {
     let mut d = Driver::new(RENEW);
-    d.on_attempt(&Ok(Attempt::Leading), mono_now(), g);
+    at(&mut d, &Ok(Attempt::Leading), mono_now(), g);
 }
 
 #[test]
 fn the_elector_counts_acquisitions_not_renewals() {
     let g = elected_gate();
     let mut d = Driver::new(RENEW);
-    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
-    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
+    at(&mut d, &Ok(Attempt::Leading), mono_now(), &g);
+    at(&mut d, &Ok(Attempt::Leading), mono_now(), &g);
     assert_eq!(g.acquisitions(), 1);
-    d.on_attempt(
+    at(
+        &mut d,
         &Ok(Attempt::Following {
             holder: "other".into(),
         }),
         mono_now(),
         &g,
     );
-    d.on_attempt(&Ok(Attempt::Leading), mono_now(), &g);
+    at(&mut d, &Ok(Attempt::Leading), mono_now(), &g);
     assert_eq!(g.acquisitions(), 2);
 }
 
@@ -1028,11 +1251,13 @@ mod http {
             matches!(&r, Err(LeaseError::Denied(m)) if m.contains("forbidden")),
             "{r:?}"
         );
+        // Refused for the whole startup budget: the missing-RBAC fallback.
         let g = elected_gate();
-        assert_eq!(
-            Driver::new(RENEW).on_attempt(&r, Duration::from_secs(1), &g),
-            Step::Fallback(Mode::FallbackDenied)
-        );
+        let mut d = Driver::new(RENEW);
+        for i in 1..=STARTUP_ATTEMPTS {
+            at(&mut d, &r, Duration::from_secs(u64::from(i)), &g);
+        }
+        assert_eq!(g.mode(), Mode::FallbackDenied);
     }
 
     #[actix_web::test]
