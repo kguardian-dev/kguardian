@@ -373,4 +373,22 @@ describe('localPodForRow — a reused pod IP', () => {
     // Nobody of that name held the IP then: nothing, not the php pod.
     expect(localPodForRow(noNs({ ...argocdRow, time_stamp: '2026-09-29T02:00:00' }), twins)).toBeNull();
   });
+
+  test('a namespaceless row whose own record is pruned is not given a same-named pod of another namespace', () => {
+    const noNs = (r: NetworkTraffic, over: Partial<NetworkTraffic> = {}): NetworkTraffic => ({ ...r, pod_namespace: null, ...over });
+    // The argocd record is gone; the only one of that name lives elsewhere.
+    const elsewhere = pod({
+      pod_name: argocd.pod_name, pod_ip: '10.62.7.7', pod_namespace: 'argocd-other',
+      started_at: '2026-09-01T00:00:00', time_stamp: '2026-09-29T08:00:00',
+    });
+    expect(localPodForRow(noNs(argocdRow), buildPeerIndex([php, elsewhere]))).toBeNull();
+    // Same name and IP, but it started after the flow: it did not capture it.
+    const later = pod({
+      pod_name: argocd.pod_name, pod_ip: ip, pod_namespace: 'argocd-other',
+      started_at: '2026-09-29T06:00:00', time_stamp: '2026-09-29T08:00:00',
+    });
+    expect(localPodForRow(noNs(argocdRow), buildPeerIndex([php, later]))).toBeNull();
+    // With no pod_ip to check, a unique name is still matched.
+    expect(localPodForRow(noNs(argocdRow, { pod_ip: null }), buildPeerIndex([php, elsewhere]))?.pod_namespace).toBe('argocd-other');
+  });
 });
