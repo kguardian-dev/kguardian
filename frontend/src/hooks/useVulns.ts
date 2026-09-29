@@ -148,12 +148,15 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
 export const CVE_IMAGE_READS = 10;
 /** Findings per page of an image read in the drawer (the Broker's maximum). */
 export const CVE_FINDING_PAGE_SIZE = 500;
-/** Pages of one image's findings the drawer reads looking for the CVE: the read has no CVE filter. */
+/** Pages of one image's findings the drawer reads looking for the CVE, for a Broker that ignores `vuln_id`. */
 export const CVE_FINDING_PAGES = 4;
 
 /**
  * Every finding of CVE `id` in one image: one per package and version that
- * carries it. Pages until each package the exposure lists is found, the
+ * carries it. The read asks for that CVE alone (`vuln_id`), so a Broker that
+ * supports it answers in one page. An older Broker ignores the parameter and
+ * returns every finding, so rows of other CVEs are still skipped here and
+ * the read pages until each package the exposure lists is found, the
  * findings (most severe first) are past the CVE's least severe package, or
  * the image has no more. `complete` is false when CVE_FINDING_PAGES ran out
  * first: what was found is part of the answer, not all of it. Stops (and
@@ -166,7 +169,7 @@ async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage, curren
   let after: string | undefined;
   for (let page = 0; page < CVE_FINDING_PAGES; page++) {
     if (!current()) break;
-    const v = await api.getImageVulns(img.digest, { limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
+    const v = await api.getImageVulns(img.digest, { vulnId: id, limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) }, signal);
     for (const f of v.items) {
       if (f.id !== id) continue;
       matches.push(f);

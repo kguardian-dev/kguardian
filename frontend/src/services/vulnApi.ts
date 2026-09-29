@@ -183,10 +183,15 @@ export class VulnApi {
     return this.json<ImageDetail>(`/images/${seg(digest)}`);
   }
 
-  /** `GET /images/{digest}/vulnerabilities`: deduplicated findings + the reports behind them. */
-  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } & TierFilters = {}, signal?: AbortSignal): Promise<ImageVulnsPage> {
-    const { tier, kev, epssMin, inUse, ...rest } = q;
-    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, ...tierParams({ tier, kev, epssMin, inUse }) }, false, signal);
+  /**
+   * `GET /images/{digest}/vulnerabilities`: deduplicated findings + the
+   * reports behind them. `vulnId` (`vuln_id`) asks for one CVE's findings
+   * only (case-insensitive exact match); a Broker predating it ignores the
+   * parameter and returns every finding, so callers still filter by id.
+   */
+  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string; vulnId?: string } & TierFilters = {}, signal?: AbortSignal): Promise<ImageVulnsPage> {
+    const { tier, kev, epssMin, inUse, vulnId, ...rest } = q;
+    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, vuln_id: vulnId, ...tierParams({ tier, kev, epssMin, inUse }) }, false, signal);
   }
 
   /** `GET /images/{digest}/sbom`: every source's SBOM (reports) and one's components. */

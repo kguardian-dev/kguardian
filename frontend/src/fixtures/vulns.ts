@@ -121,7 +121,11 @@ const requestLine = (input: RequestInfo | URL) => {
   return `GET ${url.pathname.replace(/^\/api/, '')}${url.search}`;
 };
 
-/** The captured answer for one request line (`extra` first; `limit=` falls back to the capture without it; otherwise an empty 404). */
+/**
+ * The captured answer for one request line (`extra` first; `limit=` falls
+ * back to the capture without it; otherwise an empty 404). `vuln_id=` falls
+ * back the same way: the captured Brokers predate it and ignore it.
+ */
 function replayAnswer(extra: Capture[], set: CaptureSet): (line: string) => Response {
   const all = [...extra, ...SETS[set].values()];
   const norm = (r: string) => decodeURIComponent(r.replace(/\+/g, ' '));
@@ -129,6 +133,7 @@ function replayAnswer(extra: Capture[], set: CaptureSet): (line: string) => Resp
     const noLimit = (() => {
       const u = new URL(line.slice(4), 'http://x');
       u.searchParams.delete('limit');
+      u.searchParams.delete('vuln_id');
       return `GET ${u.pathname}${u.search}`;
     })();
     const hit = all.find((c) => norm(c.request) === norm(line)) ?? all.find((c) => norm(c.request) === norm(noLimit));
