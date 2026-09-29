@@ -1,5 +1,65 @@
 # Upgrading the kguardian Helm chart
 
+## Check this before upgrading if you use the chart's ingress or SSO: the UI now refuses unknown host names (`frontend.allowedHosts`)
+
+**If users open the UI on a name the chart does not know, they get a 403
+after this upgrade.** The browser shows exactly:
+
+```
+Blocked request. This host ("kguardian.other.example.com") is not allowed.
+To allow this host, add "kguardian.other.example.com" to `preview.allowedHosts` in vite.config.js.
+```
+
+Ignore the second line: with this chart, the fix is `frontend.allowedHosts`,
+not vite.config.js.
+
+Why: the UI server used to answer requests for any `Host` header. Its `/api`
+proxy attaches the broker read token, so a web page that rebinds its own DNS
+name to the UI's address could read the broker through a user's browser. The
+chart now passes the names it knows to the UI as `ALLOWED_HOSTS`, and the
+server refuses every other host.
+
+The names the chart knows:
+
+- `frontend.ingress.hosts[].host` and `frontend.ingress.tls[].hosts`, when
+  `frontend.ingress.enabled` is true;
+- `frontend.sso.hostnames`, when `frontend.sso.enabled` is true;
+- the new `frontend.allowedHosts` (a list, or one comma-separated string);
+- the frontend Service's in-cluster names: `<svc>`, `<svc>.<ns>`,
+  `<svc>.<ns>.svc` and `<svc>.<ns>.svc.<global.clusterDomain>`
+  (`global.clusterDomain` is new and defaults to `cluster.local`).
+
+`localhost` and IP addresses are always answered, so `kubectl port-forward`
+and kubelet probes are unaffected.
+
+What to do:
+
+- **Neither ingress, SSO nor `frontend.allowedHosts` is set:** nothing
+  changes. The server answers every host as before and logs a warning at
+  startup. Set `frontend.allowedHosts` to turn the check on.
+- **An ingress rule has an empty host (a catch-all):** nothing changes. The
+  chart treats it as "accept any name" and restricts hosts only if you set
+  `frontend.allowedHosts`.
+- **You use the chart's ingress or SSO route, and users reach the UI only on
+  those names:** nothing.
+- **Users also reach the UI on a name the chart cannot see:** add every such
+  name to `frontend.allowedHosts` before upgrading. The chart cannot see:
+  - an nginx `nginx.ingress.kubernetes.io/server-alias` annotation;
+  - a LoadBalancer or NodePort Service reached by a DNS name (IP addresses
+    still work);
+  - hostnames on your own HTTPRoute beyond `frontend.sso.hostnames`, or an
+    HTTPRoute with no hostnames at all;
+  - a controller that rewrites Host (nginx `upstream-vhost`, an Istio
+    authority rewrite): list the name it rewrites to;
+  - the load balancer's own DNS name, such as an ALB's
+    `internal-k8s-….elb.amazonaws.com`;
+  - a trailing-dot name (`kguardian.example.com.`), which is matched as
+    written.
+
+`*.example.com` in `frontend.allowedHosts` matches `example.com` itself and
+its subdomains at any depth, which is broader than a Kubernetes wildcard (one
+label).
+
 ## Upgrading to 1.27.0
 
 1.27.0 is a minor release that carries one breaking change for installs with

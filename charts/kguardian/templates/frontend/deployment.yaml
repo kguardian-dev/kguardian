@@ -56,6 +56,64 @@ spec:
             {{- if or (eq (include "kguardian.brokerAuthMode" $) "scoped") .Values.frontend.brokerAuth.allowSharedToken }}
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
             {{- end }}
+            {{- /* Host names the UI server answers (vite allowedHosts), so a page
+                   that rebinds its own name to the UI cannot use the /api proxy.
+                   Set only when the chart knows every external name; otherwise the
+                   server answers any host and logs a warning. An ingress rule or
+                   SSO hostname left empty is a catch-all: the operator accepts any
+                   name, so those values alone do not restrict the server.
+                   frontend.allowedHosts always does. */}}
+            {{- $extra := .Values.frontend.allowedHosts | default list }}
+            {{- if kindIs "string" $extra }}
+            {{- $extra = splitList "," $extra }}
+            {{- end }}
+            {{- if not (kindIs "slice" $extra) }}
+            {{- fail "frontend.allowedHosts must be a list of host names, or one comma-separated string" }}
+            {{- end }}
+            {{- $known := list }}
+            {{- $catchAll := false }}
+            {{- if .Values.frontend.ingress.enabled }}
+            {{- range .Values.frontend.ingress.hosts }}
+            {{- if .host }}
+            {{- $known = append $known .host }}
+            {{- else }}
+            {{- $catchAll = true }}
+            {{- end }}
+            {{- end }}
+            {{- range .Values.frontend.ingress.tls }}
+            {{- $known = concat $known (.hosts | default list) }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.frontend.sso.enabled }}
+            {{- $ssoHosts := .Values.frontend.sso.hostnames | default list }}
+            {{- if not (kindIs "slice" $ssoHosts) }}
+            {{- fail "frontend.sso.hostnames must be a list of host names" }}
+            {{- end }}
+            {{- range $ssoHosts }}
+            {{- if . }}
+            {{- $known = append $known . }}
+            {{- else }}
+            {{- $catchAll = true }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- $explicit := list }}
+            {{- range $extra }}
+            {{- $explicit = append $explicit (trim .) }}
+            {{- end }}
+            {{- $explicit = compact $explicit }}
+            {{- $hosts := list }}
+            {{- if or $explicit (not $catchAll) }}
+            {{- $hosts = compact (concat $known $explicit) }}
+            {{- end }}
+            {{- if $hosts }}
+            {{- $svc := .Values.frontend.service.name }}
+            {{- $ns := include "kguardian.namespace" . | trim }}
+            {{- $domain := .Values.global.clusterDomain | default "cluster.local" }}
+            {{- $hosts = concat $hosts (list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.%s" $svc $ns $domain)) }}
+            - name: ALLOWED_HOSTS
+              value: {{ $hosts | uniq | join "," | quote }}
+            {{- end }}
             {{- if include "kguardian.llmBridgeEnabled" . }}
             - name: VITE_LLM_BRIDGE_URL
               value: "http://{{ .Values.llmBridge.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.llmBridge.service.port }}"

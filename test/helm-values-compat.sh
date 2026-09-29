@@ -909,6 +909,51 @@ render "seccomp-stale-window-disabled" --set seccomp.distribute=true \
 # Without distribution no node ever posts, so the interval is not checked.
 render "seccomp-stale-window-no-distribution" --set seccomp.distributeIntervalSeconds=3600
 
+# UI host allowlist (ALLOWED_HOSTS). Set only when the chart knows the names
+# users open the UI on; with none, an existing install keeps answering every
+# host (the server logs a warning), so an upgrade never locks anyone out.
+SVC_HOSTS="kguardian-frontend,kguardian-frontend.kg,kguardian-frontend.kg.svc,kguardian-frontend.kg.svc.cluster.local"
+render "allowed-hosts-default" -n kg && assert_absent "allowed-hosts-default" "ALLOWED_HOSTS"
+render "allowed-hosts-ingress" -n kg --set frontend.ingress.enabled=true \
+  --set 'frontend.ingress.tls[0].secretName=kg-tls' --set 'frontend.ingress.tls[0].hosts[0]=kguardian.example.com' \
+  --set 'frontend.ingress.tls[0].hosts[1]=alt.example.com' && \
+  assert_has "allowed-hosts-ingress" "value: \"kguardian.example.com,alt.example.com,$SVC_HOSTS\""
+render "allowed-hosts-sso" -n kg --set frontend.sso.enabled=true --set frontend.sso.httpRouteName=kg \
+  --set 'frontend.sso.hostnames[0]=kg.example.com' --set 'frontend.sso.parentRefs[0].name=gw' && \
+  assert_has "allowed-hosts-sso" "value: \"kg.example.com,$SVC_HOSTS\""
+render "allowed-hosts-extra" -n kg --set 'frontend.allowedHosts[0]=*.corp.example.com' && \
+  assert_has "allowed-hosts-extra" "value: \"\*.corp.example.com,$SVC_HOSTS\""
+# A catch-all ingress rule (empty host) answers every name, so its TLS hosts
+# alone must not lock the UI down to them.
+# (--set-json: `--set hosts[0].host=` drops the rule instead of emptying the host.)
+CATCH_ALL=(--set frontend.ingress.enabled=true
+  --set-json 'frontend.ingress.hosts=[{"host":"","paths":[{"path":"/","pathType":"Prefix"}]}]'
+  --set 'frontend.ingress.tls[0].secretName=kg-tls' --set 'frontend.ingress.tls[0].hosts[0]=a.example.com')
+render "allowed-hosts-catch-all-ingress" -n kg "${CATCH_ALL[@]}" && {
+  assert_has    "allowed-hosts-catch-all-ingress" 'host: ""'
+  assert_absent "allowed-hosts-catch-all-ingress" "ALLOWED_HOSTS"
+}
+# A rule with no host key at all is a catch-all too.
+render "allowed-hosts-hostless-ingress" -n kg --set frontend.ingress.enabled=true \
+  --set-json 'frontend.ingress.hosts=[{"paths":[{"path":"/","pathType":"Prefix"}]}]' && \
+  assert_absent "allowed-hosts-hostless-ingress" "ALLOWED_HOSTS"
+# ...unless the operator lists names explicitly.
+render "allowed-hosts-catch-all-ingress-explicit" -n kg "${CATCH_ALL[@]}" --set 'frontend.allowedHosts[0]=b.example.com' && \
+  assert_has "allowed-hosts-catch-all-ingress-explicit" "value: \"a.example.com,b.example.com,$SVC_HOSTS\""
+# The same for an empty SSO hostname.
+render "allowed-hosts-catch-all-sso" -n kg --set frontend.sso.enabled=true --set frontend.sso.httpRouteName=kg \
+  --set-json 'frontend.sso.hostnames=["kg.example.com",""]' --set 'frontend.sso.parentRefs[0].name=gw' && \
+  assert_absent "allowed-hosts-catch-all-sso" "ALLOWED_HOSTS"
+# A comma-separated string works (--set frontend.allowedHosts=a,b needs escaping; a quoted string is the common form).
+render "allowed-hosts-string" -n kg --set-string 'frontend.allowedHosts=foo.example.com\, bar.example.com' && \
+  assert_has "allowed-hosts-string" "value: \"foo.example.com,bar.example.com,$SVC_HOSTS\""
+render "allowed-hosts-single-string" -n kg --set 'frontend.allowedHosts=foo.example.com' && \
+  assert_has "allowed-hosts-single-string" "value: \"foo.example.com,$SVC_HOSTS\""
+assert_render_fails "allowed-hosts-map" "frontend.allowedHosts must be a list" -n kg --set 'frontend.allowedHosts.a=b'
+# The full in-cluster name follows global.clusterDomain.
+render "allowed-hosts-cluster-domain" -n kg --set 'frontend.allowedHosts[0]=x.example.com' --set global.clusterDomain=corp.internal && \
+  assert_has "allowed-hosts-cluster-domain" "kguardian-frontend.kg.svc.corp.internal\""
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

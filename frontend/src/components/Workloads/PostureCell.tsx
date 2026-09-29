@@ -65,20 +65,23 @@ export function PostureCell({
   ]
     .filter(Boolean)
     .join('. ');
+  // The failed-snapshot note sits under the pill, so the column stays narrow.
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <StatusPill status={status} title={title}>
-        {STATUS_LABEL[status]}
-      </StatusPill>
-      {/* Coverage whenever anything is known: a partial unknown is not a blank one. */}
-      {item.posture.coverage > 0 && (
-        <span className="font-mono text-[11px] tabular-nums text-tertiary" title={title}>
-          {coverage}%
-        </span>
-      )}
+    <span className="inline-flex flex-col items-start gap-0.5">
+      <span className="inline-flex items-center gap-1.5">
+        <StatusPill status={status} title={title}>
+          {STATUS_LABEL[status]}
+        </StatusPill>
+        {/* Coverage whenever anything is known: a partial unknown is not a blank one. */}
+        {item.posture.coverage > 0 && (
+          <span className="font-mono text-[11px] tabular-nums text-tertiary" title={title}>
+            {coverage}%
+          </span>
+        )}
+      </span>
       {(item.lastError || item.failedAt) && (
         <span className="text-[11px] text-severity-medium" title={title} data-testid="posture-stale">
-          · snapshot failed{failedAgo ? ` ${failedAgo}` : ''}
+          snapshot failed{failedAgo ? ` ${failedAgo}` : ''}
         </span>
       )}
     </span>

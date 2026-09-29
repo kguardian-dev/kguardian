@@ -11,6 +11,10 @@ import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
 import { CaptureBadge, CrNodes, StatePill } from './Seccomp';
 import { DriftCell, NetworkPill } from './Workloads/cells';
 import { PostureCell } from './Workloads/PostureCell';
+import {
+  applyColumnFilters, columnFilterClauses, COLUMN_FILTER_OPTIONS, joinClauses, NO_COLUMN_FILTERS, shownColumnFilters,
+  unknownRowsNote, type ColumnFilters,
+} from './Workloads/filters';
 import { POSTURE_AUTO_PAGES, useWorkloadPostures } from '../hooks/useWorkloadProfile';
 import { errorMessage } from '../services/profileApi';
 import type { PostureStatus } from '../types/profile';
@@ -50,11 +54,12 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
 const DRIFT_TITLE = 'Workloads with observed syscalls their deployed CR does not allow (blocked when enforcing). Syscalls the CR allows but never observed are not counted.';
 const PARTIAL_TITLE = 'Workloads with a pod below full syscall capture';
 
-/** Why every posture filter reads empty, in the user's terms rather than the pod-discovery copy. */
-function emptyDescription(scopeLabel: string, query: string, postureFilter: PostureStatus | '', seccompMode: boolean): string {
+/** Why the filtered table reads empty, naming every active filter rather than the pod-discovery copy. */
+function emptyDescription(scopeLabel: string, query: string, postureFilter: PostureStatus | '', columns: string[], seccompMode: boolean): string {
   const posture = postureFilter ? (postureFilter === 'unknown' ? 'no posture data' : `posture ${STATUS_LABEL[postureFilter]}`) : '';
-  if (posture && query) return `No workload in ${scopeLabel} has ${posture} and a name or namespace containing “${query}”.`;
-  if (posture) return `No workload in ${scopeLabel} has ${posture} in the Broker's profile list.`;
+  const clauses = [posture, ...columns].filter(Boolean);
+  if (clauses.length && query) return `No workload in ${scopeLabel} has ${joinClauses([...clauses, `a name or namespace containing “${query}”`])}.`;
+  if (clauses.length) return `No workload in ${scopeLabel} has ${joinClauses(clauses)}${columns.length === 0 ? " in the Broker's profile list" : ''}.`;
   if (query) return `No workload name or namespace in ${scopeLabel} contains “${query}”.`;
   return seccompMode
     ? 'A workload appears once the controller has reported syscalls for it and it has an owning controller (Deployment, StatefulSet, DaemonSet, CronJob).'
@@ -73,6 +78,7 @@ function emptyDescription(scopeLabel: string, query: string, postureFilter: Post
 export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload, refreshTick }: WorkloadsViewProps) {
   const [query, setQuery] = useState('');
   const [postureFilter, setPostureFilter] = useState<PostureStatus | ''>('');
+  const [columnFilters, setColumnFilters] = useState<ColumnFilters>(NO_COLUMN_FILTERS);
   const seccompMode = control === 'seccomp';
   // The name filter also narrows the posture request (server-side search) and
   // the seccomp fallback reads, debounced so typing does not fire one request
@@ -83,20 +89,39 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
     (r: WorkloadRow) => (allNamespaces || r.namespace === namespace) && (!q || r.key.toLowerCase().includes(q)),
     [allNamespaces, namespace, q],
   );
-  const { rows: allRows, loading, error, profiles, seccompUnavailable, verdictsUnavailable } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace, { visible });
+  const { rows: allRows, loading, error, profiles, seccompUnavailable, verdictsUnavailable, verdictsLoading } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace, { visible });
+  // The filter matches namespace/kind/name; the Broker's search matches the
+  // name only. It narrows the posture request only while it finds the same
+  // rows, so a namespace or kind match is not read as "no snapshot".
+  const nameSearch = useMemo(
+    () => (search && allRows.filter(visible).every((r) => r.name.toLowerCase().includes(q)) ? search : undefined),
+    [search, q, allRows, visible],
+  );
   // The posture column only exists on the all-controls table; the seccomp
   // columns never ask for it.
-  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, search || undefined, refreshTick, undefined, undefined, !seccompMode);
+  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, nameSearch, refreshTick, undefined, undefined, !seccompMode);
+  // Under a posture filter the rows are the Broker's answer; without one there is nothing to filter by.
+  const postureFilterUnread = !seccompMode && !!postureFilter && postures.byKey.size === 0 && (postures.loading || postures.error != null);
 
-  const rows = useMemo(() => {
+  const filtered = useMemo(() => {
     const qi = query.trim().toLowerCase();
-    return allRows
+    const matched = allRows
       .filter((r) => allNamespaces || r.namespace === namespace)
       .filter((r) => !seccompMode || r.profile)
       // A posture filter is server-side: keep the rows the Broker returned.
       .filter((r) => seccompMode || !postureFilter || postures.byKey.has(r.key))
       .filter((r) => !qi || r.key.toLowerCase().includes(qi));
-  }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey]);
+    return applyColumnFilters(matched, columnFilters, seccompMode, { verdictsUnknown: verdictsLoading || verdictsUnavailable });
+  }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey, columnFilters, verdictsLoading, verdictsUnavailable]);
+  const { rows } = filtered;
+  const unknownNote = unknownRowsNote(filtered);
+  const columnClauses = columnFilterClauses(columnFilters, seccompMode);
+  const filtering = query.trim() !== '' || (!seccompMode && postureFilter !== '') || columnClauses.length > 0;
+  const clearFilters = () => {
+    setQuery('');
+    setPostureFilter('');
+    setColumnFilters(NO_COLUMN_FILTERS);
+  };
 
   // Page postures until every rendered row has one or the Broker has no
   // more, a bounded number of times; past that the user asks.
@@ -132,8 +157,11 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
         title: 'Workloads whose SeccompProfile CR blocks unlisted syscalls',
         onClick: () => onControlChange('seccomp'),
       }),
-      verdictsUnavailable
-        ? { label: 'Would-deny (recent)', value: '—', icon: ShieldAlert, tone: 'text-tertiary', title: 'Unknown: the audit verdicts could not be read' }
+      verdictsUnavailable || verdictsLoading
+        ? {
+            label: 'Would-deny (recent)', value: '—', icon: ShieldAlert, tone: 'text-tertiary',
+            title: verdictsUnavailable ? 'Unknown: the audit verdicts could not be read' : 'Unknown until the audit verdicts have loaded',
+          }
         : {
             label: 'Would-deny (recent)', value: wouldDeny, icon: ShieldAlert, tone: warn(wouldDeny),
             title: 'Workloads that are the subject of a WouldDeny verdict among the latest 500 audit verdicts of each kind. A recent window, not policy coverage: kguardian does not know which policies select a workload.',
@@ -141,7 +169,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
       seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE }),
       seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE }),
     ];
-  }, [rows, seccompMode, seccompUnavailable, verdictsUnavailable, loading, onControlChange]);
+  }, [rows, seccompMode, seccompUnavailable, verdictsUnavailable, verdictsLoading, loading, onControlChange]);
 
   const scopeLabel = allNamespaces ? 'all namespaces' : namespace;
 
@@ -214,6 +242,24 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 </select>
               </label>
             )}
+            {shownColumnFilters(seccompMode).map((k) => (
+                <label key={k} className="flex items-center gap-1.5 text-xs text-tertiary">
+                  {COLUMN_FILTER_OPTIONS[k].label}
+                  <select
+                    value={columnFilters[k]}
+                    onChange={(e) => setColumnFilters((f) => ({ ...f, [k]: e.target.value }))}
+                    className={`h-8 rounded-control border bg-hubble-darker px-2 text-xs text-primary ${columnFilters[k] ? 'border-hubble-accent' : 'border-hubble-border'}`}
+                  >
+                    <option value="">Any</option>
+                    {COLUMN_FILTER_OPTIONS[k].options.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            {filtering && (
+              <Button variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button>
+            )}
             <div role="group" aria-label="Control" className="inline-flex rounded-control border border-hubble-border overflow-hidden">
               {CONTROLS.map((c) => {
                 const on = c.id === control;
@@ -232,13 +278,25 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
             </div>
             </div>
           </header>
+          {unknownNote && (
+            <p role="status" className="px-4 py-2 text-[11px] text-tertiary border-b border-hubble-border" data-testid="filter-unknown">
+              {unknownNote}
+            </p>
+          )}
 
-          {loading && profiles.length === 0 && (seccompMode || allRows.length === 0) ? (
+          {(loading && profiles.length === 0 && (seccompMode || allRows.length === 0)) || (postureFilterUnread && postures.loading) ? (
             <div className="space-y-2 p-3" aria-busy="true" aria-label="Loading">
               <Skeleton className="h-8 w-full" />
               <Skeleton className="h-8 w-5/6" />
               <Skeleton className="h-8 w-2/3" />
             </div>
+          ) : postureFilterUnread ? (
+            <EmptyState
+              icon={CloudOff}
+              title="Posture could not be read"
+              description={`The Broker did not answer the posture list, so the ${STATUS_LABEL[postureFilter as PostureStatus]} filter has nothing to show: ${errorMessage(postures.error)}. Refresh from the header to try again, or set Posture to Any.`}
+              compact
+            />
           ) : rows.length === 0 ? (
             seccompMode && seccompUnavailable ? (
               <EmptyState
@@ -250,8 +308,8 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
             ) : (
               <EmptyState
                 icon={Radar}
-                title={query || postureFilter ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
-                description={emptyDescription(scopeLabel, query.trim(), postureFilter, seccompMode)}
+                title={filtering ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
+                description={emptyDescription(scopeLabel, query.trim(), seccompMode ? '' : postureFilter, columnClauses, seccompMode)}
                 compact
               />
             )
@@ -294,26 +352,34 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                       onClick={() => onOpenWorkload(target)}
                       className="cursor-pointer hover:bg-hubble-hover/40 transition-colors"
                     >
-                      <td className="px-4 py-2.5 min-w-0">
-                        <a
-                          href={routeHref('workload', target)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="font-medium text-primary truncate hover:underline"
-                        >
-                          {r.name}
-                        </a>
-                        <div className="text-[11px] text-tertiary font-mono truncate">
-                          {r.kind}
-                          {allNamespaces && ` · ${r.namespace}`}
+                      <td className="px-4 py-2.5">
+                        {/* Long names are cut, not allowed to push the table wider than a laptop screen. */}
+                        <div className="max-w-[13rem] 2xl:max-w-[18rem]" title={`${r.namespace}/${r.kind}/${r.name}`}>
+                          <a
+                            href={routeHref('workload', target)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="block font-medium text-primary truncate hover:underline"
+                          >
+                            {r.name}
+                          </a>
+                          <div className="text-[11px] text-tertiary font-mono truncate">
+                            {r.kind}
+                            {allNamespaces && ` · ${r.namespace}`}
+                          </div>
                         </div>
                       </td>
                       {seccompMode && r.profile ? (
                         <>
                           <td className="px-3 py-2.5">{r.capture && <CaptureBadge capture={r.capture} />}</td>
                           <td className="px-3 py-2.5">
-                            <span className="inline-flex items-center gap-1.5">
+                            {/* The CR name under the pill, cut to the column. */}
+                            <span className="inline-flex flex-col items-start gap-0.5">
                               <StatePill state={r.seccomp} />
-                              {r.profile.cr && <span className="font-mono text-[11px] text-tertiary">{r.profile.cr.name}</span>}
+                              {r.profile.cr && (
+                                <span className="block font-mono text-[11px] text-tertiary truncate max-w-[11rem]" title={r.profile.cr.name}>
+                                  {r.profile.cr.name}
+                                </span>
+                              )}
                             </span>
                           </td>
                           <td className="px-3 py-2.5">{r.profile.cr ? <CrNodes cr={r.profile.cr} /> : <span className="font-mono text-xs text-tertiary">—</span>}</td>

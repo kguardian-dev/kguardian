@@ -221,8 +221,10 @@ export const POSTURE_AUTO_PAGES = 5;
  * filter change / refresh, further pages through `loadMore` (the table calls
  * it while rendered rows are uncovered, up to POSTURE_AUTO_PAGES, then the
  * user does). `pages` counts the pages fetched since the last first page.
- * `namespace`, `status` and `search` are server-side filters. `error` set means the column is unavailable (older
- * Broker, read budget); the rest of the table works.
+ * `namespace`, `status` and `search` are server-side filters; a change to
+ * any of them empties `byKey` until the new first page answers. `error` set
+ * means the column is unavailable (older Broker, read budget); after a failed
+ * first page `byKey` is empty. The rest of the table works.
  */
 export function useWorkloadPostures(
   namespace: string | undefined,
@@ -250,6 +252,16 @@ export function useWorkloadPostures(
     [api, namespace, status, search, pageSize],
   );
 
+  // The query the rows in `byKey` answer. Rows for another scope or filter are
+  // no answer for this one: under a posture filter they would list workloads
+  // that do not have that posture.
+  const rowsQuery = useRef(page);
+  const clear = useCallback(() => {
+    setByKey(new Map());
+    setNextAfter(null);
+    setPages(0);
+  }, []);
+
   const load = useCallback(async () => {
     if (!enabled) return;
     const current = begin();
@@ -257,6 +269,10 @@ export function useWorkloadPostures(
     setLoading(true);
     // A new first page supersedes any page-more in flight, whose own reset is skipped.
     setLoadingMore(false);
+    if (rowsQuery.current !== page) {
+      rowsQuery.current = page;
+      clear();
+    }
     try {
       const p = await page(undefined);
       if (!current()) return;
@@ -265,14 +281,17 @@ export function useWorkloadPostures(
       setPages(1);
       setError(null);
     } catch (err) {
-      if (current()) setError(err);
+      if (!current()) return;
+      // A refresh that failed cannot vouch for the rows it was meant to replace.
+      clear();
+      setError(err);
     } finally {
       if (current()) {
         firstPageInFlight.current = false;
         setLoading(false);
       }
     }
-  }, [page, begin, enabled]);
+  }, [page, begin, enabled, clear]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / scope or filter change / refresh

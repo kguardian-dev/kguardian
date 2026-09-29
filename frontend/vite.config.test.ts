@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
-import { applyBrokerAuth, brokerAuthHeader, brokerProxy, brokerProxyDecision, refuseDisallowed } from './vite.config'
+import config, {
+  allowedHostsFromEnv, applyBrokerAuth, brokerAuthHeader, brokerProxy, brokerProxyDecision, llmProxy, llmProxyDecision,
+  refuseDisallowed, SECURITY_HEADERS,
+} from './vite.config'
 
 class FakeProxyReq {
   headers = new Map<string, string>()
@@ -115,5 +118,80 @@ describe('broker proxy allowlist', () => {
     expect(pass.ended).toBe(false)
 
     expect(refuseDisallowed({ method: 'POST', url: '/api/pod/mark_dead' }, undefined)).toBe(false)
+  })
+})
+
+describe('allowed hosts', () => {
+  it('reads a comma-separated ALLOWED_HOSTS, trimmed and lowercased', () => {
+    expect(allowedHostsFromEnv({ ALLOWED_HOSTS: ' KGuardian.example.com , kguardian-frontend,,kguardian-frontend.kguardian.svc ' }))
+      .toEqual(['kguardian.example.com', 'kguardian-frontend', 'kguardian-frontend.kguardian.svc'])
+  })
+
+  it('turns an ingress wildcard into vite\'s subdomain form', () => {
+    expect(allowedHostsFromEnv({ ALLOWED_HOSTS: '*.example.com' })).toEqual(['.example.com'])
+  })
+
+  it('stays permissive when ALLOWED_HOSTS is unset or blank, so existing installs keep working', () => {
+    expect(allowedHostsFromEnv({})).toBe(true)
+    expect(allowedHostsFromEnv({ ALLOWED_HOSTS: ' , ' })).toBe(true)
+  })
+
+  it('is what both the dev server and vite preview use', () => {
+    // The config module is evaluated with the test process's env, where ALLOWED_HOSTS is unset.
+    expect(config.server?.allowedHosts).toEqual(allowedHostsFromEnv())
+    expect(config.preview?.allowedHosts).toEqual(allowedHostsFromEnv())
+  })
+})
+
+describe('security headers', () => {
+  it('vite preview sends them on every response', () => {
+    expect(config.preview?.headers).toEqual(SECURITY_HEADERS)
+  })
+
+  it('refuse framing and sniffing, and load images only from the app itself', () => {
+    expect(SECURITY_HEADERS['X-Content-Type-Options']).toBe('nosniff')
+    expect(SECURITY_HEADERS['X-Frame-Options']).toBe('DENY')
+    const csp = SECURITY_HEADERS['Content-Security-Policy']
+    expect(csp).toContain("frame-ancestors 'none'")
+    expect(csp).toContain("img-src 'self' data:")
+    expect(csp).toContain("script-src 'self'")
+    expect(csp).not.toMatch(/script-src[^;]*unsafe/)
+  })
+})
+
+describe('llm-bridge proxy', () => {
+  it('forwards only the chat stream the UI posts to', () => {
+    expect(llmProxyDecision('POST', '/llm-api/api/chat/stream')).toEqual({ allow: true })
+    expect(llmProxyDecision('POST', '/llm-api/api/chat/stream?x=1')).toEqual({ allow: true })
+    expect(llmProxyDecision('GET', '/llm-api/health')).toEqual({ allow: true })
+    expect(llmProxyDecision('GET', '/llm-api/api/chat/stream')).toMatchObject({ allow: false, status: 405 })
+    expect(llmProxyDecision('POST', '/llm-api/mcp')).toMatchObject({ allow: false, status: 404 })
+    expect(llmProxyDecision('POST', '/llm-api/api/chat')).toMatchObject({ allow: false, status: 404 })
+    expect(llmProxyDecision('POST', '/llm-api/api/chat/stream/../../mcp')).toMatchObject({ allow: false, status: 404 })
+  })
+
+  it('answers a refused request itself', () => {
+    const opts = llmProxy({ VITE_LLM_BRIDGE_URL: 'http://bridge:8080' })
+    expect(opts.target).toBe('http://bridge:8080')
+    expect(opts.rewrite?.('/llm-api/api/chat/stream')).toBe('/api/chat/stream')
+    const res = { statusCode: 200, headers: {} as Record<string, string>, body: '', ended: false,
+      setHeader(n: string, v: string) { this.headers[n] = v },
+      end(b?: string) { this.body = b ?? ''; this.ended = true } }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out = opts.bypass?.({ method: 'POST', url: '/llm-api/mcp' } as any, res as any, opts)
+    expect(res.statusCode).toBe(404)
+    expect(res.ended).toBe(true)
+    expect(typeof out).toBe('string')
+  })
+
+  it('never passes the browser\'s Authorization header (an SSO ID token behind oauth2-proxy) to the bridge', () => {
+    const opts = llmProxy({})
+    const proxy = new EventEmitter()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    opts.configure?.(proxy as any, opts)
+    const req = new FakeProxyReq()
+    req.setHeader('Authorization', 'Bearer sso-id-token')
+    proxy.emit('proxyReq', req, { method: 'POST', url: '/llm-api/api/chat/stream' })
+    expect(req.headers.has('authorization')).toBe(false)
   })
 })
