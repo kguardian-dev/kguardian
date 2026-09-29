@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.19.7](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.6...broker/v1.19.7) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** allow a Service's targetPort in generated egress rules ([82b8135](https://github.com/kguardian-dev/kguardian/commit/82b8135d3e9f92670e4ed80a0fd018cd79bc73df))
+* **broker:** allow a Service's targetPort, not its port, on generated egress rules ([61bbc02](https://github.com/kguardian-dev/kguardian/commit/61bbc02668747ed306acd4c19da0ee533c4bcb11))
+* **broker:** build the migrations' skipped indexes first and bound the ANALYZE lock wait ([0c0ccb5](https://github.com/kguardian-dev/kguardian/commit/0c0ccb5a0585d955fc21714539b494d0c28c2641))
+* **broker:** keep compute findings fast without statistics and build large indexes concurrently ([8126255](https://github.com/kguardian-dev/kguardian/commit/812625517ec97dda2ff8e86079ff06ea0c5ce2e4))
+* **broker:** keep compute findings fast without statistics and stop the CVE summary churn ([b89e4be](https://github.com/kguardian-dev/kguardian/commit/b89e4bec3a18bcdfc2030267143f6aaee7040c02))
+* **broker:** keep pod_compute_latest rows inline by bounding the stored blame list ([0b399b2](https://github.com/kguardian-dev/kguardian/commit/0b399b26509371ed989d7c946a12c4b29bb8e0b4))
+* **broker:** never let the maintenance VACUUM touch a table with a background index build ([0f1fb5b](https://github.com/kguardian-dev/kguardian/commit/0f1fb5b37b1bfc07d2859116197e5a6c6b5ceb34))
+* **broker:** pace the maintenance vacuum with the leader cadence ([4c041c7](https://github.com/kguardian-dev/kguardian/commit/4c041c792000ee043422d363fec3ade8327c9c78))
+* **broker:** rebuild the CVE summary and facts by writing only what changed ([597fd73](https://github.com/kguardian-dev/kguardian/commit/597fd732405a1da7f1f60f0ff8cb5de474e9d45e))
+* **broker:** resolve named targetPorts for host-network backends and quote YAML 1.1 words ([3effda6](https://github.com/kguardian-dev/kguardian/commit/3effda63982a0f5e3b18977de5795d72713596ef))
+* **broker:** say what the bounded blame shares are a share of ([6a2221b](https://github.com/kguardian-dev/kguardian/commit/6a2221b4229b1ba1bf7af2e64b552844d4e93a74))
+* **broker:** stop pod_compute_latest's TOAST churn and vacuum small tables when autovacuum lags ([703d64e](https://github.com/kguardian-dev/kguardian/commit/703d64e71db37caf86eb9fabd3e9558bba8e233f))
+* **broker:** test that the CVE summary rebuild names every table column ([2a34192](https://github.com/kguardian-dev/kguardian/commit/2a3419207b135fc660227dce55fed58208bf7bcc))
+* **broker:** vacuum the small high-churn tables when autovacuum falls behind ([2d6146a](https://github.com/kguardian-dev/kguardian/commit/2d6146aa478015a636dfed122b057b1af2c17b01))
+
 ## [1.19.6](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.5...broker/v1.19.6) (2026-09-29)
 
 
