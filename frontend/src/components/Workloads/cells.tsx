@@ -41,8 +41,15 @@ export function NetworkPill({ network }: { network: NetworkCoverage }) {
  * the CR lacks are a drift (they would be blocked when enforcing); syscalls
  * the CR allows but were never observed just mean the CR is broader.
  */
-export function DriftCell({ drift }: { drift: CrDrift | null }) {
-  if (!drift) return <span className="text-tertiary">—</span>;
+/** `known`: whether the CR state is known (see WorkloadRow.seccomp); without it no drift is "no CR". */
+export function DriftCell({ drift, known }: { drift: CrDrift | null; known: boolean }) {
+  if (!drift && !known) {
+    return <span className="text-tertiary" title="Unknown until the seccomp profile list has been read" data-testid="drift-unknown">—</span>;
+  }
+  // The Drift filter's "No CR": there is nothing to drift from.
+  if (!drift) {
+    return <span className="text-tertiary" title="No seccomp CR is deployed, so there is nothing to drift from" data-testid="drift-no-cr">no CR</span>;
+  }
   // The drift on the first line, the CR's unobserved extras under it, so the column stays narrow.
   const unobserved = drift.extra.length > 0 && (
     <span className="text-[11px] text-tertiary" title={`In the CR, never observed (not a drift): ${drift.extra.join(', ')}`} data-testid="drift-unobserved">
