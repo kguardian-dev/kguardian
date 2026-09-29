@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.5](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.4...llm-bridge/v1.12.5) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** allow a Service's targetPort in generated egress rules ([82b8135](https://github.com/kguardian-dev/kguardian/commit/82b8135d3e9f92670e4ed80a0fd018cd79bc73df))
+* **broker:** stop pod_compute_latest's TOAST churn and vacuum small tables when autovacuum lags ([703d64e](https://github.com/kguardian-dev/kguardian/commit/703d64e71db37caf86eb9fabd3e9558bba8e233f))
+* **llm-bridge:** allow a Service's targetPort on egress rules and parse ports as decimals ([42d2ad9](https://github.com/kguardian-dev/kguardian/commit/42d2ad94929d9618227c3bf89b7eebd3829dbfb0))
+* **llm-bridge:** resolve named targetPorts for host-network backends and quote YAML 1.1 words ([768a1b0](https://github.com/kguardian-dev/kguardian/commit/768a1b0ad312372bad01d0011565f2f4e423e18d))
+* **llm-bridge:** say get_pod_compute blame shares are of the controller's top 20 ([00050d6](https://github.com/kguardian-dev/kguardian/commit/00050d6f7fa99b2770c3731acc3a09e6869d6bc2))
+* **llm-bridge:** tell the model the pod compute blame list is the top culprits ([2c75252](https://github.com/kguardian-dev/kguardian/commit/2c7525279a2aff5e1054ffa4434e1c57a49cdf57))
+
 ## [1.12.4](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.3...llm-bridge/v1.12.4) (2026-09-29)
 
 
