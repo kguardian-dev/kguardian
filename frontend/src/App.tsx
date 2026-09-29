@@ -8,6 +8,7 @@ import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
 import { NARROW_QUERY, useMediaQuery } from './hooks/useMediaQuery';
 import { useDialogFocus } from './hooks/useDialogFocus';
+import { AssistantDockContext, assistantDockWidth } from './hooks/useAssistantDock';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -366,9 +367,7 @@ function App() {
   }, [narrow]);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
-  const contentPaddingRightPx = aiSidePanel.isSidePanel
-    ? (aiSidePanel.isCollapsed ? UI_DIMENSIONS.AI_PANEL_COLLAPSED_WIDTH : aiSidePanel.width)
-    : 0;
+  const contentPaddingRightPx = assistantDockWidth(aiSidePanel.isSidePanel, aiSidePanel.isCollapsed, aiSidePanel.width);
 
   const handlePodSelect = (pod: PodNodeData | null) => {
     selectPod(pod);
@@ -616,6 +615,8 @@ function App() {
         : '';
 
   return (
+    // Right-anchored drawers open beside the docked assistant, not under it.
+    <AssistantDockContext.Provider value={contentPaddingRightPx}>
     <div className="flex h-screen bg-hubble-darker">
       {(() => {
         const rail = (
@@ -985,6 +986,7 @@ function App() {
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} commands={commands} dynamic={jumpCommands} />}
     </div>
+    </AssistantDockContext.Provider>
   );
 }
 

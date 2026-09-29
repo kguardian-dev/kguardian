@@ -707,6 +707,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       <div
         role="complementary"
         aria-label="AI Assistant"
+        data-docked-panel
         onKeyDown={onDockedKeyDown}
         className="fixed top-0 right-0 bottom-0 z-50 w-12 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl items-center justify-center"
       >
@@ -730,6 +731,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     <div
       role="complementary"
       aria-label="AI Assistant"
+      data-docked-panel
       onKeyDown={onDockedKeyDown}
       className="fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl"
       style={{ width: `${panelWidth}px` }}

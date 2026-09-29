@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './Button';
 import { openModalDialogs } from '../../hooks/useDialogFocus';
+import { useDrawerDockOffset } from '../../hooks/useAssistantDock';
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | 'full';
 
@@ -175,6 +176,9 @@ export function Modal({
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' && e.key !== 'Tab') return;
+      // The docked assistant sits beside an open drawer, not in it: its keys
+      // are its own (Esc closes it, not the drawer; Tab is not pulled back).
+      if (e.target instanceof Element && e.target.closest('[data-docked-panel]')) return;
       const node = panelRef.current;
       if (!node || openModalDialogs().at(-1) !== node) return;
       if (e.key === 'Escape') {
@@ -203,16 +207,23 @@ export function Modal({
     return () => document.removeEventListener('keydown', onKey, true);
   }, [isOpen]);
 
+  const drawer = align === 'right';
+  // A drawer ends where the docked assistant begins, so both stay readable.
+  const dockOffset = useDrawerDockOffset(drawer);
+
   if (!mounted) return null;
 
   // Let an explicit width/height in `className` win over the size defaults
   // instead of emitting a conflicting utility whose winner is order-dependent.
-  const drawer = align === 'right';
   const sizeClass = /(?:^|\s)(max-w-|w-)/.test(className) ? '' : `w-full ${SIZE_CLASS[size]}`;
   const heightClass = drawer ? 'h-full' : /(?:^|\s)(max-h-|h-)\[/.test(className) ? '' : 'max-h-[88vh]';
 
   return (
-    <div className="fixed inset-0 z-50" aria-hidden={!isOpen}>
+    <div
+      className={`fixed inset-0 z-50 ${drawer ? 'transition-[right] duration-300' : ''}`}
+      style={dockOffset ? { right: `${dockOffset}px` } : undefined}
+      aria-hidden={!isOpen}
+    >
       <div
         className={`absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity duration-200 ${
           entered ? 'opacity-100' : 'opacity-0'
