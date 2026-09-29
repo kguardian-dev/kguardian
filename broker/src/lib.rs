@@ -3,6 +3,7 @@ pub mod admission;
 mod attestation;
 mod audit;
 pub mod auth;
+mod background_index;
 mod compute;
 mod compute_api;
 mod compute_types;

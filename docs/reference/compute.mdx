@@ -89,7 +89,7 @@ the `GET`s need a token with the `read` scope and the `POST`s need
 |---|---|
 | `GET /compute/latest?namespace=<ns>` | `{ "containers": [...], "nodes": [...] }` — one row per live container in the namespace (blame inline) and the node rows for the nodes hosting them. `namespace` is required. |
 | `GET /compute/history/{pod_uid}?minutes=60` | `{ "rows": [...] }` — history rows for the pod, oldest first, at whatever resolution the window has. `minutes` is capped at 10080. |
-| `GET /compute/contention?namespace=<ns>&node=<node>&minutes=5` | `{ "pairs": [...] }` — victim→culprit pairs. One of `namespace` / `node` is required. Up to 50 pairs per victim. |
+| `GET /compute/contention?namespace=<ns>&node=<node>&minutes=5` | `{ "pairs": [...] }` — victim→culprit pairs. One of `namespace` / `node` is required. Up to 50 pairs per victim. `minutes` is capped at 10080 with `node`, and at 60 with `namespace` alone. |
 | `GET /compute/findings?namespace=<ns>&node=<node>` | `{ "findings": [Finding], "truncated": bool, "victims_evaluated": int, "history_disabled": bool }` — see [findings response](#findings-response). Both filters optional; neither means the whole cluster. |
 | `GET /compute/nodes` | `{ "nodes": [...] }` — every node's latest sample: pressure, context-switch rate, capacity, BPF map occupancy, and the `compute_enabled` / `compute_supported` / `contention_loaded` flags. A node that has not reported for about an hour is pruned from the list; its pods then read `pending`. |
 | `POST /pod/compute/batch` | Controller → broker, every sample interval. |
