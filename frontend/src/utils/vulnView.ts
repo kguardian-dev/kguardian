@@ -118,11 +118,15 @@ const factorFamily = (raw: string) =>
  * carries it) as the single finding the drawer shows for that image: the
  * most urgent one, whose factors explain its tier, plus any factor family
  * only the others have (another package's `no_fix`). KEV and EPSS are the
- * worst any of them reports. null when there are none.
+ * worst any of them reports. Fixable only when every package has a fix
+ * (upgrading one leaves the CVE in the other, as `no_fix` says), with every
+ * package's fixed versions, none picked. null when there are none.
  */
 export function mergeFindings(matches: readonly Finding[]): Finding | null {
   if (matches.length === 0) return null;
-  const sorted = [...matches].sort((a, b) => tierRank(brokerTier(b.tier)) - tierRank(brokerTier(a.tier)));
+  // An unknown tier ranks above any known one, except P0: nothing outranks it.
+  const rank = (f: Finding) => (f.tier === 'P0' ? 5 : tierRank(brokerTier(f.tier)));
+  const sorted = [...matches].sort((a, b) => rank(b) - rank(a));
   const [worst, ...rest] = sorted;
   if (rest.length === 0) return worst;
   const factors = [...(worst.tierFactors ?? [])];
@@ -142,6 +146,8 @@ export function mergeFindings(matches: readonly Finding[]): Finding | null {
     kev: kevs.includes(true) ? true : kevs.includes(null) ? null : false,
     epss: epss.length ? Math.max(...epss) : null,
     score: scores.length ? Math.max(...scores) : null,
+    fixable: sorted.every((f) => f.fixable),
+    fixedVersions: [...new Set(sorted.flatMap((f) => f.fixedVersions))],
     ...(worst.tierFactors || factors.length ? { tierFactors: factors } : {}),
   };
 }

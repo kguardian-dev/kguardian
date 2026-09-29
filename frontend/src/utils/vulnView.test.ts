@@ -127,6 +127,22 @@ describe('mergeFindings', () => {
     expect(m.tier).toBeNull();
     expect(m.kev).toBeNull();
   });
+
+  test('P0 wins over an unknown tier: nothing can outrank it', () => {
+    const noTier = { ...base, package: { ...base.package, name: 'libfoo-doc' }, tier: null, tierFactors: [] };
+    for (const order of [[noTier, p0], [p0, noTier]]) expect(mergeFindings(order)!.tier).toBe('P0');
+  });
+
+  test("fixable only when every package has a fix; fixed versions are every package's, none picked", () => {
+    const fixed = { ...p0, fixable: true, fixedVersions: ['3.3.2-r0'] };
+    const other = { ...bkg, fixable: true, fixedVersions: ['1.2.0', '3.3.2-r0'], tierFactors: ['in_use:installed_not_observed', 'severity:critical', 'internal'] };
+    expect(mergeFindings([fixed, other])).toMatchObject({ fixable: true, fixedVersions: ['3.3.2-r0', '1.2.0'] });
+    // One package without a fix (its no_fix is merged in): not fixable, never "fixable" beside "No fix yet".
+    const m = mergeFindings([fixed, { ...bkg, fixable: false, fixedVersions: [] }])!;
+    expect(m.fixable).toBe(false);
+    expect(m.tierFactors).toContain('no_fix');
+    expect(m.fixedVersions).toEqual(['3.3.2-r0']);
+  });
 });
 
 describe('canonicalCveId / canonicalDigest (URL params)', () => {
