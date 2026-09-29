@@ -205,11 +205,19 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 				log.Warn().Err(err).Msgf("Skipping egress traffic record due to invalid destination port: %s", traffic.DstPort)
 				continue
 			}
-			port = intstr.FromInt(portInt)
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing CILIUM EGRESS: allowing our pod to reach peer %s on port %d (%s)", peer, portInt, protocolStr)
-			egressRules = mergeOrAppendResolvedRule(egressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
+			// A Service peer was observed pre-DNAT on its Service port; the
+			// policy must allow the backend targetPort (service_port.go).
+			resolved := resolver.resolveRow(peer, traffic)
+			ports, mapped := servicePortFor(resolved, portInt, protocolStr)
+			for _, port := range ports {
+				egressRules = mergeOrAppendResolvedRule(egressRules, resolved, port, protocolStr, traffic.TimeStamp)
+			}
+			if !mapped {
+				noteUnmappedPort(egressRules, resolved, portInt, protocolStr)
+			}
 		} else {
 			log.Debug().Msgf("Skipping traffic record with unknown type: %s", traffic.TrafficType)
 		}
@@ -309,12 +317,16 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 		if len(ingressRule.FromEntities) > 0 {
 			key := portRulesKey(ingressRule.ToPorts)
 			if idx, seen := entityRuleByPorts[key]; seen {
-				comments.addIngress(idx, comment)
+				for _, line := range group.comments(comment) {
+					comments.addIngress(idx, line)
+				}
 				continue
 			}
 			entityRuleByPorts[key] = len(ingressRules)
 		}
-		comments.addIngress(len(ingressRules), comment)
+		for _, line := range group.comments(comment) {
+			comments.addIngress(len(ingressRules), line)
+		}
 		ingressRules = append(ingressRules, *ingressRule)
 	}
 
@@ -336,12 +348,16 @@ func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPoli
 		if len(egressRule.ToEntities) > 0 {
 			key := portRulesKey(egressRule.ToPorts)
 			if idx, seen := entityRuleByPorts[key]; seen {
-				comments.addEgress(idx, comment)
+				for _, line := range group.comments(comment) {
+					comments.addEgress(idx, line)
+				}
 				continue
 			}
 			entityRuleByPorts[key] = len(egressRules)
 		}
-		comments.addEgress(len(egressRules), comment)
+		for _, line := range group.comments(comment) {
+			comments.addEgress(len(egressRules), line)
+		}
 		egressRules = append(egressRules, *egressRule)
 	}
 

@@ -152,6 +152,23 @@ pub struct PodDetail {
     /// When the broker last wrote the record (last seen alive / marked dead).
     #[serde(deserialize_with = "null_default")]
     pub time_stamp: String,
+    /// `pod_obj.spec.containers[].ports[]`: resolves a Service's named
+    /// targetPort to a number for host-network backends.
+    #[serde(deserialize_with = "null_default")]
+    pub container_ports: Vec<ContainerPort>,
+}
+
+/// One `containers[].ports[]` entry of a pod manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContainerPort {
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    /// `containerPort`; 0 = missing.
+    pub container_port: i64,
+    /// `protocol`; "" = TCP.
+    #[serde(deserialize_with = "null_default")]
+    pub protocol: String,
 }
 
 impl PodDetail {
@@ -166,6 +183,29 @@ impl PodDetail {
         }
         if let Some(node) = pod_obj.pointer("/spec/nodeName").and_then(Value::as_str) {
             self.spec_node_name = node.to_string();
+        }
+        if let Some(containers) = pod_obj
+            .pointer("/spec/containers")
+            .and_then(Value::as_array)
+        {
+            self.container_ports = containers
+                .iter()
+                .filter_map(|c| c.get("ports").and_then(Value::as_array))
+                .flatten()
+                .map(|p| ContainerPort {
+                    name: p
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    container_port: p.get("containerPort").and_then(Value::as_i64).unwrap_or(0),
+                    protocol: p
+                        .get("protocol")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect();
         }
     }
 }
@@ -185,6 +225,52 @@ pub struct SvcDetail {
     /// Empty = a selector-less Service, which is never used as a peer.
     #[serde(deserialize_with = "null_default")]
     pub selector: BTreeMap<String, String>,
+    /// `service_spec.spec.ports`; see [`SvcDetail::ports_from_service_spec`].
+    /// Empty = unknown: an observed port cannot be mapped to a targetPort.
+    #[serde(deserialize_with = "null_default")]
+    pub ports: Vec<ServicePort>,
+}
+
+/// One `spec.ports[]` entry of a Service, as far as targetPort mapping needs
+/// it (advisor `corev1.ServicePort`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServicePort {
+    /// `port`; 0 = missing (never matches).
+    pub port: i64,
+    /// `protocol`; "" = TCP, the API default.
+    #[serde(deserialize_with = "null_default")]
+    pub protocol: String,
+    /// `targetPort`; `None` when omitted (or unusable), which Kubernetes
+    /// defaults to `port`.
+    pub target_port: Option<PortValue>,
+}
+
+/// A policy port: a number, or a named container port (a named targetPort).
+/// Ordered numbers first, then names, as advisor `deduplicatePorts` sorts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PortValue {
+    Number(u16),
+    Name(String),
+}
+
+impl std::fmt::Display for PortValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortValue::Number(n) => write!(f, "{n}"),
+            PortValue::Name(s) => f.write_str(s),
+        }
+    }
+}
+
+impl PortValue {
+    fn to_json(&self) -> Value {
+        match self {
+            PortValue::Number(n) => Value::from(*n),
+            PortValue::Name(s) => Value::from(s.as_str()),
+        }
+    }
 }
 
 impl SvcDetail {
@@ -194,6 +280,37 @@ impl SvcDetail {
             .pointer("/spec/selector")
             .and_then(string_map)
             .unwrap_or_default()
+    }
+
+    /// `spec.ports` of a stored `service_spec` (empty when absent). A
+    /// numeric `targetPort` outside 1-65535 or an empty name is treated as
+    /// omitted.
+    pub fn ports_from_service_spec(service_spec: &Value) -> Vec<ServicePort> {
+        let Some(ports) = service_spec
+            .pointer("/spec/ports")
+            .and_then(Value::as_array)
+        else {
+            return Vec::new();
+        };
+        ports
+            .iter()
+            .map(|p| ServicePort {
+                port: p.get("port").and_then(Value::as_i64).unwrap_or(0),
+                protocol: p
+                    .get("protocol")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                target_port: match p.get("targetPort") {
+                    Some(Value::Number(n)) => n
+                        .as_i64()
+                        .filter(|n| (1..=65535).contains(n))
+                        .map(|n| PortValue::Number(n as u16)),
+                    Some(Value::String(s)) if !s.is_empty() => Some(PortValue::Name(s.clone())),
+                    _ => None,
+                },
+            })
+            .collect()
     }
 }
 
@@ -320,7 +437,48 @@ pub fn generate(
 /// `spec.egress` rules, and `spec` must stay a top-level key.
 pub fn render_yaml(policy: &Value, comments: &PolicyComments) -> Result<String, String> {
     let body = serde_norway::to_string(policy).map_err(|e| format!("marshal policy: {e}"))?;
-    Ok(insert_comments(&body, comments))
+    Ok(insert_comments(&quote_yaml11_words(&body), comments))
+}
+
+/// Words a YAML 1.1 decoder reads as a boolean that serde_norway (YAML 1.2)
+/// still emits plain. kubectl converts YAML to JSON through a 1.1 parser, so
+/// a port name (or label value) `on` emitted bare becomes `true` and the
+/// policy is rejected; the advisor (sigs.k8s.io/yaml) quotes them. The other
+/// 1.1 words (`true`, `False`, `null`, `~`, ...) are 1.2 booleans/nulls too, so
+/// serde_norway already quotes them as strings, and a bare `true` / `null` in
+/// its output is a real boolean / null that must stay as is.
+const YAML11_ONLY_WORDS: [&str; 6] = ["y", "yes", "n", "no", "on", "off"];
+
+/// Double-quote every plain scalar VALUE (after `key: ` or `- `) that is one
+/// of [`YAML11_ONLY_WORDS`], any case. Keys are left alone.
+fn quote_yaml11_words(doc: &str) -> String {
+    let mut out = String::with_capacity(doc.len());
+    for line in doc.split_inclusive('\n') {
+        let (text, nl) = match line.strip_suffix('\n') {
+            Some(t) => (t, "\n"),
+            None => (line, ""),
+        };
+        let split = text.find(": ").map(|i| i + 2).or_else(|| {
+            text.trim_start()
+                .starts_with("- ")
+                .then(|| text.find("- ").unwrap() + 2)
+        });
+        match split {
+            Some(i)
+                if YAML11_ONLY_WORDS
+                    .iter()
+                    .any(|w| text[i..].eq_ignore_ascii_case(w)) =>
+            {
+                out.push_str(&text[..i]);
+                out.push('"');
+                out.push_str(&text[i..]);
+                out.push('"');
+            }
+            _ => out.push_str(text),
+        }
+        out.push_str(nl);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -379,8 +537,11 @@ fn host_cidr(ip: &str) -> Option<String> {
     }
 }
 
-/// `parsePort` (strconv.Atoi + range check).
+/// `parsePort`: decimal digits only (no sign, space or other base), 1-65535.
 fn parse_port(s: &str) -> Option<u16> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let n: i64 = s.parse().ok()?;
     if (1..=65535).contains(&n) {
         Some(n as u16)
@@ -402,7 +563,7 @@ fn protocol_of(s: &str) -> &'static str {
     }
 }
 
-type Port = (u16, &'static str);
+type Port = (PortValue, &'static str);
 
 /// `deduplicatePorts`: unique (port, protocol), port ASC then protocol ASC.
 fn dedup_ports(ports: &[Port]) -> Vec<Port> {
@@ -869,33 +1030,134 @@ struct PeerRule {
     key: String,
     ports: Vec<Port>,
     stamps: Vec<String>,
+    /// Observed Service ports that `spec.ports` could not map to a targetPort.
+    unmapped: Vec<Port>,
 }
 
-/// `mergeOrAppendResolvedRule`, keyed on (peer IP, identity).
-fn merge_rule(rules: &mut Vec<PeerRule>, peer: ResolvedPeer, port: Port, time_stamp: &str) {
+/// `mergeOrAppendResolvedRule` (+ `noteUnmappedPort`), keyed on (peer IP,
+/// identity). `unmapped` is the observed Service port when it could not be
+/// mapped to a targetPort.
+fn merge_rule(
+    rules: &mut Vec<PeerRule>,
+    peer: ResolvedPeer,
+    port: Port,
+    time_stamp: &str,
+    unmapped: Option<Port>,
+) {
     let key = peer.identity_key();
-    if let Some(r) = rules
-        .iter_mut()
-        .find(|r| r.peer.ip == peer.ip && r.key == key)
+    let idx = match rules
+        .iter()
+        .position(|r| r.peer.ip == peer.ip && r.key == key)
     {
-        if !time_stamp.is_empty() {
-            r.stamps.push(time_stamp.to_string());
+        Some(i) => {
+            let r = &mut rules[i];
+            if !time_stamp.is_empty() {
+                r.stamps.push(time_stamp.to_string());
+            }
+            if !r.ports.contains(&port) {
+                r.ports.push(port);
+            }
+            i
         }
-        if !r.ports.contains(&port) {
-            r.ports.push(port);
+        None => {
+            rules.push(PeerRule {
+                peer,
+                key,
+                ports: vec![port],
+                stamps: if time_stamp.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![time_stamp.to_string()]
+                },
+                unmapped: Vec::new(),
+            });
+            rules.len() - 1
         }
-        return;
+    };
+    if let Some(u) = unmapped {
+        rules[idx].unmapped.push(u);
     }
-    rules.push(PeerRule {
-        peer,
-        key,
-        ports: vec![port],
-        stamps: if time_stamp.is_empty() {
-            Vec::new()
-        } else {
-            vec![time_stamp.to_string()]
-        },
-    });
+}
+
+/// `servicePortFor`: the port a rule must allow for an egress flow to `peer`
+/// observed on `port`/`proto`, and whether it could be mapped.
+///
+/// The controller records egress from the socket, which under kube-proxy
+/// still holds the ClusterIP and the Service port (the DNAT happens later, in
+/// conntrack). NetworkPolicy and Cilium match the backend pod after
+/// translation, so a Service peer's port is mapped through `spec.ports`
+/// (port + protocol) to its targetPort: a number as is, a name as the named
+/// port, omitted = the port. No match (or no ports) keeps the observed port
+/// and returns `false`, and the rule gets a comment. A non-Service peer is
+/// returned unchanged.
+///
+/// A named targetPort on a Service backed by host-network pods is resolved
+/// here through the backends' container ports (name and protocol) to every
+/// distinct number: the rule's peer is an ipBlock / host entities, which have
+/// no endpoints to resolve a name against. An unresolvable name is unmapped.
+fn service_port_for(peer: &ResolvedPeer, port: u16, proto: &str) -> (Vec<PortValue>, bool) {
+    let observed = vec![PortValue::Number(port)];
+    let Some(svc) = &peer.svc else {
+        return (observed, true);
+    };
+    let found = svc
+        .ports
+        .iter()
+        .find(|sp| sp.port == i64::from(port) && protocol_or_tcp(&sp.protocol) == proto);
+    match found.map(|sp| &sp.target_port) {
+        None => (observed, false),
+        Some(Some(PortValue::Name(name))) if !peer.backends.is_empty() => {
+            let nums: std::collections::BTreeSet<u16> = peer
+                .backends
+                .iter()
+                .flat_map(|b| &b.container_ports)
+                .filter(|cp| &cp.name == name && protocol_or_tcp(&cp.protocol) == proto)
+                .filter_map(|cp| u16::try_from(cp.container_port).ok().filter(|n| *n >= 1))
+                .collect();
+            if nums.is_empty() {
+                (observed, false)
+            } else {
+                (nums.into_iter().map(PortValue::Number).collect(), true)
+            }
+        }
+        Some(Some(target)) => (vec![target.clone()], true),
+        Some(None) => (observed, true),
+    }
+}
+
+fn protocol_or_tcp(p: &str) -> &str {
+    if p.is_empty() {
+        "TCP"
+    } else {
+        p
+    }
+}
+
+/// `unmappedServicePortComments`: one line per unmapped Service port, in port
+/// order, deduplicated.
+fn unmapped_port_comments(peer: &ResolvedPeer, unmapped: &[Port]) -> Vec<String> {
+    let Some(svc) = &peer.svc else {
+        return Vec::new();
+    };
+    dedup_ports(unmapped)
+        .into_iter()
+        .map(|(p, proto)| {
+            format!(
+                "service {}/svc/{}: port {p}/{proto} could not be mapped to a targetPort; allowing the Service port as observed",
+                svc.svc_namespace, svc.svc_name
+            )
+        })
+        .collect()
+}
+
+/// The comment lines above a rule: the peer's own comment, then one per
+/// unmapped Service port.
+fn rule_comment_lines(rule: &PeerRule, peer_comment: Option<String>) -> Vec<String> {
+    peer_comment
+        .into_iter()
+        .filter(|c| !c.is_empty())
+        .chain(unmapped_port_comments(&rule.peer, &rule.unmapped))
+        .collect()
 }
 
 /// `groupPeerRules`: rules are already unique per (IP, identity); order them
@@ -920,10 +1182,10 @@ fn process_traffic(
     let mut resolver = PeerResolver::new(data);
     let (mut ingress, mut egress) = (Vec::new(), Vec::new());
     for row in traffic {
-        let (rules, port_str) = if row.traffic_type.eq_ignore_ascii_case("INGRESS") {
-            (&mut ingress, &row.pod_port)
+        let (rules, port_str, is_egress) = if row.traffic_type.eq_ignore_ascii_case("INGRESS") {
+            (&mut ingress, &row.pod_port, false)
         } else if row.traffic_type.eq_ignore_ascii_case("EGRESS") {
-            (&mut egress, &row.traffic_in_out_port)
+            (&mut egress, &row.traffic_in_out_port, true)
         } else {
             tracing::debug!(
                 "Skipping traffic record with unknown type: {}",
@@ -940,12 +1202,27 @@ fn process_traffic(
             continue;
         };
         let resolved = resolver.resolve_row(peer, row);
-        merge_rule(
-            rules,
-            resolved,
-            (port, protocol_of(&row.ip_protocol)),
-            &row.time_stamp,
-        );
+        let proto = protocol_of(&row.ip_protocol);
+        // Egress to a Service was observed pre-DNAT on the Service port; the
+        // rule must allow the backend targetPort. Ingress ports are the
+        // target's own, already post-DNAT.
+        let (allowed, unmapped) = if is_egress {
+            match service_port_for(&resolved, port, proto) {
+                (p, true) => (p, None),
+                (p, false) => (p, Some((PortValue::Number(port), proto))),
+            }
+        } else {
+            (vec![PortValue::Number(port)], None)
+        };
+        for p in allowed {
+            merge_rule(
+                rules,
+                resolved.clone(),
+                (p, proto),
+                &row.time_stamp,
+                unmapped.clone(),
+            );
+        }
     }
     sort_rules(&mut ingress);
     sort_rules(&mut egress);
@@ -1111,7 +1388,7 @@ fn standard_ports(ports: &[Port]) -> Value {
     Value::Array(
         dedup_ports(ports)
             .into_iter()
-            .map(|(p, proto)| obj([("port", Value::from(p)), ("protocol", Value::from(proto))]))
+            .map(|(p, proto)| obj([("port", p.to_json()), ("protocol", Value::from(proto))]))
             .collect(),
     )
 }
@@ -1127,7 +1404,9 @@ fn standard_rules(
         if peers.is_empty() {
             continue;
         }
-        PolicyComments::add(comments, out.len(), comment);
+        for line in rule_comment_lines(rule, comment) {
+            PolicyComments::add(comments, out.len(), Some(line));
+        }
         let mut m = Map::new();
         m.insert(peer_field.to_string(), Value::Array(peers));
         m.insert("ports".to_string(), standard_ports(&rule.ports));
@@ -1348,7 +1627,9 @@ fn cilium_rules(
             }
             CiliumPeer::Entities => {
                 if let Some(&idx) = entity_rule_by_ports.get(&ports_key) {
-                    PolicyComments::add(comments, idx, comment);
+                    for line in rule_comment_lines(rule, comment) {
+                        PolicyComments::add(comments, idx, Some(line));
+                    }
                     continue;
                 }
                 entity_rule_by_ports.insert(ports_key, out.len());
@@ -1358,7 +1639,9 @@ fn cilium_rules(
         if to_ports.as_array().is_some_and(|a| !a.is_empty()) {
             m.insert("toPorts".into(), to_ports);
         }
-        PolicyComments::add(comments, out.len(), comment);
+        for line in rule_comment_lines(rule, comment) {
+            PolicyComments::add(comments, out.len(), Some(line));
+        }
         out.push(sorted(m));
     }
     out

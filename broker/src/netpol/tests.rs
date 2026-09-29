@@ -88,12 +88,44 @@ fn v4_pod(
     }
 }
 
-fn svc(name: &str, ns: &str, ip: &str, selector: &[(&str, &str)]) -> SvcDetail {
+/// A fixture Service with one TCP port whose targetPort is omitted (so it
+/// defaults to the port) — fixtureSvcPorts in the advisor. A Service with no
+/// ports cannot map an observed port and its rule gains a comment.
+fn svc(name: &str, ns: &str, ip: &str, selector: &[(&str, &str)], port: i64) -> SvcDetail {
+    svc_ports(
+        name,
+        ns,
+        ip,
+        selector,
+        vec![ServicePort {
+            port,
+            protocol: "TCP".into(),
+            target_port: None,
+        }],
+    )
+}
+
+fn svc_ports(
+    name: &str,
+    ns: &str,
+    ip: &str,
+    selector: &[(&str, &str)],
+    ports: Vec<ServicePort>,
+) -> SvcDetail {
     SvcDetail {
         svc_ip: ip.into(),
         svc_name: name.into(),
         svc_namespace: ns.into(),
         selector: labels(selector),
+        ports,
+    }
+}
+
+fn svc_port(port: i64, protocol: &str, target: Option<PortValue>) -> ServicePort {
+    ServicePort {
+        port,
+        protocol: protocol.into(),
+        target_port: target,
     }
 }
 
@@ -168,7 +200,7 @@ fn endpoint_resolved() -> Scenario {
     let mut stub = Stub::default();
     stub.svcs.insert(
         "10.96.0.10".into(),
-        svc("db", "prod", "10.96.0.10", &[("app", "db")]),
+        svc("db", "prod", "10.96.0.10", &[("app", "db")], 5432),
     );
     // brokerdata_test.go podDetail(): namespace "prod".
     stub.pods.insert(
@@ -324,11 +356,12 @@ fn hostnetwork_service() -> Scenario {
             "monitoring",
             "10.96.0.20",
             &[("app", "node-exporter")],
+            9100,
         ),
     );
     stub.svcs.insert(
         "10.96.0.10".into(),
-        svc("db", "prod", "10.96.0.10", &[("app", "db")]),
+        svc("db", "prod", "10.96.0.10", &[("app", "db")], 5432),
     );
     stub.all_pods = vec![
         host_pod(
@@ -399,6 +432,7 @@ fn cross_namespace() -> Scenario {
             "monitoring",
             "10.96.0.50",
             &[("app", "prometheus")],
+            9090,
         ),
     );
     Scenario {
@@ -490,7 +524,7 @@ fn stored_peer_identity() -> Scenario {
     let mut stub = Stub::default();
     stub.svcs.insert(
         "10.96.0.10".into(),
-        svc("db", "game-servers", "10.96.0.10", &[("app", "db")]),
+        svc("db", "game-servers", "10.96.0.10", &[("app", "db")], 5432),
     );
     stub.all_pods = vec![
         v4_pod(
@@ -545,6 +579,154 @@ fn stored_peer_identity() -> Scenario {
                 "node-exporter-abc12",
                 "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3",
             ),
+        ],
+    }
+}
+
+/// service_target_port: egress to Services observed on the Service port
+/// (pre-DNAT) must allow the backend targetPort — see the advisor's
+/// serviceTargetPortFixture for the case list. Also carries malformed ports
+/// (" 80", "0x50", "1e2", "+80", "80.0") that every generator skips.
+fn service_target_port() -> Scenario {
+    use PortValue::{Name, Number};
+    let mut stub = Stub::default();
+    stub.svcs.insert(
+        "10.96.1.10".into(),
+        svc_ports(
+            "api",
+            "prod",
+            "10.96.1.10",
+            &[("app", "api")],
+            vec![
+                svc_port(80, "TCP", Some(Number(8080))),
+                svc_port(9090, "TCP", Some(Name("metrics".into()))),
+                svc_port(8081, "TCP", Some(Name("8080-tcp".into()))),
+                svc_port(7000, "TCP", Some(Name("on".into()))),
+            ],
+        ),
+    );
+    stub.svcs.insert(
+        "10.96.1.20".into(),
+        svc_ports(
+            "cache",
+            "prod",
+            "10.96.1.20",
+            &[("app", "cache")],
+            vec![svc_port(6379, "", None)],
+        ),
+    );
+    stub.svcs.insert(
+        "10.96.1.30".into(),
+        svc_ports("legacy", "prod", "10.96.1.30", &[("app", "legacy")], vec![]),
+    );
+    stub.svcs.insert(
+        "10.96.1.40".into(),
+        svc_ports(
+            "exporter",
+            "monitoring",
+            "10.96.1.40",
+            &[("app", "node-exporter")],
+            vec![svc_port(80, "TCP", Some(Name("metrics".into())))],
+        ),
+    );
+    stub.svcs.insert(
+        "10.96.1.41".into(),
+        svc_ports(
+            "agent",
+            "monitoring",
+            "10.96.1.41",
+            &[("app", "agent")],
+            vec![
+                svc_port(80, "TCP", Some(Name("http".into()))),
+                svc_port(81, "TCP", Some(Name("missing".into()))),
+            ],
+        ),
+    );
+    stub.svcs.insert(
+        "10.96.1.53".into(),
+        svc_ports(
+            "dns",
+            "kube-system",
+            "10.96.1.53",
+            &[("k8s-app", "kube-dns")],
+            vec![
+                svc_port(53, "UDP", Some(Number(5353))),
+                svc_port(53, "TCP", Some(Number(5354))),
+            ],
+        ),
+    );
+    let cport = |name: &str, n: i64, protocol: &str| ContainerPort {
+        name: name.into(),
+        container_port: n,
+        protocol: protocol.into(),
+    };
+    let with_ports = |mut p: PodDetail, ports: Vec<ContainerPort>| {
+        p.container_ports = ports;
+        p
+    };
+    stub.all_pods = vec![
+        with_ports(
+            host_pod(
+                "node-exporter-abc12",
+                "monitoring",
+                "192.168.50.101",
+                &[("app", "node-exporter")],
+                "worker-1",
+                "node-exporter",
+                true,
+            ),
+            vec![cport("metrics", 9100, "TCP")],
+        ),
+        with_ports(
+            host_pod(
+                "agent-a",
+                "monitoring",
+                "192.168.50.103",
+                &[("app", "agent")],
+                "worker-3",
+                "agent",
+                true,
+            ),
+            vec![cport("http", 8080, "")],
+        ),
+        with_ports(
+            host_pod(
+                "agent-b",
+                "monitoring",
+                "192.168.50.104",
+                &[("app", "agent")],
+                "worker-4",
+                "agent",
+                true,
+            ),
+            vec![cport("http", 8081, "TCP"), cport("missing", 9999, "UDP")],
+        ),
+    ];
+    let udp = |t: PodTraffic| PodTraffic {
+        ip_protocol: "UDP".into(),
+        ..t
+    };
+    Scenario {
+        stub,
+        target: pod("web", "prod", "10.0.0.1", &[("app", "web")]),
+        traffic: vec![
+            egress("10.0.0.1", "10.96.1.10", "9090"),
+            egress("10.0.0.1", "10.96.1.10", "80"),
+            egress("10.0.0.1", "10.96.1.10", "8081"),
+            egress("10.0.0.1", "10.96.1.10", "7000"),
+            egress("10.0.0.1", "10.96.1.20", "6380"),
+            egress("10.0.0.1", "10.96.1.20", "6379"),
+            egress("10.0.0.1", "10.96.1.30", "8443"),
+            egress("10.0.0.1", "10.96.1.40", "80"),
+            egress("10.0.0.1", "10.96.1.41", "80"),
+            egress("10.0.0.1", "10.96.1.41", "81"),
+            udp(egress("10.0.0.1", "10.96.1.53", "53")),
+            egress("10.0.0.1", "10.96.1.53", "53"),
+            egress("10.0.0.1", "10.96.1.99", " 80"),
+            egress("10.0.0.1", "10.96.1.99", "0x50"),
+            egress("10.0.0.1", "10.96.1.99", "1e2"),
+            egress("10.0.0.1", "10.96.1.99", "+80"),
+            egress("10.0.0.1", "10.96.1.99", "80.0"),
         ],
     }
 }
@@ -650,6 +832,16 @@ const GOLDENS: &[Golden] = &[
         "cilium_stored_peer_identity",
         PolicyKind::Cilium,
         stored_peer_identity,
+    ),
+    (
+        "standard_service_target_port",
+        PolicyKind::Standard,
+        service_target_port,
+    ),
+    (
+        "cilium_service_target_port",
+        PolicyKind::Cilium,
+        service_target_port,
     ),
 ];
 
@@ -1188,8 +1380,17 @@ fn wire_json_deserialises_with_nulls() {
     }))
     .unwrap();
     d.apply_pod_obj(&serde_json::json!({
-        "metadata": {"labels": {"app": "web"}, "uid": "abc"}, "spec": {"nodeName": "n1"}
+        "metadata": {"labels": {"app": "web"}, "uid": "abc"}, "spec": {"nodeName": "n1",
+            "containers": [{"ports": [{"name": "metrics", "containerPort": 9100}]}, {"name": "sidecar"}]}
     }));
+    assert_eq!(
+        d.container_ports,
+        vec![ContainerPort {
+            name: "metrics".into(),
+            container_port: 9100,
+            protocol: String::new()
+        }]
+    );
     assert_eq!(d.labels, labels(&[("app", "web")]));
     assert_eq!((d.uid.as_str(), d.spec_node_name.as_str()), ("abc", "n1"));
     assert_eq!(
@@ -1198,4 +1399,119 @@ fn wire_json_deserialises_with_nulls() {
         ),
         labels(&[("app", "db")])
     );
+}
+
+#[test]
+fn service_egress_allows_the_target_port_not_the_service_port() {
+    let p = run(PolicyKind::Standard, &service_target_port());
+    let eg = rules(&p, "egress");
+    // api: 80 -> 8080, the named ports stay names (a digit-led one too).
+    assert_eq!(
+        eg[0]["ports"],
+        serde_json::json!([
+            {"port": 8080, "protocol": "TCP"},
+            {"port": "8080-tcp", "protocol": "TCP"},
+            {"port": "metrics", "protocol": "TCP"},
+            {"port": "on", "protocol": "TCP"},
+        ])
+    );
+    // A YAML 1.1 boolean word is quoted, so a 1.1 decoder keeps the string.
+    assert!(
+        p.yaml.contains("port: 'on'") || p.yaml.contains("port: \"on\""),
+        "{}",
+        p.yaml
+    );
+    // exporter: host-network backends resolve the name to the containerPort.
+    assert_eq!(
+        eg[3]["ports"],
+        serde_json::json!([{"port": 9100, "protocol": "TCP"}])
+    );
+    // dns: the mapping follows the protocol.
+    assert_eq!(
+        eg[5]["ports"],
+        serde_json::json!([
+            {"port": 5353, "protocol": "UDP"},
+            {"port": 5354, "protocol": "TCP"},
+        ])
+    );
+    // No rule for the malformed ports.
+    assert!(!p.yaml.contains("10.96.1.99"));
+    // Ingress keeps the target's own port even when the peer is a Service.
+    let mut s = service_target_port();
+    s.traffic = vec![ingress("10.0.0.1", "80", "10.96.1.10")];
+    let p = run(PolicyKind::Standard, &s);
+    assert_eq!(rules(&p, "ingress")[0]["ports"][0]["port"], 80);
+    assert!(p.comments.is_empty());
+}
+
+#[test]
+fn service_ports_parse_from_the_stored_manifest() {
+    let ports = SvcDetail::ports_from_service_spec(&serde_json::json!({"spec": {"ports": [
+        {"port": 80, "protocol": "TCP", "targetPort": 8080},
+        {"port": 81, "targetPort": "http"},
+        {"port": 82},
+        {"port": 83, "targetPort": 0},
+        {"port": 84, "targetPort": ""},
+    ]}}));
+    assert_eq!(
+        ports,
+        vec![
+            svc_port(80, "TCP", Some(PortValue::Number(8080))),
+            svc_port(81, "", Some(PortValue::Name("http".into()))),
+            svc_port(82, "", None),
+            svc_port(83, "", None),
+            svc_port(84, "", None),
+        ]
+    );
+    assert!(SvcDetail::ports_from_service_spec(&serde_json::json!({"spec": {}})).is_empty());
+}
+
+#[test]
+fn ports_must_be_plain_decimal() {
+    for bad in [
+        "", " 80", "80 ", "0x50", "1e2", "+80", "-80", "80.0", "0", "65536",
+    ] {
+        assert_eq!(parse_port(bad), None, "{bad:?}");
+    }
+    assert_eq!(parse_port("0080"), Some(80));
+    assert_eq!(parse_port("65535"), Some(65535));
+}
+
+#[test]
+fn yaml11_boolean_words_are_quoted_and_real_booleans_are_not() {
+    let words = [
+        "y", "Y", "yes", "YES", "n", "no", "No", "on", "On", "ON", "off", "OFF", "true", "True",
+        "FALSE", "null", "Null", "NULL", "~", "8080-tcp", "metrics",
+    ];
+    let v = serde_json::json!({
+        "words": words,
+        "labels": {"a": "on", "b": "Yes"},
+        "flag": true,
+        "none": null,
+    });
+    let y = render_yaml(&v, &PolicyComments::default()).unwrap();
+    assert!(y.contains("flag: true\n"), "{y}");
+    assert!(y.contains("none: null\n"), "{y}");
+    assert!(
+        y.contains("a: \"on\"\n") && y.contains("b: \"Yes\"\n"),
+        "{y}"
+    );
+    // Every string survives a YAML 1.1-style reading: no bare boolean/null word.
+    for line in y.lines() {
+        let value = line
+            .rsplit(": ")
+            .next()
+            .unwrap()
+            .trim_start_matches("- ")
+            .trim();
+        assert!(
+            !["y", "yes", "n", "no", "on", "off", "true", "false", "null", "~"]
+                .iter()
+                .any(|w| value.eq_ignore_ascii_case(w))
+                || line.ends_with("flag: true")
+                || line.ends_with("none: null"),
+            "bare YAML 1.1 word in {line:?}\n{y}"
+        );
+    }
+    assert_eq!(parse_yaml(&y), v);
 }

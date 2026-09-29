@@ -447,9 +447,21 @@ func choosePeerCandidate(candidates []*api.PodDetail, at string) *api.PodDetail 
 // peerGroup is one emitted rule's worth of input: a resolved peer and every
 // port it was observed on.
 type peerGroup struct {
-	peer   resolvedPeer
-	ports  []networkingv1.NetworkPolicyPort
-	stamps []string
+	peer     resolvedPeer
+	ports    []networkingv1.NetworkPolicyPort
+	stamps   []string
+	unmapped []networkingv1.NetworkPolicyPort
+}
+
+// comments is the peer's own comment (host-network, unattributed; may be
+// "") followed by one line per Service port that could not be mapped to a
+// targetPort.
+func (g peerGroup) comments(peerComment string) []string {
+	var lines []string
+	if peerComment != "" {
+		lines = append(lines, peerComment)
+	}
+	return append(lines, unmappedServicePortComments(g.peer, g.unmapped)...)
 }
 
 // groupPeerRules folds rules into one group per (peer IP, identity), ordered
@@ -476,6 +488,7 @@ func groupPeerRules(rules []NetworkPolicyRule, resolver *peerResolver) []peerGro
 		}
 		g.ports = append(g.ports, rule.Ports...)
 		g.stamps = append(g.stamps, rule.Stamps...)
+		g.unmapped = append(g.unmapped, rule.Unmapped...)
 	}
 	sort.Strings(keys)
 	out := make([]peerGroup, 0, len(keys))

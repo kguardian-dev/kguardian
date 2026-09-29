@@ -1,0 +1,89 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: kguardian
+  name: web-standard-policy
+  namespace: prod
+spec:
+  egress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+    - port: 8080-tcp
+      protocol: TCP
+    - port: metrics
+      protocol: TCP
+    - port: "on"
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: api
+  # service prod/svc/cache: port 6380/TCP could not be mapped to a targetPort; allowing the Service port as observed
+  - ports:
+    - port: 6379
+      protocol: TCP
+    - port: 6380
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: cache
+  # service prod/svc/legacy: port 8443/TCP could not be mapped to a targetPort; allowing the Service port as observed
+  - ports:
+    - port: 8443
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: legacy
+  # host-network peer monitoring/svc/exporter on node worker-1 — podSelector cannot match host traffic
+  - ports:
+    - port: 9100
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.168.50.101/32
+  # host-network peer monitoring/svc/agent on node worker-3,worker-4 — podSelector cannot match host traffic
+  # service monitoring/svc/agent: port 81/TCP could not be mapped to a targetPort; allowing the Service port as observed
+  - ports:
+    - port: 81
+      protocol: TCP
+    - port: 8080
+      protocol: TCP
+    - port: 8081
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.168.50.103/32
+    - ipBlock:
+        cidr: 192.168.50.104/32
+  - ports:
+    - port: 5353
+      protocol: UDP
+    - port: 5354
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+  - Egress

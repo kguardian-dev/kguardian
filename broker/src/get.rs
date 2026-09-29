@@ -206,7 +206,12 @@ pub async fn get_pod_details(
 /// `uid`, `name` and `namespace` under metadata (the advisor uses labels for
 /// the policy podSelector and uid for peer attribution; the frontend the same)
 /// and `spec.hostNetwork` (the advisor's Cilium generator reads it to skip
-/// host-networked / node-IP pods). Everything else in spec, all of status, and
+/// host-networked / node-IP pods). A host-network pod also keeps its NAMED
+/// container ports (`spec.containers[].ports[]` reduced to name,
+/// containerPort, protocol): the policy generators resolve a Service's named
+/// targetPort through them, because the rule for host-network backends is an
+/// ipBlock / host entity with no endpoints to resolve a name against. A few
+/// bytes, on a handful of pods per node. Everything else in spec, all of status, and
 /// every other metadata key — `annotations` above all — are dropped. Operates in
 /// place; non-object values are left untouched. Applied at write time (add.rs)
 /// so the bulk never reaches storage, and kept here as a defensive read-time
@@ -224,7 +229,14 @@ pub(crate) fn compact_pod_obj(v: &mut serde_json::Value) {
             .cloned();
         match host_network {
             Some(hn) => {
-                obj.insert("spec".to_string(), serde_json::json!({ "hostNetwork": hn }));
+                let mut spec = serde_json::json!({ "hostNetwork": hn });
+                if hn.as_bool() == Some(true) {
+                    let containers = named_container_ports(obj.get("spec"));
+                    if !containers.is_empty() {
+                        spec["containers"] = serde_json::Value::Array(containers);
+                    }
+                }
+                obj.insert("spec".to_string(), spec);
             }
             None => {
                 obj.remove("spec");
@@ -248,6 +260,42 @@ pub(crate) fn compact_pod_obj(v: &mut serde_json::Value) {
             meta.retain(|k, _| matches!(k.as_str(), "labels" | "uid" | "name" | "namespace"));
         }
     }
+}
+
+/// `spec.containers[]` reduced to `{ports: [{name, containerPort, protocol}]}`
+/// with only named ports; containers without one are dropped.
+fn named_container_ports(spec: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    let Some(containers) = spec
+        .and_then(|s| s.get("containers"))
+        .and_then(|c| c.as_array())
+    else {
+        return Vec::new();
+    };
+    containers
+        .iter()
+        .filter_map(|c| {
+            let ports: Vec<serde_json::Value> = c
+                .get("ports")?
+                .as_array()?
+                .iter()
+                .filter(|p| {
+                    p.get("name")
+                        .and_then(|n| n.as_str())
+                        .is_some_and(|n| !n.is_empty())
+                })
+                .map(|p| {
+                    let mut out = serde_json::Map::new();
+                    for k in ["name", "containerPort", "protocol"] {
+                        if let Some(v) = p.get(k) {
+                            out.insert(k.to_string(), v.clone());
+                        }
+                    }
+                    serde_json::Value::Object(out)
+                })
+                .collect();
+            (!ports.is_empty()).then(|| serde_json::json!({ "ports": ports }))
+        })
+        .collect()
 }
 
 /// Reduce a stored Service manifest to the fields consumers read — `spec`
@@ -1244,6 +1292,31 @@ mod tests {
             v.pointer("/spec/containers").is_none(),
             "the rest of spec must be dropped"
         );
+    }
+
+    #[test]
+    fn compact_pod_obj_keeps_named_container_ports_of_host_network_pods() {
+        let ports = serde_json::json!([{
+            "name": "c",
+            "image": "node-exporter",
+            "args": ["--x"],
+            "ports": [
+                {"name": "metrics", "containerPort": 9100, "hostPort": 9100, "protocol": "TCP"},
+                {"containerPort": 9999}
+            ]
+        }, {"name": "sidecar", "image": "s", "ports": [{"containerPort": 1}]}]);
+        let mut v = serde_json::json!({"spec": {"hostNetwork": true, "containers": ports}});
+        compact_pod_obj(&mut v);
+        assert_eq!(
+            v["spec"],
+            serde_json::json!({"hostNetwork": true, "containers": [
+                {"ports": [{"name": "metrics", "containerPort": 9100, "protocol": "TCP"}]}
+            ]})
+        );
+        // Not host-network: no containers survive.
+        let mut v = serde_json::json!({"spec": {"hostNetwork": false, "containers": ports}});
+        compact_pod_obj(&mut v);
+        assert_eq!(v["spec"], serde_json::json!({"hostNetwork": false}));
     }
 
     #[test]

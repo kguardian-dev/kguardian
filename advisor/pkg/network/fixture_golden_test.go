@@ -10,6 +10,7 @@ import (
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
 )
 
@@ -33,6 +34,19 @@ func fixturePodDetail(name, ns, ip string, labels map[string]string) *api.PodDet
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
 		},
 	}
+}
+
+// fixtureSvcPorts is a Service's spec.ports with targetPort omitted (so it
+// defaults to the port), as most real Services are declared. Every fixture
+// Service carries its ports: a Service with none cannot map an observed port
+// to a targetPort and its rule gains a comment (service_target_port covers
+// that case on purpose).
+func fixtureSvcPorts(ports ...int32) []corev1.ServicePort {
+	out := make([]corev1.ServicePort, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, corev1.ServicePort{Port: p, Protocol: corev1.ProtocolTCP})
+	}
+	return out
 }
 
 func checkPolicyGolden(t *testing.T, name string, got []byte) {
@@ -133,7 +147,7 @@ func TestFixtureGolden_CiliumEndpointResolved(t *testing.T) {
 		svcs: map[string]*api.SvcDetail{
 			"10.96.0.10": {
 				SvcName: "db", SvcNamespace: "prod", SvcIp: "10.96.0.10",
-				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}}},
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}, Ports: fixtureSvcPorts(5432)}},
 			},
 		},
 		pods: map[string]*api.PodDetail{
@@ -384,15 +398,15 @@ func hostNetworkTargetFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffi
 // named "<ns>/svc/<name>", with the backends' nodes listed. The db Service
 // (10.96.0.10) is backed by a normal pod and keeps the podSelector rendering.
 func hostNetworkServiceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
-	svc := func(name, ns, ip string, selector map[string]string) *api.SvcDetail {
+	svc := func(name, ns, ip string, selector map[string]string, port int32) *api.SvcDetail {
 		return &api.SvcDetail{SvcName: name, SvcNamespace: ns, SvcIp: ip,
-			Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: selector}}}
+			Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: selector, Ports: fixtureSvcPorts(port)}}}
 	}
 	stub := stubBrokerData{
 		pods: map[string]*api.PodDetail{},
 		svcs: map[string]*api.SvcDetail{
-			"10.96.0.20": svc("node-exporter", "monitoring", "10.96.0.20", map[string]string{"app": "node-exporter"}),
-			"10.96.0.10": svc("db", "prod", "10.96.0.10", map[string]string{"app": "db"}),
+			"10.96.0.20": svc("node-exporter", "monitoring", "10.96.0.20", map[string]string{"app": "node-exporter"}, 9100),
+			"10.96.0.10": svc("db", "prod", "10.96.0.10", map[string]string{"app": "db"}, 5432),
 		},
 		allPods: []api.PodDetail{
 			*hostFixturePodDetail("node-exporter-def34", "monitoring", "192.168.50.102",
@@ -477,7 +491,7 @@ func crossNamespaceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) 
 		},
 		svcs: map[string]*api.SvcDetail{
 			"10.96.0.50": {SvcName: "prometheus", SvcNamespace: "monitoring", SvcIp: "10.96.0.50",
-				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "prometheus"}}}},
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "prometheus"}, Ports: fixtureSvcPorts(9090)}}},
 		},
 	}
 	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
@@ -552,7 +566,7 @@ func storedPeerIdentityFixture() (stubBrokerData, *api.PodDetail, []api.PodTraff
 		pods: map[string]*api.PodDetail{},
 		svcs: map[string]*api.SvcDetail{
 			"10.96.0.10": {SvcName: "db", SvcNamespace: "game-servers", SvcIp: "10.96.0.10",
-				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}}}},
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}, Ports: fixtureSvcPorts(5432)}}},
 		},
 		allPods: []api.PodDetail{
 			v4FixturePod("autobrr-7d9c4b8f6-q2x9k", "home-system", "10.244.12.199",
@@ -611,5 +625,117 @@ func TestFixtureGolden_CrossNamespacePeer(t *testing.T) {
 		gen := NewCiliumPolicyGenerator()
 		gen.setBrokerData(stub)
 		checkCommentedPolicyGolden(t, "cilium_cross_namespace_peer.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+}
+
+// ---- Service port -> targetPort -----------------------------------------------
+//
+// Egress rows to a Service are recorded pre-DNAT (the socket holds the
+// ClusterIP and the Service port), but NetworkPolicy and Cilium match the
+// backend pod after translation. The generators map the observed port
+// through spec.ports (port + protocol) to its targetPort — see
+// service_port.go. One policy covers every case:
+//
+//	api      80->8080 (numeric != port), 9090->"metrics" (named), 8081->
+//	         "8080-tcp" (a digit-led name, never a number) and 7000->"on" (a
+//	         YAML 1.1 boolean word, emitted quoted): multi-port
+//	cache    6379 with targetPort and protocol omitted (targetPort defaults
+//	         to port, protocol to TCP); 6380 is not in spec.ports -> kept + comment
+//	legacy   no spec.ports at all (spec unknown) -> kept + comment
+//	exporter 80->"metrics" backed by a host-network pod whose container
+//	         names 9100 "metrics": an ipBlock / entities peer has no endpoints
+//	         to resolve a name against, so the rule allows 9100
+//	agent    host-network backed; 80->"http" is 8080 on one backend and 8081
+//	         on the other (both allowed); 81->"missing" names no container
+//	         port -> 81 kept + comment
+//	dns      53/UDP->5353 and 53/TCP->5354: protocol-specific mapping
+//
+// plus malformed egress ports (" 80", "0x50", "1e2", "+80", "80.0") to an
+// unresolvable IP, which every generator skips (decimal digits only).
+func serviceTargetPortFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	svc := func(name, ns, ip string, selector map[string]string, ports ...corev1.ServicePort) *api.SvcDetail {
+		return &api.SvcDetail{SvcName: name, SvcNamespace: ns, SvcIp: ip,
+			Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: selector, Ports: ports}}}
+	}
+	sp := func(name string, port int32, proto corev1.Protocol, target intstr.IntOrString) corev1.ServicePort {
+		return corev1.ServicePort{Name: name, Port: port, Protocol: proto, TargetPort: target}
+	}
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{},
+		svcs: map[string]*api.SvcDetail{
+			"10.96.1.10": svc("api", "prod", "10.96.1.10", map[string]string{"app": "api"},
+				sp("http", 80, corev1.ProtocolTCP, intstr.FromInt(8080)),
+				sp("metrics", 9090, corev1.ProtocolTCP, intstr.FromString("metrics")),
+				sp("alt", 8081, corev1.ProtocolTCP, intstr.FromString("8080-tcp")),
+				sp("switch", 7000, corev1.ProtocolTCP, intstr.FromString("on"))),
+			"10.96.1.20": svc("cache", "prod", "10.96.1.20", map[string]string{"app": "cache"},
+				sp("", 6379, "", intstr.IntOrString{})),
+			"10.96.1.30": svc("legacy", "prod", "10.96.1.30", map[string]string{"app": "legacy"}),
+			"10.96.1.40": svc("exporter", "monitoring", "10.96.1.40", map[string]string{"app": "node-exporter"},
+				sp("metrics", 80, corev1.ProtocolTCP, intstr.FromString("metrics"))),
+			"10.96.1.41": svc("agent", "monitoring", "10.96.1.41", map[string]string{"app": "agent"},
+				sp("http", 80, corev1.ProtocolTCP, intstr.FromString("http")),
+				sp("gone", 81, corev1.ProtocolTCP, intstr.FromString("missing"))),
+			"10.96.1.53": svc("dns", "kube-system", "10.96.1.53", map[string]string{"k8s-app": "kube-dns"},
+				sp("dns", 53, corev1.ProtocolUDP, intstr.FromInt(5353)),
+				sp("dns-tcp", 53, corev1.ProtocolTCP, intstr.FromInt(5354))),
+		},
+		allPods: []api.PodDetail{
+			withContainerPorts(*hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
+				map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", true),
+				corev1.ContainerPort{Name: "metrics", ContainerPort: 9100, Protocol: corev1.ProtocolTCP}),
+			withContainerPorts(*hostFixturePodDetail("agent-a", "monitoring", "192.168.50.103",
+				map[string]string{"app": "agent"}, "worker-3", "agent", true),
+				corev1.ContainerPort{Name: "http", ContainerPort: 8080}),
+			withContainerPorts(*hostFixturePodDetail("agent-b", "monitoring", "192.168.50.104",
+				map[string]string{"app": "agent"}, "worker-4", "agent", true),
+				corev1.ContainerPort{Name: "http", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
+				corev1.ContainerPort{Name: "missing", ContainerPort: 9999, Protocol: corev1.ProtocolUDP}),
+		},
+	}
+	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
+	egress := func(ip, port, proto string) api.PodTraffic {
+		return api.PodTraffic{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: ip, DstPort: port, Protocol: corev1.Protocol(proto)}
+	}
+	traffic := []api.PodTraffic{
+		egress("10.96.1.10", "9090", "TCP"),
+		egress("10.96.1.10", "80", "TCP"),
+		egress("10.96.1.10", "8081", "TCP"),
+		egress("10.96.1.10", "7000", "TCP"),
+		egress("10.96.1.20", "6380", "TCP"),
+		egress("10.96.1.20", "6379", "TCP"),
+		egress("10.96.1.30", "8443", "TCP"),
+		egress("10.96.1.40", "80", "TCP"),
+		egress("10.96.1.41", "80", "TCP"),
+		egress("10.96.1.41", "81", "TCP"),
+		egress("10.96.1.53", "53", "UDP"),
+		egress("10.96.1.53", "53", "TCP"),
+		egress("10.96.1.99", " 80", "TCP"),
+		egress("10.96.1.99", "0x50", "TCP"),
+		egress("10.96.1.99", "1e2", "TCP"),
+		egress("10.96.1.99", "+80", "TCP"),
+		egress("10.96.1.99", "80.0", "TCP"),
+	}
+	return stub, detail, traffic
+}
+
+// withContainerPorts gives a fixture pod one container exposing ports.
+func withContainerPorts(d api.PodDetail, ports ...corev1.ContainerPort) api.PodDetail {
+	d.Pod.Spec.Containers = []corev1.Container{{Name: "main", Ports: ports}}
+	return d
+}
+
+func TestFixtureGolden_ServiceTargetPort(t *testing.T) {
+	t.Run("standard", func(t *testing.T) {
+		stub, detail, traffic := serviceTargetPortFixture()
+		gen := NewStandardPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "standard_service_target_port.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+	t.Run("cilium", func(t *testing.T) {
+		stub, detail, traffic := serviceTargetPortFixture()
+		gen := NewCiliumPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "cilium_service_target_port.golden.yaml", gen, detail.Name, traffic, detail)
 	})
 }

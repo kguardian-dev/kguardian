@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
@@ -222,11 +223,19 @@ func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffi
 				log.Warn().Err(err).Msgf("Skipping egress traffic record due to invalid destination port: %s", traffic.DstPort)
 				continue
 			}
-			port = intstr.FromInt(portInt)
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing EGRESS: allowing our pod to reach peer %s on port %d (%s)", peer, portInt, protocolStr)
-			egressRules = mergeOrAppendResolvedRule(egressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
+			// A Service peer was observed pre-DNAT on its Service port; the
+			// policy must allow the backend targetPort (service_port.go).
+			resolved := resolver.resolveRow(peer, traffic)
+			ports, mapped := servicePortFor(resolved, portInt, protocolStr)
+			for _, port := range ports {
+				egressRules = mergeOrAppendResolvedRule(egressRules, resolved, port, protocolStr, traffic.TimeStamp)
+			}
+			if !mapped {
+				noteUnmappedPort(egressRules, resolved, portInt, protocolStr)
+			}
 		} else {
 			log.Debug().Msgf("Skipping traffic record with unknown type: %s", traffic.TrafficType)
 		}
@@ -263,7 +272,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 		if len(peers) == 0 { // Skip if peer could not be determined (e.g., internal error)
 			continue
 		}
-		comments.addIngress(len(ingressRules), comment)
+		for _, line := range group.comments(comment) {
+			comments.addIngress(len(ingressRules), line)
+		}
 		ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
 			From:  peers,
 			Ports: deduplicatePorts(group.ports),
@@ -284,7 +295,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 		if len(peers) == 0 { // Skip if peer could not be determined
 			continue
 		}
-		comments.addEgress(len(egressRules), comment)
+		for _, line := range group.comments(comment) {
+			comments.addEgress(len(egressRules), line)
+		}
 
 		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
 			To:    peers,
@@ -420,7 +433,14 @@ func (g *StandardPolicyGenerator) peersForResolved(peer resolvedPeer, at string)
 // We can't trust the input to be well-formed — port strings come from
 // observed eBPF traffic data and persist through the broker; silently
 // truncating "8.5" to 8 in a generated NetworkPolicy is a real bug.
+//
+// Atoi still accepts a leading sign ("+80"), which the TypeScript generators
+// reject, so anything other than decimal digits is refused first: every
+// generator skips exactly the same rows.
 func parsePort(portStr string) (int, error) {
+	if portStr == "" || strings.TrimLeft(portStr, "0123456789") != "" {
+		return 0, fmt.Errorf("invalid port format '%s': decimal digits only", portStr)
+	}
 	portInt, err := strconv.Atoi(portStr)
 	if err != nil {
 		return 0, fmt.Errorf("invalid port format '%s': %w", portStr, err)

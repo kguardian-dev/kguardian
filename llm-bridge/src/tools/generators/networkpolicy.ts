@@ -1,4 +1,4 @@
-import { Document, stringify, isNode } from "yaml";
+import { Document, isNode, visit } from "yaml";
 import { log } from "../../logger.js";
 
 // In-process NetworkPolicy / CiliumNetworkPolicy generation. A faithful
@@ -33,11 +33,29 @@ export interface PeerIdentity {
   // NetworkPolicy is evaluated post-DNAT, so these — never the ClusterIP —
   // are the ipBlock peers. Cilium ignores them (entities cover every node).
   backendIPs?: string[];
+  // Service case only: the named container ports of those backends, which
+  // resolve a named targetPort to a number (an ipBlock / host entity has no
+  // endpoints to resolve a name against).
+  backendPorts?: BrokerContainerPort[];
   // Unattributed: pods held this IP but none can be proven to have been the
   // peer at flow time (all started later), or the row's stored identity no
   // longer exists. Rendered as an ipBlock / CIDR with a comment — never a
   // selector for whoever holds the IP today.
   unattributed?: boolean;
+  // Set when the peer is a Service (selector or host-network backed): its
+  // name and spec.ports, so an egress port observed on the ClusterIP (the
+  // Service port, pre-DNAT) is mapped to the backend targetPort the policy
+  // must allow. `ports` empty/absent = unknown: the port is kept and the rule
+  // commented. Absent = not a Service; ports are used as observed.
+  svcPorts?: { name: string; namespace: string; ports?: BrokerServicePort[] | null };
+}
+
+/** One broker service_spec.spec.ports[] entry (Kubernetes ServicePort). */
+export interface BrokerServicePort {
+  name?: string;
+  port?: unknown;
+  protocol?: unknown;
+  targetPort?: unknown;
 }
 
 // The broker pod record (/pod/info listing, /pod/ip) fields the generators
@@ -47,8 +65,11 @@ export interface BrokerPodListEntry {
   pod_name?: string; pod_namespace?: string; pod_ip?: string; host_network?: boolean | null;
   node_name?: string; workload_name?: string; is_dead?: boolean;
   pod_ips?: string[] | null; time_stamp?: string | null; started_at?: string | null;
-  pod_obj?: { metadata?: { uid?: string; labels?: Record<string, string> }; spec?: { nodeName?: string } };
+  pod_obj?: { metadata?: { uid?: string; labels?: Record<string, string> }; spec?: { nodeName?: string; containers?: { ports?: BrokerContainerPort[] | null }[] | null } };
 }
+
+/** One pod_obj.spec.containers[].ports[] entry. */
+export interface BrokerContainerPort { name?: string; containerPort?: unknown; protocol?: unknown }
 
 function labelsContain(labels: Record<string, string> | undefined, selector: Record<string, string>): boolean {
   return Object.entries(selector).every(([k, v]) => labels?.[k] === v);
@@ -73,7 +94,8 @@ export function hostNetworkServiceIdentity(
   if (backends.length === 0) return null;
   const nodes = [...new Set(backends.map((p) => p.node_name || p.pod_obj?.spec?.nodeName || "").filter(Boolean))].sort();
   const backendIPs = [...new Set(backends.map((p) => p.pod_ip || "").filter(Boolean))].sort();
-  return { hostNetwork: true, namespace: svc.svc_namespace, service: svc.svc_name, selector: svc.selector, node: nodes.join(","), backendIPs };
+  const backendPorts = backends.flatMap((p) => (p.pod_obj?.spec?.containers ?? []).flatMap((c) => c?.ports ?? []));
+  return { hostNetwork: true, namespace: svc.svc_namespace, service: svc.svc_name, selector: svc.selector, node: nodes.join(","), backendIPs, backendPorts };
 }
 
 // The identity the broker stamped on a traffic row at ingest (broker-api-v4).
@@ -189,16 +211,74 @@ function hostTargetWarning(pod: PodInfo, kind: string, selector: string): string
 // and the peer may sit on either.
 const HOST_ENTITIES = ["host", "remote-node"];
 
-interface Port { port: number; protocol: string }
+// A policy port: a number, or a named container port (a named targetPort).
+interface Port { port: number | string; protocol: string }
 // One rule per (peer IP, attributed identity): the ports that peer was
 // observed on, the identity it resolved to, and the time_stamps of the rows
 // folded in (the newest is quoted in the unattributed-peer comment).
-interface Rule { peerIP: string; key: string; identity: PeerIdentity | null; ports: Port[]; stamps: string[] }
+// `unmapped` are observed Service ports spec.ports could not map to a targetPort.
+interface Rule { peerIP: string; key: string; identity: PeerIdentity | null; ports: Port[]; stamps: string[]; unmapped: Port[] }
 
-function parsePort(p: string): number | null {
+// Decimal digits only, 1-65535, as the advisor (strconv.Atoi after a digit
+// check), the broker and the frontend parse it. Number() would also accept
+// "0x50", "1e2", " 80" and "80.0", rendering ports the others skip.
+export function parsePort(p: string): number | null {
+  if (!/^[0-9]+$/.test(p)) return null;
   const n = Number(p);
-  if (!Number.isInteger(n) || n <= 0 || n > 65535) return null;
+  if (n < 1 || n > 65535) return null;
   return n;
+}
+
+// servicePortFor — the port a rule must allow for an egress flow to a peer
+// observed on port/protocol, and whether it could be mapped. Mirrors advisor
+// service_port.go: the controller records egress from the socket, which
+// under kube-proxy still holds the ClusterIP and the Service port (the DNAT
+// happens later, in conntrack), while NetworkPolicy and Cilium match the
+// backend pod after translation. So a Service peer's port is mapped through
+// spec.ports (port AND protocol, protocol defaulting to TCP) to its
+// targetPort: a number as is, a name as the named port, omitted (or
+// unusable) = the port. A named targetPort on a Service backed by
+// host-network pods is resolved through the backends' container ports (name
+// AND protocol) to every distinct number, since the rule's ipBlock / host
+// entity peer has no endpoints to resolve a name against; an unresolvable
+// name is unmapped. No match, or no ports known, keeps the observed port and
+// reports it unmapped (the rule gets a comment). Non-Service peers are
+// returned unchanged.
+const protocolOrTCP = (p: unknown): unknown => (typeof p === "string" && p !== "" ? p : "TCP");
+
+export function servicePortFor(id: PeerIdentity | null, port: number, protocol: string): { ports: (number | string)[]; mapped: boolean } {
+  if (!id?.svcPorts) return { ports: [port], mapped: true };
+  for (const sp of id.svcPorts.ports ?? []) {
+    if (sp.port !== port || protocolOrTCP(sp.protocol) !== protocol) continue;
+    const t = sp.targetPort;
+    if (typeof t === "string" && t !== "") {
+      if (id.hostNetwork !== true || !id.service) return { ports: [t], mapped: true };
+      const nums = [...new Set((id.backendPorts ?? [])
+        .filter((cp) => cp.name === t && protocolOrTCP(cp.protocol) === protocol)
+        .map((cp) => cp.containerPort)
+        .filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 65535))]
+        .sort((a, b) => a - b);
+      return nums.length > 0 ? { ports: nums, mapped: true } : { ports: [port], mapped: false };
+    }
+    if (typeof t === "number" && Number.isInteger(t) && t >= 1 && t <= 65535) return { ports: [t], mapped: true };
+    return { ports: [port], mapped: true };
+  }
+  return { ports: [port], mapped: false };
+}
+
+// unmappedPortComments — one line per unmapped Service port, in port order,
+// deduplicated. Wording pinned by the goldens (advisor service_port.go).
+function unmappedPortComments(id: PeerIdentity | null, unmapped: Port[]): string[] {
+  if (!id?.svcPorts || unmapped.length === 0) return [];
+  const svc = `${id.svcPorts.namespace}/svc/${id.svcPorts.name}`;
+  return dedupePorts(unmapped).map((p) =>
+    `service ${svc}: port ${p.port}/${p.protocol} could not be mapped to a targetPort; allowing the Service port as observed`);
+}
+
+// The comment lines above a rule: the peer's own comment, then one per
+// unmapped Service port.
+function ruleComments(r: Rule, peerComment: string): string[] {
+  return [...(peerComment ? [peerComment] : []), ...unmappedPortComments(r.identity, r.unmapped)];
 }
 
 // identityKey groups rows for the same IP that resolved to the same rendering
@@ -227,25 +307,41 @@ const bytewise = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 // mergeOrAppendRule — group by (peer IP, identity), dedup (port,protocol).
 // Mirrors mergeOrAppendResolvedRule in types.go: flows from two different
 // peers that held the same IP at different times never merge into one rule.
-function mergeOrAppend(rules: Rule[], peer: string, identity: PeerIdentity | null, port: number, protocol: string, timeStamp: string): void {
+// `unmapped` is the observed Service port when it could not be mapped to a
+// targetPort (advisor noteUnmappedPort).
+function mergeOrAppend(rules: Rule[], peer: string, identity: PeerIdentity | null, port: number | string, protocol: string, timeStamp: string, unmapped?: Port): void {
   const key = identityKey(identity);
-  for (const r of rules) {
-    if (r.peerIP === peer && r.key === key) {
-      if (timeStamp) r.stamps.push(timeStamp);
-      if (r.ports.some((p) => p.port === port && p.protocol === protocol)) return;
-      r.ports.push({ port, protocol });
-      return;
-    }
+  let rule = rules.find((r) => r.peerIP === peer && r.key === key);
+  if (rule) {
+    if (timeStamp) rule.stamps.push(timeStamp);
+    if (!rule.ports.some((p) => p.port === port && p.protocol === protocol)) rule.ports.push({ port, protocol });
+  } else {
+    rule = { peerIP: peer, key, identity, ports: [{ port, protocol }], stamps: timeStamp ? [timeStamp] : [], unmapped: [] };
+    rules.push(rule);
   }
-  rules.push({ peerIP: peer, key, identity, ports: [{ port, protocol }], stamps: timeStamp ? [timeStamp] : [] });
+  if (unmapped) rule.unmapped.push(unmapped);
 }
 
-// deduplicatePorts — sort by port asc then protocol asc, drop dups. Mirrors the
-// Go helper that keeps regenerated YAML diff-stable.
+// deduplicatePorts — numeric ports ascending, then named ports bytewise, then
+// protocol; drop dups. Mirrors the Go helper that keeps regenerated YAML
+// diff-stable.
+function comparePorts(a: Port, b: Port): number {
+  if (typeof a.port === "number" && typeof b.port === "number") {
+    if (a.port !== b.port) return a.port - b.port;
+  } else if (typeof a.port === "number") {
+    return -1;
+  } else if (typeof b.port === "number") {
+    return 1;
+  } else if (a.port !== b.port) {
+    return bytewise(a.port, b.port);
+  }
+  return bytewise(a.protocol, b.protocol);
+}
+
 function dedupePorts(ports: Port[]): Port[] {
   const seen = new Set<string>();
   const out: Port[] = [];
-  for (const p of [...ports].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol))) {
+  for (const p of [...ports].sort(comparePorts)) {
     const k = `${p.port}/${p.protocol}`;
     if (seen.has(k)) continue;
     seen.add(k);
@@ -287,7 +383,12 @@ async function processTrafficRules(traffic: TrafficRow[], pod: PodInfo, resolve:
       const port = parsePort(t.traffic_in_out_port ?? "");
       if (port === null) continue;
       const id = await resolve(peer, { peer: storedPeerOf(t), timeStamp });
-      mergeOrAppend(egress, peer, id, port, protocol, timeStamp);
+      // A Service peer was observed pre-DNAT on its Service port; the rule
+      // must allow the backend targetPort (servicePortFor).
+      const allowed = servicePortFor(id, port, protocol);
+      for (const p of allowed.ports) {
+        mergeOrAppend(egress, peer, id, p, protocol, timeStamp, allowed.mapped ? undefined : { port, protocol });
+      }
     }
   }
   return { ingress, egress };
@@ -485,7 +586,7 @@ function standardRules(rules: Rule[], key: "from" | "to", comments: Record<numbe
   for (const r of sortedPeers(rules)) {
     const resolved = standardPeer(r.peerIP, r.identity, newestTimeStamp(r.stamps));
     if (resolved === null) continue; // unparseable peer IP - see peerCIDR
-    addRuleComment(comments, out.length, resolved.comment);
+    for (const line of ruleComments(r, resolved.comment)) addRuleComment(comments, out.length, line);
     out.push({
       [key]: resolved.peers,
       ports: dedupePorts(r.ports).map((p) => ({ protocol: p.protocol, port: p.port })),
@@ -621,14 +722,20 @@ function ciliumRules(
     else if (peer.entities) {
       const key = portsKey(ports);
       const existing = entityRuleByPorts.get(key);
-      if (existing !== undefined) { addRuleComment(comments, existing, peer.comment); continue; }
+      if (existing !== undefined) {
+        for (const line of ruleComments(r, peer.comment)) addRuleComment(comments, existing, line);
+        continue;
+      }
       entityRuleByPorts.set(key, out.length);
       rule[entKey] = peer.entities;
     }
     else if (peer.cidr) rule[cidrKey] = peer.cidr;
     else continue;
-    rule.toPorts = [{ ports: ports.map((p) => ({ port: String(p.port), protocol: p.protocol })) }];
-    addRuleComment(comments, out.length, peer.comment);
+    // One PortRule per port, as the advisor's convertPortsToCiliumPortRules
+    // emits them (a rule seen on several ports used to get a single PortRule
+    // listing them all: equivalent to Cilium, but not the golden).
+    rule.toPorts = ports.map((p) => ({ ports: [{ port: String(p.port), protocol: p.protocol }] }));
+    for (const line of ruleComments(r, peer.comment)) addRuleComment(comments, out.length, line);
     out.push(rule);
   }
   return out;
@@ -703,7 +810,7 @@ export async function generateCiliumPolicyWithComments(
 /** The broker /svc/ip record fields the resolver reads. */
 export interface BrokerServiceRecord {
   svc_name?: string; svc_namespace?: string;
-  service_spec?: { spec?: { selector?: Record<string, string> } };
+  service_spec?: { spec?: { selector?: Record<string, string>; ports?: BrokerServicePort[] | null } };
 }
 
 /**
@@ -851,7 +958,9 @@ export function makePeerResolver(lookup: PeerLookup): PeerResolver {
   const serviceIdentity = async (svc: BrokerServiceRecord): Promise<PeerIdentity> => {
     const selector = svc.service_spec?.spec?.selector ?? {};
     const host = hostNetworkServiceIdentity({ svc_name: svc.svc_name, svc_namespace: svc.svc_namespace, selector }, await pods());
-    return host ?? { selector, namespace: svc.svc_namespace };
+    const ports = svc.service_spec?.spec?.ports;
+    const svcPorts = { name: svc.svc_name ?? "", namespace: svc.svc_namespace ?? "", ports: Array.isArray(ports) ? ports : [] };
+    return { ...(host ?? { selector, namespace: svc.svc_namespace }), svcPorts };
   };
 
   // A stored identity is materialised, never re-resolved: an identity that no
@@ -914,16 +1023,35 @@ export function makePeerResolver(lookup: PeerLookup): PeerResolver {
   };
 }
 
+// Words a YAML 1.1 decoder reads as a boolean or null. kubectl converts YAML
+// to JSON through a 1.1 parser, and the `yaml` package emits YAML 1.2, where
+// y/yes/n/no/on/off are plain strings: a port name `on` would reach the API
+// server as `true`. The advisor (sigs.k8s.io/yaml) quotes them; so do we.
+const YAML11_WORDS = /^(y|yes|n|no|on|off|true|false|null|~)$/i;
+
+function quoteYaml11Words(doc: Document): void {
+  visit(doc, {
+    Scalar(key, node) {
+      if (key !== "key" && typeof node.value === "string" && YAML11_WORDS.test(node.value)) node.type = "QUOTE_DOUBLE";
+    },
+  });
+}
+
 /**
- * Serialize a generated policy object to YAML for the tool response. With no
- * comments this is exactly `stringify(policy)` (the pre-existing output);
- * otherwise the comments are attached to the document / rule nodes so the
- * emitter renders them as `# ...` lines above the header / rule.
+ * Serialize a generated policy object to YAML for the tool response: the
+ * `yaml` package's output with YAML 1.1 boolean/null words quoted, and the
+ * comments (if any) attached to the document / rule nodes so the emitter
+ * renders them as `# ...` lines above the header / rule.
  */
 export function policyToYAML(policy: Record<string, unknown>, comments?: PolicyComments): string {
-  if (!hasComments(comments)) return stringify(policy);
+  if (!hasComments(comments)) {
+    const plain = new Document(policy);
+    quoteYaml11Words(plain);
+    return plain.toString();
+  }
   const c = comments as PolicyComments;
   const doc = new Document(policy);
+  quoteYaml11Words(doc);
   const asComment = (lines: string[]) => lines.map((l) => ` ${l}`).join("\n");
   if (c.header.length > 0) doc.commentBefore = asComment(c.header);
   for (const dir of ["ingress", "egress"] as const) {

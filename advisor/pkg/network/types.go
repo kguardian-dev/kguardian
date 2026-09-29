@@ -31,6 +31,10 @@ type NetworkPolicyRule struct {
 	Peer   *resolvedPeer
 	Ports  []networkingv1.NetworkPolicyPort
 	Stamps []string
+	// Unmapped are the observed Service ports (egress to a Service peer)
+	// that spec.ports could not map to a targetPort; each gets a comment
+	// above the rule. See service_port.go.
+	Unmapped []networkingv1.NetworkPolicyPort
 }
 
 // identityKey is the rule's grouping key beside PeerIP ("" for a rule with
@@ -71,6 +75,21 @@ func mergeOrAppendResolvedRule(
 		Ports:  []networkingv1.NetworkPolicyPort{{Port: &port, Protocol: protocolPtr(protocolStr)}},
 		Stamps: appendStamp(nil, timeStamp),
 	})
+}
+
+// noteUnmappedPort records on the (peer IP, identity) rule that the observed
+// Service port port/protocol could not be mapped to a targetPort. The rule
+// must already exist (mergeOrAppendResolvedRule first).
+func noteUnmappedPort(rules []NetworkPolicyRule, peer resolvedPeer, port int, protocolStr string) {
+	key := peer.identityKey()
+	for i := range rules {
+		if rules[i].PeerIP != peer.IP || rules[i].identityKey() != key {
+			continue
+		}
+		p := intstr.FromInt(port)
+		rules[i].Unmapped = append(rules[i].Unmapped, networkingv1.NetworkPolicyPort{Port: &p, Protocol: protocolPtr(protocolStr)})
+		return
+	}
 }
 
 func appendStamp(stamps []string, s string) []string {
