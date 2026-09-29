@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Copy, ExternalLink, Map as MapIcon, SearchX, Sparkles } from 'lucide-react';
-import { CVE_IMAGE_READS, useCveDetail, usePssByWorkload } from '../../hooks/useVulns';
+import { CVE_FINDING_PAGE_SIZE, CVE_FINDING_PAGES, CVE_IMAGE_READS, useCveDetail, usePssByWorkload } from '../../hooks/useVulns';
 import { profileApi as defaultProfileApi, type ProfileApi } from '../../services/profileApi';
 import { workloadKey } from '../../utils/workloads';
 import { vulnErrorKind, type VulnApi } from '../../services/vulnApi';
@@ -36,7 +36,7 @@ interface CveDrawerProps {
  * unknown throughout; kguardian applies nothing.
  */
 export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, onAskAI, api, profileApi = defaultProfileApi }: CveDrawerProps) {
-  const { exposure: e, findings, failed, pending, finding: f, loading, error, reload } = useCveDetail(id, api);
+  const { exposure: e, findings, failed, incomplete, pending, finding: f, loading, error, reload } = useCveDetail(id, api);
   const namespaces = useMemo(() => (e ? e.workloads.map((w) => w.namespace) : []), [e]);
   const pss = usePssByWorkload(namespaces, profileApi);
 
@@ -48,22 +48,24 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
         ? e.workloads
             .map((w) => {
               const imageFinding = findings.get(w.imageDigest) ?? null;
+              const tier = brokerTier(imageFinding?.tier);
               return {
                 w,
-                tier: brokerTier(imageFinding?.tier),
+                // A partly read image may carry the CVE in a package not seen yet: only P0 has nothing above it.
+                tier: incomplete.has(w.imageDigest) && tier !== 'P0' ? null : tier,
                 factors: workloadFactors(w, e, imageFinding, pss ? (pss.get(workloadKey(w.namespace, w.kind, w.name)) ?? null) : undefined),
               };
             })
             .sort((a, b) => Number(b.w.running) - Number(a.w.running) || tierRank(b.tier) - tierRank(a.tier))
         : [],
-    [e, findings, pss],
+    [e, findings, incomplete, pss],
   );
   const backgroundRow = rows.find((r) => r.tier === 'Background');
   // A row whose image read is still in flight says "…", like the headline.
   const readPending = (digest: string) =>
     pending > 0 && !findings.has(digest) && !failed.has(digest) && (e?.images.slice(0, CVE_IMAGE_READS).some((i) => i.digest === digest) ?? false);
   // Worst case over every row; pending until every read has settled.
-  const head = cveHeadline(rows, { pending, failed: failed.size, summaryTier: summary?.tier });
+  const head = cveHeadline(rows, { pending, failed: failed.size, incomplete: incomplete.size, summaryTier: summary?.tier });
   const overall = head.pending ? null : head.tier;
   // The prompt states the headline's merged factors, not the first image's own.
   const prompt = () => (e ? cveAiPrompt(e, f, overall, head.pending ? [] : head.factors) : '');
@@ -92,6 +94,18 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
                 )}
                 {head.failedReads > 0 && (
                   <FactorChips factors={[{ key: 'read-failed', tone: 'unknown', label: 'read failed', title: `The finding read failed for ${head.failedReads} image${head.failedReads === 1 ? '' : 's'}: their tier is unknown. Retry with Refresh.` }]} />
+                )}
+                {head.incompleteReads > 0 && (
+                  <FactorChips
+                    factors={[
+                      {
+                        key: 'read-incomplete',
+                        tone: 'unknown',
+                        label: 'read incomplete',
+                        title: `${head.incompleteReads} image${head.incompleteReads === 1 ? ' has' : 's have'} more findings than the first ${CVE_FINDING_PAGES * CVE_FINDING_PAGE_SIZE} read here, so some of this CVE's packages may not have been seen: their tier is unknown, not low.`,
+                      },
+                    ]}
+                  />
                 )}
               </>
             )}

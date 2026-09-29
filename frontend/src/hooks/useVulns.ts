@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
-import type { CveSummary, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
+import type { CveSummary, ExposedImage, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
 import { workloadKey } from '../utils/workloads';
+import { mergeFindings, VULN_SEVERITY_RANK } from '../utils/vulnView';
 
 /** Drop a response for a request the user has already moved away from. */
 function useLatest() {
@@ -137,6 +138,36 @@ export function useCveTotals(namespace: string | undefined, refreshTick = 0, api
 
 /** Images per CVE whose findings the drawer reads (tier, factors, KEV/EPSS). */
 export const CVE_IMAGE_READS = 10;
+/** Findings per page of an image read in the drawer (the Broker's maximum). */
+export const CVE_FINDING_PAGE_SIZE = 500;
+/** Pages of one image's findings the drawer reads looking for the CVE: the read has no CVE filter. */
+export const CVE_FINDING_PAGES = 4;
+
+/**
+ * Every finding of CVE `id` in one image: one per package and version that
+ * carries it. Pages until each package the exposure lists is found, the
+ * findings (most severe first) are past the CVE's least severe package, or
+ * the image has no more. `complete` is false when CVE_FINDING_PAGES ran out
+ * first: what was found is part of the answer, not all of it.
+ */
+async function cveFindingsIn(api: VulnApi, id: string, img: ExposedImage): Promise<{ matches: Finding[]; complete: boolean }> {
+  const missing = new Set(img.packages.map((p) => `${p.name}@${p.installedVersion}`));
+  const floor = Math.min(...img.packages.map((p) => VULN_SEVERITY_RANK[p.severity] ?? 0));
+  const matches: Finding[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < CVE_FINDING_PAGES; page++) {
+    const v = await api.getImageVulns(img.digest, { limit: CVE_FINDING_PAGE_SIZE, ...(after ? { after } : {}) });
+    for (const f of v.items) {
+      if (f.id !== id) continue;
+      matches.push(f);
+      missing.delete(`${f.package.name}@${f.installedVersion}`);
+    }
+    const last = v.items[v.items.length - 1];
+    if (!v.nextAfter || missing.size === 0 || (last && (VULN_SEVERITY_RANK[last.severity] ?? 0) < floor)) return { matches, complete: true };
+    after = v.nextAfter;
+  }
+  return { matches, complete: false };
+}
 
 /**
  * One CVE for the triage drawer: its exposure (images → workloads →
@@ -144,8 +175,12 @@ export const CVE_IMAGE_READS = 10;
  * affected image (first CVE_IMAGE_READS): the Broker's tier and tier
  * factors, KEV, EPSS, title and link, which the exposure read does not
  * carry. Findings arrive per image as each read settles:
- *  - `findings`: digest → the finding, or null (read, CVE not in it);
+ *  - `findings`: digest → the finding (the most urgent over every package
+ *    carrying the CVE, utils/vulnView mergeFindings), or null (read, CVE
+ *    not in it);
  *  - `failed`: digests whose read failed;
+ *  - `incomplete`: digests with more findings than the drawer reads, where
+ *    some of the CVE's may not have been seen;
  *  - `pending`: reads still in flight.
  * `finding` is only for descriptive text (title, link); risk comes from
  * every row (utils/vulnView cveHeadline).
@@ -154,6 +189,7 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
   const [exposure, setExposure] = useState<Exposure | null>(null);
   const [findings, setFindings] = useState<Map<string, Finding | null>>(new Map());
   const [failed, setFailed] = useState<Set<string>>(new Set());
+  const [incomplete, setIncomplete] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -166,6 +202,7 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     setExposure(null);
     setFindings(new Map());
     setFailed(new Set());
+    setIncomplete(new Set());
     setPending(0);
     try {
       const e = await api.getExposure(id);
@@ -177,8 +214,10 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
       await withConcurrencyLimit(
         toRead.map((img) => async () => {
           try {
-            const v = await api.getImageVulns(img.digest, { limit: 500 });
-            if (current()) setFindings((prev) => new Map(prev).set(img.digest, v.items.find((f) => f.id === id) ?? null));
+            const { matches, complete } = await cveFindingsIn(api, id, img);
+            if (!current()) return;
+            setFindings((prev) => new Map(prev).set(img.digest, mergeFindings(matches)));
+            if (!complete) setIncomplete((prev) => new Set(prev).add(img.digest));
           } catch {
             // That image's tier and KEV / EPSS are unknown; the headline says the read failed.
             if (current()) setFailed((prev) => new Set(prev).add(img.digest));
@@ -209,7 +248,7 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
       break;
     }
   }
-  return { exposure, findings, failed, pending, finding, loading, error, reload: load };
+  return { exposure, findings, failed, incomplete, pending, finding, loading, error, reload: load };
 }
 
 export const IMAGE_PAGE_SIZE = 25;
