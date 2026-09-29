@@ -78,7 +78,7 @@ const nodeExporter = podRecord({
   pod_obj: { metadata: { uid: '9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3' } },
 });
 const dbService: ServiceInfo = {
-  svc_ip: '10.96.0.10', svc_name: 'db', svc_namespace: 'game-servers', service_spec: { spec: { selector: { app: 'db' } } },
+  svc_ip: '10.96.0.10', svc_name: 'db', svc_namespace: 'game-servers', service_spec: { spec: { selector: { app: 'db' }, ports: [{ port: 5432, protocol: 'TCP' }] } },
 };
 
 let listing: PodInfo[] | (() => never) = [cmangosDatabase, autobrr, cmangosWeb];
@@ -350,7 +350,7 @@ describe('generateNetworkPolicy — peer attribution', () => {
   test('a guarded-out pod backed by a Service is NOT redirected to the Service identity', async () => {
     // autobrr's Service is also a peer; the May row from autobrr's IP must stay unattributed.
     const autobrrSvc: ServiceInfo = { svc_ip: '10.96.0.20', svc_name: 'autobrr', svc_namespace: 'home-system',
-      service_spec: { spec: { selector: { app: 'autobrr' } } } };
+      service_spec: { spec: { selector: { app: 'autobrr' }, ports: [{ port: 7474, protocol: 'TCP' }] } } };
     services = { '10.96.0.20': autobrrSvc };
     const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [
       ingressRow('10.244.12.199', '3306', '51234', '2026-05-21T08:30:00'),

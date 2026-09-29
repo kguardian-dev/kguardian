@@ -4,6 +4,7 @@ import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
 import { isValidCidr, peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
+import { mapServicePort, servicePortsByRow, unmappedServicePortComments } from './serviceTargetPort';
 import {
   hostNetworkPeerComment,
   hostNetworkServiceBackends,
@@ -48,8 +49,10 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
     ip: string;
     identity: TrafficIdentity;
   }
-  const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
-  const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
+  // `unmapped`: observed Service ports (`PROTOCOL:port`) that spec.ports
+  // could not map to a targetPort; each gets a comment above the rule.
+  const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string>; unmapped?: Set<string> }>();
+  const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string>; unmapped?: Set<string> }>();
 
   // Resolve every ROW to an identity — not every IP. Pod IPs are recycled,
   // so two rows from one IP months apart can be two different peers. The
@@ -61,6 +64,12 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
   const identities = await Promise.all(rows.map((t) => resolver.resolve(t)));
   const rowIdentity = new Map<NetworkTraffic, TrafficIdentity>();
   rows.forEach((t, i) => rowIdentity.set(t, identities[i]));
+
+  // Egress to a Service is observed pre-DNAT, on the Service port; the rule
+  // must allow the backend targetPort (utils/serviceTargetPort). Read before
+  // the collapse below: a pod row redirected to its Service was observed
+  // post-DNAT and already carries the container port.
+  const svcPorts = await servicePortsByRow(rows, rowIdentity, resolver, sources);
 
   // Deduplicate: a pod peer that is selected by a Service peer also present
   // is redirected to the Service identity, collapsing traffic to both the
@@ -98,16 +107,21 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
     if (!map) return;
     // For ingress: allow traffic FROM remote IP TO this pod's port.
     // For egress: allow traffic TO remote IP:port.
-    const port = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
+    const observed = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
     // No usable port (ICMP rows carry "0"): skip the row, as the advisor does.
-    if (port === null) return;
+    if (observed === null) return;
+    const rowSvcPorts = svcPorts.get(traffic);
+    const mapped = rowSvcPorts ? mapServicePort(rowSvcPorts, observed, protocol) : { port: observed, mapped: true };
+    const port = mapped.port;
 
-    const entry = map.get(key);
+    let entry = map.get(key);
     if (!entry) {
-      map.set(key, { peer: { ip: remoteIP, identity }, ports: new Set([`${protocol}:${port}`]) });
-      return;
+      entry = { peer: { ip: remoteIP, identity }, ports: new Set([`${protocol}:${port}`]) };
+      map.set(key, entry);
+    } else {
+      entry.ports.add(`${protocol}:${port}`);
     }
-    entry.ports.add(`${protocol}:${port}`);
+    if (!mapped.mapped) (entry.unmapped ??= new Set()).add(`${protocol}:${observed}`);
     // The group's comment quotes the NEWEST unattributed flow.
     if (identity.unattributed && entry.peer.identity.unattributed && newerRow(identity.unattributed.at, entry.peer.identity.unattributed.at)) {
       entry.peer = { ip: remoteIP, identity };
@@ -342,12 +356,12 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
   // host-network pod on a node does), and they collapse into a single ipBlock
   // rule carrying the union of their ports and one comment line per peer.
   const buildRules = async (
-    map: Map<string, { peer: PeerInfo; ports: Set<string> }>,
+    map: Map<string, { peer: PeerInfo; ports: Set<string>; unmapped?: Set<string> }>,
     direction: 'ingress' | 'egress',
   ): Promise<NetworkPolicyRule[]> => {
     const rules: NetworkPolicyRule[] = [];
     const hostRuleByCidr = new Map<string, NetworkPolicyRule>();
-    for (const { peer, ports } of sortedByPeerIP(map)) {
+    for (const { peer, ports, unmapped } of sortedByPeerIP(map)) {
       const resolved = await createPeer(peer);
       // An unparseable peer IP drops the whole rule rather than emitting a
       // malformed CIDR, which would make the API server reject the entire policy.
@@ -360,23 +374,24 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
         ? resolved.peers.map((p) => p.ipBlock?.cidr).filter(Boolean).join(',') || undefined
         : undefined;
       const existing = cidr ? hostRuleByCidr.get(cidr) : undefined;
+      const peerComment = resolved.hostNetworkComment ?? resolved.comment;
+      const lines = [...(peerComment ? [peerComment] : []), ...unmappedServicePortComments(peer.identity, unmapped)];
       if (existing && resolved.hostNetworkComment) {
         const seen = new Set(existing.ports.map((p) => `${p.protocol}:${p.port}`));
         for (const p of rulePorts) {
           if (!seen.has(`${p.protocol}:${p.port}`)) existing.ports.push(p);
         }
-        if (!existing.comments!.includes(resolved.hostNetworkComment)) {
-          existing.comments!.push(resolved.hostNetworkComment);
+        for (const line of lines) {
+          if (!existing.comments!.includes(line)) existing.comments!.push(line);
         }
         continue;
       }
 
-      const comment = resolved.hostNetworkComment ?? resolved.comment;
       const rule: NetworkPolicyRule = {
         id: `${direction}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         peers: resolved.peers,
         ports: rulePorts,
-        ...(comment && { comments: [comment] }),
+        ...(lines.length > 0 && { comments: lines }),
       };
       if (cidr) hostRuleByCidr.set(cidr, rule);
       rules.push(rule);

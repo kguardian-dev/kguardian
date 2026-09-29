@@ -114,22 +114,26 @@ const useIngressNginx = () => {
 const useDefaults = () => { byIp = podsByIp; byName = podsByName; serviceLookup = {}; };
 
 // (e) Services: node-exporter ClusterIP fronting the two host-network pods
-// above; db ClusterIP fronting an ordinary pod-network deployment.
+// above; db ClusterIP fronting an ordinary pod-network deployment. Every
+// Service lists its ports (targetPort omitted = the port, as the advisor's
+// fixtureSvcPorts): with none, an observed port cannot be mapped to a
+// targetPort and the rule gains a comment (service_target_port covers that).
+const tcp = (...ports: number[]) => ports.map((port) => ({ port, protocol: 'TCP' }));
 const services: Record<string, unknown> = {
   '10.96.0.20': { svc_name: 'node-exporter', svc_namespace: 'monitoring', svc_ip: '10.96.0.20',
-    service_spec: { spec: { selector: { app: 'node-exporter' } } } },
+    service_spec: { spec: { selector: { app: 'node-exporter' }, ports: tcp(9100) } } },
   '10.96.0.10': { svc_name: 'db', svc_namespace: 'prod', svc_ip: '10.96.0.10',
-    service_spec: { spec: { selector: { app: 'db' } } } },
+    service_spec: { spec: { selector: { app: 'db' }, ports: tcp(5432) } } },
   // (f) cross-namespace Service peer of prod/web
   '10.96.0.50': { svc_name: 'prometheus', svc_namespace: 'monitoring', svc_ip: '10.96.0.50',
-    service_spec: { spec: { selector: { app: 'prometheus' } } } },
+    service_spec: { spec: { selector: { app: 'prometheus' }, ports: tcp(9090) } } },
   // (j) Services whose selector is not `{app: <name>}`: kube-dns selects
   // `k8s-app: kube-dns`, and grafana (same namespace as prometheus) selects
   // on the recommended labels.
   '10.96.0.53': { svc_name: 'kube-dns', svc_namespace: 'kube-system', svc_ip: '10.96.0.53',
-    service_spec: { spec: { selector: { 'k8s-app': 'kube-dns' } } } },
+    service_spec: { spec: { selector: { 'k8s-app': 'kube-dns' }, ports: [{ port: 53, protocol: 'UDP' }, { port: 53, protocol: 'TCP' }] } } },
   '10.96.0.30': { svc_name: 'grafana', svc_namespace: 'monitoring', svc_ip: '10.96.0.30',
-    service_spec: { spec: { selector: { 'app.kubernetes.io/name': 'grafana', 'app.kubernetes.io/instance': 'obs' } } } },
+    service_spec: { spec: { selector: { 'app.kubernetes.io/name': 'grafana', 'app.kubernetes.io/instance': 'obs' }, ports: tcp(3000) } } },
 };
 let serviceLookup: Record<string, unknown> = {};
 const useServices = () => { serviceLookup = services; };
@@ -228,10 +232,15 @@ function normaliseCiliumRules(rules: unknown): Rule[] {
           out[key] = (out[key] as { matchLabels: Record<string, string> }[]).map((ep) => ({ matchLabels: unprefix(ep.matchLabels) }));
         }
       }
+      // The frontend holds a rule's ports in ONE PortRule, the reference emits
+      // one PortRule per port; Cilium ORs both the same way, so compare the
+      // flattened, sorted port list.
       if (Array.isArray(out.toPorts)) {
-        out.toPorts = (out.toPorts as { ports: Record<string, unknown>[] }[]).map((pr) => ({
-          ports: [...pr.ports].sort((a, b) => portKey(a).localeCompare(portKey(b))),
-        }));
+        out.toPorts = [{
+          ports: (out.toPorts as { ports: Record<string, unknown>[] }[])
+            .flatMap((pr) => pr.ports)
+            .sort((a, b) => portKey(a).localeCompare(portKey(b))),
+        }];
       }
       return out;
     });
@@ -740,5 +749,75 @@ describe('generators — a Service peer renders the Service selector', () => {
       expect(yaml).not.toContain('app: pg');
       expect(yaml).not.toContain('has no selector');
     }
+  });
+});
+
+// (k) Service port -> targetPort. Egress to a Service is observed pre-DNAT on
+// the Service port; NetworkPolicy and Cilium match the backend pod after
+// translation, so the rule allows the targetPort. Mirrors advisor
+// serviceTargetPortFixture (case list there) against the shared
+// service_target_port goldens, plus malformed ports every generator skips.
+describe('generators — Service port mapped to the backend targetPort', () => {
+  const tpServices: ServiceInfo[] = [
+    { svc_name: 'api', svc_namespace: 'prod', svc_ip: '10.96.1.10', service_spec: { spec: { selector: { app: 'api' }, ports: [
+      { name: 'http', port: 80, protocol: 'TCP', targetPort: 8080 },
+      { name: 'metrics', port: 9090, protocol: 'TCP', targetPort: 'metrics' },
+    ] } } },
+    { svc_name: 'cache', svc_namespace: 'prod', svc_ip: '10.96.1.20', service_spec: { spec: { selector: { app: 'cache' }, ports: [{ port: 6379 }] } } },
+    { svc_name: 'legacy', svc_namespace: 'prod', svc_ip: '10.96.1.30', service_spec: { spec: { selector: { app: 'legacy' } } } },
+    { svc_name: 'exporter', svc_namespace: 'monitoring', svc_ip: '10.96.1.40', service_spec: { spec: { selector: { app: 'node-exporter' }, ports: [
+      { name: 'metrics', port: 80, protocol: 'TCP', targetPort: 9100 },
+    ] } } },
+    { svc_name: 'dns', svc_namespace: 'kube-system', svc_ip: '10.96.1.53', service_spec: { spec: { selector: { 'k8s-app': 'kube-dns' }, ports: [
+      { name: 'dns', port: 53, protocol: 'UDP', targetPort: 5353 },
+      { name: 'dns-tcp', port: 53, protocol: 'TCP', targetPort: 5354 },
+    ] } } },
+  ];
+  // The exporter Service is backed by ONE host-network pod here, as in the advisor fixture.
+  const tpSources = { pods: [podsByIp['192.168.50.101']], services: tpServices };
+  const udp = (row: ReturnType<typeof egressRow>) => ({ ...row, ip_protocol: 'UDP' });
+  const tpTarget = target(web, [
+    egressRow('10.96.1.10', '9090'), egressRow('10.96.1.10', '80'),
+    egressRow('10.96.1.20', '6380'), egressRow('10.96.1.20', '6379'),
+    egressRow('10.96.1.30', '8443'),
+    egressRow('10.96.1.40', '80'),
+    udp(egressRow('10.96.1.53', '53')), egressRow('10.96.1.53', '53'),
+    egressRow('10.96.1.99', ' 80'), egressRow('10.96.1.99', '0x50'), egressRow('10.96.1.99', '1e2'),
+    egressRow('10.96.1.99', '+80'), egressRow('10.96.1.99', '80.0'),
+  ]);
+
+  test('standard: rules and comment lines match the golden', async () => {
+    useDefaults();
+    const yaml = policyToYAML(await generateNetworkPolicy(tpTarget, tpSources));
+    const file = 'standard_service_target_port.golden.yaml';
+    expect(normaliseStandardRules(spec(parse(yaml)).egress, 'prod')).toEqual(normaliseStandardRules(spec(golden(file)).egress, 'prod'));
+    expect(commentLines(yaml)).toEqual(commentLines(goldenText(file)));
+    expect(yaml).not.toContain('10.96.1.99');
+  });
+
+  test('cilium: rules and comment lines match the golden', async () => {
+    useDefaults();
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(tpTarget, tpSources));
+    const file = 'cilium_service_target_port.golden.yaml';
+    expect(normaliseCiliumRules(spec(parse(yaml)).egress)).toEqual(normaliseCiliumRules(spec(golden(file)).egress));
+    expect(commentLines(yaml)).toEqual(commentLines(goldenText(file)));
+  });
+
+  test('a backend-pod flow collapsed into the Service keeps its container port; ingress is never mapped', async () => {
+    useDefaults();
+    useServices();
+    // kube-dns maps 53/UDP -> 53 in `services`; give the pod flow a port the
+    // Service does not expose to prove it is not run through spec.ports.
+    const rows = [
+      udp(egressRow('10.96.0.53', '53')),
+      udp(egressRow('10.0.0.53', '5353')),
+      ingressRow('10.96.0.53', '53'),
+    ];
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, rows)));
+    expect(normaliseStandardRules(spec(parse(yaml)).egress, 'monitoring')[0].ports).toEqual([
+      { protocol: 'UDP', port: 53 }, { protocol: 'UDP', port: 5353 },
+    ]);
+    expect(spec(parse(yaml)).ingress[0].ports).toEqual([{ protocol: 'TCP', port: 53 }]);
+    expect(yaml).not.toContain('could not be mapped');
   });
 });
