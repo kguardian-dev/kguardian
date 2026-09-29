@@ -381,7 +381,9 @@ kguardian resolves IPs to Kubernetes resources. The resolution happens when the 
     ```yaml
     # service prod/svc/cache: port 6380/TCP could not be mapped to a targetPort; allowing the Service port as observed
     ```
-    The same mapping applies to a Service backed by host-network pods. Ingress ports are the target pod's own and are never mapped.
+    Cilium resolves a named egress port by name across the cluster, limited to the endpoints the rule selects; NetworkPolicy resolves it on the selected pods.
+
+    For a Service backed by host-network pods the rule's peer is an `ipBlock` (or the `host`/`remote-node` entities), which has no endpoints to resolve a name against, so a named `targetPort` is resolved to the number in the backends' `containers[].ports[]` (matching name and protocol; a host-network container port is the host port). Backends that disagree give one port each; a name no backend declares keeps the observed port with the comment above. Ingress ports are the target pod's own and are never mapped.
   </Accordion>
 
   <Accordion title="Services without a selector" icon="server">
