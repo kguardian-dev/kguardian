@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo } from 'react';
 import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { ArrowRight, ArrowDown, ArrowUp, ArrowUpDown, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox, Cpu } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
@@ -16,7 +16,7 @@ import {
 import type { ComputeBlame, ComputeContainer } from '../types/compute';
 import { describeDrop, isDrop } from '../utils/dropCause';
 import { displaySyscallList } from '../utils/syscalls';
-import { PRIVATE_PEER_TOOLTIP, SERVICE_LOOKUP_FAILED_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeerForView } from '../utils/peerResolution';
+import { PRIVATE_PEER_TOOLTIP, SERVICE_LOOKUP_FAILED_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, localPodForRow, resolvePeerForView } from '../utils/peerResolution';
 import { isPrivateAddress } from '../utils/ipCidr';
 
 interface DataTableProps {
@@ -195,81 +195,30 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   const [trafficPage, setTrafficPage] = useState(0);
   const TRAFFIC_PAGE_SIZE = 100; // Show 100 rows at a time
 
-  // Create lookup maps from allPodsLookup (all namespaces) for cross-namespace resolution
-  const podLookupMaps = useMemo(() => {
-    const byIp = new Map<string, PodInfo>();
-    const byName = new Map<string, PodInfo>();
-
-    allPodsLookup.forEach((pod) => {
-      if (pod.pod_ip) byIp.set(pod.pod_ip, pod);
-      if (pod.pod_name) byName.set(pod.pod_name, pod);
-    });
-
-    return { byIp, byName };
-  }, [allPodsLookup]);
-
-  // Build service ClusterIP lookup
-  const svcLookupByIp = useMemo(() => {
-    const map = new Map<string, ServiceInfo>();
-    services.forEach((svc) => {
-      if (svc.svc_ip) map.set(svc.svc_ip, svc);
-    });
-    return map;
-  }, [services]);
-
-  // Synchronous identity resolution using in-memory lookups only
-  // Uses allPodsLookup (all namespaces) so cross-namespace traffic is correctly identified
-  const resolveTrafficIdentity = useCallback((ip: string | null): TrafficIdentity => {
-    if (!ip) {
-      return { isExternal: true };
-    }
-
-    // Try to find pod by IP in our lookup map (spans all namespaces)
-    const podInfo = podLookupMaps.byIp.get(ip);
-    if (podInfo) {
-      return {
-        podName: podInfo.pod_name,
-        podIdentity: podInfo.pod_identity || undefined,
-        podNamespace: podInfo.pod_namespace || undefined,
-        isExternal: false,
-      };
-    }
-
-    // Try to find a matching service ClusterIP
-    const svcInfo = svcLookupByIp.get(ip);
-    if (svcInfo) {
-      return {
-        svcName: svcInfo.svc_name || undefined,
-        svcNamespace: svcInfo.svc_namespace || undefined,
-        isExternal: false,
-      };
-    }
-
-    // If not found in any namespace, it's truly external
-    return { isExternal: true };
-  }, [podLookupMaps, svcLookupByIp]);
-
-  // Memoize resolved identities for the local side (pod_ip) — by IP
-  const resolvedIdentities = useMemo(() => {
-    if (!selectedPod?.traffic) return new Map<string, TrafficIdentity>();
-
-    const identities = new Map<string, TrafficIdentity>();
-    const uniqueIPs = new Set<string>();
-    selectedPod.traffic.forEach(t => {
-      if (t.pod_ip) uniqueIPs.add(t.pod_ip);
-    });
-
-    uniqueIPs.forEach((ip) => {
-      identities.set(ip, resolveTrafficIdentity(ip));
-    });
-
-    return identities;
-  }, [selectedPod, resolveTrafficIdentity]);
-
   // The remote side is attributed per ROW (utils/peerResolution): the row's
   // stored peer_* first, else by IP guarded by the flow time — one IP can be
   // different peers at different times.
   const peerIndex = useMemo(() => buildPeerIndex(allPodsLookup, services), [allPodsLookup, services]);
+
+  // The local side of an external card's row is the pod that captured it,
+  // named on the row itself (utils/peerResolution `localPodForRow`). It is
+  // never looked up by `pod_ip`: pod IPs are reused, and a by-IP map named a
+  // dead pod of another namespace for flows an argocd pod received.
+  const localIdentities = useMemo(() => {
+    const identities = new Map<NetworkTraffic, TrafficIdentity>();
+    if (!selectedPod?.isExternal) return identities;
+    selectedPod.traffic?.forEach((t) => {
+      const record = localPodForRow(t, peerIndex);
+      identities.set(t, {
+        podName: t.pod_name || record?.pod_name || undefined,
+        podIdentity: record?.pod_identity || record?.workload_name || undefined,
+        podNamespace: t.pod_namespace || record?.pod_namespace || undefined,
+        isExternal: false,
+      });
+    });
+    return identities;
+  }, [selectedPod, peerIndex]);
+
   const remoteIdentities = useMemo(() => {
     const identities = new Map<NetworkTraffic, TrafficIdentity>();
     selectedPod?.traffic?.forEach((t) => {
@@ -712,8 +661,9 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
                     // For external nodes, traffic records come from local pods.
                     // pod_ip/pod_name = the local pod, traffic_in_out_ip = the external node's IP.
-                    // Direction is from the local pod's perspective, so we use
-                    // the record's pod_ip to identify the local pod.
+                    // Direction is from the local pod's perspective. The local
+                    // pod is named by the row's pod_name; pod_ip is only the
+                    // address it held then.
                     let source: TrafficIdentity;
                     let sourceIP: string | null;
                     let sourcePort: string | null;
@@ -722,8 +672,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                     let destinationPort: string | null;
 
                     if (selectedPod.isExternal) {
-                      // Resolve the local pod from the record's pod_ip
-                      const localPodIdentity = resolvedIdentities.get(traffic.pod_ip || '') || {
+                      // The local pod is the row's own capturing pod.
+                      const localPodIdentity = localIdentities.get(traffic) || {
                         podName: traffic.pod_name || undefined,
                         podNamespace: traffic.pod_namespace || undefined,
                         isExternal: false,
