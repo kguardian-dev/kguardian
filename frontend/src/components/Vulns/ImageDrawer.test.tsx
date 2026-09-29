@@ -83,6 +83,25 @@ describe('ImageDrawer', () => {
     expect(await screen.findByText('No SBOM from any source.')).toBeTruthy();
   });
 
+  test('a failed "Load more findings" keeps the findings already loaded and says so under them', async () => {
+    const ledger = digestOf('ledger');
+    const page = imageVulns('ledger');
+    const api = replayVulnApi([
+      answer(`GET /images/${ledger}/vulnerabilities?limit=100`, { ...page, nextAfter: '5.9' }),
+      answer(`GET /images/${ledger}/vulnerabilities?limit=100&after=5.9`, 'busy', 503),
+    ]).api;
+    render(drawer(ledger, api));
+    await waitFor(() => expect(screen.getAllByTestId('finding-row')).toHaveLength(page.items.length));
+    await act(async () => {
+      screen.getByRole('button', { name: 'Load more findings' }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.getAllByTestId('finding-row')).toHaveLength(page.items.length);
+    expect(screen.getByTestId('load-more-error').textContent).toMatch(/^Could not load more findings; showing the ones loaded so far\. .*\(503: busy\)/);
+    // The button stays, as the retry.
+    expect(screen.getByRole('button', { name: 'Load more findings' })).toBeTruthy();
+  });
+
   test('IMG-17: a malformed digest is an error with no Retry, and no section claims anything about it', async () => {
     const api = replayVulnApi([answer('GET /images/latest', badDigest, 400), answer('GET /images/latest/sbom?limit=1', badDigest, 400)]).api;
     render(drawer('latest', api));

@@ -443,6 +443,7 @@ export function useImageVulns(digest: string | null, api: VulnApi = vulnApi, pag
       if (!current()) return;
       setItems((prev) => [...prev, ...p.items]);
       setNextAfter(p.nextAfter);
+      setError(null);
     } catch (err) {
       if (current()) setError(err);
     } finally {
