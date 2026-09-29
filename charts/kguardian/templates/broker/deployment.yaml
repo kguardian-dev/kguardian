@@ -431,6 +431,12 @@ spec:
               {{- if .Values.broker.networkPolicy.enabled }}{{- $features = append $features "netpol" }}{{- end }}
               {{- if .Values.frontend.sso.enabled }}{{- $features = append $features "sso" }}{{- end }}
               value: {{ join "," $features | quote }}
+            # VACUUM of the small high-churn tables when autovacuum falls
+            # behind (leader only; see broker/README.md).
+            - name: BROKER_MAINTENANCE_VACUUM_ENABLED
+              value: {{ .Values.broker.maintenanceVacuum.enabled | quote }}
+            - name: BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS
+              value: {{ .Values.broker.maintenanceVacuum.intervalSeconds | quote }}
             # Leader election for the cluster-singleton background jobs
             # (retention, compute downsample, profile snapshotter, sweeps):
             # with replicaCount > 1 only the Lease holder runs them. Off,
