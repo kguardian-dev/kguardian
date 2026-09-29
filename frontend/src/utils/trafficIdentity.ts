@@ -38,8 +38,9 @@ export interface TrafficIdentity {
    *  every pod that ever held the IP (the flow predates the current holder),
    *  or the stored peer is gone from the broker. Rendered as an ipBlock
    *  with the `unattributed peer` comment, never as a selector. `at` is the
-   *  row's `time_stamp` verbatim. */
-  unattributed?: { ip: string; at: string };
+   *  row's `time_stamp` verbatim. `service` (`<ns>/<name>`) is set when the IP
+   *  is a Service ClusterIP whose selector is unknown (spec never stored). */
+  unattributed?: { ip: string; at: string; service?: string };
   isExternal: boolean;
 }
 
@@ -73,6 +74,19 @@ function serviceIdentity(serviceInfo: ServiceInfo): TrafficIdentity {
   };
 }
 
+/** A Service's identity for one row. Its selector is what the generators
+ *  render, so a Service whose `spec` the broker never stored has nothing to
+ *  render and nothing may be guessed from its name: the row is unattributed
+ *  (pinned ipBlock / CIDR with the comment), as a stored Service peer in the
+ *  same state already is. `at` is the row's `time_stamp`. */
+function serviceRowIdentity(serviceInfo: ServiceInfo, ip: string, at: string): TrafficIdentity {
+  if (!serviceSelector(serviceInfo) && !serviceHasNoSelector(serviceInfo)) {
+    const service = `${serviceInfo.svc_namespace || 'default'}/${serviceInfo.svc_name}`;
+    return { isExternal: true, unattributed: { ip, at, service } };
+  }
+  return serviceIdentity(serviceInfo);
+}
+
 /**
  * By-IP resolution against the broker, following the advisor's priority:
  * Service ClusterIP, then pod, then external.
@@ -92,7 +106,7 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
   try {
     const serviceInfo = await apiClient.getServiceByIP(ip);
     if (serviceInfo && serviceInfo.svc_name) {
-      return serviceIdentity(serviceInfo);
+      return serviceRowIdentity(serviceInfo, ip, at ?? '');
     }
   } catch {
     // Service lookup failed, continue to pod lookup
@@ -201,7 +215,7 @@ export async function createRowIdentityResolver(sources: IdentitySources = {}): 
         return identity;
       }
       case 'service': {
-        if (!peer.stored && peer.svc) return serviceIdentity(peer.svc);
+        if (!peer.stored && peer.svc) return serviceRowIdentity(peer.svc, ip, row.time_stamp);
         // The Service of that namespace/name must still front this
         // ClusterIP. A different name on the IP means the ClusterIP was
         // recycled; gone, or a spec the broker never stored ⇒ unattributed.
@@ -217,7 +231,7 @@ export async function createRowIdentityResolver(sources: IdentitySources = {}): 
       case 'unknown': {
         // No pod ever held the IP: Service ClusterIP, else external.
         const svc = await lookupService(ip);
-        return svc && svc.svc_name ? serviceIdentity(svc) : { isExternal: true };
+        return svc && svc.svc_name ? serviceRowIdentity(svc, ip, row.time_stamp) : { isExternal: true };
       }
     }
   };

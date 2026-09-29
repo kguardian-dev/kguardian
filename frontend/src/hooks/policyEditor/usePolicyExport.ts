@@ -2,11 +2,11 @@ import { useState } from 'react';
 import type { NetworkPolicy } from '../../types/networkPolicy';
 import type { CiliumNetworkPolicy } from '../../types/ciliumPolicy';
 import type { SeccompProfile } from '../../types/seccompProfile';
-import { policyToYAML } from '../../utils/networkPolicyGenerator';
-import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
+import { invalidPolicyCidrs, invalidPolicyPorts, policyToYAML } from '../../utils/networkPolicyGenerator';
+import { ciliumPolicyToYAML, invalidCiliumCidrs, invalidCiliumPorts } from '../../utils/ciliumPolicyGenerator';
 import { toAuditNetworkPolicy } from '../../utils/auditNetworkPolicy';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
-import { podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
+import { kguardianCrIssues, podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
 import type { PodNodeData } from '../../types';
 import type { CaptureInfo } from '../../types/seccompWorkload';
 
@@ -84,10 +84,34 @@ export const usePolicyExport = ({
 }: UsePolicyExportProps) => {
   const [copiedToClipboard, setCopiedToClipboard] = useState(false);
 
+  // What the kguardian CR would carry that its CRD rejects. Checked on the
+  // action it actually exports (audit-first unless the operator picked one).
+  // Non-empty ⇒ no CR is exported: the editor shows these instead.
+  const crIssues =
+    policyType === 'seccomp' && seccompFormat === 'kguardian' && seccompProfile
+      ? kguardianCrIssues({ ...seccompProfile, defaultAction: crDefaultAction ?? 'SCMP_ACT_LOG' })
+      : [];
+
+  // Ports the API server would reject (a cleared field, 0, out of range).
+  // Non-empty ⇒ nothing is exported: the editor lists them instead. The
+  // generators never emit one (they skip rows without a usable port), so
+  // only a value typed in the editor can land here.
+  const portIssues =
+    policyType === 'network' && policy ? invalidPolicyPorts(policy)
+      : policyType === 'cilium' && ciliumPolicy ? invalidCiliumPorts(ciliumPolicy)
+        : [];
+  // CIDRs typed into an ipBlock / CIDR field that do not parse (`""` included).
+  const cidrIssues =
+    policyType === 'network' && policy ? invalidPolicyCidrs(policy)
+      : policyType === 'cilium' && ciliumPolicy ? invalidCiliumCidrs(ciliumPolicy)
+        : [];
+
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
+      if (portIssues.length > 0 || cidrIssues.length > 0) return null;
       return policyToYAML(networkFormat === 'audit' ? toAuditNetworkPolicy(policy) : policy);
     } else if (policyType === 'cilium' && ciliumPolicy) {
+      if (portIssues.length > 0 || cidrIssues.length > 0) return null;
       return ciliumPolicyToYAML(ciliumPolicy);
     } else if (policyType === 'seccomp' && seccompProfile) {
       if (seccompFormat === 'json') return profileToJSON(seccompProfile);
@@ -95,7 +119,7 @@ export const usePolicyExport = ({
         // Use pod identity for resource name, fallback to pod name
         return profileToYAML(seccompProfile, podIdentity || podName, podNamespace);
       }
-      if (!pod) return null;
+      if (!pod || crIssues.length > 0) return null;
       return podProfileToKguardianCR(pod, seccompProfile, capture, { defaultAction: crDefaultAction });
     }
     return null;
@@ -173,5 +197,8 @@ export const usePolicyExport = ({
     handleCopy,
     handleDownload,
     getExportContent,
+    crIssues,
+    portIssues,
+    cidrIssues,
   };
 };

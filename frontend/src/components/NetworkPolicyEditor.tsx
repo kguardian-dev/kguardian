@@ -16,10 +16,14 @@ import {
   type DenyAllCause,
 } from '../utils/cniPolicySupport';
 import { ipBlockScope } from '../utils/ipBlockScope';
+import { isValidCidr } from '../utils/ipCidr';
+import { isValidPolicyPort, ruleHasPeers } from '../utils/networkPolicyGenerator';
+import { ciliumRuleHasPeers, isValidCiliumPort } from '../utils/ciliumPolicyGenerator';
 import type { IdentitySources } from '../utils/trafficIdentity';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
 import { useWorkloadCapture } from '../hooks/useWorkloadCapture';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
+import { CR_ARCHITECTURES, CR_DEFAULT_ACTIONS, CR_RULE_ACTIONS } from '../types/seccompWorkload';
 import { PolicyHeader } from './PolicyEditor';
 import { Modal } from './ui/Modal';
 import {
@@ -53,6 +57,67 @@ interface NetworkPolicyEditorProps {
   podsLookup?: PodInfo[];
   services?: ServiceInfo[];
 }
+
+/** On a rule with no peers. An empty peer list matches every peer, so the
+ *  renderers leave such a rule out of the YAML (ruleHasPeers /
+ *  ciliumRuleHasPeers): what the rule does is allow nothing. */
+const PeerlessRuleNotice: React.FC<{ missing: string; add: string }> = ({ missing, add }) => (
+  <p className="text-xs text-hubble-warning">
+    No {missing}: this rule allows nothing and is left out of the YAML. Add {add} to include it.
+  </p>
+);
+
+/** In place of the label chips of a selector with no labels: an empty selector
+ *  selects everything in its scope, and the chip row says so. */
+const EmptySelectorBadge: React.FC<{ text: string }> = ({ text }) => (
+  <div className="flex flex-wrap gap-1 mb-2">
+    <span className="bg-hubble-accent/20 text-hubble-accent px-2 py-1 rounded text-xs">{text}</span>
+  </div>
+);
+
+/** On a rule with peers but no ports: an empty port list matches every port. */
+const AllPortsNote = () => <p className="text-xs text-tertiary italic">All ports: no port restriction</p>;
+
+/** Shown in place of a kguardian CR its CRD would reject (kguardianCrIssues). */
+const CrBlockedNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    The kguardian SeccompProfile CRD does not accept {issues.join(', ')}. Pick a supported value in the visual editor, or
+    export as the Security Profiles Operator CR or raw JSON, which take the full seccomp vocabulary.
+  </div>
+);
+
+/** Shown in place of a NetworkPolicy with a port the API server rejects. */
+const InvalidPortsNotice: React.FC<{ issues: string[]; lowest: 0 | 1 }> = ({ issues, lowest }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    Nothing to export: {issues.join(', ')} is not a valid port. A port is a number from {lowest} to 65535 or a named
+    container port (for example http).
+  </div>
+);
+
+/** Shown in place of a policy with a typed CIDR the API server rejects. */
+const InvalidCidrsNotice: React.FC<{ issues: string[] }> = ({ issues }) => (
+  <div role="alert" className="bg-hubble-error/10 border border-hubble-error/40 text-hubble-error text-xs rounded-lg p-3">
+    Nothing to export: {issues.join(', ')} is not a valid CIDR. A CIDR is an IPv4 or IPv6 address with a prefix
+    length (for example 10.0.0.0/8 or fd00::/64).
+  </div>
+);
+
+/** Border and a11y state for a CIDR input. */
+const cidrFieldProps = (cidr: string) => {
+  const valid = isValidCidr(cidr);
+  return {
+    'aria-invalid': !valid,
+    title: valid ? undefined : 'An IPv4 or IPv6 address with a prefix length, e.g. 10.0.0.0/8',
+    border: valid ? 'border-hubble-border' : 'border-hubble-error',
+  };
+};
+
+/** The kguardian CR's allowed values, plus the current one when it falls
+ *  outside them, so the editor shows what is selected rather than silently
+ *  displaying a different option. */
+const withCurrent = <T extends string>(allowed: readonly T[], current: T): T[] =>
+  allowed.includes(current) ? [...allowed] : [...allowed, current];
+const NOT_IN_CR = ' (not accepted by the kguardian CR)';
 
 const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType, podsLookup, services }) => {
   const env = useClusterEnvironment();
@@ -209,7 +274,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   } = useSyscallAutocomplete();
 
   // Export functionality
-  const { copiedToClipboard, handleCopy, handleDownload, getExportContent } = usePolicyExport({
+  const { copiedToClipboard, handleCopy, handleDownload, getExportContent, crIssues, portIssues, cidrIssues } = usePolicyExport({
     policyType,
     policy,
     ciliumPolicy,
@@ -228,10 +293,15 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   // A policy with no rules still denies every direction it covers. Read the
   // directions off the generated document, not the traffic list, so a
   // workload whose every row was dropped, or edited away, is caught too.
+  // Only rules that render count: a peerless rule is left out of the YAML.
+  const hasRules = policy ? [...(policy.spec.ingress ?? []), ...(policy.spec.egress ?? [])].some(ruleHasPeers) : false;
+  const hasCiliumRules = ciliumPolicy
+    ? [...(ciliumPolicy.spec.ingress ?? []), ...(ciliumPolicy.spec.egress ?? [])].some(ciliumRuleHasPeers)
+    : false;
   const deniedDirections: DeniedDirection[] =
-    policyType === 'network' && policy && !policy.spec.ingress?.length && !policy.spec.egress?.length
+    policyType === 'network' && policy && !hasRules
       ? (['Ingress', 'Egress'] as const).filter((d) => policy.spec.policyTypes.includes(d))
-      : policyType === 'cilium' && ciliumPolicy && !ciliumPolicy.spec.ingress?.length && !ciliumPolicy.spec.egress?.length
+      : policyType === 'cilium' && ciliumPolicy && !hasCiliumRules
         ? (['Ingress', 'Egress'] as const).filter((d) => ciliumPolicy.spec.defaultDeny[d === 'Ingress' ? 'ingress' : 'egress'])
         : [];
   const denyAll = deniedDirections.length > 0;
@@ -360,10 +430,19 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     </span>
                   </div>
                 )}
-                <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                  {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
-                  {getExportContent() ?? ''}
-                </pre>
+                {crIssues.length > 0 ? (
+                  <CrBlockedNotice issues={crIssues} />
+                ) : portIssues.length > 0 || cidrIssues.length > 0 ? (
+                  <>
+                    {portIssues.length > 0 && <InvalidPortsNotice issues={portIssues} lowest={policyType === 'cilium' ? 0 : 1} />}
+                    {cidrIssues.length > 0 && <InvalidCidrsNotice issues={cidrIssues} />}
+                  </>
+                ) : (
+                  <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
+                    {/* One source of truth for view, copy and download: the export content honours the chosen format. */}
+                    {getExportContent() ?? ''}
+                  </pre>
+                )}
               </div>
             ) : (
               /* Visual Editor */
@@ -495,8 +574,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={peer.ipBlock.cidr}
                                             onChange={(e) => updatePeerCIDR(rule.id, peerIndex, e.target.value, 'ingress')}
-                                            className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(peer.ipBlock.cidr)['aria-invalid']}
+                                            title={cidrFieldProps(peer.ipBlock.cidr).title}
+                                            className={`flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border ${cidrFieldProps(peer.ipBlock.cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0 or 10.0.0.0/8"
                                           />
                                         </div>
@@ -510,6 +591,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs font-medium text-secondary">Pod Labels (Same Namespace)</span>
                                             </div>
                                             {/* Show existing labels */}
+                                            {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the namespace" />}
                                             {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -599,6 +681,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs text-tertiary italic">Leave empty to match all namespaces</span>
                                             </div>
                                             {/* Show existing labels */}
+                                            {Object.keys(peer.namespaceSelector.matchLabels).length === 0 && <EmptySelectorBadge text="matches every namespace" />}
                                             {Object.entries(peer.namespaceSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.namespaceSelector.matchLabels).map(([key, value]) => (
@@ -690,6 +773,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               </div>
                                               <span className="text-xs text-tertiary italic block mb-2">Leave empty to match all pods in namespace</span>
                                               {/* Show existing labels */}
+                                              {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the selected namespaces" />}
                                               {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                                 <div className="flex flex-wrap gap-1 mb-2">
                                                   {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -794,7 +878,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No sources defined</p>
+                                  <PeerlessRuleNotice missing="sources" add="a source" />
                                 )}
                               </div>
                             </div>
@@ -826,14 +910,16 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                         </select>
                                         <span className="text-xs text-tertiary">/</span>
                                         <input
-                                          type="number"
+                                          type="text"
                                           value={port.port}
-                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', parseInt(e.target.value) || 0, 'ingress')}
-                                          className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
-                                          placeholder="80"
-                                          min="1"
-                                          max="65535"
+                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', e.target.value, 'ingress')}
+                                          aria-invalid={!isValidPolicyPort(port.port)}
+                                          title={isValidPolicyPort(port.port) ? undefined : 'A number from 1 to 65535 or a named port'}
+                                          className={`w-24 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                       isValidPolicyPort(port.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                     }`}
+                                          placeholder="80 or http"
                                         />
                                         <button
                                           onClick={() => removePortFromRule(rule.id, portIndex, 'ingress')}
@@ -846,7 +932,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No ports defined</p>
+                                  <AllPortsNote />
                                 )}
                               </div>
                             </div>
@@ -950,8 +1036,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               type="text"
                                               value={peer.ipBlock.cidr}
                                               onChange={(e) => updatePeerCIDR(rule.id, peerIndex, e.target.value, 'egress')}
-                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                              aria-invalid={cidrFieldProps(peer.ipBlock.cidr)['aria-invalid']}
+                                              title={cidrFieldProps(peer.ipBlock.cidr).title}
+                                              className={`flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border ${cidrFieldProps(peer.ipBlock.cidr).border}
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                               placeholder="0.0.0.0/0 or 10.0.0.0/8"
                                             />
                                           </div>
@@ -971,6 +1059,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs font-medium text-secondary">Pod Labels (Same Namespace)</span>
                                             </div>
                                             {/* Show existing labels as chips */}
+                                            {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the namespace" />}
                                             {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -1070,6 +1159,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               <span className="text-xs text-tertiary italic">Leave empty to match all namespaces</span>
                                             </div>
                                             {/* Show existing namespace labels as chips */}
+                                            {Object.keys(peer.namespaceSelector.matchLabels).length === 0 && <EmptySelectorBadge text="matches every namespace" />}
                                             {Object.entries(peer.namespaceSelector.matchLabels).length > 0 && (
                                               <div className="flex flex-wrap gap-1 mb-2">
                                                 {Object.entries(peer.namespaceSelector.matchLabels).map(([key, value]) => (
@@ -1170,6 +1260,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 Leave empty to match all pods in namespace
                                               </span>
                                               {/* Show existing pod labels as chips */}
+                                              {Object.keys(peer.podSelector.matchLabels).length === 0 && <EmptySelectorBadge text="all pods in the selected namespaces" />}
                                               {Object.entries(peer.podSelector.matchLabels).length > 0 && (
                                                 <div className="flex flex-wrap gap-1 mb-2">
                                                   {Object.entries(peer.podSelector.matchLabels).map(([key, value]) => (
@@ -1280,7 +1371,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No destinations defined</p>
+                                  <PeerlessRuleNotice missing="destinations" add="a destination" />
                                 )}
                               </div>
                             </div>
@@ -1312,14 +1403,16 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                         </select>
                                         <span className="text-xs text-tertiary">/</span>
                                         <input
-                                          type="number"
+                                          type="text"
                                           value={port.port}
-                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', parseInt(e.target.value) || 0, 'egress')}
-                                          className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
-                                          placeholder="80"
-                                          min="1"
-                                          max="65535"
+                                          onChange={(e) => updatePort(rule.id, portIndex, 'port', e.target.value, 'egress')}
+                                          aria-invalid={!isValidPolicyPort(port.port)}
+                                          title={isValidPolicyPort(port.port) ? undefined : 'A number from 1 to 65535 or a named port'}
+                                          className={`w-24 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                       isValidPolicyPort(port.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                     }`}
+                                          placeholder="80 or http"
                                         />
                                         <button
                                           onClick={() => removePortFromRule(rule.id, portIndex, 'egress')}
@@ -1332,7 +1425,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No ports defined</p>
+                                  <AllPortsNote />
                                 )}
                               </div>
                             </div>
@@ -1520,6 +1613,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 </div>
                                 <div className="space-y-3">
                                   <RuleComments comments={rule.comments} />
+                                  {!ciliumRuleHasPeers(rule) && <PeerlessRuleNotice missing="peers" add="an endpoint or a CIDR" />}
                                   <EntitiesPeer label="From Entities" entities={rule.fromEntities} />
                                   {/* fromEndpoints */}
                                   <div>
@@ -1650,8 +1744,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={cidr}
                                             onChange={(e) => updateIngressCIDR(rule.id, cidrIndex, e.target.value)}
-                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(cidr)['aria-invalid']}
+                                            title={cidrFieldProps(cidr).title}
+                                            className={`flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border ${cidrFieldProps(cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0"
                                           />
                                           <button
@@ -1700,8 +1796,12 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 type="text"
                                                 value={pp.port}
                                                 onChange={(e) => updateCiliumPort(rule.id, portIndex, 'port', e.target.value, 'ingress')}
-                                                className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                                aria-invalid={!isValidCiliumPort(pp.port)}
+                                                title={isValidCiliumPort(pp.port) ? undefined : 'A number from 0 (any port) to 65535 or a named port'}
+                                                className={`w-20 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                             isValidCiliumPort(pp.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                           }`}
                                                 placeholder="80"
                                               />
                                               <button
@@ -1714,7 +1814,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           </div>
                                         ))
                                       ) : (
-                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                        <AllPortsNote />
                                       )}
                                     </div>
                                   </div>
@@ -1772,6 +1872,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 </div>
                                 <div className="space-y-3">
                                   <RuleComments comments={rule.comments} />
+                                  {!ciliumRuleHasPeers(rule) && <PeerlessRuleNotice missing="peers" add="an endpoint or a CIDR" />}
                                   <EntitiesPeer label="To Entities" entities={rule.toEntities} />
                                   {/* toEndpoints */}
                                   <div>
@@ -1902,8 +2003,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                             type="text"
                                             value={cidr}
                                             onChange={(e) => updateEgressCIDR(rule.id, cidrIndex, e.target.value)}
-                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
-                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            aria-invalid={cidrFieldProps(cidr)['aria-invalid']}
+                                            title={cidrFieldProps(cidr).title}
+                                            className={`flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border ${cidrFieldProps(cidr).border}
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono`}
                                             placeholder="0.0.0.0/0"
                                           />
                                           <button
@@ -1952,8 +2055,12 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 type="text"
                                                 value={pp.port}
                                                 onChange={(e) => updateCiliumPort(rule.id, portIndex, 'port', e.target.value, 'egress')}
-                                                className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
-                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                                aria-invalid={!isValidCiliumPort(pp.port)}
+                                                title={isValidCiliumPort(pp.port) ? undefined : 'A number from 0 (any port) to 65535 or a named port'}
+                                                className={`w-20 bg-hubble-card text-secondary px-2 py-1 rounded border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono ${
+                                                             isValidCiliumPort(pp.port) ? 'border-hubble-border' : 'border-hubble-error'
+                                                           }`}
                                                 placeholder="80"
                                               />
                                               <button
@@ -1966,7 +2073,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           </div>
                                         ))
                                       ) : (
-                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                        <AllPortsNote />
                                       )}
                                     </div>
                                   </div>
@@ -1985,6 +2092,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 ) : policyType === 'seccomp' && seccompProfile ? (
                   /* Seccomp Profile Visual Editor */
                   <>
+                    {crIssues.length > 0 && <CrBlockedNotice issues={crIssues} />}
+
                     {/* Default Action */}
                     <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
                       <h3 className="text-sm font-semibold text-primary mb-3">Default Action</h3>
@@ -1997,8 +2106,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             className="bg-hubble-card text-primary px-3 py-2 rounded border border-hubble-border
                                        focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent text-sm"
                           >
-                            {SECCOMP_ACTIONS.map(action => (
-                              <option key={action} value={action}>{action}</option>
+                            {(seccompFormat === 'kguardian' ? withCurrent(CR_DEFAULT_ACTIONS, seccompProfile.defaultAction) : SECCOMP_ACTIONS).map(action => (
+                              <option key={action} value={action}>
+                                {action}{seccompFormat === 'kguardian' && !(CR_DEFAULT_ACTIONS as readonly string[]).includes(action) ? NOT_IN_CR : ''}
+                              </option>
                             ))}
                           </select>
                         </div>
@@ -2025,7 +2136,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
                       <h3 className="text-sm font-semibold text-primary mb-3">Architectures</h3>
                       <div className="flex flex-wrap gap-2">
-                        {ARCHITECTURES.map(arch => (
+                        {(seccompFormat === 'kguardian'
+                          ? [...CR_ARCHITECTURES, ...(seccompProfile.architectures ?? []).filter((a) => !(CR_ARCHITECTURES as readonly string[]).includes(a))]
+                          : ARCHITECTURES
+                        ).map(arch => (
                           <button
                             key={arch}
                             onClick={() => toggleArchitecture(arch)}
@@ -2081,8 +2195,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       className="bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
                                                  focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                     >
-                                      {SECCOMP_ACTIONS.map(action => (
-                                        <option key={action} value={action}>{action}</option>
+                                      {(seccompFormat === 'kguardian' ? withCurrent(CR_RULE_ACTIONS, rule.action) : SECCOMP_ACTIONS).map(action => (
+                                        <option key={action} value={action}>
+                                          {action}{seccompFormat === 'kguardian' && !(CR_RULE_ACTIONS as readonly string[]).includes(action) ? NOT_IN_CR : ''}
+                                        </option>
                                       ))}
                                     </select>
                                   </div>

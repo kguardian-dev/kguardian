@@ -2,7 +2,7 @@ import type { NetworkTraffic, PodInfo, PodNodeData } from '../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer, NetworkPolicyPort } from '../types/networkPolicy';
 import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
-import { peerCIDR } from './ipCidr';
+import { isValidCidr, peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import {
   hostNetworkPeerComment,
@@ -14,6 +14,26 @@ import {
   specNodeName,
   yamlComments,
 } from './hostNetwork';
+
+/**
+ * The port of an observed row, or null when it has none NetworkPolicy can
+ * express: missing, not a decimal number, or outside 1-65535 (ICMP rows carry
+ * "0"). The row is then skipped, as the advisor's parsePort skips it
+ * (standard_policy.go), rather than rendered as a port the API server rejects.
+ * Shared with the Cilium generator so both skip the same rows.
+ */
+export function observedPort(port: string | null | undefined): string | null {
+  if (!port || !/^[0-9]+$/.test(port)) return null;
+  const n = Number(port);
+  return n >= 1 && n <= 65535 ? String(n) : null;
+}
+
+/** The protocol of an observed row: TCP, UDP or SCTP, anything else TCP, as
+ *  the advisor's protocolPtr maps it. */
+export function observedProtocol(protocol: string | null | undefined): string {
+  const p = (protocol ?? '').toUpperCase();
+  return p === 'UDP' || p === 'SCTP' ? p : 'TCP';
+}
 
 /**
  * `sources` are the listings the caller already holds (the map's pods and
@@ -49,7 +69,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
 
   // Process traffic rules
   rows.forEach((traffic) => {
-    const protocol = traffic.ip_protocol || 'TCP';
+    const protocol = observedProtocol(traffic.ip_protocol);
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) {
@@ -78,7 +98,9 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
     if (!map) return;
     // For ingress: allow traffic FROM remote IP TO this pod's port.
     // For egress: allow traffic TO remote IP:port.
-    const port = (trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port) || '80';
+    const port = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
+    // No usable port (ICMP rows carry "0"): skip the row, as the advisor does.
+    if (port === null) return;
 
     const entry = map.get(key);
     if (!entry) {
@@ -193,8 +215,6 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
         };
       }
 
-      // Service - use podSelector with service label
-      // Try to get labels (workload or pod labels) for pods behind this service
       // A Service fronting host-network pods fronts node IPs: its selector
       // matches labels no policy can see. NetworkPolicy is evaluated after
       // the Service DNAT, so the ClusterIP never appears on the wire either —
@@ -215,11 +235,19 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
         };
       }
 
-      const facts = await getPeerPodFacts(identity.svcName);
+      // The Service's own selector picks its backends, as the advisor renders
+      // it; kube-dns selects `k8s-app: kube-dns`, not `app: kube-dns`. The
+      // resolver turns a Service with an unknown spec into an unattributed
+      // peer, so a missing selector here is never guessed from the name.
+      if (!identity.svcSelector) {
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return null;
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(peerInfo.ip, undefined, `${identity.svcNamespace || 'default'}/${identity.svcName}`) };
+      }
 
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: facts.labels || { app: identity.svcName },
+          matchLabels: identity.svcSelector,
         },
       };
 
@@ -283,7 +311,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
       // A guarded-out peer (the flow predates every pod that held the IP)
       // is the same ipBlock, with a comment saying no pod could be matched.
       if (identity.unattributed) {
-        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at) };
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
       }
       return { peers: [{ ipBlock: { cidr } }] };
     }
@@ -490,6 +518,82 @@ export function quoteYamlValue(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * Whether a rule renders. An empty `from` / `to` matches every peer, so a rule
+ * the editor holds with no peers (just added, or its last source removed) is
+ * left out of the YAML rather than exported as allow-all; the editor says so
+ * on the rule. A direction left with no rendered rules keeps its policyType,
+ * which is the deny form.
+ */
+export function ruleHasPeers(rule: NetworkPolicyRule): boolean {
+  return rule.peers.length > 0;
+}
+
+/** An IANA service name, the form of a named container port: 1-15 lowercase
+ *  letters, digits and inner single hyphens, with at least one letter. */
+const PORT_NAME_RE = /^(?=.{1,15}$)(?=.*[a-z])[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/**
+ * What `NetworkPolicyPort.port` accepts: a number 1-65535 (or its decimal
+ * string, as the editor holds it) or a named port. Anything else, including
+ * the empty string a cleared field leaves, makes the API server reject the
+ * whole policy.
+ */
+export function isValidPolicyPort(port: string | number): boolean {
+  if (typeof port === 'number') return Number.isInteger(port) && port >= 1 && port <= 65535;
+  if (/^[0-9]+$/.test(port)) return isValidPolicyPort(Number(port));
+  return PORT_NAME_RE.test(port);
+}
+
+/** Every invalid port in the rules that render, as `<direction> rule <n>: port "<value>"`. */
+export function invalidPolicyPorts(policy: NetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule, i) => {
+      if (!ruleHasPeers(rule)) return;
+      rule.ports.filter((p) => !isValidPolicyPort(p.port)).forEach((p) => out.push(`${dir} rule ${i + 1}: port "${p.port}"`));
+    });
+  });
+  return out;
+}
+
+/** Every malformed ipBlock CIDR (or `except` entry) in the rules that render,
+ *  as `<direction> rule <n>: cidr "<value>"`. Typed values only: the
+ *  generators emit peerCIDR output, which always parses. */
+export function invalidPolicyCidrs(policy: NetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule, i) => {
+      if (!ruleHasPeers(rule)) return;
+      rule.peers.forEach(({ ipBlock }) => {
+        if (!ipBlock) return;
+        if (!isValidCidr(ipBlock.cidr)) out.push(`${dir} rule ${i + 1}: cidr "${ipBlock.cidr}"`);
+        (ipBlock.except ?? []).filter((e) => !isValidCidr(e)).forEach((e) => out.push(`${dir} rule ${i + 1}: except "${e}"`));
+      });
+    });
+  });
+  return out;
+}
+
+/** A port number is written as a plain decimal: a digit string with a leading
+ *  zero, bare, is octal to a YAML 1.1 decoder (`0100` reads as 64). A named
+ *  port is a string, quoted when YAML would read it as something else (`no`). */
+const portValue = (port: string | number): string =>
+  typeof port === 'number' || /^[0-9]+$/.test(port) ? String(Number(port)) : quoteYamlValue(port);
+
+/** A peer's selector. No labels is written `{}`, the API's "select all"
+ *  (every pod in the namespace, or every namespace), rather than a bare
+ *  `matchLabels:` that reads as if something were missing. */
+function peerSelectorLines(field: 'podSelector' | 'namespaceSelector', labels: Record<string, string>): string[] {
+  const entries = Object.entries(labels);
+  if (entries.length === 0) return [`      ${field}: {}`];
+  return [
+    `      ${field}:`,
+    '        matchLabels:',
+    ...entries.map(([key, value]) => `          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`),
+  ];
+}
+
 export function policyToYAML(policy: NetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -513,9 +617,10 @@ export function policyToYAML(policy: NetworkPolicy): string {
     });
   }
 
-  if (policy.spec.ingress && policy.spec.ingress.length > 0) {
+  const ingress = (policy.spec.ingress ?? []).filter(ruleHasPeers);
+  if (ingress.length > 0) {
     yaml.push('  ingress:');
-    policy.spec.ingress.forEach((rule) => {
+    ingress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - from:');
       rule.peers.forEach((peer) => {
@@ -528,34 +633,23 @@ export function policyToYAML(policy: NetworkPolicy): string {
             peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
-        if (peer.podSelector) {
-          yaml.push('      podSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
-        if (peer.namespaceSelector) {
-          yaml.push('      namespaceSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
+        if (peer.podSelector) yaml.push(...peerSelectorLines('podSelector', peer.podSelector.matchLabels));
+        if (peer.namespaceSelector) yaml.push(...peerSelectorLines('namespaceSelector', peer.namespaceSelector.matchLabels));
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
           yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
-          yaml.push(`      port: ${port.port}`);
+          yaml.push(`      port: ${portValue(port.port)}`);
         });
       }
     });
   }
 
-  if (policy.spec.egress && policy.spec.egress.length > 0) {
+  const egress = (policy.spec.egress ?? []).filter(ruleHasPeers);
+  if (egress.length > 0) {
     yaml.push('  egress:');
-    policy.spec.egress.forEach((rule) => {
+    egress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - to:');
       rule.peers.forEach((peer) => {
@@ -568,26 +662,14 @@ export function policyToYAML(policy: NetworkPolicy): string {
             peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
-        if (peer.podSelector) {
-          yaml.push('      podSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
-        if (peer.namespaceSelector) {
-          yaml.push('      namespaceSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
+        if (peer.podSelector) yaml.push(...peerSelectorLines('podSelector', peer.podSelector.matchLabels));
+        if (peer.namespaceSelector) yaml.push(...peerSelectorLines('namespaceSelector', peer.namespaceSelector.matchLabels));
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
           yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
-          yaml.push(`      port: ${port.port}`);
+          yaml.push(`      port: ${portValue(port.port)}`);
         });
       }
     });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isPrivateAddress, peerCIDR } from './ipCidr';
+import { isPrivateAddress, isValidCidr, peerCIDR } from './ipCidr';
 
 // The UI cannot use node:net (it is browser code), so ipCidr hand-rolls both the
 // address validation and the canonical serialization. These cases pin that
@@ -172,5 +172,17 @@ describe('isPrivateAddress', () => {
     expect(isPrivateAddress('10.0.0.256')).toBe(false);
     expect(isPrivateAddress('fe80::1%eth0')).toBe(false);
     expect(isPrivateAddress('example.com')).toBe(false);
+  });
+});
+
+// A CIDR typed into the editor's ipBlock / fromCIDR field. The API server
+// rejects the whole policy for one that does not parse, `""` included.
+describe('isValidCidr', () => {
+  it.each([['10.0.0.0/8'], ['0.0.0.0/0'], ['10.0.0.1/32'], ['fd00::/64'], ['::/0'], ['2001:db8::1/128'], ['10.1.2.3/24']])('accepts %s', (cidr) => {
+    expect(isValidCidr(cidr)).toBe(true);
+  });
+
+  it.each([[''], ['10.0.0.0'], ['10.0.0.0/'], ['10.0.0.0/33'], ['10.0.0.0/08'], ['fd00::/129'], ['10.0.0.256/8'], ['010.0.0.0/8'], ['fd00::%eth0/64'], [' 10.0.0.0/8'], ['10.0.0.0/8/8'], ['/8']])('rejects %j', (cidr) => {
+    expect(isValidCidr(cidr)).toBe(false);
   });
 });

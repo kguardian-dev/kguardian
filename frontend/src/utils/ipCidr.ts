@@ -142,6 +142,21 @@ export function peerCIDR(ip: string): string | null {
 }
 
 /**
+ * isValidCidr - whether `cidr` is `<address>/<prefix>` the API server accepts
+ * in an ipBlock or a Cilium CIDR rule: an IPv4 or IPv6 literal (parsed as
+ * above) and a decimal prefix within the family's width (0-32 / 0-128). Host
+ * bits may be set, as Kubernetes allows. Used on values typed into the editor;
+ * the generators only ever emit peerCIDR output.
+ */
+export function isValidCidr(cidr: string): boolean {
+  const parts = cidr.split('/');
+  if (parts.length !== 2 || !/^(0|[1-9]\d{0,2})$/.test(parts[1])) return false;
+  const prefix = Number(parts[1]);
+  if (parseIPv4(parts[0]) !== null) return prefix <= 32;
+  return parseIPv6(parts[0]) !== null && prefix <= 128;
+}
+
+/**
  * isPrivateAddress - true for an address that cannot be a peer on the
  * Internet: RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT 100.64/10, IPv4
  * "this network" 0/8, loopback 127/8, link-local 169.254/16, multicast 224/4

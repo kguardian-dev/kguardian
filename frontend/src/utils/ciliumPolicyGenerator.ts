@@ -10,8 +10,8 @@ import {
 } from '../types/ciliumPolicy';
 import { apiClient } from '../services/api';
 import { createRowIdentityResolver, type IdentitySources, type TrafficIdentity } from './trafficIdentity';
-import { quoteYamlValue } from './networkPolicyGenerator';
-import { peerCIDR } from './ipCidr';
+import { observedPort, observedProtocol, quoteYamlValue } from './networkPolicyGenerator';
+import { isValidCidr, peerCIDR } from './ipCidr';
 import { collapseToServiceIdentity, identityKey, newerRow, selectorlessServiceComment, unattributedPeerComment } from './peerComments';
 import { specNodeName } from './hostNetwork';
 import {
@@ -58,7 +58,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
 
   // Process traffic rules
   rows.forEach((traffic) => {
-    const protocol = traffic.ip_protocol || 'TCP';
+    const protocol = observedProtocol(traffic.ip_protocol);
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) return;
@@ -79,7 +79,9 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
 
     const map = trafficType === 'ingress' ? ingressMap : trafficType === 'egress' ? egressMap : null;
     if (!map) return;
-    const port = (trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port) || '80';
+    const port = observedPort(trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port);
+    // No usable port: skip the row, as the standard generator and the advisor do.
+    if (port === null) return;
 
     const entry = map.get(key);
     if (!entry) {
@@ -209,8 +211,14 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
           ),
         };
       }
-      const facts = await getPeerPodFacts(identity.svcName);
-      return { selector: { matchLabels: withPeerNamespace(facts.labels || { app: identity.svcName }, identity.svcNamespace) } };
+      // The Service's own selector, never a label guessed from its name —
+      // see the sibling comment in networkPolicyGenerator.
+      if (!identity.svcSelector) {
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return {};
+        return { cidr, comment: unattributedPeerComment(peerInfo.ip, undefined, `${identity.svcNamespace || 'default'}/${identity.svcName}`) };
+      }
+      return { selector: { matchLabels: withPeerNamespace(identity.svcSelector, identity.svcNamespace) } };
     } else if (identity.podName) {
       const facts = await getPeerPodFacts(identity.podName);
       const hostNetwork = identity.hostNetwork ?? facts.hostNetwork;
@@ -240,7 +248,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
       const cidr = peerCIDR(peerInfo.ip);
       if (cidr === null) return {};
       if (identity.unattributed) {
-        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at) };
+        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
       }
       return { cidr };
     }
@@ -400,6 +408,59 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
   return policy;
 }
 
+/**
+ * Whether a rule renders: it names at least one endpoint selector, CIDR or
+ * entity. A rule with none selects every peer (with only `toPorts`, every
+ * peer on those ports), so a rule the editor holds with no peers is left out
+ * of the YAML rather than exported as allow-all; the editor says so on the
+ * rule. An empty selector (`matchLabels: {}`) is an explicit peer and counts.
+ */
+export function ciliumRuleHasPeers(rule: CiliumIngressRule | CiliumEgressRule): boolean {
+  const r = rule as CiliumIngressRule & CiliumEgressRule;
+  return [r.fromEndpoints, r.fromCIDR, r.fromEntities, r.toEndpoints, r.toCIDR, r.toEntities].some((peers) => (peers?.length ?? 0) > 0);
+}
+
+/** A Cilium `toPorts` port: 0-65535 (0 is any port) or a named port. */
+export function isValidCiliumPort(port: string): boolean {
+  return /^[0-9]+$/.test(port) ? Number(port) <= 65535 : /^(?=.{1,15}$)(?=.*[a-z])[a-z0-9]+(-[a-z0-9]+)*$/.test(port);
+}
+
+/**
+ * Every port the CRD rejects in the rules that render, as
+ * `<direction> rule <n>: port "<value>"`. Cilium takes 0-65535 (0 is any
+ * port) or a named port. The editor's port field is free text, and nothing in
+ * it says an empty field means "any port", so empty is flagged, not guessed.
+ */
+export function invalidCiliumPorts(policy: CiliumNetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule: CiliumIngressRule | CiliumEgressRule, i) => {
+      if (!ciliumRuleHasPeers(rule)) return;
+      (rule.toPorts ?? []).flatMap((r) => r.ports).filter((p) => !isValidCiliumPort(p.port))
+        .forEach((p) => out.push(`${dir} rule ${i + 1}: port "${p.port}"`));
+    });
+  });
+  return out;
+}
+
+/** Every malformed CIDR in the rules that render, as
+ *  `<direction> rule <n>: cidr "<value>"`. Typed values only (see invalidPolicyCidrs). */
+export function invalidCiliumCidrs(policy: CiliumNetworkPolicy): string[] {
+  const out: string[] = [];
+  (['ingress', 'egress'] as const).forEach((dir) => {
+    (policy.spec[dir] ?? []).forEach((rule: CiliumIngressRule | CiliumEgressRule, i) => {
+      if (!ciliumRuleHasPeers(rule)) return;
+      const r = rule as CiliumIngressRule & CiliumEgressRule;
+      [...(r.fromCIDR ?? []), ...(r.toCIDR ?? [])].filter((c) => !isValidCidr(c))
+        .forEach((c) => out.push(`${dir} rule ${i + 1}: cidr "${c}"`));
+    });
+  });
+  return out;
+}
+
+/** A numeric port as a plain decimal (`0080` → `80`); names as typed. */
+const ciliumPortValue = (port: string): string => (/^[0-9]+$/.test(port) ? String(Number(port)) : port);
+
 export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -425,17 +486,20 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
     yaml.push(`    egress: ${policy.spec.defaultDeny.egress}`);
   }
 
+  const ingress = (policy.spec.ingress ?? []).filter(ciliumRuleHasPeers);
+  const egress = (policy.spec.egress ?? []).filter(ciliumRuleHasPeers);
+
   // The CRD requires an ingress or egress section (spec anyOf), and Cilium's
   // form for "deny this direction, allow nothing" is a single empty rule.
-  const denyOnly = (dir: 'ingress' | 'egress') => policy.spec.defaultDeny[dir] && !(policy.spec[dir]?.length);
+  const denyOnly = (dir: 'ingress' | 'egress') => policy.spec.defaultDeny[dir] && (dir === 'ingress' ? ingress : egress).length === 0;
 
   // Ingress rules
   if (denyOnly('ingress')) {
     yaml.push('  ingress:');
     yaml.push('  - {}');
-  } else if (policy.spec.ingress && policy.spec.ingress.length > 0) {
+  } else if (ingress.length > 0) {
     yaml.push('  ingress:');
-    policy.spec.ingress.forEach((rule) => {
+    ingress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  -');
       if (rule.fromEntities && rule.fromEntities.length > 0) {
@@ -466,7 +530,7 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
         rule.toPorts.forEach((portRule) => {
           yaml.push('    - ports:');
           portRule.ports.forEach((pp) => {
-            yaml.push(`      - port: "${pp.port}"`);
+            yaml.push(`      - port: "${ciliumPortValue(pp.port)}"`);
             yaml.push(`        protocol: ${pp.protocol}`);
           });
         });
@@ -478,9 +542,9 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   if (denyOnly('egress')) {
     yaml.push('  egress:');
     yaml.push('  - {}');
-  } else if (policy.spec.egress && policy.spec.egress.length > 0) {
+  } else if (egress.length > 0) {
     yaml.push('  egress:');
-    policy.spec.egress.forEach((rule) => {
+    egress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  -');
       if (rule.toEntities && rule.toEntities.length > 0) {
@@ -511,7 +575,7 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
         rule.toPorts.forEach((portRule) => {
           yaml.push('    - ports:');
           portRule.ports.forEach((pp) => {
-            yaml.push(`      - port: "${pp.port}"`);
+            yaml.push(`      - port: "${ciliumPortValue(pp.port)}"`);
             yaml.push(`        protocol: ${pp.protocol}`);
           });
         });

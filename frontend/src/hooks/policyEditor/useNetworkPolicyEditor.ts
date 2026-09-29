@@ -241,6 +241,10 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
     type: 'ingress' | 'egress'
   ) => {
     if (!policy) return;
+    // The port field is free text: a number, a named port, or (mid-edit)
+    // empty. Digits are stored as a number; anything else is kept as typed
+    // and flagged by isValidPolicyPort rather than coerced to 0.
+    if (field === 'port' && typeof value === 'string' && /^[0-9]+$/.test(value)) value = Number(value);
     if (type === 'ingress') {
       setPolicy({
         ...policy,
@@ -545,15 +549,14 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
         peers: rule.peers.map((peer, i) => {
           if (i !== peerIndex) return peer;
 
+          // Removing the last label leaves an empty selector, which is what
+          // the editor's "leave empty to match all pods / namespaces" hint
+          // promises. Deleting the selector instead left a same-namespace
+          // peer with nothing: a null peer the API server rejects, failing
+          // the whole policy.
           if (selectorType === 'podSelector' && peer.podSelector) {
             const newLabels = { ...peer.podSelector.matchLabels };
             delete newLabels[labelKey];
-
-            if (Object.keys(newLabels).length === 0) {
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars
-              const { podSelector: _podSelector, ...rest } = peer;
-              return rest;
-            }
 
             return {
               ...peer,
@@ -562,12 +565,6 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
           } else if (selectorType === 'namespaceSelector' && peer.namespaceSelector) {
             const newLabels = { ...peer.namespaceSelector.matchLabels };
             delete newLabels[labelKey];
-
-            if (Object.keys(newLabels).length === 0) {
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars
-              const { namespaceSelector: _namespaceSelector, ...rest } = peer;
-              return rest;
-            }
 
             return {
               ...peer,

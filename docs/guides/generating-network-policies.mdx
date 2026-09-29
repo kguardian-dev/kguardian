@@ -365,6 +365,7 @@ kguardian resolves IPs to Kubernetes resources. The resolution happens when the 
         matchLabels:
           kubernetes.io/metadata.name: databases
     ```
+    The selector is the Service's `spec.selector` as stored, never a label derived from the Service's name: DNS egress to `kube-system/kube-dns` renders as `k8s-app: kube-dns`. When the Broker never stored the Service's spec, the selector is unknown and the peer is pinned as an `ipBlock` on the observed address instead (the Policy Builder adds the `# unattributed peer` comment above it).
   </Accordion>
 
   <Accordion title="Services without a selector" icon="server">
