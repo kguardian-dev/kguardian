@@ -22,6 +22,8 @@ interface DataTableProps {
   selectedPod: PodNodeData | null;
   allPodsLookup: PodInfo[];
   services: ServiceInfo[];
+  /** The live compute poll is failing and backing off (hooks/useComputeData). */
+  computeUnavailable?: boolean;
 }
 
 interface TrafficIdentity {
@@ -95,7 +97,7 @@ const SortableHeader: React.FC<{
   </th>
 );
 
-const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services }) => {
+const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services, computeUnavailable = false }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
   // Every section starts collapsed. The panel shares the screen with the map
   // and a selection now focuses the graph as well as opening the card, so the
@@ -384,6 +386,12 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   // Read off `compute` rather than `hasCompute`: the header renders for a
   // workload with no compute at all, and must still say "0 containers".
   const containerCount = compute?.containers.length ?? 0;
+  // With the poll failing and nothing kept from a good read, "0 containers"
+  // and "the node is not reporting" would both be guesses: the broker read is
+  // what failed. Last-good rows (the hook keeps them) still render as data.
+  // A pod outside the namespace is never in the namespace's compute poll, so
+  // the outage says nothing about it.
+  const computeMissing = computeUnavailable && !hasCompute && !selectedPod?.isExternal;
   const blame = useMemo(() => {
     if (!compute) return { rows: [] as Array<ComputeBlame & { victim: string }>, totalWaitNs: 0 };
     // One list across the pod's containers, largest wait first. The share is
@@ -909,6 +917,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         <button
           onClick={() => setIsComputeExpanded(!isComputeExpanded)}
           aria-expanded={isComputeExpanded}
+          title={computeUnavailable && hasCompute ? 'The live compute feed is not answering right now; gauges shown are from the last successful read.' : undefined}
           className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
         >
           {isComputeExpanded ? (
@@ -917,7 +926,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
             <ChevronRight className="w-4 h-4 text-hubble-accent" />
           )}
           <Cpu className="w-4 h-4 text-hubble-accent" />
-          Compute ({containerCount} container{containerCount !== 1 ? 's' : ''})
+          {computeMissing ? 'Compute (unavailable)' : <>Compute ({containerCount} container{containerCount !== 1 ? 's' : ''})</>}
           {compute && compute.findings.length > 0 && (
             <span className="ml-1 rounded-full bg-hubble-error/15 text-hubble-error text-xs font-medium px-2 py-0.5 tabular-nums">
               {compute.findings.length} finding{compute.findings.length !== 1 ? 's' : ''}
@@ -925,7 +934,18 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
           )}
         </button>
 
-        {isComputeExpanded && !(hasCompute && compute) && (
+        {isComputeExpanded && computeMissing && (
+          <div className="bg-hubble-card rounded-surface border border-hubble-border">
+            <EmptyState
+              icon={Cpu}
+              title="Compute metrics unavailable"
+              description="Live compute metrics cannot be loaded right now: the broker's compute read keeps failing and is retried with back-off."
+              compact
+            />
+          </div>
+        )}
+
+        {isComputeExpanded && !computeMissing && !(hasCompute && compute) && (
           <div className="bg-hubble-card rounded-surface border border-hubble-border">
             <EmptyState
               icon={Cpu}

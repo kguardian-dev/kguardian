@@ -36,3 +36,52 @@ test('blame share is computed over the full blame list, and only the top 10 rows
   const share = rows[0].querySelectorAll('td')[3].textContent;
   expect(share).toBe('15%'); // 100 / 650, not 100 / (100 + 9×50) = 18%
 });
+
+// The compute header and empty state must not blame the node when it is the
+// broker's compute read that is failing (App passes `computeUnavailable`).
+const bare: PodNodeData = { ...selected, compute: undefined };
+const openCompute = () => fireEvent.click(screen.getByRole('button', { name: /^Compute \(/ }));
+
+test('healthy poll with data: the header counts containers and the gauges render', () => {
+  render(<DataTable selectedPod={selected} allPodsLookup={[pod]} services={[]} />);
+  const header = screen.getByRole('button', { name: /^Compute \(/ });
+  expect(header.textContent).toBe('Compute (1 container)');
+  expect(header.getAttribute('title')).toBeNull();
+  openCompute();
+  expect(screen.getByTestId('compute-blame')).not.toBeNull();
+});
+
+test('healthy poll without data: the node-agent empty state is unchanged', () => {
+  render(<DataTable selectedPod={bare} allPodsLookup={[pod]} services={[]} />);
+  expect(screen.getByRole('button', { name: /^Compute \(/ }).textContent).toBe('Compute (0 containers)');
+  openCompute();
+  expect(screen.getByText('No compute data for this workload')).not.toBeNull();
+  expect(screen.getByText(/Compute metrics arrive from the node agent/)).not.toBeNull();
+  expect(screen.queryByText('Compute metrics unavailable')).toBeNull();
+});
+
+test('failing poll without data: the panel says the read is failing instead of claiming 0 containers', () => {
+  render(<DataTable selectedPod={bare} allPodsLookup={[pod]} services={[]} computeUnavailable />);
+  const header = screen.getByRole('button', { name: /^Compute \(/ });
+  expect(header.textContent).toBe('Compute (unavailable)');
+  openCompute();
+  expect(screen.getByText('Compute metrics unavailable')).not.toBeNull();
+  expect(screen.getByText(/the broker's compute read keeps failing and is retried with back-off/)).not.toBeNull();
+  expect(screen.queryByText('No compute data for this workload')).toBeNull();
+});
+
+test('failing poll with last-good data: the data stays, and the header says it is from the last good read', () => {
+  render(<DataTable selectedPod={selected} allPodsLookup={[pod]} services={[]} computeUnavailable />);
+  const header = screen.getByRole('button', { name: /^Compute \(/ });
+  expect(header.textContent).toBe('Compute (1 container)');
+  expect(header.getAttribute('title')).toMatch(/last successful read/);
+  openCompute();
+  expect(screen.getByTestId('compute-blame')).not.toBeNull();
+  expect(screen.queryByText('Compute metrics unavailable')).toBeNull();
+});
+
+test('failing poll, pod outside the namespace: the outage is not blamed on it', () => {
+  render(<DataTable selectedPod={{ ...bare, isExternal: true }} allPodsLookup={[pod]} services={[]} computeUnavailable />);
+  expect(screen.queryByText('Compute (unavailable)')).toBeNull();
+  expect(screen.queryByText('Compute metrics unavailable')).toBeNull();
+});
