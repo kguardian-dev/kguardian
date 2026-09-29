@@ -963,7 +963,7 @@ for replicas in 1 3; do
   label="leader-election-replicas-$replicas"
   render "$label" -n kg --set broker.replicaCount=$replicas && {
     assert_has "$label" "kind: Role$"
-    assert_has "$label" "name: kguardian-broker-leader-election"
+    assert_has "$label" "name: compat-kguardian-broker-leader-election"
     assert_has "$label" 'resourceNames: \["compat-kguardian-broker-leader"\]'
     assert_has "$label" "value: \"compat-kguardian-broker-leader\""
     assert_has "$label" "fieldPath: metadata.name"
@@ -1011,6 +1011,17 @@ render "db-conns-explicit" --set database.maxConnections=300 && \
   assert_has "db-conns-explicit" 'max_connections=300'
 assert_render_fails "db-conns-explicit-too-low" "database.maxConnections=50 is below" \
   --set broker.replicaCount=3 --set database.maxConnections=50
+# Raised: NOTES says the database pod restarts once to apply it; not at 1.
+if notes="$(helm install compat "$CHART" --dry-run=client --set broker.replicaCount=3 2>/dev/null)"; then
+  grep -q "database pod" <<<"$notes" || \
+    { echo "FAIL [db-conns-restart-notes]: NOTES must warn of the one database restart"; fail=1; }
+else
+  echo "FAIL [db-conns-restart-notes]: dry-run install failed"; fail=1
+fi
+if notes="$(helm install compat "$CHART" --dry-run=client 2>/dev/null)"; then
+  grep -q "^max_connections" <<<"$notes" && \
+    { echo "FAIL [db-conns-default-notes]: no max_connections note at replicaCount 1"; fail=1; }
+fi
 # External database: nothing to size, but NOTES states the requirement.
 render "db-conns-external" --set database.enabled=false --set database.external.host=db.example.com \
   --set database.existingSecret=kg-db --set broker.replicaCount=3 && \

@@ -444,6 +444,11 @@ maxSurge, rounded up) with a full pool, plus a margin for everything else
 psql, and Postgres's 3 superuser_reserved_connections). The pool size is
 what the broker actually uses: dbPoolMaxSize raised to
 audit.inflightPermits + 8 (main.rs pool_size_with_headroom).
+
+The surge term assumes the Deployment's default RollingUpdate strategy
+(maxSurge 25%): the broker Deployment sets no strategy and the chart
+refuses autoscaling. If a strategy value is ever added, derive the surge
+from it here.
 */}}
 {{- define "kguardian.brokerPoolSize" -}}
 {{- $pool := int (.Values.broker.dbPoolMaxSize | default 32) -}}
