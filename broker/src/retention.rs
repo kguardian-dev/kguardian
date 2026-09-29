@@ -57,10 +57,12 @@
 //!    says why the two windows differ). Runs regardless of the history
 //!    setting.
 //!
-//! With history on, a separate task also keeps the downsample's partial
-//! index `idx_pod_compute_history_minute_ts` present and valid, building
-//! it with `CREATE INDEX CONCURRENTLY` on its own connection after
-//! startup rather than in a migration (`ensure_minute_index` says why).
+//! With history on, a separate task (`background_index`) also keeps the
+//! downsample's partial index `idx_pod_compute_history_minute_ts` present
+//! and valid, building it with `CREATE INDEX CONCURRENTLY` on its own
+//! connection after startup rather than in a migration (that module says
+//! why, and why a VACUUM of the table must go through its
+//! `with_table_maintenance`).
 //!
 //! # Seccomp denials
 //!
@@ -260,11 +262,9 @@ fn spawn_compute(pool: DbPool) {
         interval_secs = interval.as_secs(),
         "compute retention loop scheduled (days=0 means history off; stale-latest pruning still runs)"
     );
-    // The downsample is the index's only user, and it runs only with
-    // history on.
-    if days > 0 {
-        spawn_minute_index();
-    }
+    // The compute history indexes' readers and passes run only with
+    // history on; the others are maintained whatever the setting.
+    crate::background_index::spawn(days > 0);
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
         let mut cadence = crate::leader::Cadence::new("compute retention", interval);
@@ -1449,210 +1449,11 @@ async fn run_downsample(pool: &DbPool, minute_hours: u32) {
 /// Where the next downsample batch starts: the oldest minute row older
 /// than the cutoff, or NULL once the tier is fully folded. A constant so
 /// the live test plans the SAME statement. It needs the partial
-/// [`MINUTE_INDEX`], which [`spawn_minute_index`] builds: through the
-/// plain `(ts)` index it walked every five-minute row below the cutoff
-/// first, and on a 16 M-row table that hit the statement timeout.
+/// [`crate::background_index::MINUTE_INDEX`], which that module builds:
+/// through the plain `(ts)` index it walked every five-minute row below the
+/// cutoff first, and on a 16 M-row table that hit the statement timeout.
 const OLDEST_MINUTE_ROW_SQL: &str =
     "SELECT min(ts) AS ts FROM pod_compute_history WHERE resolution_secs = 60 AND ts < $1";
-
-/// Partial index on the minute tier of `pod_compute_history`, for
-/// [`OLDEST_MINUTE_ROW_SQL`] and the downsample batch's own
-/// `resolution_secs = 60 AND ts >= $1 AND ts < $2` range. Partial rather
-/// than `(resolution_secs, ts)` because nothing reads the five-minute tier
-/// by resolution.
-const MINUTE_INDEX: &str = "idx_pod_compute_history_minute_ts";
-const CREATE_MINUTE_INDEX_SQL: &str = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \
-     idx_pod_compute_history_minute_ts ON pod_compute_history (ts) WHERE resolution_secs = 60";
-const DROP_MINUTE_INDEX_SQL: &str =
-    "DROP INDEX CONCURRENTLY IF EXISTS idx_pod_compute_history_minute_ts";
-/// Session advisory lock held for the whole check-and-build, so two
-/// replicas never race one build, and a replica never drops the INVALID
-/// index another is still building. A build orphaned by a killed pod keeps
-/// its backend, and so this lock, until it finishes.
-const MINUTE_INDEX_LOCK_KEY: &str = "kguardian:idx_pod_compute_history_minute_ts";
-/// First check after startup: after the pool has warmed and well before
-/// the first downsample pass could need it, but never on the startup path.
-const MINUTE_INDEX_WARMUP: Duration = Duration::from_secs(30);
-/// Re-check cadence once the index is valid (or another replica holds the
-/// build). A catalog lookup, so cheap; it catches an index dropped by hand
-/// or left INVALID by a build that failed elsewhere.
-const MINUTE_INDEX_RECHECK: Duration = Duration::from_secs(3600);
-/// First retry after a failed build, doubled per failure up to the
-/// re-check cadence.
-const MINUTE_INDEX_RETRY: Duration = Duration::from_secs(300);
-/// How often a follower re-checks whether it has become the leader, so
-/// a new leader ensures the index within a minute rather than an hour.
-const MINUTE_INDEX_FOLLOWER_POLL: Duration = Duration::from_secs(60);
-
-/// What [`ensure_minute_index`] found and did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MinuteIndex {
-    /// Present and valid; nothing to do.
-    Valid,
-    /// Was missing; built.
-    Built,
-    /// Was INVALID (a CONCURRENTLY build that failed or was interrupted);
-    /// dropped and rebuilt.
-    Rebuilt,
-    /// Another session holds the build lock; try again later.
-    Busy,
-}
-
-#[derive(diesel::QueryableByName)]
-struct IndexValid {
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
-    valid: Option<bool>,
-}
-
-#[derive(diesel::QueryableByName)]
-struct Locked {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    locked: bool,
-}
-
-/// Make sure [`MINUTE_INDEX`] exists and is valid, building it with
-/// `CREATE INDEX CONCURRENTLY` if not.
-///
-/// This used to be a migration, and must not be one. Migrations run before
-/// the HTTP server binds, inside a transaction, so a plain `CREATE INDEX`
-/// on a large history table (23 GB on the dev cluster) could outlast the
-/// liveness probe's ~200 s. The kubelet would kill the pod and it would
-/// start the build again, while Postgres kept every orphaned build running
-/// with its SHARE lock, blocking every history INSERT. Those inserts hold
-/// a pool connection each while they wait, so the old pod's pool ran dry,
-/// `/health` failed, and a single-replica Broker went down entirely.
-/// CONCURRENTLY blocks no writes but cannot run in a transaction, and a
-/// build that fails leaves an INVALID index that `IF NOT EXISTS` would
-/// then skip for good, so it runs here, after startup, and repairs that
-/// case itself.
-///
-/// `conn` must be a dedicated connection, never a pool one: the build can
-/// take hours on a large table, so the session's statement timeout is
-/// switched off. It must also be a real session (direct, or a session-mode
-/// pooler, never PgBouncer transaction mode): the advisory lock is
-/// session-scoped, and a transaction-mode pooler could hand the lock and
-/// the build to different server connections.
-fn ensure_minute_index(conn: &mut PgConnection) -> Result<MinuteIndex, RetentionError> {
-    use diesel::connection::SimpleConnection;
-    use diesel::sql_types::Text;
-    conn.batch_execute("SET statement_timeout = 0")?;
-    let locked = sql_query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked")
-        .bind::<Text, _>(MINUTE_INDEX_LOCK_KEY)
-        .get_result::<Locked>(conn)?
-        .locked;
-    if !locked {
-        return Ok(MinuteIndex::Busy);
-    }
-    let outcome = (|| -> Result<MinuteIndex, RetentionError> {
-        let valid = sql_query(
-            "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)) AS valid",
-        )
-        .bind::<Text, _>(MINUTE_INDEX)
-        .get_result::<IndexValid>(conn)?
-        .valid;
-        let started = std::time::Instant::now();
-        let outcome = match valid {
-            Some(true) => return Ok(MinuteIndex::Valid),
-            Some(false) => {
-                warn!(
-                    index = MINUTE_INDEX,
-                    "compute history index is INVALID (an earlier build failed); rebuilding"
-                );
-                conn.batch_execute(DROP_MINUTE_INDEX_SQL)?;
-                MinuteIndex::Rebuilt
-            }
-            None => MinuteIndex::Built,
-        };
-        info!(
-            index = MINUTE_INDEX,
-            "building compute history index CONCURRENTLY (writes continue meanwhile)"
-        );
-        conn.batch_execute(CREATE_MINUTE_INDEX_SQL)?;
-        info!(
-            index = MINUTE_INDEX,
-            elapsed_secs = started.elapsed().as_secs(),
-            "compute history index built"
-        );
-        Ok(outcome)
-    })();
-    // Released explicitly so a pooled or reused session never keeps it;
-    // a dropped connection releases it anyway.
-    let _ = sql_query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
-        .bind::<Text, _>(MINUTE_INDEX_LOCK_KEY)
-        .execute(conn);
-    outcome
-}
-
-/// Background task that keeps [`MINUTE_INDEX`] present and valid (see
-/// [`ensure_minute_index`]). Off the startup path and on its own
-/// connection, so neither readiness nor the request pool ever waits on a
-/// build.
-fn spawn_minute_index() {
-    let Some(url) = std::env::var("DATABASE_URL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    else {
-        warn!(
-            index = MINUTE_INDEX,
-            "DATABASE_URL unset; not maintaining the compute history index"
-        );
-        return;
-    };
-    actix_web::rt::spawn(async move {
-        tokio::time::sleep(MINUTE_INDEX_WARMUP).await;
-        let mut retry = MINUTE_INDEX_RETRY;
-        loop {
-            // Leader only, on top of the build's own advisory lock: the
-            // downsample that needs the index runs only there.
-            if !crate::leader::is_leader() {
-                tokio::time::sleep(MINUTE_INDEX_FOLLOWER_POLL).await;
-                continue;
-            }
-            let url = url.clone();
-            let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-                let mut conn =
-                    PgConnection::establish(&url).map_err(|e| format!("connect: {e}"))?;
-                ensure_minute_index(&mut conn).map_err(|e| e.to_string())
-            })
-            .await;
-            let next = match result {
-                Ok(Ok(outcome)) => {
-                    match outcome {
-                        MinuteIndex::Valid => {
-                            debug!(index = MINUTE_INDEX, "compute history index valid")
-                        }
-                        MinuteIndex::Busy => info!(
-                            index = MINUTE_INDEX,
-                            "compute history index build held by another session; re-checking later"
-                        ),
-                        MinuteIndex::Built | MinuteIndex::Rebuilt => {}
-                    }
-                    retry = MINUTE_INDEX_RETRY;
-                    MINUTE_INDEX_RECHECK
-                }
-                Ok(Err(e)) => {
-                    warn!(
-                        index = MINUTE_INDEX,
-                        error = %e,
-                        retry_secs = retry.as_secs(),
-                        "compute history index build failed; retrying"
-                    );
-                    let wait = retry;
-                    retry = (retry * 2).min(MINUTE_INDEX_RECHECK);
-                    wait
-                }
-                Err(e) => {
-                    warn!(index = MINUTE_INDEX, error = %e, "compute history index task panicked");
-                    let wait = retry;
-                    retry = (retry * 2).min(MINUTE_INDEX_RECHECK);
-                    wait
-                }
-            };
-            tokio::time::sleep(next).await;
-        }
-    });
-}
 
 #[derive(diesel::QueryableByName)]
 struct OldestRow {
@@ -4301,15 +4102,18 @@ mod tests {
             .expect("leave the table empty for the other live tests");
     }
 
-    fn minute_index_valid(conn: &mut PgConnection) -> Option<bool> {
-        sql_query(
-            "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)) AS valid",
-        )
-        .bind::<diesel::sql_types::Text, _>(MINUTE_INDEX)
-        .get_result::<IndexValid>(conn)
-        .expect("read the index state")
-        .valid
+    use crate::background_index::MINUTE_INDEX;
+
+    fn minute_index() -> &'static crate::background_index::BackgroundIndex {
+        &crate::background_index::INDEXES[0]
     }
+
+    fn minute_index_valid(conn: &mut PgConnection) -> Option<bool> {
+        crate::background_index::index_valid(conn, MINUTE_INDEX).expect("read the index state")
+    }
+
+    const DROP_MINUTE_INDEX_SQL: &str =
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_pod_compute_history_minute_ts";
 
     /// The background task's one step: builds the missing index, does
     /// nothing to a valid one, rebuilds an INVALID one (what a failed or
@@ -4320,15 +4124,28 @@ mod tests {
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_minute_index_is_built_idempotent_and_self_heals() {
+        use crate::background_index::{ensure_index, lock_key, IndexState};
         use diesel::connection::SimpleConnection;
         let mut conn = live_conn();
+        assert_eq!(minute_index().name, MINUTE_INDEX, "built first");
+        assert_eq!(
+            lock_key(MINUTE_INDEX),
+            "kguardian:idx_pod_compute_history_minute_ts",
+            "the key earlier Brokers hold, so a rolling upgrade stays exclusive"
+        );
         conn.batch_execute(DROP_MINUTE_INDEX_SQL)
             .expect("start without the index");
         assert_eq!(minute_index_valid(&mut conn), None);
 
-        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Built);
+        assert_eq!(
+            ensure_index(&mut conn, minute_index()).unwrap(),
+            IndexState::Built
+        );
         assert_eq!(minute_index_valid(&mut conn), Some(true));
-        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Valid);
+        assert_eq!(
+            ensure_index(&mut conn, minute_index()).unwrap(),
+            IndexState::Valid
+        );
 
         conn.batch_execute(
             "UPDATE pg_index SET indisvalid = false \
@@ -4337,8 +4154,8 @@ mod tests {
         .expect("mark the index INVALID (needs superuser)");
         assert_eq!(minute_index_valid(&mut conn), Some(false));
         assert_eq!(
-            ensure_minute_index(&mut conn).unwrap(),
-            MinuteIndex::Rebuilt
+            ensure_index(&mut conn, minute_index()).unwrap(),
+            IndexState::Rebuilt
         );
         assert_eq!(minute_index_valid(&mut conn), Some(true));
 
@@ -4347,15 +4164,21 @@ mod tests {
         let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
         let mut other = PgConnection::establish(&url).expect("connect");
         sql_query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
-            .bind::<diesel::sql_types::Text, _>(MINUTE_INDEX_LOCK_KEY)
+            .bind::<diesel::sql_types::Text, _>(lock_key(MINUTE_INDEX))
             .execute(&mut other)
             .expect("hold the build lock");
         conn.batch_execute(DROP_MINUTE_INDEX_SQL)
             .expect("drop the index again");
-        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Busy);
+        assert_eq!(
+            ensure_index(&mut conn, minute_index()).unwrap(),
+            IndexState::Busy
+        );
         assert_eq!(minute_index_valid(&mut conn), None, "nothing built");
         drop(other);
-        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Built);
+        assert_eq!(
+            ensure_index(&mut conn, minute_index()).unwrap(),
+            IndexState::Built
+        );
     }
 
     /// The downsample's starting point must come from the partial minute
@@ -4394,8 +4217,9 @@ mod tests {
         )
         .expect("seed pod_compute_history");
         assert_ne!(
-            ensure_minute_index(&mut conn).expect("ensure the minute index"),
-            MinuteIndex::Busy
+            crate::background_index::ensure_index(&mut conn, minute_index())
+                .expect("ensure the minute index"),
+            crate::background_index::IndexState::Busy
         );
 
         let cutoff = chrono::Utc::now().naive_utc()

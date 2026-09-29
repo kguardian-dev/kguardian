@@ -1649,7 +1649,33 @@ const FOR_VULN: &str = "l.image_digest IN (SELECT l2.image_digest FROM supplycha
 /// effective payload per image and the workloads running each image.
 /// Run by the retention loop, so `GET /vulnerabilities` is an indexed
 /// read however many findings there are.
+///
+/// The statement writes only what changed: `fresh` is the summary as it
+/// should be, rows no longer in it are deleted, and the upsert rewrites a
+/// row only when one of its values differs ([`CVE_SUMMARY_VALUES`]). It
+/// used to DELETE every row and INSERT them all again, which on an
+/// unchanged cluster left one dead tuple per row, plus one per index, every
+/// pass (300 k rows every 5 minutes on a large cluster); a database whose
+/// autovacuum falls behind or stops bloats on that alone. Both halves see
+/// the same snapshot and touch disjoint keys (a deleted key is not in
+/// `fresh`, an upserted one is), so one statement does both.
 fn refresh_cve_summary_sql() -> String {
+    let cols = CVE_SUMMARY_VALUES.join(", ");
+    let set = CVE_SUMMARY_VALUES
+        .iter()
+        .map(|c| format!("{c} = EXCLUDED.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let old = CVE_SUMMARY_VALUES
+        .iter()
+        .map(|c| format!("vuln_cve_summary.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let new = CVE_SUMMARY_VALUES
+        .iter()
+        .map(|c| format!("EXCLUDED.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "WITH {eff}, \
          hp0 AS ( \
@@ -1727,66 +1753,117 @@ fn refresh_cve_summary_sql() -> String {
                 count(DISTINCT wl) FILTER (WHERE iur = 3) AS not_observed, \
                 count(DISTINCT wl) FILTER (WHERE exposed) AS exposed \
             FROM w GROUP BY GROUPING SETS ((vuln_id), (vuln_id, ns)) \
+         ), \
+         fresh ({cols_all}) AS ( \
+            SELECT ai.scope, ai.vuln_id, ai.sr, ai.sc, ai.fx, ai.kev, ai.ep, \
+                COALESCE(pk.packages, '{{}}'), COALESCE(pk.sources, '{{}}'), ai.images, \
+                aw.workloads, aw.running_workloads, aw.namespaces, ai.jr, aw.tier, \
+                CASE aw.iur WHEN 0 THEN 'executed' WHEN 1 THEN 'loaded' \
+                    WHEN 3 THEN 'installed_not_observed' ELSE 'unknown' END, \
+                aw.executed, aw.loaded, aw.unknown, aw.not_observed, aw.exposed \
+            FROM ai JOIN aw ON aw.scope = ai.scope AND aw.vuln_id = ai.vuln_id \
+            JOIN pk ON pk.vuln_id = ai.vuln_id \
+         ), \
+         gone AS ( \
+            DELETE FROM vuln_cve_summary s WHERE NOT EXISTS ( \
+                SELECT 1 FROM fresh f \
+                WHERE f.scope_namespace = s.scope_namespace AND f.vuln_id = s.vuln_id) \
          ) \
-         INSERT INTO vuln_cve_summary (scope_namespace, vuln_id, severity_rank, max_score, \
-            fixable, kev, max_epss, packages, sources, images, workloads, running_workloads, \
-            namespaces, weakest_rank, tier, in_use, executed_workloads, loaded_workloads, \
-            unknown_workloads, not_observed_workloads, exposed_workloads) \
-         SELECT ai.scope, ai.vuln_id, ai.sr, ai.sc, ai.fx, ai.kev, ai.ep, \
-            COALESCE(pk.packages, '{{}}'), COALESCE(pk.sources, '{{}}'), ai.images, \
-            aw.workloads, aw.running_workloads, aw.namespaces, ai.jr, aw.tier, \
-            CASE aw.iur WHEN 0 THEN 'executed' WHEN 1 THEN 'loaded' \
-                WHEN 3 THEN 'installed_not_observed' ELSE 'unknown' END, \
-            aw.executed, aw.loaded, aw.unknown, aw.not_observed, aw.exposed \
-         FROM ai JOIN aw ON aw.scope = ai.scope AND aw.vuln_id = ai.vuln_id \
-         JOIN pk ON pk.vuln_id = ai.vuln_id",
+         INSERT INTO vuln_cve_summary ({cols_all}) \
+         SELECT {cols_all} FROM fresh \
+         ON CONFLICT (scope_namespace, vuln_id) DO UPDATE SET {set} \
+         WHERE ({old}) IS DISTINCT FROM ({new})",
         eff = effective_cte("true"),
         running = running_sql!("$1"),
+        cols_all = format!("scope_namespace, vuln_id, {cols}"),
     )
 }
 
-/// Rebuild the CVE summary in one transaction (readers see the old or the
-/// new table, never half). Returns the cluster-wide CVE count.
+/// Every `vuln_cve_summary` column but the key, which is what
+/// [`refresh_cve_summary_sql`] writes and compares. A column added to the
+/// table must be added here, or a change to only that column would never
+/// reach the table.
+pub(crate) const CVE_SUMMARY_VALUES: [&str; 19] = [
+    "severity_rank",
+    "max_score",
+    "fixable",
+    "kev",
+    "max_epss",
+    "packages",
+    "sources",
+    "images",
+    "workloads",
+    "running_workloads",
+    "namespaces",
+    "weakest_rank",
+    "tier",
+    "in_use",
+    "executed_workloads",
+    "loaded_workloads",
+    "unknown_workloads",
+    "not_observed_workloads",
+    "exposed_workloads",
+];
+
 /// Rebuild `vuln_cve_facts` from every stored finding in one grouped
-/// scan. The rebuild REPLACES the table (DELETE, then this INSERT, in
-/// [`refresh_cve_facts`]'s own transaction); it never merges into
-/// existing rows. That is
-/// what lets values come down: the ingest upsert only ever raises them
-/// (kev by OR, EPSS by GREATEST), so a KEV a source retracted or an EPSS
-/// that decayed is corrected here, within one retention interval. CVEs with
-/// no image_vulnerabilities row left (garbage-collected) are not
-/// re-inserted, so their facts go in the same pass.
+/// scan, in [`refresh_cve_facts`]'s own transaction. The result REPLACES
+/// the table's values; it never merges with them. That is what lets values
+/// come down: the ingest upsert only ever raises them (kev by OR, EPSS by
+/// GREATEST), so a KEV a source retracted or an EPSS that decayed is
+/// corrected here, within one retention interval. CVEs with no
+/// image_vulnerabilities row left (garbage-collected) are not in `fresh`,
+/// so their facts are deleted in the same statement.
+///
+/// Only what changed is written: a row is deleted when its CVE left
+/// `fresh`, inserted when it is new, and updated (with a new `updated_at`)
+/// only when one of its values differs. The table used to be emptied and
+/// refilled every pass, one dead tuple per CVE per pass on an unchanged
+/// cluster. The two halves touch disjoint keys and share one snapshot.
 pub const REFRESH_CVE_FACTS_SQL: &str = "\
+WITH fresh AS ( \
+    SELECT vuln_id, bool_or(kev) AS kev, min(kev_date_added) AS kev_date_added, \
+        max(epss) AS epss, max(epss_percentile) AS epss_percentile \
+    FROM image_vulnerabilities \
+    GROUP BY vuln_id \
+    HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
+        OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL \
+), \
+gone AS ( \
+    DELETE FROM vuln_cve_facts f \
+    WHERE NOT EXISTS (SELECT 1 FROM fresh n WHERE n.vuln_id = f.vuln_id) \
+) \
 INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
-SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
-    timezone('UTC', NOW()) \
-FROM image_vulnerabilities \
-GROUP BY vuln_id \
-HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
-    OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL";
+SELECT vuln_id, kev, kev_date_added, epss, epss_percentile, timezone('UTC', NOW()) FROM fresh \
+ON CONFLICT (vuln_id) DO UPDATE SET kev = EXCLUDED.kev, \
+    kev_date_added = EXCLUDED.kev_date_added, epss = EXCLUDED.epss, \
+    epss_percentile = EXCLUDED.epss_percentile, updated_at = EXCLUDED.updated_at \
+WHERE (vuln_cve_facts.kev, vuln_cve_facts.kev_date_added, vuln_cve_facts.epss, \
+        vuln_cve_facts.epss_percentile) \
+    IS DISTINCT FROM (EXCLUDED.kev, EXCLUDED.kev_date_added, EXCLUDED.epss, \
+        EXCLUDED.epss_percentile)";
 
 /// Rebuild `vuln_cve_facts` in its own short transaction (see
 /// [`REFRESH_CVE_FACTS_SQL`]). It starts with a SHARE ROW EXCLUSIVE lock on
 /// the table, taken before any row lock, so concurrent ingest upserts wait
 /// for this rebuild only (not for the CVE summary, which commits
-/// separately) and cannot interleave with the DELETE + INSERT: no
-/// duplicate-key abort for a CVE committed mid-rebuild, and no lock cycle
-/// with an ingest updating several CVEs. Readers see the old table or the
-/// new one, never an empty one.
+/// separately) and cannot interleave with it: no lost update between the
+/// rebuild's read of the findings and its write, and no lock cycle with an
+/// ingest updating several CVEs. Readers see the old values or the new
+/// ones, never an empty table. Returns the rows inserted or updated.
 pub fn refresh_cve_facts(conn: &mut PgConnection) -> QueryResult<usize> {
     refresh_cve_facts_with(conn, || {})
 }
 
-/// [`refresh_cve_facts`] with a hook run between the DELETE and the
-/// INSERT, holding the lock (tests drive concurrent ingest from it).
+/// [`refresh_cve_facts`] with a hook run after the lock is taken and
+/// before the rebuild statement, holding the lock (tests drive concurrent
+/// ingest from it).
 pub(crate) fn refresh_cve_facts_with(
     conn: &mut PgConnection,
-    between: impl FnOnce(),
+    locked: impl FnOnce(),
 ) -> QueryResult<usize> {
     conn.transaction(|conn| {
         sql_query("LOCK TABLE vuln_cve_facts IN SHARE ROW EXCLUSIVE MODE").execute(conn)?;
-        sql_query("DELETE FROM vuln_cve_facts").execute(conn)?;
-        between();
+        locked();
         sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)
     })
 }
@@ -1805,7 +1882,6 @@ pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
 /// upsert waits on, however long it runs.
 pub(crate) fn refresh_cve_summary_only(conn: &mut PgConnection) -> QueryResult<i64> {
     conn.transaction(|conn| {
-        sql_query("DELETE FROM vuln_cve_summary").execute(conn)?;
         let t = crate::in_use::TierSettings::from_env();
         sql_query(refresh_cve_summary_sql())
             .bind::<Double, _>(running_window_secs() as f64)

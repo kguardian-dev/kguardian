@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | Audit verdict + dead-pod prune | `retention::spawn` | leader |
 //! | Compute downsample, history prune, stale latest rows | `retention::spawn_compute` | leader |
-//! | Compute minute-index ensure | `retention::spawn_minute_index` | leader (plus its session advisory lock) |
+//! | Background `CREATE INDEX CONCURRENTLY` ensure (compute minute index, large-table indexes) | `background_index::spawn` | leader (plus a session advisory lock per index) |
 //! | Seccomp denial attribution backfill + prune, stale denial nodes | `retention::spawn_seccomp_denials` | leader |
 //! | Pod traffic prune and per-pod cap | `retention::spawn_pod_traffic` | leader |
 //! | Image inventory prune | `retention::spawn_image_inventory` | leader |
