@@ -997,6 +997,33 @@ render "leader-election-custom-sa" -n kg --set broker.serviceAccount.name=kg-bro
 render "leader-election-timings" -n kg --set broker.leaderElection.leaseDurationSeconds=30 && \
   assert_has "leader-election-timings" 'value: "30"'
 
+# 16. Database connections vs broker pools. Every broker pod of a rolling
+# update (replicaCount + 25% surge, rounded up) may hold a full pool, plus 13
+# for other clients. The bundled database keeps the image default (100) while
+# that fits, and is raised to it (rounded up to 10) once it does not.
+render "db-conns-default" && assert_absent "db-conns-default" "max_connections"
+render "db-conns-replicas-3" --set broker.replicaCount=3 && \
+  assert_has "db-conns-replicas-3" 'max_connections=150'
+# The pool the broker really uses: dbPoolMaxSize raised to inflightPermits + 8.
+render "db-conns-permit-floor" --set broker.replicaCount=10 --set broker.dbPoolMaxSize=16 && \
+  assert_has "db-conns-permit-floor" 'max_connections=330'
+render "db-conns-explicit" --set database.maxConnections=300 && \
+  assert_has "db-conns-explicit" 'max_connections=300'
+assert_render_fails "db-conns-explicit-too-low" "database.maxConnections=50 is below" \
+  --set broker.replicaCount=3 --set database.maxConnections=50
+# External database: nothing to size, but NOTES states the requirement.
+render "db-conns-external" --set database.enabled=false --set database.external.host=db.example.com \
+  --set database.existingSecret=kg-db --set broker.replicaCount=3 && \
+  assert_absent "db-conns-external" "max_connections="
+if notes="$(helm install compat "$CHART" --dry-run=client --set database.enabled=false \
+    --set database.external.host=db.example.com --set database.existingSecret=kg-db \
+    --set broker.replicaCount=3 2>/dev/null)"; then
+  grep -q "max_connections must be at least 141" <<<"$notes" || \
+    { echo "FAIL [db-conns-external-notes]: NOTES must state the required max_connections"; fail=1; }
+else
+  echo "FAIL [db-conns-external-notes]: dry-run install failed"; fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

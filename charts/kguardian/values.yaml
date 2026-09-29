@@ -775,6 +775,12 @@ broker:
   # the default 16 permits leaves 16 connections of headroom.
   # Tune up when broker logs show "could not get db conn for audit
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
+  #
+  # Each replica opens at most this many connections (idle, it keeps 4). The
+  # database must accept (replicaCount + rolling-update surge, 25% rounded
+  # up) x dbPoolMaxSize + 13. The bundled database is sized for that
+  # automatically (database.maxConnections); an external one is not, so
+  # check its max_connections when raising replicaCount or this value.
   dbPoolMaxSize: 32
 
   imageInventory:
@@ -1162,6 +1168,14 @@ database:
     # | require | verify-ca | verify-full). Cloud-managed Postgres typically
     # requires "require" or stricter.
     sslMode: prefer
+
+  # -- max_connections for the bundled PostgreSQL. Empty (the default) sizes
+  # it automatically: the image default of 100 until the broker could open
+  # more, i.e. (broker.replicaCount + rolling-update surge, 25% rounded up)
+  # x broker pool size + 13, then that number rounded up to a multiple of 10.
+  # An explicit value below that requirement refuses to render. Ignored with
+  # an external database, whose limit you must size by the same formula.
+  maxConnections: ""
 
   # -- Object name for the in-cluster Database deployment / PVC / SA. Only
   # used when `database.enabled=true`.

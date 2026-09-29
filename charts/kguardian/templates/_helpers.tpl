@@ -435,3 +435,44 @@ they cannot disagree.
 {{- define "kguardian.brokerLeaseName" -}}
 {{- printf "%s-broker-leader" (include "kguardian.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{/*
+Database connections the broker can hold at once, worst case: every broker
+pod of a rolling update (replicaCount plus the Deployment's default 25%
+maxSurge, rounded up) with a full pool, plus a margin for everything else
+(the leader's minute-index build, the pre-upgrade pg_dump, an operator's
+psql, and Postgres's 3 superuser_reserved_connections). The pool size is
+what the broker actually uses: dbPoolMaxSize raised to
+audit.inflightPermits + 8 (main.rs pool_size_with_headroom).
+*/}}
+{{- define "kguardian.brokerPoolSize" -}}
+{{- $pool := int (.Values.broker.dbPoolMaxSize | default 32) -}}
+{{- $permits := int ((.Values.broker.audit | default dict).inflightPermits | default 16) -}}
+{{- max $pool (add $permits 8) -}}
+{{- end -}}
+
+{{- define "kguardian.dbConnectionsRequired" -}}
+{{- $replicas := int .Values.broker.replicaCount -}}
+{{- $surge := max 1 (div (add (mul $replicas 25) 99) 100) -}}
+{{- add (mul (add $replicas $surge) (int (include "kguardian.brokerPoolSize" .))) 13 -}}
+{{- end -}}
+
+{{/*
+max_connections for the bundled PostgreSQL, or "" to leave the image
+default (100) alone. An explicit database.maxConnections below the
+requirement refuses to render; unset, it is raised to the requirement
+(rounded up to a multiple of 10) only when 100 is not enough, so a
+single-replica install's database spec never changes.
+*/}}
+{{- define "kguardian.dbMaxConnections" -}}
+{{- $required := int (include "kguardian.dbConnectionsRequired" .) -}}
+{{- $set := toString (.Values.database.maxConnections | default "") -}}
+{{- if ne $set "" -}}
+{{- if lt (int $set) $required -}}
+{{- fail (printf "database.maxConnections=%s is below what the broker can open: (broker.replicaCount %d + rolling-update surge) x pool %s + 13 = %d. Raise database.maxConnections, or lower broker.replicaCount / broker.dbPoolMaxSize." $set (int .Values.broker.replicaCount) (include "kguardian.brokerPoolSize" .) $required) -}}
+{{- end -}}
+{{- int $set -}}
+{{- else if gt $required 100 -}}
+{{- mul (div (add $required 9) 10) 10 -}}
+{{- end -}}
+{{- end -}}

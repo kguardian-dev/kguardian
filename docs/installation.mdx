@@ -233,6 +233,22 @@ every replica runs every job, which duplicates work, so keep `replicaCount: 1`
 in that case. See `broker_leader` and `broker_leader_election_active` on
 `/metrics` for which replica is leading.
 
+Each replica keeps 4 database connections open and grows its pool up to
+`broker.dbPoolMaxSize` (default 32) under load. During a rolling update the
+old and new pods overlap, so the database must accept:
+
+```text
+(replicaCount + ceil(replicaCount x 0.25)) x dbPoolMaxSize + 13
+```
+
+(`dbPoolMaxSize` is raised to `broker.audit.inflightPermits + 8` if it is
+lower.) With the bundled database the chart does this for you: it leaves
+PostgreSQL's default `max_connections` of 100 while that is enough and raises
+it otherwise (150 for three replicas), and refuses to render an explicit
+`database.maxConnections` below the requirement. With an external database,
+check its `max_connections` against the formula before raising `replicaCount`;
+`helm install` prints the number in its notes.
+
 ### Use External PostgreSQL
 
 For production-grade deployments — managed services like AWS RDS / Cloud SQL / a CloudNativePG cluster you already run — disable the bundled Postgres and point the broker at the external instance:
