@@ -102,3 +102,26 @@ test('a read that never answers becomes a retryable timeout, not an endless skel
   expect(err.kind).toBe('timeout');
   expect(err.message).toMatch(/did not answer/);
 });
+
+// An ingress 502/504 page, or the sign-in proxy's 401/403 page after the SSO
+// session expired, became the whole on-screen error message.
+test('a proxy error page is never the message; 401 and 403 say what is wrong with the token', async () => {
+  const at = (status: number, body: string) =>
+    new ProfileApi({ fetchImpl: (async () => new Response(body, { status })) as unknown as typeof fetch })
+      .getProfile('a', 'b', 'c').catch((e: unknown) => e as ProfileApiError);
+  const html = '<html>\n<head><title>502 Bad Gateway</title></head>\n<body>\n<center><h1>502 Bad Gateway</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n';
+  const gateway = await at(502, html);
+  expect(gateway.kind).toBe('error');
+  expect(gateway.message).toBe('request failed with 502');
+  const long = await at(500, `line one\n${'x'.repeat(500)}`);
+  expect(long.message).not.toMatch(/\n/);
+  expect(long.message.length).toBeLessThanOrEqual(200);
+
+  const noToken = await at(401, html);
+  expect(noToken.kind).toBe('auth');
+  expect(noToken.message).toMatch(/requires a token/);
+  expect(noToken.message).not.toMatch(/</);
+  const noScope = await at(403, 'forbidden');
+  expect(noScope.kind).toBe('auth');
+  expect(noScope.message).toMatch(/read scope/);
+});

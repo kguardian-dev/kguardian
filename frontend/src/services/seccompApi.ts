@@ -1,5 +1,6 @@
 import apiClient from './api';
 import { isTimeout, PROFILE_READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
+import { errorBodyText } from './brokerBusy';
 import type { ExportBody, ExportParams, WorkloadProfileDetail, WorkloadProfileSummary } from '../types/seccompWorkload';
 
 /**
@@ -89,7 +90,7 @@ export class SeccompApi {
     const msg =
       parsed && typeof parsed === 'object' && typeof (parsed as { error?: unknown }).error === 'string'
         ? (parsed as { error: string }).error
-        : text || `${method} ${path} failed with ${status}`;
+        : errorBodyText(text) || `${method} ${path} failed with ${status}`;
     throw new SeccompApiError(status, msg, parsed);
   }
 

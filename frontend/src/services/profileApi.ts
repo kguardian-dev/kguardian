@@ -1,5 +1,5 @@
 import apiClient from './api';
-import { busyMessage, retryAfterMs } from './brokerBusy';
+import { busyMessage, errorBodyText, retryAfterMs } from './brokerBusy';
 import { isTimeout, PROFILE_READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, WorkloadProfile } from '../types/profile';
 
@@ -18,10 +18,12 @@ import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, Workloa
  *    the statement; the message follows the body and `retryAfterMs` the
  *    Broker's `Retry-After`; retry later;
  *  - `bad_request`: 400;
+ *  - `auth`: 401 / 403, no token presented, or one without the read scope
+ *    (also what a sign-in proxy answers once the session has expired);
  *  - `timeout`: no answer within PROFILE_READ_TIMEOUT_MS (retryable);
- *  - `error`: anything else (network, 500, auth).
+ *  - `error`: anything else (network, 500).
  */
-export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'unsupported' | 'busy' | 'bad_request' | 'timeout' | 'error';
+export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'unsupported' | 'busy' | 'bad_request' | 'auth' | 'timeout' | 'error';
 
 export class ProfileApiError extends Error {
   readonly status: number;
@@ -57,9 +59,11 @@ function classify(status: number, text: string, headers?: Headers): ProfileApiEr
   } catch {
     /* plain-text body */
   }
-  const msg = message ?? (text.trim() || `request failed with ${status}`);
+  const msg = message ?? (errorBodyText(text) || `request failed with ${status}`);
   if (status === 404 && (code === 'workload_not_found' || code === 'revision_not_found')) return new ProfileApiError(status, code, msg);
   if (status === 404) return new ProfileApiError(status, 'unsupported', 'This Broker does not serve workload profiles. Upgrade the Broker to a release with the profile API.');
+  if (status === 401) return new ProfileApiError(status, 'auth', 'The Broker requires a token for profile reads and none was presented. Set the frontend read token (BROKER_AUTH_TOKEN) in the chart, or sign in again if the UI is behind a sign-in proxy.');
+  if (status === 403) return new ProfileApiError(status, 'auth', 'The token the frontend presents does not have the Broker read scope.');
   if (status === 503) return new ProfileApiError(status, 'busy', busyMessage(text), headers ? retryAfterMs(headers) : null);
   if (status === 400) return new ProfileApiError(status, 'bad_request', msg);
   return new ProfileApiError(status, 'error', msg);

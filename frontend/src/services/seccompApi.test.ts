@@ -66,6 +66,20 @@ describe('SeccompApi (read-only)', () => {
     expect(e2.message).toBe('no seccomp profile for that workload');
   });
 
+  test('a proxy error page is never the message, and a long plain body is kept to one line', async () => {
+    const { impl } = mockFetch([
+      { status: 504, body: '<html>\n<head><title>502 Bad Gateway</title></head>\n<body>\n<center><h1>502 Bad Gateway</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n', type: 'text/html' },
+      { status: 500, body: `line one\n${'x'.repeat(500)}`, type: 'text/plain' },
+    ]);
+    const api = new SeccompApi({ fetchImpl: impl });
+    const e1 = await api.listProfiles().catch((e) => e);
+    expect(e1.status).toBe(504);
+    expect(e1.message).toBe('GET /seccomp/profiles failed with 504');
+    const e2 = await api.listProfiles().catch((e) => e);
+    expect(e2.message).not.toMatch(/\n/);
+    expect(e2.message.length).toBeLessThanOrEqual(200);
+  });
+
   test('exportEdited POSTs the staged edits and returns the document text', async () => {
     const yaml = 'apiVersion: kguardian.dev/v1alpha1\n';
     const { impl, calls } = mockFetch([{ status: 200, body: yaml, type: 'application/yaml' }]);
