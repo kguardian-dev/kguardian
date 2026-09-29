@@ -507,6 +507,19 @@ export function ruleHasPeers(rule: NetworkPolicyRule): boolean {
   return rule.peers.length > 0;
 }
 
+/** A peer's selector. No labels is written `{}`, the API's "select all"
+ *  (every pod in the namespace, or every namespace), rather than a bare
+ *  `matchLabels:` that reads as if something were missing. */
+function peerSelectorLines(field: 'podSelector' | 'namespaceSelector', labels: Record<string, string>): string[] {
+  const entries = Object.entries(labels);
+  if (entries.length === 0) return [`      ${field}: {}`];
+  return [
+    `      ${field}:`,
+    '        matchLabels:',
+    ...entries.map(([key, value]) => `          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`),
+  ];
+}
+
 export function policyToYAML(policy: NetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -546,20 +559,8 @@ export function policyToYAML(policy: NetworkPolicy): string {
             peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
-        if (peer.podSelector) {
-          yaml.push('      podSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
-        if (peer.namespaceSelector) {
-          yaml.push('      namespaceSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
+        if (peer.podSelector) yaml.push(...peerSelectorLines('podSelector', peer.podSelector.matchLabels));
+        if (peer.namespaceSelector) yaml.push(...peerSelectorLines('namespaceSelector', peer.namespaceSelector.matchLabels));
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');
@@ -587,20 +588,8 @@ export function policyToYAML(policy: NetworkPolicy): string {
             peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
-        if (peer.podSelector) {
-          yaml.push('      podSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
-        if (peer.namespaceSelector) {
-          yaml.push('      namespaceSelector:');
-          yaml.push('        matchLabels:');
-          Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
-          });
-        }
+        if (peer.podSelector) yaml.push(...peerSelectorLines('podSelector', peer.podSelector.matchLabels));
+        if (peer.namespaceSelector) yaml.push(...peerSelectorLines('namespaceSelector', peer.namespaceSelector.matchLabels));
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');

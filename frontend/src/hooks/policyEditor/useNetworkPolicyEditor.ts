@@ -545,15 +545,14 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
         peers: rule.peers.map((peer, i) => {
           if (i !== peerIndex) return peer;
 
+          // Removing the last label leaves an empty selector, which is what
+          // the editor's "leave empty to match all pods / namespaces" hint
+          // promises. Deleting the selector instead left a same-namespace
+          // peer with nothing: a null peer the API server rejects, failing
+          // the whole policy.
           if (selectorType === 'podSelector' && peer.podSelector) {
             const newLabels = { ...peer.podSelector.matchLabels };
             delete newLabels[labelKey];
-
-            if (Object.keys(newLabels).length === 0) {
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars
-              const { podSelector: _podSelector, ...rest } = peer;
-              return rest;
-            }
 
             return {
               ...peer,
@@ -562,12 +561,6 @@ export const useNetworkPolicyEditor = ({ pod, isOpen, sources }: UseNetworkPolic
           } else if (selectorType === 'namespaceSelector' && peer.namespaceSelector) {
             const newLabels = { ...peer.namespaceSelector.matchLabels };
             delete newLabels[labelKey];
-
-            if (Object.keys(newLabels).length === 0) {
-              // eslint-disable-next-line @typescript-eslint/no-unused-vars
-              const { namespaceSelector: _namespaceSelector, ...rest } = peer;
-              return rest;
-            }
 
             return {
               ...peer,
