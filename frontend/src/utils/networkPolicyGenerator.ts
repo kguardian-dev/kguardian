@@ -496,6 +496,17 @@ export function quoteYamlValue(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * Whether a rule renders. An empty `from` / `to` matches every peer, so a rule
+ * the editor holds with no peers (just added, or its last source removed) is
+ * left out of the YAML rather than exported as allow-all; the editor says so
+ * on the rule. A direction left with no rendered rules keeps its policyType,
+ * which is the deny form.
+ */
+export function ruleHasPeers(rule: NetworkPolicyRule): boolean {
+  return rule.peers.length > 0;
+}
+
 export function policyToYAML(policy: NetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -519,9 +530,10 @@ export function policyToYAML(policy: NetworkPolicy): string {
     });
   }
 
-  if (policy.spec.ingress && policy.spec.ingress.length > 0) {
+  const ingress = (policy.spec.ingress ?? []).filter(ruleHasPeers);
+  if (ingress.length > 0) {
     yaml.push('  ingress:');
-    policy.spec.ingress.forEach((rule) => {
+    ingress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - from:');
       rule.peers.forEach((peer) => {
@@ -559,9 +571,10 @@ export function policyToYAML(policy: NetworkPolicy): string {
     });
   }
 
-  if (policy.spec.egress && policy.spec.egress.length > 0) {
+  const egress = (policy.spec.egress ?? []).filter(ruleHasPeers);
+  if (egress.length > 0) {
     yaml.push('  egress:');
-    policy.spec.egress.forEach((rule) => {
+    egress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - to:');
       rule.peers.forEach((peer) => {

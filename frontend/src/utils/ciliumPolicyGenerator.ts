@@ -406,6 +406,18 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
   return policy;
 }
 
+/**
+ * Whether a rule renders: it names at least one endpoint selector, CIDR or
+ * entity. A rule with none selects every peer (with only `toPorts`, every
+ * peer on those ports), so a rule the editor holds with no peers is left out
+ * of the YAML rather than exported as allow-all; the editor says so on the
+ * rule. An empty selector (`matchLabels: {}`) is an explicit peer and counts.
+ */
+export function ciliumRuleHasPeers(rule: CiliumIngressRule | CiliumEgressRule): boolean {
+  const r = rule as CiliumIngressRule & CiliumEgressRule;
+  return [r.fromEndpoints, r.fromCIDR, r.fromEntities, r.toEndpoints, r.toCIDR, r.toEntities].some((peers) => (peers?.length ?? 0) > 0);
+}
+
 export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   const yaml: string[] = [];
 
@@ -431,17 +443,20 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
     yaml.push(`    egress: ${policy.spec.defaultDeny.egress}`);
   }
 
+  const ingress = (policy.spec.ingress ?? []).filter(ciliumRuleHasPeers);
+  const egress = (policy.spec.egress ?? []).filter(ciliumRuleHasPeers);
+
   // The CRD requires an ingress or egress section (spec anyOf), and Cilium's
   // form for "deny this direction, allow nothing" is a single empty rule.
-  const denyOnly = (dir: 'ingress' | 'egress') => policy.spec.defaultDeny[dir] && !(policy.spec[dir]?.length);
+  const denyOnly = (dir: 'ingress' | 'egress') => policy.spec.defaultDeny[dir] && (dir === 'ingress' ? ingress : egress).length === 0;
 
   // Ingress rules
   if (denyOnly('ingress')) {
     yaml.push('  ingress:');
     yaml.push('  - {}');
-  } else if (policy.spec.ingress && policy.spec.ingress.length > 0) {
+  } else if (ingress.length > 0) {
     yaml.push('  ingress:');
-    policy.spec.ingress.forEach((rule) => {
+    ingress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  -');
       if (rule.fromEntities && rule.fromEntities.length > 0) {
@@ -484,9 +499,9 @@ export function ciliumPolicyToYAML(policy: CiliumNetworkPolicy): string {
   if (denyOnly('egress')) {
     yaml.push('  egress:');
     yaml.push('  - {}');
-  } else if (policy.spec.egress && policy.spec.egress.length > 0) {
+  } else if (egress.length > 0) {
     yaml.push('  egress:');
-    policy.spec.egress.forEach((rule) => {
+    egress.forEach((rule) => {
       yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  -');
       if (rule.toEntities && rule.toEntities.length > 0) {

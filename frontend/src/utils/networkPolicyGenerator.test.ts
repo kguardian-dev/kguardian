@@ -9,8 +9,11 @@ vi.mock('../services/api', () => ({
   },
 }));
 
-import { generateNetworkPolicy, quoteYamlValue } from './networkPolicyGenerator';
-import { generateCiliumNetworkPolicy, ciliumPolicyToYAML } from './ciliumPolicyGenerator';
+import { parse } from 'yaml';
+import { generateNetworkPolicy, policyToYAML, quoteYamlValue, ruleHasPeers } from './networkPolicyGenerator';
+import { generateCiliumNetworkPolicy, ciliumPolicyToYAML, ciliumRuleHasPeers } from './ciliumPolicyGenerator';
+import type { NetworkPolicy, NetworkPolicyRule } from '../types/networkPolicy';
+import type { CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy } from '../types/ciliumPolicy';
 
 // An observed direction whose every peer is unparseable must stay DENIED, not
 // become unrestricted.
@@ -173,5 +176,70 @@ describe('quoteYamlValue — keys need the same treatment as values', () => {
 
   it('leaves an ordinary label key unquoted', () => {
     expect(quoteYamlValue('app.kubernetes.io/name')).toBe('app.kubernetes.io/name');
+  });
+});
+
+// What the editor can hand the renderers. An empty `from` / `to` (standard)
+// or a Cilium rule with no from*/to* selector matches EVERY peer, so a rule
+// the editor shows with no sources must not reach the YAML as one: the user
+// clicks "Add Rule", or deletes the last source of a generated rule, and the
+// export used to read `- from:` (allow all ingress, on all ports).
+describe('policyToYAML / ciliumPolicyToYAML — a rule with no peers is left out, never allow-all', () => {
+  const standard = (ingress: NetworkPolicyRule[], egress?: NetworkPolicyRule[]): NetworkPolicy => ({
+    apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy', metadata: { name: 'web-policy', namespace: 'prod' },
+    spec: { podSelector: { matchLabels: { app: 'web' } }, policyTypes: egress ? ['Ingress', 'Egress'] : ['Ingress'], ingress, ...(egress && { egress }) },
+  });
+  const peerless = (id: string, ports: NetworkPolicyRule['ports'] = []): NetworkPolicyRule => ({ id, peers: [], ports });
+  const fromApi: NetworkPolicyRule = { id: 'r1', peers: [{ podSelector: { matchLabels: { app: 'api' } } }], ports: [{ protocol: 'TCP', port: 8080 }] };
+
+  it('drops the peerless rule and keeps the others', () => {
+    const doc = parse(policyToYAML(standard([fromApi, peerless('r2', [{ protocol: 'TCP', port: 22 }])])));
+    expect(doc.spec.ingress).toEqual([{ from: [{ podSelector: { matchLabels: { app: 'api' } } }], ports: [{ protocol: 'TCP', port: 8080 }] }]);
+  });
+
+  it('a direction left with only peerless rules keeps its policyType and no rules: deny, not allow-all', () => {
+    const yaml = policyToYAML(standard([peerless('r1')], [peerless('r2', [{ protocol: 'UDP', port: 53 }])]));
+    const doc = parse(yaml);
+    expect(doc.spec.policyTypes).toEqual(['Ingress', 'Egress']);
+    expect(doc.spec.ingress).toBeUndefined();
+    expect(doc.spec.egress).toBeUndefined();
+    expect(yaml).not.toContain('- from:');
+    expect(yaml).not.toContain('- to:');
+  });
+
+  it('ruleHasPeers is the test the renderer applies', () => {
+    expect(ruleHasPeers(fromApi)).toBe(true);
+    expect(ruleHasPeers(peerless('r'))).toBe(false);
+  });
+
+  const cilium = (ingress: CiliumIngressRule[], egress: CiliumEgressRule[], defaultDeny = { ingress: true, egress: true }): CiliumNetworkPolicy => ({
+    apiVersion: 'cilium.io/v2', kind: 'CiliumNetworkPolicy', metadata: { name: 'web-cilium-policy', namespace: 'prod' },
+    spec: { endpointSelector: { matchLabels: { app: 'web' } }, defaultDeny, ingress, egress },
+  });
+  const ports = (port: string, protocol = 'TCP') => [{ ports: [{ port, protocol }] }];
+
+  it('cilium: a rule with ports but no endpoint, CIDR or entity (L4-only, open to every peer) is left out', () => {
+    const doc = parse(ciliumPolicyToYAML(cilium(
+      [{ id: 'i1', fromEndpoints: [{ matchLabels: { app: 'api' } }], toPorts: ports('8080') }, { id: 'i2', fromEndpoints: [], fromCIDR: [], toPorts: ports('22') }],
+      [{ id: 'e1', toEndpoints: [], toPorts: ports('53', 'UDP') }],
+    )));
+    expect(doc.spec.ingress).toEqual([{ fromEndpoints: [{ matchLabels: { app: 'api' } }], toPorts: ports('8080') }]);
+    // The only egress rule was peerless: the denied direction keeps Cilium's
+    // deny form (one empty rule), never a ports-only rule.
+    expect(doc.spec.egress).toEqual([{}]);
+  });
+
+  it('cilium: a freshly added rule (no peers, no ports) never renders as a null rule', () => {
+    const doc = parse(ciliumPolicyToYAML(cilium([{ id: 'i1', fromEndpoints: [], toPorts: [] }], [], { ingress: false, egress: true })));
+    expect(doc.spec.ingress).toBeUndefined();
+    expect(doc.spec.egress).toEqual([{}]);
+  });
+
+  it('ciliumRuleHasPeers counts endpoints, CIDRs and entities, not ports', () => {
+    expect(ciliumRuleHasPeers({ id: 'x', fromCIDR: ['10.0.0.0/8'] })).toBe(true);
+    expect(ciliumRuleHasPeers({ id: 'x', toEntities: ['kube-apiserver'] })).toBe(true);
+    // An empty selector is an explicit peer: every endpoint in the namespace.
+    expect(ciliumRuleHasPeers({ id: 'x', fromEndpoints: [{ matchLabels: {} }] })).toBe(true);
+    expect(ciliumRuleHasPeers({ id: 'x', toEndpoints: [], toPorts: ports('53') })).toBe(false);
   });
 });

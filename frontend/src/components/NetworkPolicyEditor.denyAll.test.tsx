@@ -151,12 +151,17 @@ test('rules plus a failed member read: a dismissible incomplete-traffic warning 
   expect(screen.getByRole('button', { name: 'Save Policy' })).toBeTruthy();
 });
 
-test('the warning tracks the document: adding a rule in the visual editor clears it', async () => {
+// A rule with no source is left out of the YAML (an empty `from` would allow
+// every source), so adding one does not change the document and must not
+// clear the warning; this test used to expect it to. Giving it a source does.
+test('the warning tracks the document: a rule clears it once it has a source', async () => {
   render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={workload([])} initialPolicyType="network" />);
   await waitForYaml('kind: NetworkPolicy');
   fireEvent.click(screen.getByText('Visual Editor'));
   expect(screen.getByRole('alert')).toBeTruthy();
   fireEvent.click(screen.getAllByText('Add Rule')[0]);
+  expect(screen.getByRole('alert')).toBeTruthy();
+  fireEvent.click(screen.getByText('Add Source'));
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.getByRole('button', { name: 'Save Policy' })).toBeTruthy();
 });

@@ -16,6 +16,8 @@ import {
   type DenyAllCause,
 } from '../utils/cniPolicySupport';
 import { ipBlockScope } from '../utils/ipBlockScope';
+import { ruleHasPeers } from '../utils/networkPolicyGenerator';
+import { ciliumRuleHasPeers } from '../utils/ciliumPolicyGenerator';
 import type { IdentitySources } from '../utils/trafficIdentity';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
 import { useWorkloadCapture } from '../hooks/useWorkloadCapture';
@@ -53,6 +55,18 @@ interface NetworkPolicyEditorProps {
   podsLookup?: PodInfo[];
   services?: ServiceInfo[];
 }
+
+/** On a rule with no peers. An empty peer list matches every peer, so the
+ *  renderers leave such a rule out of the YAML (ruleHasPeers /
+ *  ciliumRuleHasPeers): what the rule does is allow nothing. */
+const PeerlessRuleNotice: React.FC<{ missing: string; add: string }> = ({ missing, add }) => (
+  <p className="text-xs text-hubble-warning">
+    No {missing}: this rule allows nothing and is left out of the YAML. Add {add} to include it.
+  </p>
+);
+
+/** On a rule with peers but no ports: an empty port list matches every port. */
+const AllPortsNote = () => <p className="text-xs text-tertiary italic">All ports: no port restriction</p>;
 
 const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType, podsLookup, services }) => {
   const env = useClusterEnvironment();
@@ -228,10 +242,15 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   // A policy with no rules still denies every direction it covers. Read the
   // directions off the generated document, not the traffic list, so a
   // workload whose every row was dropped, or edited away, is caught too.
+  // Only rules that render count: a peerless rule is left out of the YAML.
+  const hasRules = policy ? [...(policy.spec.ingress ?? []), ...(policy.spec.egress ?? [])].some(ruleHasPeers) : false;
+  const hasCiliumRules = ciliumPolicy
+    ? [...(ciliumPolicy.spec.ingress ?? []), ...(ciliumPolicy.spec.egress ?? [])].some(ciliumRuleHasPeers)
+    : false;
   const deniedDirections: DeniedDirection[] =
-    policyType === 'network' && policy && !policy.spec.ingress?.length && !policy.spec.egress?.length
+    policyType === 'network' && policy && !hasRules
       ? (['Ingress', 'Egress'] as const).filter((d) => policy.spec.policyTypes.includes(d))
-      : policyType === 'cilium' && ciliumPolicy && !ciliumPolicy.spec.ingress?.length && !ciliumPolicy.spec.egress?.length
+      : policyType === 'cilium' && ciliumPolicy && !hasCiliumRules
         ? (['Ingress', 'Egress'] as const).filter((d) => ciliumPolicy.spec.defaultDeny[d === 'Ingress' ? 'ingress' : 'egress'])
         : [];
   const denyAll = deniedDirections.length > 0;
@@ -794,7 +813,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No sources defined</p>
+                                  <PeerlessRuleNotice missing="sources" add="a source" />
                                 )}
                               </div>
                             </div>
@@ -846,7 +865,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No ports defined</p>
+                                  <AllPortsNote />
                                 )}
                               </div>
                             </div>
@@ -1280,7 +1299,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No destinations defined</p>
+                                  <PeerlessRuleNotice missing="destinations" add="a destination" />
                                 )}
                               </div>
                             </div>
@@ -1332,7 +1351,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                     </div>
                                   ))
                                 ) : (
-                                  <p className="text-xs text-tertiary italic">No ports defined</p>
+                                  <AllPortsNote />
                                 )}
                               </div>
                             </div>
@@ -1520,6 +1539,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 </div>
                                 <div className="space-y-3">
                                   <RuleComments comments={rule.comments} />
+                                  {!ciliumRuleHasPeers(rule) && <PeerlessRuleNotice missing="peers" add="an endpoint or a CIDR" />}
                                   <EntitiesPeer label="From Entities" entities={rule.fromEntities} />
                                   {/* fromEndpoints */}
                                   <div>
@@ -1714,7 +1734,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           </div>
                                         ))
                                       ) : (
-                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                        <AllPortsNote />
                                       )}
                                     </div>
                                   </div>
@@ -1772,6 +1792,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 </div>
                                 <div className="space-y-3">
                                   <RuleComments comments={rule.comments} />
+                                  {!ciliumRuleHasPeers(rule) && <PeerlessRuleNotice missing="peers" add="an endpoint or a CIDR" />}
                                   <EntitiesPeer label="To Entities" entities={rule.toEntities} />
                                   {/* toEndpoints */}
                                   <div>
@@ -1966,7 +1987,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           </div>
                                         ))
                                       ) : (
-                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                        <AllPortsNote />
                                       )}
                                     </div>
                                   </div>
