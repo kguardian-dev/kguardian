@@ -2228,13 +2228,16 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 </button>
                 <button
                   onClick={handleDownload}
-                  className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-hubble-accent-hover transition-colors"
+                  className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-hubble-accent-hover transition-colors whitespace-nowrap"
                 >
-                  {policyType === 'seccomp'
-                    ? (seccompFormat === 'spo' ? 'Save SPO CR' : seccompFormat === 'json' ? 'Save JSON' : 'Save CR')
-                    : denyAll
-                      ? `Save Deny-All ${deniedDirections.length === 1 ? `${deniedDirections[0]} ` : ''}${networkFormat === 'audit' ? 'Audit ' : ''}Policy`
-                      : networkFormat === 'audit' ? 'Save Audit Policy' : 'Save Policy'}
+                  {/* One label for every format. The footer note above already
+                      says which resource is about to be written, and a button
+                      that renames itself per format read as a different action
+                      each time rather than the one thing it does. Deny-all is
+                      not a format but a consequence, so it keeps its warning. */}
+                  {policyType !== 'seccomp' && denyAll
+                    ? `Save Deny-All ${deniedDirections.length === 1 ? `${deniedDirections[0]} ` : ''}Policy`
+                    : 'Save Policy'}
                 </button>
               </div>
             </div>
