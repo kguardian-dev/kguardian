@@ -81,6 +81,15 @@ fn run_migrations(
 /// operator sets DB_POOL_MAX_SIZE too low. Tune up via the env when
 /// /metrics shows pool-acquire contention.
 const DEFAULT_DB_POOL_MAX_SIZE: u32 = 32;
+/// Idle connections each replica keeps open (r2d2's default is max_size).
+/// Holding the whole pool open on every replica is what made the database's
+/// connection count scale with `replicaCount x DB_POOL_MAX_SIZE` even when
+/// idle; connections above this open on demand and close after r2d2's
+/// 10 minute idle timeout. `DB_POOL_MIN_IDLE` overrides, clamped to
+/// [0, max_size].
+const DEFAULT_DB_POOL_MIN_IDLE: u32 = 4;
+/// Per-attempt wait for a connection in the startup migration loop.
+const MIGRATION_CONN_TIMEOUT_SECS: u64 = 5;
 /// Default per-statement timeout (30s). See db_statement_timeout_ms.
 const DEFAULT_DB_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 
@@ -122,6 +131,14 @@ fn db_pool_max_size() -> u32 {
         .and_then(|v| v.trim().parse::<u32>().ok())
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_DB_POOL_MAX_SIZE)
+}
+
+fn db_pool_min_idle(max_size: u32) -> u32 {
+    std::env::var("DB_POOL_MIN_IDLE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_DB_POOL_MIN_IDLE)
+        .min(max_size)
 }
 
 /// Per-statement timeout (ms) applied to every pooled connection as a backstop
@@ -225,7 +242,10 @@ async fn main() -> Result<(), std::io::Error> {
     let max_size = effective_pool_size();
     let stmt_timeout_ms = db_statement_timeout_ms();
     info!(max_size, "constructing DB connection pool");
-    let mut builder = r2d2::Pool::builder().max_size(max_size);
+    let min_idle = db_pool_min_idle(max_size);
+    let mut builder = r2d2::Pool::builder()
+        .max_size(max_size)
+        .min_idle(Some(min_idle));
     if stmt_timeout_ms > 0 {
         info!(
             stmt_timeout_ms,
@@ -236,7 +256,16 @@ async fn main() -> Result<(), std::io::Error> {
     } else {
         info!("statement_timeout backstop disabled (DB_STATEMENT_TIMEOUT_MS=0)");
     }
-    let pool = builder.build(manager).expect("Failed to create pool.");
+    // Unchecked: `build` blocks until `min_idle` connections open and
+    // panics the process if they can't (a database at max_connections,
+    // e.g. mid rolling update with several replicas). The migration loop
+    // below already retries a connection on a bounded budget, so the pool
+    // starts empty and fills in the background instead.
+    info!(
+        min_idle,
+        "DB pool keeps this many idle connections; grows to max_size on demand"
+    );
+    let pool = builder.build_unchecked(manager);
     // RUN the migration schema with retries. The chart's wait-for-db
     // init container handles the "DB pod not started" case via TCP
     // probe, so this loop's real purpose is to absorb the gap
@@ -246,7 +275,9 @@ async fn main() -> Result<(), std::io::Error> {
     let max_retries = db_migration_max_retries();
     info!(max_retries, "running embedded migrations");
     for attempt in 1..=max_retries {
-        match pool.get() {
+        // Bounded, not r2d2's 30 s default, so the retry budget above is
+        // what decides how long startup waits.
+        match pool.get_timeout(std::time::Duration::from_secs(MIGRATION_CONN_TIMEOUT_SECS)) {
             Ok(mut conn) => {
                 // The statement_timeout backstop (applied by the pool customizer
                 // on acquire) would kill a long CREATE INDEX on a multi-million-row
@@ -1340,6 +1371,40 @@ mod tests {
         with_pool_env(Some("  32\n"), || {
             assert_eq!(db_pool_max_size(), 32);
         });
+    }
+
+    #[test]
+    fn pool_min_idle_defaults_clamps_and_overrides() {
+        with_env("DB_POOL_MIN_IDLE", None, || {
+            assert_eq!(db_pool_min_idle(32), DEFAULT_DB_POOL_MIN_IDLE);
+            assert_eq!(db_pool_min_idle(2), 2, "never above max_size");
+        });
+        with_env("DB_POOL_MIN_IDLE", Some(" 0 "), || {
+            assert_eq!(db_pool_min_idle(32), 0);
+        });
+        with_env("DB_POOL_MIN_IDLE", Some("junk"), || {
+            assert_eq!(db_pool_min_idle(32), DEFAULT_DB_POOL_MIN_IDLE);
+        });
+    }
+
+    /// The pool must come up with the database refusing connections (at
+    /// max_connections, or not up yet) instead of panicking the process:
+    /// checkouts then fail on their own bounded timeout.
+    #[test]
+    fn pool_builds_without_a_reachable_database() {
+        let manager = r2d2::ConnectionManager::<diesel::PgConnection>::new(
+            "postgres://nobody:nothing@127.0.0.1:1/none",
+        );
+        let pool = r2d2::Pool::builder()
+            .max_size(4)
+            .min_idle(Some(db_pool_min_idle(4)))
+            .connection_timeout(std::time::Duration::from_millis(200))
+            .build_unchecked(manager);
+        let started = Instant::now();
+        assert!(pool
+            .get_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     // db_statement_timeout_ms is the backstop that keeps one slow/unbounded

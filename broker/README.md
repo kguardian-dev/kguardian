@@ -34,6 +34,7 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `LISTEN_ADDR` | `0.0.0.0:9090` | HTTP bind address |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string. Direct or session-mode pooled, not PgBouncer transaction mode: the compute history index build holds a session-scoped advisory lock |
 | `DB_POOL_MAX_SIZE` | `32` | r2d2 pool size (floored to keep headroom over audit permits) |
+| `DB_POOL_MIN_IDLE` | `4` | Idle connections each replica keeps open; the pool grows to `DB_POOL_MAX_SIZE` on demand and idles back down after 10 minutes |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | Per-statement timeout backstop; `0` disables |
 | `DB_MIGRATION_MAX_RETRIES` | `10` | Startup migration retry budget (2s spacing) |
 | `BROKER_TOKEN_READ` | unset | Token with the `read` scope (frontend proxy, llm-bridge, CLI) |
