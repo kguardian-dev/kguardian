@@ -189,3 +189,20 @@ test('Esc leaves focus through the current onFocusChange, so a lens changed whil
   expect(first).not.toHaveBeenCalled();
   expect(latest).toHaveBeenCalledWith(null);
 });
+
+test('a Service in another namespace whose selector matches a local workload is drawn as that Service, not an edge to the local card', async () => {
+  const row = {
+    uuid: 'r1', pod_name: 'client', pod_namespace: 'kguardian', pod_ip: '10.0.0.9', pod_port: '40000', ip_protocol: 'TCP',
+    traffic_type: 'EGRESS', traffic_in_out_ip: '10.96.0.50', traffic_in_out_port: '6379', decision: 'ALLOW', time_stamp: '2026-09-01T00:00:00',
+    peer_kind: 'service', peer_namespace: 'cache', peer_name: 'redis',
+  } as NetworkTraffic;
+  const redisPod = { ...pod('redis'), workload_selector_labels: { app: 'redis' } };
+  const client = node('client', { traffic: [row] });
+  const redis = node('redis', { pod: redisPod, pods: [redisPod], traffic: [] });
+  const svc = { svc_ip: '10.96.0.50', svc_name: 'redis', svc_namespace: 'cache', service_spec: { spec: { selector: { app: 'redis' } } } };
+  const { container } = render(graph([client, redis], { services: [svc] as never }));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBeGreaterThan(0));
+  await new Promise((r) => setTimeout(r, 50));
+  const ids = Array.from(container.querySelectorAll('.react-flow__node')).map((n) => n.getAttribute('data-id'));
+  expect(ids).toContain('external-svc-cache-redis-out');
+});

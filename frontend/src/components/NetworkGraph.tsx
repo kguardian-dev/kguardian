@@ -210,10 +210,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       const selectorLabels = selector?.selector as Record<string, string> | undefined;
       if (!selectorLabels || Object.keys(selectorLabels).length === 0) return;
 
-      // Find a local pod whose workload_selector_labels match the service selector
+      // Find a local pod whose workload_selector_labels match the service selector;
+      // a Service selects pods in its own namespace only.
       for (const pod of trafficPods) {
         const podLabels = pod.pod.workload_selector_labels;
-        if (!podLabels) continue;
+        if (!podLabels || pod.pod.pod_namespace !== svc.svc_namespace) continue;
 
         const matches = Object.entries(selectorLabels).every(
           ([k, v]) => podLabels[k] === v
