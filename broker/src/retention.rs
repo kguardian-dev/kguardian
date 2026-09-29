@@ -1618,8 +1618,14 @@ struct OldestRow {
 /// predicate (`resolution_secs = 60 AND ts >= $1 AND ts < $2`), so a
 /// crash between them cannot leave a bucket both folded and unfolded.
 /// The histogram is summed element-wise through `unnest ... WITH
-/// ORDINALITY` in a LATERAL subquery because Postgres has no array
-/// aggregate that adds arrays. Quantile columns take the max over the
+/// ORDINALITY` because Postgres has no array aggregate that adds arrays.
+/// It is one pass over the range grouped by `(container_uid, bucket)` and
+/// joined back, not a LATERAL subquery per group: that ran once per
+/// (container, bucket) and, with no `container_uid` index, each run read
+/// every container's rows in the bucket, so a batch was quadratic in the
+/// container count (5 s at 3 000 containers, minutes at 15 000). Because
+/// the range is whole buckets, every row of a bucket is inside it and the
+/// two forms sum the same rows. Quantile columns take the max over the
 /// bucket (a p99 of five p99s is not a p99, but the max is a safe upper
 /// bound, and the summed `runq_hist` is there to re-derive an exact
 /// one). Written with epoch arithmetic rather than `date_bin` so it runs
@@ -1728,16 +1734,18 @@ FROM ( \
     WHERE resolution_secs = 60 AND ts >= $1 AND ts < $2 \
     GROUP BY container_uid, bucket \
 ) g \
-LEFT JOIN LATERAL ( \
-    SELECT array_agg(x.s ORDER BY x.i) AS hist \
+LEFT JOIN ( \
+    SELECT x.container_uid, x.bucket, array_agg(x.s ORDER BY x.i) AS hist \
     FROM ( \
-        SELECT u.i, sum(u.v)::bigint AS s \
+        SELECT p.container_uid, \
+            (to_timestamp(floor(extract(epoch FROM p.ts) / 300) * 300) AT TIME ZONE 'UTC') AS bucket, \
+            u.i, sum(u.v)::bigint AS s \
         FROM pod_compute_history p, unnest(p.runq_hist) WITH ORDINALITY AS u(v, i) \
-        WHERE p.container_uid = g.container_uid AND p.resolution_secs = 60 \
-          AND p.ts >= g.bucket AND p.ts < g.bucket + interval '5 minutes' \
-        GROUP BY u.i \
+        WHERE p.resolution_secs = 60 AND p.ts >= $1 AND p.ts < $2 \
+        GROUP BY p.container_uid, bucket, u.i \
     ) x \
-) h ON true";
+    GROUP BY x.container_uid, x.bucket \
+) h ON h.container_uid = g.container_uid AND h.bucket = g.bucket";
 
 /// Batched prune of one compute history table by `ts`. The table name
 /// is a `&'static str` chosen by the caller from two literals, never
@@ -3888,6 +3896,84 @@ mod tests {
             ["live-a", "live-b"].map(String::from),
             "one pass must clear every dead container, not one batch of them"
         );
+    }
+
+    /// The fold sums each (container, bucket)'s histograms element-wise and
+    /// only that group's: the grouped join must pair every group with its
+    /// own sum, leave a group whose rows carry no histogram at NULL, and
+    /// ignore minute rows outside the batch range.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_downsample_sums_each_buckets_own_histograms() {
+        use diesel::connection::SimpleConnection;
+        use diesel::sql_types::Timestamp;
+        let mut conn = live_conn();
+        // Container a: hist [k, 1, 0 ...] at minute k. b: [0, 0, k ...].
+        // c: no histogram (scheduler probe not loaded on its node).
+        conn.batch_execute(
+            "TRUNCATE pod_compute_history; \
+             INSERT INTO pod_compute_history (container_uid, pod_uid, namespace, pod_name, \
+               container, node, ts, resolution_secs, cpu_usage_millis_avg, cpu_usage_millis_max, \
+               cpu_usage_millis_last, cpu_period_usec, cpu_nr_periods, cpu_nr_throttled, \
+               cpu_throttled_usec, cpu_psi_some10_avg, cpu_psi_some10_max, cpu_psi_full10_avg, \
+               cpu_psi_full10_max, mem_current_avg, mem_current_max, mem_current_last, \
+               mem_working_set_avg, mem_working_set_max, mem_working_set_last, \
+               mem_psi_some10_avg, mem_psi_some10_max, mem_psi_full10_avg, mem_psi_full10_max, \
+               mem_events_high, mem_events_max, mem_oom_kill, mem_refault, mem_pgmajfault, \
+               runq_hist) \
+             SELECT c || '/app', c, 'ns', c, 'app', 'n', \
+               timestamp '2026-09-01 00:00' + k * interval '1 minute', 60, \
+               0, 0, 0, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
+               CASE c WHEN 'a' THEN ARRAY[k, 1]::bigint[] \
+                      WHEN 'b' THEN ARRAY[0, 0, k]::bigint[] END \
+             FROM unnest(ARRAY['a', 'b', 'c']) c, generate_series(0, 10) k",
+        )
+        .expect("seed pod_compute_history");
+
+        let at = |s: &str| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").expect("timestamp")
+        };
+        let written = sql_query(DOWNSAMPLE_INSERT_SQL)
+            .bind::<Timestamp, _>(at("2026-09-01 00:00"))
+            .bind::<Timestamp, _>(at("2026-09-01 00:10"))
+            .execute(&mut conn)
+            .expect("fold two buckets");
+        assert_eq!(written, 6, "three containers x two buckets");
+
+        #[derive(QueryableByName, Debug, PartialEq)]
+        struct Folded {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            container_uid: String,
+            #[diesel(sql_type = diesel::sql_types::Timestamp)]
+            ts: chrono::NaiveDateTime,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Array<diesel::sql_types::BigInt>>)]
+            runq_hist: Option<Vec<i64>>,
+        }
+        let folded = sql_query(
+            "SELECT container_uid, ts, runq_hist FROM pod_compute_history \
+             WHERE resolution_secs = 300 ORDER BY container_uid, ts",
+        )
+        .load::<Folded>(&mut conn)
+        .expect("read the folded rows");
+        let row = |uid: &str, ts: &str, hist: Option<Vec<i64>>| Folded {
+            container_uid: uid.into(),
+            ts: at(ts),
+            runq_hist: hist,
+        };
+        // Minutes 0-4 sum to 10, 5-9 to 35; minute 10 is outside the range.
+        assert_eq!(
+            folded,
+            vec![
+                row("a/app", "2026-09-01 00:00", Some(vec![10, 5])),
+                row("a/app", "2026-09-01 00:05", Some(vec![35, 5])),
+                row("b/app", "2026-09-01 00:00", Some(vec![0, 0, 10])),
+                row("b/app", "2026-09-01 00:05", Some(vec![0, 0, 35])),
+                row("c/app", "2026-09-01 00:00", None),
+                row("c/app", "2026-09-01 00:05", None),
+            ]
+        );
+        conn.batch_execute("TRUNCATE pod_compute_history")
+            .expect("leave the table empty for the other live tests");
     }
 
     fn minute_index_valid(conn: &mut PgConnection) -> Option<bool> {
