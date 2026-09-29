@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.19.6](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.5...broker/v1.19.6) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** date the leader_task_runs migration after the CVE summary migrations ([82ad13c](https://github.com/kguardian-dev/kguardian/commit/82ad13cf5f8fd08cc01d73d7077de0db66eea0d8))
+* **broker:** drop the old CVE summary index in its own migration ([c0b90c5](https://github.com/kguardian-dev/kguardian/commit/c0b90c5597a394f363e2555124eeb49c24f3677e))
+* **broker:** elect one replica to run the cluster-wide background jobs ([62c632b](https://github.com/kguardian-dev/kguardian/commit/62c632ba77e9ec800c955a66d2cfac6947676242))
+* **broker:** filter image findings by CVE and rank the CVE list by tier from an index ([6b53778](https://github.com/kguardian-dev/kguardian/commit/6b537788db624bb84a318069ec32b48a4dec33f1))
+* **broker:** filter image findings by vuln_id and rank the CVE list by tier ([7edf033](https://github.com/kguardian-dev/kguardian/commit/7edf033f97682868017f45967200d38f1fd4cdab))
+* **broker:** never assume leadership the Lease API cannot confirm ([15327ba](https://github.com/kguardian-dev/kguardian/commit/15327ba42959a9863aae12f53d935d5ba24de1db))
+* **broker:** never send Lease requests through an HTTP proxy ([10da0be](https://github.com/kguardian-dev/kguardian/commit/10da0be1d27b1ecc7d986c589029be630a89ade8))
+* **broker:** open DB connections on demand and survive a full database at startup ([17d0fbc](https://github.com/kguardian-dev/kguardian/commit/17d0fbc58154a0a8b007b2a2c0b3f5b6a87b176b))
+* **broker:** read a tier-filtered CVE list off the index ranges ([0e6cf36](https://github.com/kguardian-dev/kguardian/commit/0e6cf36a05dc73bf1e82208f7e282e9a88f542e5))
+* **broker:** rebuild CVE facts outside the supply-chain lock so ingest never waits on it ([00e8cf7](https://github.com/kguardian-dev/kguardian/commit/00e8cf77485ace3144df90fe69a301c9b3a78537))
+* **broker:** release the leader lease before draining HTTP on shutdown ([98fb446](https://github.com/kguardian-dev/kguardian/commit/98fb44671557d6df08aa0e148fa846a847012820))
+* **broker:** run a new leader's overdue background passes promptly ([31ae023](https://github.com/kguardian-dev/kguardian/commit/31ae0230bd47d76ab6c7fdd69993afc4191369fe))
+* **broker:** run cluster-singleton background jobs on one elected replica ([85552ed](https://github.com/kguardian-dev/kguardian/commit/85552ed262200961f3db19538e5c8d0616530cb6))
+* **broker:** serialise profile snapshots and supply-chain rebuilds across a leader hand-off ([66ac93a](https://github.com/kguardian-dev/kguardian/commit/66ac93a3ffae859b1f276202ed5361c09612e2ad))
+* **broker:** serve the tier-ordered CVE list from an index ([0182084](https://github.com/kguardian-dev/kguardian/commit/01820842412980072b93ffd0459f594eaf6fc752))
+
 ## [1.19.5](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.4...broker/v1.19.5) (2026-09-29)
 
 
