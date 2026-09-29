@@ -1792,6 +1792,9 @@ pub(crate) fn refresh_cve_facts_with(
 }
 
 /// The CVE-level facts (committed on their own, first), then the summary.
+/// The background pass calls the two halves itself (retention.rs
+/// `rebuild_cve_summary`, which locks only the summary); tests use this.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
     refresh_cve_facts(conn)?;
     refresh_cve_summary_only(conn)

@@ -3303,6 +3303,15 @@ pub fn store_snapshot(
     cap: i64,
 ) -> Result<SnapshotOutcome, DbError> {
     conn.transaction::<_, DbError, _>(|conn| {
+        // One writer per workload at a time, cluster-wide. Leader election
+        // keeps the snapshotter on one replica, but a hand-off can overlap
+        // an in-flight tick with the new leader's first; serialised here, the
+        // second writer reads the first one's head and stores nothing new
+        // for the same content, rather than leaning on the revision
+        // conflict below.
+        sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<Text, _>(snapshot_lock_key(key))
+            .execute(conn)?;
         let head: Option<StoredVersionHead> = sql_query(LATEST_VERSION_SQL)
             .bind::<Text, _>(DEFAULT_CLUSTER_ID)
             .bind::<Text, _>(&key.namespace)
@@ -3312,6 +3321,14 @@ pub fn store_snapshot(
             .optional()?;
         store_with_head(conn, key, p, cap, head)
     })
+}
+
+/// Transaction-scoped advisory lock key for one workload's snapshot write.
+fn snapshot_lock_key(key: &Key) -> String {
+    format!(
+        "kguardian:profile|{DEFAULT_CLUSTER_ID}|{}|{}|{}",
+        key.namespace, key.kind, key.name
+    )
 }
 
 /// The write half of [`store_snapshot`], given the head this writer read.
@@ -3613,7 +3630,10 @@ pub fn snapshot_tick(
             }
             seen.push(k);
         }
-        if !full || started.elapsed() >= budget {
+        if !full
+            || started.elapsed() >= budget
+            || !crate::leader::still_leader("workload profile snapshotter")
+        {
             break;
         }
     }
@@ -3638,10 +3658,17 @@ pub fn spawn(pool: DbPool) {
     );
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut cadence = crate::leader::Cadence::new("workload profile snapshotter", interval);
         loop {
-            let pool = pool.clone();
+            // Leader only (leader.rs): two replicas snapshotting the same
+            // workload can both see the old hash and both write a version.
+            if !crate::leader::is_leader() {
+                cadence.wait(&pool).await;
+                continue;
+            }
+            let tick_pool = pool.clone();
             let r = tokio::task::spawn_blocking(move || -> Result<TickStats, DbError> {
-                let mut conn = pool.get()?;
+                let mut conn = tick_pool.get()?;
                 snapshot_tick(&mut conn, batch, cap, budget)
             })
             .await;
@@ -3666,7 +3693,8 @@ pub fn spawn(pool: DbPool) {
                 Ok(Err(e)) => warn!(error = %e, "workload profile snapshotter tick failed"),
                 Err(e) => warn!(error = %e, "workload profile snapshotter task panicked"),
             }
-            tokio::time::sleep(interval).await;
+            cadence.completed(&pool).await;
+            cadence.wait(&pool).await;
         }
     });
 }
@@ -6482,6 +6510,74 @@ mod live_tests {
             kind: "Deployment".into(),
             name: "checkout".into(),
         }
+    }
+
+    /// Two snapshotters storing the same workload at once (an old leader's
+    /// in-flight tick and the new leader's first) write one version: the
+    /// second waits on the workload's lock, then finds the first one's head
+    /// already carries its content.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_overlapping_snapshots_write_one_version() {
+        use diesel::sql_types::BigInt;
+        let mut conn = live_conn();
+        let ns = "kgtest-profile-overlap";
+        reset(&mut conn, ns);
+        seed(&mut conn, ns, '7', "{}");
+        let k = key(ns);
+        let s = load_sources(&mut conn, &k).unwrap();
+        let p = build(&k, &s, Utc::now());
+
+        #[derive(QueryableByName)]
+        struct N {
+            #[diesel(sql_type = BigInt)]
+            n: i64,
+        }
+        let mut watcher = live_conn();
+        let second = conn
+            .transaction::<_, DbError, _>(|conn| {
+                // "Replica one" has stored revision 1 but not committed.
+                assert_eq!(
+                    store_snapshot(conn, &k, &p, 50).unwrap(),
+                    SnapshotOutcome::NewVersion(1)
+                );
+                let (k2, p2) = (k.clone(), p.clone());
+                let second = std::thread::spawn(move || {
+                    store_snapshot(&mut live_conn(), &k2, &p2, 50).map_err(|e| e.to_string())
+                });
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let waiting = sql_query(
+                        "SELECT count(*) AS n FROM pg_locks \
+                         WHERE locktype = 'advisory' AND NOT granted",
+                    )
+                    .get_result::<N>(&mut watcher)
+                    .unwrap()
+                    .n;
+                    if waiting > 0 {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the second writer never waited on the workload lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(second)
+            })
+            .unwrap();
+        assert_eq!(
+            second.join().unwrap().unwrap(),
+            SnapshotOutcome::Unchanged(1)
+        );
+        let versions = sql_query(format!(
+            "SELECT count(*) AS n FROM workload_profile_versions WHERE pod_namespace = '{ns}'"
+        ))
+        .get_result::<N>(&mut conn)
+        .unwrap()
+        .n;
+        assert_eq!(versions, 1);
+        reset(&mut conn, ns);
     }
 
     /// The handler's gate agrees with `Sources::is_empty`: a running

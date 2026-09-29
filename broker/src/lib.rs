@@ -13,6 +13,7 @@ mod image_trust;
 pub mod in_use;
 pub mod in_use_store;
 mod ip;
+pub mod leader;
 mod netpol;
 mod node_status;
 mod peer;

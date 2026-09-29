@@ -7,10 +7,17 @@ Persistence: enabled (claim {{ .Values.database.persistence.existingClaim | defa
 {{- else }}
 Persistence: disabled (emptyDir; data is lost when the pod restarts)
 {{- end }}
+{{- with include "kguardian.dbMaxConnections" . }}
+max_connections: {{ . }}, sized for every broker pod of a rolling update (see database.maxConnections).
+If this release already ran broker.replicaCount >= 2 before this setting existed, the database pod
+restarts once on this upgrade to apply it.
+{{- end }}
 {{- else }}
 Database: external PostgreSQL at {{ .Values.database.external.host }}:{{ .Values.database.external.port }}
                   user="{{ .Values.database.user }}" db="{{ .Values.database.databaseName }}" sslmode="{{ .Values.database.external.sslMode }}"
                   password from Secret "{{ include "kguardian.dbSecretName" . }}" (key="{{ .Values.database.passwordSecretKey }}")
+Its max_connections must be at least {{ include "kguardian.dbConnectionsRequired" . }}: (broker.replicaCount {{ .Values.broker.replicaCount }}
++ rolling-update surge) x broker pool {{ include "kguardian.brokerPoolSize" . }} + 13 for other clients. The chart cannot check this.
 {{- end }}
 
 {{- if and .Values.database.enabled .Values.database.persistence.enabled (hasPrefix "18" .Values.database.image.tag) }}
