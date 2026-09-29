@@ -1,6 +1,6 @@
 import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, Report, SbomTrust, VulnSeverity } from '../types/vulns';
 import type { Severity } from './severity';
-import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, nodeOnlyExposure, privilegedFactor, TIER_RANK, tierRank, type Factor, type RiskTierName } from './tiers';
+import { brokerFactors, brokerTier, epssPercent, exposureFactor, factChips, inUseFactor, mergeFactors, nodeOnlyExposure, privilegedFactor, TIER_RANK, tierRank, type Factor, type RiskTierName } from './tiers';
 
 /** View helpers for the supply-chain UI (kept out of component files). */
 
@@ -232,7 +232,7 @@ export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null 
   const nodeNames = names(isNodeOnly);
   const fixes = [...new Set(e.images.flatMap((i) => i.packages.flatMap((p) => p.fixedVersions)))];
   const why = factors.length ? factors.map((x) => x.label).join(', ') : f?.tierFactors?.join(', ');
-  const facts = factors.length ? '' : `${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}`;
+  const facts = factors.length ? '' : `${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${epssPercent(f.epss)}` : ''}`;
   return [
     `Context: ${e.id} (${e.severity.toLowerCase()}${facts}; kguardian tier ${tier ?? 'unknown'}${why ? ` from ${why}` : ''}).`,
     `Affects ${impact.images} image(s) and ${impact.containers} workload container(s); ${impact.running} distinct workload(s) running.`,
