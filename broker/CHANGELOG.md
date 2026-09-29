@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.19.5](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.4...broker/v1.19.5) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** fold downsample histograms in one grouped pass ([d8cd3cb](https://github.com/kguardian-dev/kguardian/commit/d8cd3cb6c4f2dc135e3dea7d457ec70714192d4b))
+* **broker:** keep pod_compute_latest small and stop the compute timeouts ([eafef65](https://github.com/kguardian-dev/kguardian/commit/eafef652ee2ead73316ae8faa7e986fbfb41f899))
+* **broker:** keep pod_compute_latest small by making its upserts hot ([2c93d1a](https://github.com/kguardian-dev/kguardian/commit/2c93d1a65eb7ac4eccacfd2ea8d3c393e420f285))
+
 ## [1.19.4](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.3...broker/v1.19.4) (2026-09-28)
 
 
