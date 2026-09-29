@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.20.6](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.5...frontend/v1.20.6) (2026-09-29)
+
+
+### Bug Fixes
+
+* **frontend:** ask the image read for the drawer's CVE only ([75e2a59](https://github.com/kguardian-dev/kguardian/commit/75e2a59fe5354995b28cc3d431420593f73d88ad))
+* **frontend:** back off the profile poll after a 401 or 403 ([8326110](https://github.com/kguardian-dev/kguardian/commit/8326110ccdd3f0aab5ddfeab0d80a6e6422fd807))
+* **frontend:** clear the version diff while another revision pair loads ([d027154](https://github.com/kguardian-dev/kguardian/commit/d0271541d9991e0706d2f47ac0ada8dfa0581845))
+* **frontend:** drop a workload's older versions when the view moves to another ([c9bf693](https://github.com/kguardian-dev/kguardian/commit/c9bf693d2aefe0ba906e84bdc5832eb42d6e05c5))
+* **frontend:** finish the review round and use the broker's CVE filter and tier order ([ba2fd47](https://github.com/kguardian-dev/kguardian/commit/ba2fd476a035b16ce2963bdde760533363d93341))
+* **frontend:** keep the CVE list in the Broker's tier order when it says so ([be48bb2](https://github.com/kguardian-dev/kguardian/commit/be48bb22ccce136372fd274504e3e7c6a0ffdde8))
+* **frontend:** match CVE ids ignoring case and say which CVEs capped tiles cover ([0d740b3](https://github.com/kguardian-dev/kguardian/commit/0d740b33e1708a91d64801a0c213927553ebbe9e))
+* **frontend:** note which cluster CIDRs a failed lookup still shows as external ([184e076](https://github.com/kguardian-dev/kguardian/commit/184e0761644e194a54fabaaed653b845dd48d475))
+* **frontend:** rank tiers P0, unknown, P1, P2, Background everywhere ([ea466e2](https://github.com/kguardian-dev/kguardian/commit/ea466e2a754e78bee288d036865616d3a4280598))
+* **frontend:** say a Service lookup failed instead of calling the peer a former holder ([087d164](https://github.com/kguardian-dev/kguardian/commit/087d164cb20c9f0d78f66180e03f7234d10a75f8))
+* **frontend:** stop the seccomp list poll from outliving its test ([4fecec6](https://github.com/kguardian-dev/kguardian/commit/4fecec6ab45e470926312da355b01f7a2f2a3b51))
+* **frontend:** tell a failed pod lookup from no pod, and use the Service listing, when the pod listing is down ([630f3ac](https://github.com/kguardian-dev/kguardian/commit/630f3acaf326b885eca2ec53ae7e8cfc3462b33e))
+* **frontend:** treat a failed Service lookup as unattributed, not external ([a8a990d](https://github.com/kguardian-dev/kguardian/commit/a8a990d7438deb3a76f2397f12800bed197f9547))
+
 ## [1.20.5](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.4...frontend/v1.20.5) (2026-09-29)
 
 
