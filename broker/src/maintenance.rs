@@ -33,7 +33,7 @@
 //! [`NEVER_VACUUMED`].
 //!
 //! VACUUM cannot run inside a transaction, so each pass opens its own
-//! connection (like `retention::ensure_minute_index`), with a
+//! connection (like `background_index::ensure_index`), with a
 //! `statement_timeout` sized for small tables ([`STATEMENT_TIMEOUT`]) and a
 //! short `lock_timeout` ([`LOCK_TIMEOUT`]): VACUUM's lock conflicts only
 //! with another VACUUM, ANALYZE or DDL on the same table, and if one holds
@@ -81,14 +81,15 @@ pub const TABLES: [&str; 6] = [
 
 /// Tables this task must never VACUUM: the large append-and-prune tables,
 /// whose VACUUM is heavy, and every table with a background
-/// `CREATE INDEX CONCURRENTLY` (`retention::ensure_minute_index` builds one
-/// on `pod_compute_history`), whose maintenance is coordinated with the
-/// build instead. Extend it when a background index build moves to a new
-/// table.
-pub const NEVER_VACUUMED: [&str; 5] = [
+/// `CREATE INDEX CONCURRENTLY` (`background_index::INDEXES`), whose
+/// maintenance goes through `background_index::with_table_maintenance`
+/// instead. A unit test checks every table in that list is here.
+pub const NEVER_VACUUMED: [&str; 7] = [
     "pod_compute_history",
     "pod_contention_history",
     "pod_traffic",
+    "pod_syscalls",
+    "image_sbom_components",
     "seccomp_denials",
     "audit_verdicts",
 ];
@@ -513,8 +514,15 @@ mod tests {
         for t in NEVER_VACUUMED {
             assert!(!TABLES.contains(&t), "{t} must not be on the VACUUM list");
         }
-        // The background minute-index build's table in particular.
-        assert!(NEVER_VACUUMED.contains(&"pod_compute_history"));
+        // Every table a background index build runs on.
+        for index in crate::background_index::INDEXES {
+            assert!(
+                NEVER_VACUUMED.contains(&index.table),
+                "{} has a background build ({})",
+                index.table,
+                index.name
+            );
+        }
     }
 
     #[test]

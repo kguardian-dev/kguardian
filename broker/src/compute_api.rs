@@ -72,6 +72,14 @@ pub const LATEST_ROW_CAP: i64 = 5_000;
 pub const HISTORY_ROW_CAP: i64 = 20_000;
 /// Longest history window, minutes (7 days — the retention default).
 pub const HISTORY_MAX_MINUTES: i64 = 10_080;
+/// Longest `GET /compute/contention` window when it is scoped by namespace
+/// alone. A node scope reads one node's pairs through the `(node, ts)`
+/// index, so it keeps the full [`HISTORY_MAX_MINUTES`]. A namespace's
+/// victims are spread over every node, and a 7-day window there ranked
+/// every pair of the namespace in 7 days (tens of millions of rows scanned
+/// on a busy cluster) past the statement timeout; the UI and the LLM
+/// Bridge ask for minutes, not days.
+pub const CONTENTION_NAMESPACE_MAX_MINUTES: i64 = 60;
 /// Pairs kept per victim by `GET /compute/contention` (contract).
 pub const CONTENTION_PER_VICTIM: i64 = 50;
 /// `GET /compute/contention` overall row cap and charge.
@@ -340,6 +348,17 @@ pub(crate) fn clamp_minutes(raw: Option<i64>, default: i64) -> i64 {
     raw.unwrap_or(default).clamp(1, HISTORY_MAX_MINUTES)
 }
 
+/// The `GET /compute/contention` window: default 5 minutes, capped at
+/// [`CONTENTION_NAMESPACE_MAX_MINUTES`] unless a node narrows the scope.
+pub(crate) fn contention_minutes(raw: Option<i64>, has_node: bool) -> i64 {
+    let minutes = clamp_minutes(raw, 5);
+    if has_node {
+        minutes
+    } else {
+        minutes.min(CONTENTION_NAMESPACE_MAX_MINUTES)
+    }
+}
+
 /// Containers per pod assumed for the FIRST permit of a history read,
 /// before the pod's real container count is known.
 pub const HISTORY_CONTAINERS_ASSUMED: i64 = 4;
@@ -561,7 +580,7 @@ pub async fn get_compute_contention(
     if ns.is_none() && node.is_none() {
         return Ok(HttpResponse::BadRequest().body("namespace or node query parameter is required"));
     }
-    let minutes = clamp_minutes(q.minutes, 5);
+    let minutes = contention_minutes(q.minutes, node.is_some());
     let _permit = match budget
         .acquire(cost_kib(CONTENTION_ROW_CAP, COMPUTE_ROW_COST_BYTES))
         .await
@@ -580,7 +599,9 @@ pub async fn get_compute_contention(
 }
 
 /// Top [`CONTENTION_PER_VICTIM`] pairs by wait per victim in the window,
-/// under an overall [`CONTENTION_ROW_CAP`]. A window function has no
+/// under an overall [`CONTENTION_ROW_CAP`]. A namespace scope reads the
+/// `(victim_namespace, ts)` index `background_index` builds; a node scope
+/// the `(node, ts)` one. A window function has no
 /// diesel DSL form, hence `sql_query`; the row type is the same
 /// `PodContentionRow` (`QueryableByName` on the table's columns).
 pub fn contention_pairs(
@@ -673,7 +694,7 @@ pub async fn get_compute_findings(
     let scope_pool = pool.clone();
     let victims = web::block(move || -> Result<FindingsVictims, DbError> {
         let mut conn = scope_pool.get()?;
-        load_findings_victims(&mut conn, ns, node, cutoff)
+        without_jit(&mut conn, |c| load_findings_victims(c, ns, node, cutoff))
     })
     .await?
     .map_err(crate::db_error_response)?;
@@ -694,7 +715,7 @@ pub async fn get_compute_findings(
     };
     let scope = web::block(move || -> Result<FindingsScope, DbError> {
         let mut conn = pool.get()?;
-        load_findings_rows(&mut conn, victims, cutoff)
+        without_jit(&mut conn, |c| load_findings_rows(c, victims, cutoff))
     })
     .await?
     .map_err(crate::db_error_response)?;
@@ -705,6 +726,22 @@ pub async fn get_compute_findings(
         victims_evaluated,
         history_disabled: false,
     }))
+}
+
+/// Run `f` in a transaction with JIT off. The findings reads return a few
+/// thousand rows through indexes, so compiling them costs more than running
+/// them, and a table with missing or stale statistics (autovacuum down)
+/// inflates their estimates past `jit_above_cost`: on a never-analyzed
+/// contention table the pairs read took 340 ms with JIT and 0.3 ms without.
+fn without_jit<T>(
+    conn: &mut PgConnection,
+    f: impl FnOnce(&mut PgConnection) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    use diesel::connection::SimpleConnection;
+    conn.transaction(|conn| {
+        conn.batch_execute("SET LOCAL jit = off")?;
+        f(conn)
+    })
 }
 
 /// Run the engine over a loaded scope and keep only findings whose
@@ -835,6 +872,19 @@ pub fn load_findings_victims(
     })
 }
 
+/// The findings pairs read ([`load_findings_rows`]): the top `$3` pairs by
+/// wait per victim in `$2` since `$1`, at most `$4` in all. A constant so
+/// the live test plans the same statement.
+const PAIRS_SQL: &str = "SELECT p.* FROM unnest($2::text[]) AS v(uid) \
+     CROSS JOIN LATERAL ( \
+         SELECT * FROM pod_contention_history c \
+         WHERE c.victim_container_uid = v.uid AND c.ts >= $1 \
+         ORDER BY c.wait_ns DESC, c.id DESC \
+         LIMIT $3 \
+     ) p \
+     ORDER BY p.victim_container_uid, p.wait_ns DESC, p.id DESC \
+     LIMIT $4";
+
 /// Step two: the engine's input for the scope.
 ///
 /// - History: for every container on the victims' NODES (culprits are
@@ -869,7 +919,11 @@ pub fn load_findings_rows(
     }
 
     // `SELECT *` on the ranked subquery also yields `rn`; QueryableByName
-    // reads columns by name and ignores it.
+    // reads columns by name and ignores it. Unlike the pairs read below
+    // this stays one `node = ANY` scan: the window's minute rows are one
+    // short range of the partial minute index, with or without statistics,
+    // while a per-node LATERAL, with no statistics, re-read that whole
+    // range once per node (40x the buffers at dev scale).
     let history = diesel::sql_query(
         "SELECT * FROM ( \
              SELECT h.*, ROW_NUMBER() OVER ( \
@@ -890,22 +944,20 @@ pub fn load_findings_rows(
         truncated = true;
     }
 
-    let pairs = diesel::sql_query(
-        "SELECT * FROM ( \
-             SELECT p.*, ROW_NUMBER() OVER ( \
-                        PARTITION BY victim_container_uid ORDER BY wait_ns DESC, id DESC) AS rn \
-             FROM pod_contention_history p \
-             WHERE ts >= $1 AND victim_container_uid = ANY($2) \
-         ) ranked \
-         WHERE rn <= $3 \
-         ORDER BY victim_container_uid, wait_ns DESC \
-         LIMIT $4",
-    )
-    .bind::<Timestamp, _>(cutoff)
-    .bind::<Array<Text>, _>(&victims)
-    .bind::<BigInt, _>(FINDINGS_PAIRS_PER_VICTIM)
-    .bind::<BigInt, _>(FINDINGS_PAIR_ROW_CAP)
-    .load::<PodContentionRow>(conn)?;
+    // One bounded probe of the (victim_container_uid, ts) index per victim.
+    // It used to be one `victim_container_uid = ANY($2)` scan ranked with
+    // ROW_NUMBER, which the planner costs from the table's statistics: on
+    // the dev cluster `pod_contention_history` had never been analyzed
+    // (autovacuum was down), the default selectivities put 772 real rows
+    // at 917 k, the planner chose a sequential scan of the 7.5 GB table,
+    // and every findings call took 8.5-10.4 s. A LATERAL with a LIMIT cannot be flattened
+    // into a join, so each victim is an index probe whatever the estimates.
+    let pairs = diesel::sql_query(PAIRS_SQL)
+        .bind::<Timestamp, _>(cutoff)
+        .bind::<Array<Text>, _>(&victims)
+        .bind::<BigInt, _>(FINDINGS_PAIRS_PER_VICTIM)
+        .bind::<BigInt, _>(FINDINGS_PAIR_ROW_CAP)
+        .load::<PodContentionRow>(conn)?;
     if pairs.len() as i64 >= FINDINGS_PAIR_ROW_CAP {
         truncated = true;
     }
@@ -970,6 +1022,25 @@ mod tests {
         assert!(validate_envelope("worker-3", 0).is_err());
         assert!(validate_envelope("worker-3", -1).is_err());
         assert!(validate_envelope(&"x".repeat(300), 5000).is_err());
+    }
+
+    #[test]
+    fn contention_window_is_capped_unless_a_node_scopes_it() {
+        assert_eq!(contention_minutes(None, false), 5);
+        assert_eq!(contention_minutes(Some(30), false), 30);
+        assert_eq!(
+            contention_minutes(Some(HISTORY_MAX_MINUTES), false),
+            CONTENTION_NAMESPACE_MAX_MINUTES
+        );
+        assert_eq!(contention_minutes(Some(0), false), 1);
+        assert_eq!(
+            contention_minutes(Some(HISTORY_MAX_MINUTES), true),
+            HISTORY_MAX_MINUTES
+        );
+        assert_eq!(
+            contention_minutes(Some(HISTORY_MAX_MINUTES + 1), true),
+            HISTORY_MAX_MINUTES
+        );
     }
 
     #[test]
@@ -1613,5 +1684,88 @@ mod tests {
             .iter()
             .map(|c| PodComputeLatest::from_sample(&batch, c, at))
             .collect()
+    }
+
+    /// The findings pairs read returns each victim's top pairs by wait, and
+    /// it stays a per-victim index probe on a contention table that was
+    /// never analyzed: with no statistics the old single `= ANY` scan was
+    /// costed from defaults, and on the dev cluster's 7.5 GB table that
+    /// made every findings call a ~10 s scan. Statistics are removed by
+    /// hand, which needs the superuser the test databases run as.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_findings_pairs_probe_each_victim_without_statistics() {
+        use diesel::connection::SimpleConnection;
+        use diesel::sql_types::{Array, BigInt, Text, Timestamp};
+        let mut conn = live_conn();
+        conn.batch_execute(
+            "TRUNCATE pod_contention_history; \
+             INSERT INTO pod_contention_history (ts, node, victim_container_uid, victim_pod_uid, \
+               victim_namespace, culprit_cgroup_id, culprit_kind, culprit_ref, count, wait_ns) \
+             SELECT timezone('UTC', NOW()) - make_interval(mins => m), 'n' || (v % 20), \
+               'v' || v || '/app', 'v' || v, 'ns' || (v % 50), k, 'pod', 'x/y/' || k, 1, k * 1000 + m \
+             FROM generate_series(1, 400) v, generate_series(0, 20) m, generate_series(1, 8) k; \
+             DELETE FROM pg_statistic WHERE starelid = 'pod_contention_history'::regclass; \
+             UPDATE pg_class SET reltuples = -1, relpages = 0 \
+               WHERE oid = 'pod_contention_history'::regclass",
+        )
+        .expect("seed an unanalyzed contention table");
+        let cutoff = chrono::Utc::now().naive_utc() - chrono::Duration::minutes(WINDOW_MINUTES);
+        let victims: Vec<String> = (1..=40).map(|v| format!("v{v}/app")).collect();
+
+        #[derive(QueryableByName)]
+        struct PlanLine {
+            #[diesel(sql_type = Text)]
+            #[diesel(column_name = "QUERY PLAN")]
+            line: String,
+        }
+        let plan = diesel::sql_query(format!("EXPLAIN {PAIRS_SQL}"))
+            .bind::<Timestamp, _>(cutoff)
+            .bind::<Array<Text>, _>(&victims)
+            .bind::<BigInt, _>(FINDINGS_PAIRS_PER_VICTIM)
+            .bind::<BigInt, _>(FINDINGS_PAIR_ROW_CAP)
+            .load::<PlanLine>(&mut conn)
+            .expect("explain")
+            .into_iter()
+            .map(|l| l.line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_pod_contention_history_victim_ts") && !plan.contains("Seq Scan"),
+            "one index probe per victim:\n{plan}"
+        );
+
+        let scope = load_findings_rows(
+            &mut conn,
+            FindingsVictims {
+                victims: victims.clone(),
+                truncated: false,
+                node_names: vec!["n1".into()],
+                containers_on_nodes: 0,
+            },
+            cutoff,
+        )
+        .expect("load");
+        // Five minutes (0..=4; the row stamped 5 minutes ago is just past the
+        // cutoff) x 8 culprits in the window per victim, of which the top 30
+        // by wait.
+        assert_eq!(scope.pairs.len(), 40 * 30);
+        for v in &victims {
+            let mine: Vec<i64> = scope
+                .pairs
+                .iter()
+                .filter(|p| &p.victim_container_uid == v)
+                .map(|p| p.wait_ns)
+                .collect();
+            assert_eq!(mine.len(), 30, "{v}");
+            assert!(
+                mine.windows(2).all(|w| w[0] >= w[1]),
+                "{v} by wait: {mine:?}"
+            );
+            assert_eq!(mine[0], 8_004, "{v}: the heaviest pair in the window");
+        }
+        assert!(!scope.truncated);
+        conn.batch_execute("TRUNCATE pod_contention_history; ANALYZE pod_contention_history")
+            .expect("leave the table empty for the other live tests");
     }
 }
