@@ -91,7 +91,8 @@ export function brokerFactors(factors: readonly string[] | null | undefined, det
     else if (raw === 'kev') out.push({ key: 'kev', tone: 'risk', label: 'KEV', title: 'Listed in CISA Known Exploited Vulnerabilities' });
     else if (raw.startsWith('epss>=')) {
       const t = Number(raw.slice(6));
-      out.push({ key: 'epss', tone: 'risk', label: `EPSS ≥ ${Number.isFinite(t) ? `${Math.round(t * 100)}%` : raw.slice(6)}`, title: "At or above the Broker's EPSS threshold" });
+      // The threshold as configured (0.005 is 0.5%, not 1%); toFixed only drops float noise.
+      out.push({ key: 'epss', tone: 'risk', label: `EPSS ≥ ${Number.isFinite(t) ? `${Number((t * 100).toFixed(4))}%` : raw.slice(6)}`, title: "At or above the Broker's EPSS threshold" });
     } else if (raw.startsWith('severity:')) out.push({ key: 'severity', tone: 'neutral', label: raw.slice(9) });
     else if (raw === 'exposed') out.push({ key: 'exposure', tone: 'risk', label: 'Exposed', title: 'Observed ingress from outside the namespace' });
     else if (raw === 'internal') out.push({ key: 'exposure', tone: 'neutral', label: 'No outside ingress seen', title: 'Ingress was observed and none came from outside the namespace. Not proof it is unreachable.' });
@@ -100,6 +101,21 @@ export function brokerFactors(factors: readonly string[] | null | undefined, det
     else out.push({ key: raw, tone: 'neutral', label: raw });
   }
   return out;
+}
+
+/**
+ * An EPSS score (0-1) as a percentage that never rounds across a line that
+ * matters: 0.995 is "99.5%", not a certain "100%", and 0.0004 is "<0.1%",
+ * not "0.0%".
+ */
+export function epssPercent(epss: number): string {
+  const pct = epss * 100;
+  if (pct <= 0) return '0%';
+  if (pct < 0.05) return '<0.1%';
+  if (pct < 1) return `${pct.toFixed(1)}%`;
+  if (pct >= 100) return '100%';
+  if (pct >= 99.5) return `${(Math.floor(pct * 10) / 10).toFixed(1)}%`;
+  return `${pct.toFixed(0)}%`;
 }
 
 export interface Facts {
@@ -118,8 +134,7 @@ export function factChips(f: Facts): Factor[] {
   else if (f.kev === null) out.push({ key: 'kev', tone: 'unknown', label: 'KEV: not reported', title: 'No source said whether this is in CISA KEV. Unknown, not "no".' });
   if (f.epss === null) out.push({ key: 'epss', tone: 'unknown', label: 'EPSS: not reported', title: 'No source gave an EPSS score. Unknown, not low.' });
   else if (f.epss !== undefined) {
-    const pct = f.epss * 100;
-    out.push({ key: 'epss', tone: 'neutral', label: `EPSS ${pct >= 1 ? pct.toFixed(0) : pct.toFixed(1)}%`, title: 'EPSS: estimated probability of exploitation in the next 30 days' });
+    out.push({ key: 'epss', tone: 'neutral', label: `EPSS ${epssPercent(f.epss)}`, title: 'EPSS: estimated probability of exploitation in the next 30 days' });
   }
   if (f.score != null) out.push({ key: 'cvss', tone: 'neutral', label: `CVSS ${f.score.toFixed(1)}` });
   if (f.fixable === true) {

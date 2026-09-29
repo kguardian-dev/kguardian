@@ -1,3 +1,4 @@
+import { vulnErrorMessage } from '../../services/vulnApi';
 import type { Finding, Report } from '../../types/vulns';
 import { formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS } from '../../utils/tiers';
@@ -31,6 +32,8 @@ interface FindingsTableProps {
   onOpenCve: (id: string) => void;
   hasMore?: boolean;
   loadingMore?: boolean;
+  /** The last "Load more" failed: the rows loaded so far stay. */
+  loadMoreError?: unknown;
   onLoadMore?: () => void;
 }
 
@@ -39,7 +42,7 @@ interface FindingsTableProps {
  * with the Broker's tier and tier factors (worst over every workload
  * container running the image).
  */
-export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMore }: FindingsTableProps) {
+export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, loadMoreError, onLoadMore }: FindingsTableProps) {
   const background = items.find((f) => f.tier === 'Background');
   return (
     <div>
@@ -88,6 +91,11 @@ export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMo
           </tbody>
         </table>
       </div>
+      {loadMoreError != null && (
+        <p role="alert" className="pt-2 text-xs text-severity-medium" data-testid="load-more-error">
+          Could not load more findings; showing the ones loaded so far. {vulnErrorMessage(loadMoreError)}
+        </p>
+      )}
       {hasMore && onLoadMore && (
         <div className="pt-2">
           <Button variant="secondary" size="sm" onClick={onLoadMore} disabled={loadingMore}>

@@ -134,7 +134,7 @@ export function ImageDrawer({ digest, onClose, onOpenCve, onOpenWorkload, api = 
             <h3 className="flex items-center gap-2 text-sm font-semibold text-primary mb-2"><Bug className="w-4 h-4 text-hubble-accent" aria-hidden />Vulnerabilities</h3>
             {vulns.loading && !vulns.reports ? (
               <SectionSkeleton rows={3} />
-            ) : vulns.error ? (
+            ) : vulns.error && vulns.items.length === 0 ? (
               <VulnErrorState error={vulns.error} onRetry={() => void vulns.reload()} />
             ) : vulns.reports && vulns.reports.length === 0 ? (
               <EmptyState icon={Bug} compact title="No vulnerability data for this image" description="No source has reported on this digest. That is unknown, not clean." />
@@ -144,7 +144,8 @@ export function ImageDrawer({ digest, onClose, onOpenCve, onOpenWorkload, api = 
                 {vulns.items.length === 0 ? (
                   <p className="text-xs text-secondary">The sources above reported no vulnerabilities for this digest in their latest scans.</p>
                 ) : (
-                  <FindingsTable items={vulns.items} onOpenCve={onOpenCve} hasMore={vulns.hasMore} loadingMore={vulns.loadingMore} onLoadMore={() => void vulns.loadMore()} />
+                  // With findings on screen an error is a failed next page: they stay, and it is said under them.
+                  <FindingsTable items={vulns.items} onOpenCve={onOpenCve} hasMore={vulns.hasMore} loadingMore={vulns.loadingMore} loadMoreError={vulns.error} onLoadMore={() => void vulns.loadMore()} />
                 )}
               </div>
             )}

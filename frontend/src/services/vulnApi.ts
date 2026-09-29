@@ -169,8 +169,8 @@ export class VulnApi {
   }
 
   /** `GET /vulnerabilities/{id}/exposure`. 404 = no inventory digest affected. */
-  getExposure(id: string, windowHours?: number): Promise<Exposure> {
-    return this.json<Exposure>(`/vulnerabilities/${seg(id)}/exposure`, { window_hours: windowHours });
+  getExposure(id: string, windowHours?: number, signal?: AbortSignal): Promise<Exposure> {
+    return this.json<Exposure>(`/vulnerabilities/${seg(id)}/exposure`, { window_hours: windowHours }, false, signal);
   }
 
   /** `GET /images`: inventory digests (cluster-wide unless `namespace`). */
@@ -184,9 +184,9 @@ export class VulnApi {
   }
 
   /** `GET /images/{digest}/vulnerabilities`: deduplicated findings + the reports behind them. */
-  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } & TierFilters = {}): Promise<ImageVulnsPage> {
+  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } & TierFilters = {}, signal?: AbortSignal): Promise<ImageVulnsPage> {
     const { tier, kev, epssMin, inUse, ...rest } = q;
-    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, ...tierParams({ tier, kev, epssMin, inUse }) });
+    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, ...tierParams({ tier, kev, epssMin, inUse }) }, false, signal);
   }
 
   /** `GET /images/{digest}/sbom`: every source's SBOM (reports) and one's components. */

@@ -50,6 +50,25 @@ test('facts carry no threshold judgement: EPSS is only a risk when the Broker sa
   expect(merged[0]).toMatchObject({ key: 'epss', label: 'EPSS 34%', tone: 'risk' });
 });
 
+test('EPSS labels never round across a line that matters: not to 100%, not to 0%, and thresholds keep their decimals', () => {
+  const epss = (v: number) => factChips({ epss: v })[0].label;
+  expect(epss(0.34)).toBe('EPSS 34%');
+  expect(epss(0.0123)).toBe('EPSS 1%');
+  expect(epss(0.0042)).toBe('EPSS 0.4%');
+  // Near the top: never "100%" for what is not certain.
+  expect(epss(0.995)).toBe('EPSS 99.5%');
+  expect(epss(0.99999)).toBe('EPSS 99.9%');
+  expect(epss(1)).toBe('EPSS 100%');
+  // Near the bottom: small, not zero.
+  expect(epss(0.0004)).toBe('EPSS <0.1%');
+  expect(epss(0)).toBe('EPSS 0%');
+  const threshold = (raw: string) => brokerFactors([raw])[0].label;
+  expect(threshold('epss>=0.1')).toBe('EPSS ≥ 10%');
+  expect(threshold('epss>=0.005')).toBe('EPSS ≥ 0.5%');
+  expect(threshold('epss>=0.07')).toBe('EPSS ≥ 7%');
+  expect(threshold('epss>=0.0001')).toBe('EPSS ≥ 0.01%');
+});
+
 test('several fixed versions are all shown, none picked', () => {
   expect(factChips({ fixable: true, fixedVersions: ['4.20.0', '4.19.2'] })[0].label).toBe('Fix: 4.20.0 / 4.19.2');
   expect(factChips({ fixable: false })[0].label).toBe('No fix yet');

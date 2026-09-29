@@ -6,7 +6,7 @@ import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
 import { formatTimestamp, shortDigest } from '../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
-import { asUtc, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
+import { asUtc, canonicalCveId, canonicalDigest, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { StatStrip, StatTile } from './ui/StatTile';
@@ -61,8 +61,11 @@ const SEVERITY_FILTERS: Array<{ id: string; label: string; value: VulnSeverity[]
  * who signed each running digest (the supplychain component's verdicts). Cluster-wide by default: the
  * namespace selector filters, it does not scope.
  */
-export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, digest, onParamsChange, onOpenWorkload, onShowOnMap, onAskAI, refreshTick, api = vulnApi, profileApi }: ImagesViewProps) {
+export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cveParam, digest: digestParam, onParamsChange, onOpenWorkload, onShowOnMap, onAskAI, refreshTick, api = vulnApi, profileApi }: ImagesViewProps) {
   const tab: ImagesTab = TABS.some((t) => t.id === tabParam) ? (tabParam as ImagesTab) : 'vulns';
+  // URL params are typed or pasted: read them as the Broker spells ids and digests.
+  const cve = cveParam ? canonicalCveId(cveParam) : undefined;
+  const digest = digestParam ? canonicalDigest(digestParam) : undefined;
   const ns = allNamespaces ? undefined : namespace;
   const [sevId, setSevId] = useState('all');
   const [fixable, setFixable] = useState(false);
@@ -81,6 +84,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const tierRows = totals.items.length > 0 ? totals.items : cves.items;
   const tiersKnown = tierRows.some((c) => c.tier != null);
   const preTierBroker = tierRows.length > 0 && !tiersKnown;
+  // Sorted by tier over the rows loaded so far only: the Broker pages CVEs most severe first, so this is not a tier ranking of the scope.
   const rows = useMemo(
     () => cves.items.map((c) => ({ c, tier: brokerTier(c.tier), factors: cveRowFactors(c) })).sort((a, b) => tierRank(b.tier) - tierRank(a.tier)),
     [cves.items],
@@ -133,7 +137,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
         <div>
           <h2 className="text-base font-semibold text-primary">Images</h2>
           <p className="text-xs text-tertiary mt-0.5">
-            Vulnerabilities in the images running in {scopeLabel}, ranked by tier. Findings come from Trivy Operator reports and, when the opt-in Grype matcher is enabled, from kguardian matching SBOMs itself. kguardian never blocks a workload.
+            Vulnerabilities in the images running in {scopeLabel}. Findings come from Trivy Operator reports and, when the opt-in Grype matcher is enabled, from kguardian matching SBOMs itself. kguardian never blocks a workload.
           </p>
         </div>
 
@@ -248,13 +252,18 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
                     <span title={IN_USE_UNKNOWN_TITLE}>
                       {rows.some((r) => r.tier === 'Background') && <span className="block text-secondary" data-testid="background-caveat">{backgroundCaveat(null)}</span>}
+                      {cves.hasMore && tierId !== 'p0' && (
+                        <span className="block text-secondary" data-testid="page-order-note">
+                          The Broker sends CVEs most severe first, a page at a time; the rows loaded so far are sorted by tier. A P0 of lower severity may be on a later page: set Tier to P0 to list every one.
+                        </span>
+                      )}
                       {!tiersKnown
                         ? 'No tiers yet (not computed, or this Broker predates them) and no loaded-package data: both unknown. '
                         : loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}
                       Privilege and per-workload exposure are in the CVE drawer.
                     </span>
                     {cves.hasMore && (
-                      <Button variant="secondary" size="sm" onClick={() => void cves.loadMore()} disabled={cves.loadingMore}>
+                      <Button variant="secondary" size="sm" onClick={() => void cves.loadMore()} disabled={cves.loadingMore || cves.loading}>
                         {cves.loadingMore ? 'Loading…' : 'Load more CVEs'}
                       </Button>
                     )}
@@ -359,7 +368,7 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
           <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
             <span>Keyed by digest. Each row reads the image and its vulnerability reports, then its SBOMs when a source reported on it (2 to 3 reads per digest, a few at a time).</span>
             {list.hasMore && (
-              <Button variant="secondary" size="sm" onClick={() => void list.loadMore()} disabled={list.loadingMore}>
+              <Button variant="secondary" size="sm" onClick={() => void list.loadMore()} disabled={list.loadingMore || list.loading}>
                 {list.loadingMore ? 'Loading…' : 'Load more images'}
               </Button>
             )}

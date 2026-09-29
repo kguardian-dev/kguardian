@@ -41,6 +41,20 @@ describe('ImagesView: Vulnerabilities tab', () => {
     expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
   });
 
+  test('the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
+    const page1 = vulnCapture<CvePage>('vulnerabilities-page1-limit2').body;
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', page1)]);
+    render(view({ api }));
+    await screen.findAllByTestId('cve-row');
+    expect(screen.queryByText(/ranked by tier/)).toBeNull();
+    // A lower-severity P0 can be on a later page: only the Tier filter lists every one.
+    expect(screen.getByTestId('page-order-note').textContent).toBe(
+      'The Broker sends CVEs most severe first, a page at a time; the rows loaded so far are sorted by tier. A P0 of lower severity may be on a later page: set Tier to P0 to list every one.',
+    );
+    fireEvent.change(screen.getByLabelText('Tier', { exact: false }), { target: { value: 'p0' } });
+    await waitFor(() => expect(screen.queryByTestId('page-order-note')).toBeNull());
+  });
+
   test('a Broker without tiers: every row "Tier ?", tier tiles unknown, no tier filter; never a computed tier', async () => {
     render(view({ api: replayVulnApi([], { broker: '1671' }).api }));
     const rows = await screen.findAllByTestId('cve-row');
@@ -116,6 +130,21 @@ describe('CVE drawer', () => {
   test('a CVE that affects nothing in the inventory says so', async () => {
     render(view({ cve: 'CVE-2099-9999' }));
     expect(await screen.findByText(/affects nothing in the inventory/)).toBeTruthy();
+  });
+
+  test('a lowercase CVE id in the URL (pasted from a ticket) opens that CVE, not a false "affects nothing"', async () => {
+    render(view({ cve: 'cve-2099-0001' }));
+    await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/affects nothing in the inventory/)).toBeNull();
+    expect(within(screen.getByRole('dialog')).getAllByText('CVE-2099-0001').length).toBeGreaterThan(0);
+  });
+});
+
+describe('Image drawer from the URL', () => {
+  test('an upper-case digest opens that image, not "Image not in the inventory"', async () => {
+    render(view({ digest: imageDetail('ledger').digest.toUpperCase() }));
+    expect(await screen.findByText('payments/ledger')).toBeTruthy();
+    expect(screen.queryByText('Image not in the inventory')).toBeNull();
   });
 });
 

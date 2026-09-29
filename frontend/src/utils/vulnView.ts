@@ -1,6 +1,6 @@
 import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, Report, SbomTrust, VulnSeverity } from '../types/vulns';
 import type { Severity } from './severity';
-import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, nodeOnlyExposure, privilegedFactor, TIER_RANK, type Factor, type RiskTierName } from './tiers';
+import { brokerFactors, brokerTier, epssPercent, exposureFactor, factChips, inUseFactor, mergeFactors, nodeOnlyExposure, privilegedFactor, TIER_RANK, tierRank, type Factor, type RiskTierName } from './tiers';
 
 /** View helpers for the supply-chain UI (kept out of component files). */
 
@@ -15,6 +15,9 @@ export function toSeverity(s: VulnSeverity): Severity | null {
     default: return null;
   }
 }
+
+/** The Broker's severity rank (`severity_rank`): findings come most severe first in this order. */
+export const VULN_SEVERITY_RANK: Record<VulnSeverity, number> = { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, NONE: 1, UNKNOWN: 0 };
 
 /** How a report was matched to what runs; tag-only is a weaker, flagged match. */
 export const JOIN_LABEL: Record<JoinKind, { label: string; title: string; weak: boolean }> = {
@@ -48,6 +51,22 @@ export function jumpTarget(query: string): JumpTarget | null {
   if (d) return { kind: 'digest', digest: d[1].toLowerCase() };
   if (/^sha(256|512):[0-9a-f]{4,}$/i.test(q)) return { kind: 'partial-digest' };
   return null;
+}
+
+/**
+ * A `cve` / `digest` URL param spelled the way the Broker keys it, as the
+ * command palette does (jumpTarget): a pasted `cve-2024-3094` or an
+ * upper-case digest would otherwise read as "affects nothing" or "not in
+ * the inventory". Anything else is passed on as given, for the drawer to
+ * report.
+ */
+export function canonicalCveId(id: string): string {
+  const t = jumpTarget(id);
+  return t?.kind === 'cve' ? t.id : id;
+}
+export function canonicalDigest(digest: string): string {
+  const t = jumpTarget(digest);
+  return t?.kind === 'digest' ? t.digest : digest;
 }
 
 /** The supply-chain reads return naive UTC timestamps; mark them UTC before parsing. */
@@ -88,6 +107,49 @@ export function findingFactors(f: Finding): Factor[] {
   const facts = factChips(f);
   if (!f.tierFactors) facts.unshift(inUseFactor(f.inUseState, f.inUseDetail));
   return mergeFactors(broker, facts);
+}
+
+/** The family a tier factor belongs to: one package's `in_use:loaded` and another's `in_use:executed` are the same question. */
+const factorFamily = (raw: string) =>
+  raw.startsWith('in_use:') ? 'in_use' : raw.startsWith('epss>=') ? 'epss' : raw.startsWith('severity:') ? 'severity' : raw === 'exposed' || raw === 'internal' || raw.startsWith('exposure:') ? 'exposure' : raw;
+
+/**
+ * One image's findings of one CVE (one per package and version that
+ * carries it) as the single finding the drawer shows for that image: the
+ * most urgent one, whose factors explain its tier, plus any factor family
+ * only the others have (another package's `no_fix`). KEV and EPSS are the
+ * worst any of them reports. Fixable only when every package has a fix
+ * (upgrading one leaves the CVE in the other, as `no_fix` says), with every
+ * package's fixed versions, none picked. null when there are none.
+ */
+export function mergeFindings(matches: readonly Finding[]): Finding | null {
+  if (matches.length === 0) return null;
+  // An unknown tier ranks above any known one, except P0: nothing outranks it.
+  const rank = (f: Finding) => (f.tier === 'P0' ? 5 : tierRank(brokerTier(f.tier)));
+  const sorted = [...matches].sort((a, b) => rank(b) - rank(a));
+  const [worst, ...rest] = sorted;
+  if (rest.length === 0) return worst;
+  const factors = [...(worst.tierFactors ?? [])];
+  const families = new Set(factors.map(factorFamily));
+  for (const f of rest) {
+    for (const raw of f.tierFactors ?? []) {
+      if (families.has(factorFamily(raw))) continue;
+      families.add(factorFamily(raw));
+      factors.push(raw);
+    }
+  }
+  const kevs = sorted.map((f) => f.kev);
+  const epss = sorted.map((f) => f.epss).filter((x): x is number => x !== null);
+  const scores = sorted.map((f) => f.score).filter((x): x is number => x !== null);
+  return {
+    ...worst,
+    kev: kevs.includes(true) ? true : kevs.includes(null) ? null : false,
+    epss: epss.length ? Math.max(...epss) : null,
+    score: scores.length ? Math.max(...scores) : null,
+    fixable: sorted.every((f) => f.fixable),
+    fixedVersions: [...new Set(sorted.flatMap((f) => f.fixedVersions))],
+    ...(worst.tierFactors || factors.length ? { tierFactors: factors } : {}),
+  };
 }
 
 /**
@@ -176,7 +238,7 @@ export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null 
   const nodeNames = names(isNodeOnly);
   const fixes = [...new Set(e.images.flatMap((i) => i.packages.flatMap((p) => p.fixedVersions)))];
   const why = factors.length ? factors.map((x) => x.label).join(', ') : f?.tierFactors?.join(', ');
-  const facts = factors.length ? '' : `${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}`;
+  const facts = factors.length ? '' : `${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${epssPercent(f.epss)}` : ''}`;
   return [
     `Context: ${e.id} (${e.severity.toLowerCase()}${facts}; kguardian tier ${tier ?? 'unknown'}${why ? ` from ${why}` : ''}).`,
     `Affects ${impact.images} image(s) and ${impact.containers} workload container(s); ${impact.running} distinct workload(s) running.`,
@@ -225,6 +287,8 @@ export interface CveHeadline {
   unknownRows: number;
   /** Image reads that failed. */
   failedReads: number;
+  /** Images whose findings were not all read (more pages than the drawer reads). */
+  incompleteReads: number;
 }
 
 /**
@@ -234,7 +298,7 @@ export interface CveHeadline {
  */
 export function cveHeadline(
   rows: ReadonlyArray<{ tier: RiskTierName | null; factors: Factor[] }>,
-  opts: { pending: number; failed: number; summaryTier?: string | null },
+  opts: { pending: number; failed: number; incomplete?: number; summaryTier?: string | null },
 ): CveHeadline {
   let tier: RiskTierName | null = brokerTier(opts.summaryTier);
   let unknownRows = 0;
@@ -248,5 +312,5 @@ export function cveHeadline(
       if (!cur || TONE_RANK[f.tone] > TONE_RANK[cur.tone]) worst.set(f.key, f);
     }
   }
-  return { pending: opts.pending > 0, tier, factors: [...worst.values()], unknownRows, failedReads: opts.failed };
+  return { pending: opts.pending > 0, tier, factors: [...worst.values()], unknownRows, failedReads: opts.failed, incompleteReads: opts.incomplete ?? 0 };
 }
