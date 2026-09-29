@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { cveAiPrompt, groupNotCovered, impactCounts, mergeFindings, PROMPT_WORKLOADS_MAX, sbomFromMatcher } from './vulnView';
+import { canonicalCveId, canonicalDigest, cveAiPrompt, groupNotCovered, impactCounts, mergeFindings, PROMPT_WORKLOADS_MAX, sbomFromMatcher } from './vulnView';
 import { exposureOf, imageVulns } from '../fixtures/vulns';
 import type { ExposedVia, ExposedWorkload, Report } from '../types/vulns';
 import type { Factor } from './tiers';
@@ -126,5 +126,16 @@ describe('mergeFindings', () => {
     const m = mergeFindings([bkg, { ...base, kev: null, tier: null, tierFactors: [] }])!;
     expect(m.tier).toBeNull();
     expect(m.kev).toBeNull();
+  });
+});
+
+describe('canonicalCveId / canonicalDigest (URL params)', () => {
+  test('CVE ids upper-case, GHSA ids as GitHub spells them, digests lower-case; anything else as given', () => {
+    expect(canonicalCveId('cve-2024-3094')).toBe('CVE-2024-3094');
+    expect(canonicalCveId(' CVE-2024-3094 ')).toBe('CVE-2024-3094');
+    expect(canonicalCveId('ghsa-JFH8-C2JP-5V3Q')).toBe('GHSA-jfh8-c2jp-5v3q');
+    expect(canonicalCveId('GO-2024-2687')).toBe('GO-2024-2687');
+    expect(canonicalDigest(`SHA256:${'AB'.repeat(32)}`)).toBe(`sha256:${'ab'.repeat(32)}`);
+    expect(canonicalDigest('latest')).toBe('latest');
   });
 });

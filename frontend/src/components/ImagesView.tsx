@@ -6,7 +6,7 @@ import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
 import { formatTimestamp, shortDigest } from '../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
-import { asUtc, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
+import { asUtc, canonicalCveId, canonicalDigest, cveRowFactors, sbomFromMatcher, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { StatStrip, StatTile } from './ui/StatTile';
@@ -61,8 +61,11 @@ const SEVERITY_FILTERS: Array<{ id: string; label: string; value: VulnSeverity[]
  * who signed each running digest (the supplychain component's verdicts). Cluster-wide by default: the
  * namespace selector filters, it does not scope.
  */
-export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, digest, onParamsChange, onOpenWorkload, onShowOnMap, onAskAI, refreshTick, api = vulnApi, profileApi }: ImagesViewProps) {
+export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cveParam, digest: digestParam, onParamsChange, onOpenWorkload, onShowOnMap, onAskAI, refreshTick, api = vulnApi, profileApi }: ImagesViewProps) {
   const tab: ImagesTab = TABS.some((t) => t.id === tabParam) ? (tabParam as ImagesTab) : 'vulns';
+  // URL params are typed or pasted: read them as the Broker spells ids and digests.
+  const cve = cveParam ? canonicalCveId(cveParam) : undefined;
+  const digest = digestParam ? canonicalDigest(digestParam) : undefined;
   const ns = allNamespaces ? undefined : namespace;
   const [sevId, setSevId] = useState('all');
   const [fixable, setFixable] = useState(false);

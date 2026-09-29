@@ -131,6 +131,21 @@ describe('CVE drawer', () => {
     render(view({ cve: 'CVE-2099-9999' }));
     expect(await screen.findByText(/affects nothing in the inventory/)).toBeTruthy();
   });
+
+  test('a lowercase CVE id in the URL (pasted from a ticket) opens that CVE, not a false "affects nothing"', async () => {
+    render(view({ cve: 'cve-2099-0001' }));
+    await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/affects nothing in the inventory/)).toBeNull();
+    expect(within(screen.getByRole('dialog')).getAllByText('CVE-2099-0001').length).toBeGreaterThan(0);
+  });
+});
+
+describe('Image drawer from the URL', () => {
+  test('an upper-case digest opens that image, not "Image not in the inventory"', async () => {
+    render(view({ digest: imageDetail('ledger').digest.toUpperCase() }));
+    expect(await screen.findByText('payments/ledger')).toBeTruthy();
+    expect(screen.queryByText('Image not in the inventory')).toBeNull();
+  });
 });
 
 test('a failed read never shows zero counts', async () => {

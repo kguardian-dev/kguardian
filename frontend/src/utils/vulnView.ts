@@ -53,6 +53,22 @@ export function jumpTarget(query: string): JumpTarget | null {
   return null;
 }
 
+/**
+ * A `cve` / `digest` URL param spelled the way the Broker keys it, as the
+ * command palette does (jumpTarget): a pasted `cve-2024-3094` or an
+ * upper-case digest would otherwise read as "affects nothing" or "not in
+ * the inventory". Anything else is passed on as given, for the drawer to
+ * report.
+ */
+export function canonicalCveId(id: string): string {
+  const t = jumpTarget(id);
+  return t?.kind === 'cve' ? t.id : id;
+}
+export function canonicalDigest(digest: string): string {
+  const t = jumpTarget(digest);
+  return t?.kind === 'digest' ? t.digest : digest;
+}
+
 /** The supply-chain reads return naive UTC timestamps; mark them UTC before parsing. */
 export function asUtc(t: string | null | undefined): string | null {
   if (!t) return null;
