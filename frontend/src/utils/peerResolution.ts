@@ -329,6 +329,8 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
  * Service and pod CIDRs, which are private address space, so a private
  * address may be one and is unattributed, never external. A public address
  * cannot be one and stays external.
+ * A Service or pod CIDR outside those private ranges (for example
+ * 198.18.0.0/15, or public IPv6) still shows as external on a failed lookup.
  */
 export function mayBeUncheckedClusterAddress(ip: string): boolean {
   return isPrivateAddress(ip);
