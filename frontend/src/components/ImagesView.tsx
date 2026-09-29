@@ -81,6 +81,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const tierRows = totals.items.length > 0 ? totals.items : cves.items;
   const tiersKnown = tierRows.some((c) => c.tier != null);
   const preTierBroker = tierRows.length > 0 && !tiersKnown;
+  // Sorted by tier over the rows loaded so far only: the Broker pages CVEs most severe first, so this is not a tier ranking of the scope.
   const rows = useMemo(
     () => cves.items.map((c) => ({ c, tier: brokerTier(c.tier), factors: cveRowFactors(c) })).sort((a, b) => tierRank(b.tier) - tierRank(a.tier)),
     [cves.items],
@@ -133,7 +134,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
         <div>
           <h2 className="text-base font-semibold text-primary">Images</h2>
           <p className="text-xs text-tertiary mt-0.5">
-            Vulnerabilities in the images running in {scopeLabel}, ranked by tier. Findings come from Trivy Operator reports and, when the opt-in Grype matcher is enabled, from kguardian matching SBOMs itself. kguardian never blocks a workload.
+            Vulnerabilities in the images running in {scopeLabel}. Findings come from Trivy Operator reports and, when the opt-in Grype matcher is enabled, from kguardian matching SBOMs itself. kguardian never blocks a workload.
           </p>
         </div>
 
@@ -248,6 +249,11 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
                     <span title={IN_USE_UNKNOWN_TITLE}>
                       {rows.some((r) => r.tier === 'Background') && <span className="block text-secondary" data-testid="background-caveat">{backgroundCaveat(null)}</span>}
+                      {cves.hasMore && tierId !== 'p0' && (
+                        <span className="block text-secondary" data-testid="page-order-note">
+                          The Broker sends CVEs most severe first, a page at a time; the rows loaded so far are sorted by tier. A P0 of lower severity may be on a later page: set Tier to P0 to list every one.
+                        </span>
+                      )}
                       {!tiersKnown
                         ? 'No tiers yet (not computed, or this Broker predates them) and no loaded-package data: both unknown. '
                         : loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}

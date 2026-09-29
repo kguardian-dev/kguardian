@@ -41,6 +41,20 @@ describe('ImagesView: Vulnerabilities tab', () => {
     expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
   });
 
+  test('the table is paged most severe first, so it never claims a tier ranking; with more pages it points to the P0 filter', async () => {
+    const page1 = vulnCapture<CvePage>('vulnerabilities-page1-limit2').body;
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', page1)]);
+    render(view({ api }));
+    await screen.findAllByTestId('cve-row');
+    expect(screen.queryByText(/ranked by tier/)).toBeNull();
+    // A lower-severity P0 can be on a later page: only the Tier filter lists every one.
+    expect(screen.getByTestId('page-order-note').textContent).toBe(
+      'The Broker sends CVEs most severe first, a page at a time; the rows loaded so far are sorted by tier. A P0 of lower severity may be on a later page: set Tier to P0 to list every one.',
+    );
+    fireEvent.change(screen.getByLabelText('Tier', { exact: false }), { target: { value: 'p0' } });
+    await waitFor(() => expect(screen.queryByTestId('page-order-note')).toBeNull());
+  });
+
   test('a Broker without tiers: every row "Tier ?", tier tiles unknown, no tier filter; never a computed tier', async () => {
     render(view({ api: replayVulnApi([], { broker: '1671' }).api }));
     const rows = await screen.findAllByTestId('cve-row');
