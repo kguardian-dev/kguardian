@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { ProfileApi } from '../services/profileApi';
+import { errorKind, ProfileApi } from '../services/profileApi';
 import { useElapsedSeconds, useProfileDiff, useProfileVersions, useWorkloadProfile } from './useWorkloadProfile';
 import { checkoutDiff2to4, checkoutProfile } from '../fixtures/profile';
 
@@ -71,6 +71,31 @@ test('a 404 is not backed off: the workload may appear, and waiting does not hel
   renderHook(() => useWorkloadProfile(...W, 0, 1000, api));
   await pass(2000);
   expect(calls).toEqual([0, 1000, 2000]);
+});
+
+test.each([401, 403])('a %i backs off like a failing Broker: a token is not fixed by asking every poll; a success restores the plain interval', async (status) => {
+  vi.useFakeTimers({ now: 0 });
+  let answer = { status, body: '' };
+  const { api, calls } = answering(() => answer);
+  const { result } = renderHook(() => useWorkloadProfile(...W, 0, 1000, api));
+  await pass(0);
+  expect(calls).toEqual([0]);
+  expect(errorKind(result.current.error)).toBe('auth');
+  // One failure: 2 × pollMs; two: 4 × pollMs.
+  await pass(1999);
+  expect(calls).toEqual([0]);
+  await pass(1);
+  expect(calls).toEqual([0, 2000]);
+  await pass(3999);
+  expect(calls).toEqual([0, 2000]);
+  // The token is fixed meanwhile.
+  answer = { status: 200, body: OK };
+  await pass(1);
+  expect(calls).toEqual([0, 2000, 6000]);
+  expect(result.current.error).toBeNull();
+  expect(result.current.profile).not.toBeNull();
+  await pass(2000);
+  expect(calls).toEqual([0, 2000, 6000, 7000, 8000]);
 });
 
 test('a poll is skipped while a read is still in flight', async () => {

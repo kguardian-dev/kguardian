@@ -19,12 +19,14 @@ export const PROFILE_POLL_MAX_BACKOFF_MS = 300_000;
 
 /**
  * Failures worth backing off for: the Broker is slow or struggling (timeout,
- * 5xx, shed read, network), and asking again in 30 s only adds load. A 404
- * or 400 will not change by waiting, so those keep the plain poll.
+ * 5xx, shed read, network), and asking again in 30 s only adds load; or the
+ * read was refused (401/403), which lasts until someone fixes the token or
+ * its scope, so a fast poll only repeats the refusal. A 404 or 400 keeps the
+ * plain poll: the workload may appear.
  */
-function isTransient(err: unknown): boolean {
+function backsOff(err: unknown): boolean {
   const kind = errorKind(err);
-  return kind === 'timeout' || kind === 'busy' || kind === 'error';
+  return kind === 'timeout' || kind === 'busy' || kind === 'error' || kind === 'auth';
 }
 
 /**
@@ -32,7 +34,7 @@ function isTransient(err: unknown): boolean {
  * Refresh (`refreshTick`), and polls (the profile is computed live). A poll
  * that fails keeps the last good profile and surfaces the error beside it.
  * A poll is skipped while a read is still in flight, and after a transient
- * failure the next poll waits twice as long per consecutive failure (up to
+ * or auth failure the next poll waits twice as long per consecutive failure (up to
  * PROFILE_POLL_MAX_BACKOFF_MS); `reload` (the Retry button) resets that.
  */
 export function useWorkloadProfile(ns: string, kind: string, name: string, refreshTick = 0, pollMs = 30_000, api: ProfileApi = profileApi) {
@@ -56,7 +58,7 @@ export function useWorkloadProfile(ns: string, kind: string, name: string, refre
       setError(null);
     } catch (err) {
       if (!current()) return;
-      if (isTransient(err)) {
+      if (backsOff(err)) {
         failures.current += 1;
         nextPollAt.current = Date.now() + Math.min(pollMs * 2 ** failures.current, PROFILE_POLL_MAX_BACKOFF_MS);
       }
