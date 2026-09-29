@@ -2767,8 +2767,7 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     let p = pool.clone();
     match tokio::task::spawn_blocking(move || -> Result<i64, RetentionError> {
         let mut conn = p.get().map_err(RetentionError::Pool)?;
-        with_supplychain_lock(&mut conn, crate::supplychain_read::refresh_cve_summary)
-            .map_err(RetentionError::Diesel)
+        rebuild_cve_summary(&mut conn).map_err(RetentionError::Diesel)
     })
     .await
     {
@@ -2969,6 +2968,30 @@ fn with_supplychain_lock<T, E: From<diesel::result::Error>>(
             .bind::<diesel::sql_types::Text, _>(SUPPLYCHAIN_LOCK_KEY)
             .execute(conn)?;
         f(conn)
+    })
+}
+
+/// The pass's CVE rebuild. The facts go first, OUTSIDE the lock: they have
+/// their own short transaction that table-locks `vuln_cve_facts`
+/// (cc178442), which already serialises two rebuilds, and nesting it in
+/// the lock's transaction would turn it into a savepoint and hold that
+/// table lock, which ingest upserts wait on, through the whole summary
+/// rebuild. Only the summary, which reads the facts and writes nothing
+/// ingest touches, runs under [`SUPPLYCHAIN_LOCK_KEY`].
+fn rebuild_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
+    rebuild_cve_summary_with(conn, || {})
+}
+
+/// [`rebuild_cve_summary`] with a hook run under the lock, before the
+/// summary (tests drive concurrent ingest from it).
+fn rebuild_cve_summary_with(
+    conn: &mut PgConnection,
+    under_lock: impl FnOnce(),
+) -> QueryResult<i64> {
+    crate::supplychain_read::refresh_cve_facts(conn)?;
+    with_supplychain_lock(conn, |conn| {
+        under_lock();
+        crate::supplychain_read::refresh_cve_summary_only(conn)
     })
 }
 
@@ -4126,10 +4149,8 @@ mod tests {
             n: i64,
         }
         let second = with_supplychain_lock(&mut conn, |conn| {
-            crate::supplychain_read::refresh_cve_summary(conn)?;
-            let second = std::thread::spawn(|| {
-                with_supplychain_lock(&mut live_conn(), crate::supplychain_read::refresh_cve_summary)
-            });
+            crate::supplychain_read::refresh_cve_summary_only(conn)?;
+            let second = std::thread::spawn(|| rebuild_cve_summary(&mut live_conn()));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 let waiting = sql_query(
@@ -4153,6 +4174,33 @@ mod tests {
             .join()
             .expect("join")
             .expect("the second rebuild succeeds after the first commits");
+    }
+
+    /// An ingest upsert into `vuln_cve_facts` proceeds while the pass's
+    /// summary rebuild holds the supply-chain lock: the facts' table lock
+    /// (cc178442) must be released when the facts are, not held until the
+    /// summary commits. A short lock_timeout turns a wait into a failure.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_ingest_is_not_blocked_by_the_locked_summary_rebuild() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        let mut ingest = None;
+        rebuild_cve_summary_with(&mut conn, || {
+            let h = std::thread::spawn(|| {
+                live_conn().batch_execute(
+                    "SET lock_timeout = '1500ms'; \
+                     INSERT INTO vuln_cve_facts (vuln_id, updated_at) \
+                     VALUES ('CVE-LEADER-INGEST-1', timezone('UTC', NOW())) \
+                     ON CONFLICT (vuln_id) DO UPDATE SET updated_at = EXCLUDED.updated_at; \
+                     DELETE FROM vuln_cve_facts WHERE vuln_id = 'CVE-LEADER-INGEST-1'",
+                )
+            });
+            ingest = Some(h.join().expect("join"));
+        })
+        .expect("rebuild");
+        let r = ingest.expect("the hook ran");
+        assert!(r.is_ok(), "ingest waited on the facts lock: {r:?}");
     }
 
     /// Two folds of the same range (an old leader's last batch overlapping
