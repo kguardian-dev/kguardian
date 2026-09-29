@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
+import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo, SyscallInfo } from '../types';
+import axios from 'axios';
 import { apiClient } from '../services/api';
 import { useComputeData } from './useComputeData';
 import { buildPodComputeData, containersForNode, nodeComputeState } from '../utils/compute';
@@ -24,9 +25,18 @@ export interface FailedReads {
 
 const NO_FAILURES: FailedReads = { traffic: 0, syscalls: 0 };
 
-/** A failed per-pod read is a marker, never an empty list (see api.ts). */
-const settle = <T,>(read: Promise<T[]>): Promise<{ rows: T[]; failed: boolean }> =>
-  read.then((rows) => ({ rows, failed: false }), () => ({ rows: [], failed: true }));
+/**
+ * Per-pod reads in flight across the whole namespace. Twenty is what the
+ * old nested limiters allowed for single-replica workloads (10 workloads, a
+ * traffic and a syscall read each), so those load as fast as before; a
+ * replica-heavy namespace no longer gets 10 × (10 + 10) = 200 at once.
+ */
+const POD_READ_CONCURRENCY = 20;
+
+/** The Broker shed the read (read budget, or a cancelled statement). */
+const isShed = (err: unknown): boolean => axios.isAxiosError(err) && err.response?.status === 503;
+
+interface SettledRead<T> { rows: T[]; failed: boolean }
 
 /**
  * @param selectedPodId The open card, or null. Selection is what opens a card
@@ -98,44 +108,61 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
         podsByIdentity.get(key)!.push(pod);
       });
 
-      // Fetch traffic and syscalls for each identity group with concurrency limit
+      // A failed per-pod read is a marker, never an empty list (see api.ts).
+      // Once the Broker sheds one with 503, the reads not yet sent are marked
+      // failed without being sent: it is refusing reads, and every further
+      // one would only add to what it is refusing.
+      let shed = false;
+      const settled = <T,>(read: () => Promise<T[]>) => async (): Promise<SettledRead<T>> => {
+        if (shed) return { rows: [], failed: true };
+        try {
+          return { rows: await read(), failed: false };
+        } catch (err) {
+          if (isShed(err)) shed = true;
+          return { rows: [], failed: true };
+        }
+      };
+
+      // Traffic and syscalls for every pod of every identity group, under one
+      // limit for the whole namespace.
       const identityEntries = Array.from(podsByIdentity.entries());
-      const podDataTasks = identityEntries.map(([key, podsInGroup]) => () => {
+      const trafficTasks = identityEntries.flatMap(([, podsInGroup]) =>
+        podsInGroup.map((pod) => settled(() => apiClient.getPodTrafficByName(pod.pod_name))));
+      const syscallTasks = identityEntries.flatMap(([, podsInGroup]) =>
+        podsInGroup.map((pod) => settled(() => apiClient.getPodSyscalls(pod.pod_name))));
+      const reads = await withConcurrencyLimit<SettledRead<unknown>>([...trafficTasks, ...syscallTasks], POD_READ_CONCURRENCY);
+      if (!current()) return;
+      const allTraffic = reads.slice(0, trafficTasks.length) as SettledRead<NetworkTraffic>[];
+      const allSyscalls = reads.slice(trafficTasks.length) as SettledRead<SyscallInfo>[];
+
+      let offset = 0;
+      const results = identityEntries.map(([key, podsInGroup]) => {
         // Use first pod as the primary pod
         const primaryPod = podsInGroup[0];
         const identity = primaryPod.pod_identity || primaryPod.pod_name;
+        const groupTraffic = allTraffic.slice(offset, offset + podsInGroup.length);
+        const groupSyscalls = allSyscalls.slice(offset, offset + podsInGroup.length);
+        offset += podsInGroup.length;
 
-        // Fetch traffic and syscalls for all pods in the group with concurrency limit
-        const trafficTasks = podsInGroup.map(pod => () => settle(apiClient.getPodTrafficByName(pod.pod_name)));
-        const syscallTasks = podsInGroup.map(pod => () => settle(apiClient.getPodSyscalls(pod.pod_name)));
+        // Merge all traffic and syscalls
+        const mergedTraffic = groupTraffic.flatMap((r) => r.rows);
+        const mergedSyscalls = groupSyscalls.flatMap((r) => r.rows);
+        const trafficFailed = groupTraffic.filter((r) => r.failed).length;
+        const syscallsFailed = groupSyscalls.filter((r) => r.failed).length;
 
-        return Promise.all([
-          withConcurrencyLimit(trafficTasks, 10),
-          withConcurrencyLimit(syscallTasks, 10),
-        ]).then(([allTraffic, allSyscalls]) => {
-          // Merge all traffic and syscalls
-          const mergedTraffic = allTraffic.flatMap((r) => r.rows);
-          const mergedSyscalls = allSyscalls.flatMap((r) => r.rows);
-          const trafficFailed = allTraffic.filter((r) => r.failed).length;
-          const syscallsFailed = allSyscalls.filter((r) => r.failed).length;
-
-          const node = {
-            id: key,
-            label: identity,
-            pod: primaryPod, // Primary pod for backward compatibility
-            pods: podsInGroup, // All pods in this identity
-            traffic: mergedTraffic,
-            syscalls: mergedSyscalls.length > 0 ? mergedSyscalls : undefined,
-            isExpanded: false,
-            trafficError: trafficFailed > 0,
-            syscallsError: syscallsFailed > 0,
-          } as PodNodeData;
-          return { node, trafficFailed, syscallsFailed };
-        });
+        const node = {
+          id: key,
+          label: identity,
+          pod: primaryPod, // Primary pod for backward compatibility
+          pods: podsInGroup, // All pods in this identity
+          traffic: mergedTraffic,
+          syscalls: mergedSyscalls.length > 0 ? mergedSyscalls : undefined,
+          isExpanded: false,
+          trafficError: trafficFailed > 0,
+          syscallsError: syscallsFailed > 0,
+        } as PodNodeData;
+        return { node, trafficFailed, syscallsFailed };
       });
-
-      const results = await withConcurrencyLimit(podDataTasks, 10);
-      if (!current()) return;
       setPods(results.map((r) => r.node));
       setFailedReads({
         traffic: results.reduce((n, r) => n + r.trafficFailed, 0),
