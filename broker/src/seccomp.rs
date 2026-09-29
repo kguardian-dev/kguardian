@@ -2702,9 +2702,77 @@ impl CrMirror {
     }
 }
 
+/// Upsert one CR's mirror row, writing nothing when the stored row already
+/// says the same thing.
+///
+/// Every Controller re-sends every mirror (on change, and every
+/// `MIRROR_REFRESH_PASSES` reconciles regardless), so almost every PUT
+/// carries what the row already holds. Rewriting it anyway left a dead
+/// tuple, syscall list included, per PUT: 3 live rows in 16 GB on the dev
+/// cluster, and a `COUNT(*)` over them that hit the statement timeout. The
+/// `WHERE` on the `DO UPDATE` makes an identical PUT a no-op, so
+/// `updated_at` is when the mirrored content last changed rather than when
+/// some node last repeated it, which also keeps the "newest CR first"
+/// order in `CrIndex` from flapping between CRs on every resend.
+fn upsert_cr_mirror(
+    conn: &mut PgConnection,
+    namespace: &str,
+    name: &str,
+    m: &CrMirror,
+    now: chrono::NaiveDateTime,
+) -> QueryResult<usize> {
+    // The ON CONFLICT ... DO UPDATE ... WHERE form; QueryDsl's `filter`
+    // is for selects.
+    use diesel::query_dsl::methods::FilterDsl;
+    use diesel::upsert::excluded;
+    use schema::seccomp_crs::dsl as c;
+    diesel::insert_into(c::seccomp_crs)
+        .values((
+            c::namespace.eq(namespace),
+            c::name.eq(name),
+            c::workload_kind.eq(&m.workload_kind),
+            c::workload_name.eq(&m.workload_name),
+            c::default_action.eq(&m.default_action),
+            c::syscalls.eq(&m.syscalls),
+            c::architectures.eq(&m.architectures),
+            c::hash.eq(&m.hash),
+            c::ready.eq(m.ready),
+            c::total.eq(m.total),
+            c::dist_state.eq(&m.dist_state),
+            c::updated_at.eq(now),
+        ))
+        .on_conflict((c::namespace, c::name))
+        .do_update()
+        .set((
+            c::workload_kind.eq(excluded(c::workload_kind)),
+            c::workload_name.eq(excluded(c::workload_name)),
+            c::default_action.eq(excluded(c::default_action)),
+            c::syscalls.eq(excluded(c::syscalls)),
+            c::architectures.eq(excluded(c::architectures)),
+            c::hash.eq(excluded(c::hash)),
+            c::ready.eq(excluded(c::ready)),
+            c::total.eq(excluded(c::total)),
+            c::dist_state.eq(excluded(c::dist_state)),
+            c::updated_at.eq(excluded(c::updated_at)),
+        ))
+        .filter(
+            c::workload_kind
+                .is_distinct_from(excluded(c::workload_kind))
+                .or(c::workload_name.is_distinct_from(excluded(c::workload_name)))
+                .or(c::default_action.ne(excluded(c::default_action)))
+                .or(c::syscalls.ne(excluded(c::syscalls)))
+                .or(c::architectures.ne(excluded(c::architectures)))
+                .or(c::hash.ne(excluded(c::hash)))
+                .or(c::ready.ne(excluded(c::ready)))
+                .or(c::total.ne(excluded(c::total)))
+                .or(c::dist_state.ne(excluded(c::dist_state))),
+        )
+        .execute(conn)
+}
+
 /// `PUT /seccomp/crs/{namespace}/{name}` — upsert the mirror of one
-/// `SeccompProfile` CR. Idempotent; every controller sends the same
-/// thing on every watch event / resync.
+/// `SeccompProfile` CR. Idempotent, and an identical PUT writes nothing:
+/// every controller sends the same thing (see [`upsert_cr_mirror`]).
 #[actix_web::put(
     "/seccomp/crs/{namespace}/{name}",
     wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
@@ -2724,39 +2792,14 @@ pub async fn put_seccomp_cr(
     debug!(%namespace, %name, hash = %m.hash, syscalls = split_set(&m.syscalls).len(), "mirror seccomp CR");
 
     let out = web::block(move || -> Result<serde_json::Value, DbError> {
-        use schema::seccomp_crs::dsl as c;
         let mut conn = pool.get()?;
-        let now = chrono::Utc::now().naive_utc();
-        diesel::insert_into(c::seccomp_crs)
-            .values((
-                c::namespace.eq(&namespace),
-                c::name.eq(&name),
-                c::workload_kind.eq(&m.workload_kind),
-                c::workload_name.eq(&m.workload_name),
-                c::default_action.eq(&m.default_action),
-                c::syscalls.eq(&m.syscalls),
-                c::architectures.eq(&m.architectures),
-                c::hash.eq(&m.hash),
-                c::ready.eq(m.ready),
-                c::total.eq(m.total),
-                c::dist_state.eq(&m.dist_state),
-                c::updated_at.eq(now),
-            ))
-            .on_conflict((c::namespace, c::name))
-            .do_update()
-            .set((
-                c::workload_kind.eq(&m.workload_kind),
-                c::workload_name.eq(&m.workload_name),
-                c::default_action.eq(&m.default_action),
-                c::syscalls.eq(&m.syscalls),
-                c::architectures.eq(&m.architectures),
-                c::hash.eq(&m.hash),
-                c::ready.eq(m.ready),
-                c::total.eq(m.total),
-                c::dist_state.eq(&m.dist_state),
-                c::updated_at.eq(now),
-            ))
-            .execute(&mut conn)?;
+        upsert_cr_mirror(
+            &mut conn,
+            &namespace,
+            &name,
+            &m,
+            chrono::Utc::now().naive_utc(),
+        )?;
         Ok(serde_json::json!({
             "namespace": namespace, "name": name, "hash": m.hash,
             "syscallCount": split_set(&m.syscalls).len(),
@@ -3365,6 +3408,99 @@ mod tests {
         conn.batch_execute("TRUNCATE seccomp_node_status")
             .expect("reset node status");
         conn
+    }
+
+    /// Every Controller re-sends every CR mirror, so a PUT that matches the
+    /// stored row must not write a new tuple: rewriting 3 unchanged rows
+    /// grew seccomp_crs to 16 GB on the dev cluster. A real change still
+    /// lands, NULL workloadRef fields included, and moves `updated_at`.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_identical_cr_mirror_put_writes_nothing() {
+        use diesel::connection::SimpleConnection;
+        #[derive(QueryableByName)]
+        struct Stored {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            ctid: String,
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            ready: i32,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            workload_kind: Option<String>,
+            #[diesel(sql_type = diesel::sql_types::Timestamp)]
+            updated_at: chrono::NaiveDateTime,
+        }
+        let stored = |conn: &mut PgConnection| -> Stored {
+            diesel::sql_query(
+                "SELECT ctid::text AS ctid, ready, workload_kind, updated_at FROM seccomp_crs \
+                 WHERE namespace = 'prod' AND name = 'deployment-web'",
+            )
+            .get_result(conn)
+            .expect("the mirror row")
+        };
+        let mut conn = live_conn();
+        conn.batch_execute("TRUNCATE seccomp_crs")
+            .expect("reset the table this test uses");
+        let mut m = CrMirror {
+            workload_kind: Some("Deployment".into()),
+            workload_name: Some("web".into()),
+            default_action: DEFAULT_SECCOMP_ACTION.into(),
+            syscalls: "close,openat,read,write".into(),
+            architectures: "SCMP_ARCH_X86_64".into(),
+            hash: "abc123".into(),
+            ready: 2,
+            total: 3,
+            dist_state: "Distributing".into(),
+        };
+        let t0 = chrono::NaiveDateTime::parse_from_str("2026-10-01 10:00:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap();
+        let later = |mins: i64| t0 + chrono::Duration::minutes(mins);
+
+        assert_eq!(
+            upsert_cr_mirror(&mut conn, "prod", "deployment-web", &m, t0).unwrap(),
+            1
+        );
+        let first = stored(&mut conn);
+
+        // The same mirror from another node, and again: nothing written.
+        for mins in [1, 2] {
+            assert_eq!(
+                upsert_cr_mirror(&mut conn, "prod", "deployment-web", &m, later(mins)).unwrap(),
+                0,
+                "an identical PUT is a no-op"
+            );
+            let again = stored(&mut conn);
+            assert_eq!(again.ctid, first.ctid, "no new tuple version");
+            assert_eq!(again.updated_at, t0, "updated_at is when it last changed");
+        }
+
+        // The distribution moved: written, and stamped.
+        m.ready = 3;
+        assert_eq!(
+            upsert_cr_mirror(&mut conn, "prod", "deployment-web", &m, later(3)).unwrap(),
+            1
+        );
+        let changed = stored(&mut conn);
+        assert_eq!(changed.ready, 3);
+        assert_eq!(changed.updated_at, later(3));
+
+        // The workloadRef went away: NULL is a change (IS DISTINCT FROM,
+        // not `<>`, which would read NULL as "unknown" and skip it), and a
+        // repeat of the NULL is not.
+        m.workload_kind = None;
+        m.workload_name = None;
+        assert_eq!(
+            upsert_cr_mirror(&mut conn, "prod", "deployment-web", &m, later(4)).unwrap(),
+            1
+        );
+        assert_eq!(stored(&mut conn).workload_kind, None);
+        assert_eq!(
+            upsert_cr_mirror(&mut conn, "prod", "deployment-web", &m, later(5)).unwrap(),
+            0
+        );
+        assert_eq!(stored(&mut conn).updated_at, later(4));
+
+        conn.batch_execute("TRUNCATE seccomp_crs")
+            .expect("leave the table empty for the other live tests");
     }
 
     /// The list's per-pod read (`capture_index` over every workload) must be

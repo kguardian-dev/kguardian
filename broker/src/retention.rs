@@ -57,6 +57,11 @@
 //!    says why the two windows differ). Runs regardless of the history
 //!    setting.
 //!
+//! With history on, a separate task also keeps the downsample's partial
+//! index `idx_pod_compute_history_minute_ts` present and valid, building
+//! it with `CREATE INDEX CONCURRENTLY` on its own connection after
+//! startup rather than in a migration (`ensure_minute_index` says why).
+//!
 //! # Seccomp denials
 //!
 //! A third loop does two things to `seccomp_denials`. It **backfills
@@ -248,6 +253,11 @@ fn spawn_compute(pool: DbPool) {
         interval_secs = interval.as_secs(),
         "compute retention loop scheduled (days=0 means history off; stale-latest pruning still runs)"
     );
+    // The downsample is the index's only user, and it runs only with
+    // history on.
+    if days > 0 {
+        spawn_minute_index();
+    }
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
         loop {
@@ -1396,6 +1406,205 @@ async fn run_downsample(pool: &DbPool, minute_hours: u32) {
     );
 }
 
+/// Where the next downsample batch starts: the oldest minute row older
+/// than the cutoff, or NULL once the tier is fully folded. A constant so
+/// the live test plans the SAME statement. It needs the partial
+/// [`MINUTE_INDEX`], which [`spawn_minute_index`] builds: through the
+/// plain `(ts)` index it walked every five-minute row below the cutoff
+/// first, and on a 16 M-row table that hit the statement timeout.
+const OLDEST_MINUTE_ROW_SQL: &str =
+    "SELECT min(ts) AS ts FROM pod_compute_history WHERE resolution_secs = 60 AND ts < $1";
+
+/// Partial index on the minute tier of `pod_compute_history`, for
+/// [`OLDEST_MINUTE_ROW_SQL`] and the downsample batch's own
+/// `resolution_secs = 60 AND ts >= $1 AND ts < $2` range. Partial rather
+/// than `(resolution_secs, ts)` because nothing reads the five-minute tier
+/// by resolution.
+const MINUTE_INDEX: &str = "idx_pod_compute_history_minute_ts";
+const CREATE_MINUTE_INDEX_SQL: &str = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \
+     idx_pod_compute_history_minute_ts ON pod_compute_history (ts) WHERE resolution_secs = 60";
+const DROP_MINUTE_INDEX_SQL: &str =
+    "DROP INDEX CONCURRENTLY IF EXISTS idx_pod_compute_history_minute_ts";
+/// Session advisory lock held for the whole check-and-build, so two
+/// replicas never race one build, and a replica never drops the INVALID
+/// index another is still building. A build orphaned by a killed pod keeps
+/// its backend, and so this lock, until it finishes.
+const MINUTE_INDEX_LOCK_KEY: &str = "kguardian:idx_pod_compute_history_minute_ts";
+/// First check after startup: after the pool has warmed and well before
+/// the first downsample pass could need it, but never on the startup path.
+const MINUTE_INDEX_WARMUP: Duration = Duration::from_secs(30);
+/// Re-check cadence once the index is valid (or another replica holds the
+/// build). A catalog lookup, so cheap; it catches an index dropped by hand
+/// or left INVALID by a build that failed elsewhere.
+const MINUTE_INDEX_RECHECK: Duration = Duration::from_secs(3600);
+/// First retry after a failed build, doubled per failure up to the
+/// re-check cadence.
+const MINUTE_INDEX_RETRY: Duration = Duration::from_secs(300);
+
+/// What [`ensure_minute_index`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinuteIndex {
+    /// Present and valid; nothing to do.
+    Valid,
+    /// Was missing; built.
+    Built,
+    /// Was INVALID (a CONCURRENTLY build that failed or was interrupted);
+    /// dropped and rebuilt.
+    Rebuilt,
+    /// Another session holds the build lock; try again later.
+    Busy,
+}
+
+#[derive(diesel::QueryableByName)]
+struct IndexValid {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
+    valid: Option<bool>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct Locked {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    locked: bool,
+}
+
+/// Make sure [`MINUTE_INDEX`] exists and is valid, building it with
+/// `CREATE INDEX CONCURRENTLY` if not.
+///
+/// This used to be a migration, and must not be one. Migrations run before
+/// the HTTP server binds, inside a transaction, so a plain `CREATE INDEX`
+/// on a large history table (23 GB on the dev cluster) could outlast the
+/// liveness probe's ~200 s. The kubelet would kill the pod and it would
+/// start the build again, while Postgres kept every orphaned build running
+/// with its SHARE lock, blocking every history INSERT. Those inserts hold
+/// a pool connection each while they wait, so the old pod's pool ran dry,
+/// `/health` failed, and a single-replica Broker went down entirely.
+/// CONCURRENTLY blocks no writes but cannot run in a transaction, and a
+/// build that fails leaves an INVALID index that `IF NOT EXISTS` would
+/// then skip for good, so it runs here, after startup, and repairs that
+/// case itself.
+///
+/// `conn` must be a dedicated connection, never a pool one: the build can
+/// take hours on a large table, so the session's statement timeout is
+/// switched off. It must also be a real session (direct, or a session-mode
+/// pooler, never PgBouncer transaction mode): the advisory lock is
+/// session-scoped, and a transaction-mode pooler could hand the lock and
+/// the build to different server connections.
+fn ensure_minute_index(conn: &mut PgConnection) -> Result<MinuteIndex, RetentionError> {
+    use diesel::connection::SimpleConnection;
+    use diesel::sql_types::Text;
+    conn.batch_execute("SET statement_timeout = 0")?;
+    let locked = sql_query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked")
+        .bind::<Text, _>(MINUTE_INDEX_LOCK_KEY)
+        .get_result::<Locked>(conn)?
+        .locked;
+    if !locked {
+        return Ok(MinuteIndex::Busy);
+    }
+    let outcome = (|| -> Result<MinuteIndex, RetentionError> {
+        let valid = sql_query(
+            "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)) AS valid",
+        )
+        .bind::<Text, _>(MINUTE_INDEX)
+        .get_result::<IndexValid>(conn)?
+        .valid;
+        let started = std::time::Instant::now();
+        let outcome = match valid {
+            Some(true) => return Ok(MinuteIndex::Valid),
+            Some(false) => {
+                warn!(
+                    index = MINUTE_INDEX,
+                    "compute history index is INVALID (an earlier build failed); rebuilding"
+                );
+                conn.batch_execute(DROP_MINUTE_INDEX_SQL)?;
+                MinuteIndex::Rebuilt
+            }
+            None => MinuteIndex::Built,
+        };
+        info!(
+            index = MINUTE_INDEX,
+            "building compute history index CONCURRENTLY (writes continue meanwhile)"
+        );
+        conn.batch_execute(CREATE_MINUTE_INDEX_SQL)?;
+        info!(
+            index = MINUTE_INDEX,
+            elapsed_secs = started.elapsed().as_secs(),
+            "compute history index built"
+        );
+        Ok(outcome)
+    })();
+    // Released explicitly so a pooled or reused session never keeps it;
+    // a dropped connection releases it anyway.
+    let _ = sql_query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind::<Text, _>(MINUTE_INDEX_LOCK_KEY)
+        .execute(conn);
+    outcome
+}
+
+/// Background task that keeps [`MINUTE_INDEX`] present and valid (see
+/// [`ensure_minute_index`]). Off the startup path and on its own
+/// connection, so neither readiness nor the request pool ever waits on a
+/// build.
+fn spawn_minute_index() {
+    let Some(url) = std::env::var("DATABASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        warn!(
+            index = MINUTE_INDEX,
+            "DATABASE_URL unset; not maintaining the compute history index"
+        );
+        return;
+    };
+    actix_web::rt::spawn(async move {
+        tokio::time::sleep(MINUTE_INDEX_WARMUP).await;
+        let mut retry = MINUTE_INDEX_RETRY;
+        loop {
+            let url = url.clone();
+            let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
+                let mut conn =
+                    PgConnection::establish(&url).map_err(|e| format!("connect: {e}"))?;
+                ensure_minute_index(&mut conn).map_err(|e| e.to_string())
+            })
+            .await;
+            let next = match result {
+                Ok(Ok(outcome)) => {
+                    match outcome {
+                        MinuteIndex::Valid => {
+                            debug!(index = MINUTE_INDEX, "compute history index valid")
+                        }
+                        MinuteIndex::Busy => info!(
+                            index = MINUTE_INDEX,
+                            "compute history index build held by another session; re-checking later"
+                        ),
+                        MinuteIndex::Built | MinuteIndex::Rebuilt => {}
+                    }
+                    retry = MINUTE_INDEX_RETRY;
+                    MINUTE_INDEX_RECHECK
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        index = MINUTE_INDEX,
+                        error = %e,
+                        retry_secs = retry.as_secs(),
+                        "compute history index build failed; retrying"
+                    );
+                    let wait = retry;
+                    retry = (retry * 2).min(MINUTE_INDEX_RECHECK);
+                    wait
+                }
+                Err(e) => {
+                    warn!(index = MINUTE_INDEX, error = %e, "compute history index task panicked");
+                    let wait = retry;
+                    retry = (retry * 2).min(MINUTE_INDEX_RECHECK);
+                    wait
+                }
+            };
+            tokio::time::sleep(next).await;
+        }
+    });
+}
+
 #[derive(diesel::QueryableByName)]
 struct OldestRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamp>)]
@@ -1409,8 +1618,14 @@ struct OldestRow {
 /// predicate (`resolution_secs = 60 AND ts >= $1 AND ts < $2`), so a
 /// crash between them cannot leave a bucket both folded and unfolded.
 /// The histogram is summed element-wise through `unnest ... WITH
-/// ORDINALITY` in a LATERAL subquery because Postgres has no array
-/// aggregate that adds arrays. Quantile columns take the max over the
+/// ORDINALITY` because Postgres has no array aggregate that adds arrays.
+/// It is one pass over the range grouped by `(container_uid, bucket)` and
+/// joined back, not a LATERAL subquery per group: that ran once per
+/// (container, bucket) and, with no `container_uid` index, each run read
+/// every container's rows in the bucket, so a batch was quadratic in the
+/// container count (5 s at 3 000 containers, minutes at 15 000). Because
+/// the range is whole buckets, every row of a bucket is inside it and the
+/// two forms sum the same rows. Quantile columns take the max over the
 /// bucket (a p99 of five p99s is not a p99, but the max is a safe upper
 /// bound, and the summed `runq_hist` is there to re-derive an exact
 /// one). Written with epoch arithmetic rather than `date_bin` so it runs
@@ -1423,13 +1638,11 @@ fn run_downsample_batch(
     let mut conn = pool.get().map_err(RetentionError::Pool)?;
     let now = chrono::Utc::now().naive_utc();
     let cutoff = now - chrono::Duration::hours(i64::from(minute_hours));
-    let oldest = sql_query(
-        "SELECT min(ts) AS ts FROM pod_compute_history WHERE resolution_secs = 60 AND ts < $1",
-    )
-    .bind::<Timestamp, _>(cutoff)
-    .get_result::<OldestRow>(&mut conn)
-    .map_err(RetentionError::Diesel)?
-    .ts;
+    let oldest = sql_query(OLDEST_MINUTE_ROW_SQL)
+        .bind::<Timestamp, _>(cutoff)
+        .get_result::<OldestRow>(&mut conn)
+        .map_err(RetentionError::Diesel)?
+        .ts;
     let Some(oldest) = oldest else {
         return Ok(None);
     };
@@ -1521,16 +1734,18 @@ FROM ( \
     WHERE resolution_secs = 60 AND ts >= $1 AND ts < $2 \
     GROUP BY container_uid, bucket \
 ) g \
-LEFT JOIN LATERAL ( \
-    SELECT array_agg(x.s ORDER BY x.i) AS hist \
+LEFT JOIN ( \
+    SELECT x.container_uid, x.bucket, array_agg(x.s ORDER BY x.i) AS hist \
     FROM ( \
-        SELECT u.i, sum(u.v)::bigint AS s \
+        SELECT p.container_uid, \
+            (to_timestamp(floor(extract(epoch FROM p.ts) / 300) * 300) AT TIME ZONE 'UTC') AS bucket, \
+            u.i, sum(u.v)::bigint AS s \
         FROM pod_compute_history p, unnest(p.runq_hist) WITH ORDINALITY AS u(v, i) \
-        WHERE p.container_uid = g.container_uid AND p.resolution_secs = 60 \
-          AND p.ts >= g.bucket AND p.ts < g.bucket + interval '5 minutes' \
-        GROUP BY u.i \
+        WHERE p.resolution_secs = 60 AND p.ts >= $1 AND p.ts < $2 \
+        GROUP BY p.container_uid, bucket, u.i \
     ) x \
-) h ON true";
+    GROUP BY x.container_uid, x.bucket \
+) h ON h.container_uid = g.container_uid AND h.bucket = g.bucket";
 
 /// Batched prune of one compute history table by `ts`. The table name
 /// is a `&'static str` chosen by the caller from two literals, never
@@ -1595,6 +1810,14 @@ async fn run_compute_prune(pool: &DbPool, table: &'static str, days: u32) {
 /// The statement `run_stale_latest` issues per batch, a constant so the
 /// live test runs the SAME SQL. Same shape as `NODE_COMPUTE_STALE_PRUNE_SQL`
 /// below, window repeated on the outer DELETE for the same recheck reason.
+///
+/// Deliberately no index on `updated_at` (dropped by migration
+/// `2026-10-01-100000_pod_compute_latest_hot_updates`). Every upsert
+/// rewrites `updated_at`, so an index on it made every upsert non-HOT and
+/// grew the table to 86 GB on the dev cluster. Without it the CTE is a
+/// sequential scan and top-N sort of a live-container-sized table, a few
+/// MB, once per batch every 10 minutes; the DELETE finds its rows through
+/// the primary key.
 const POD_COMPUTE_STALE_PRUNE_SQL: &str = "WITH stale AS (\
          SELECT container_uid FROM pod_compute_latest \
          WHERE updated_at < timezone('UTC', NOW()) - $1::interval \
@@ -3673,6 +3896,228 @@ mod tests {
             ["live-a", "live-b"].map(String::from),
             "one pass must clear every dead container, not one batch of them"
         );
+    }
+
+    /// The fold sums each (container, bucket)'s histograms element-wise and
+    /// only that group's: the grouped join must pair every group with its
+    /// own sum, leave a group whose rows carry no histogram at NULL, and
+    /// ignore minute rows outside the batch range.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_downsample_sums_each_buckets_own_histograms() {
+        use diesel::connection::SimpleConnection;
+        use diesel::sql_types::Timestamp;
+        let mut conn = live_conn();
+        // Container a: hist [k, 1, 0 ...] at minute k. b: [0, 0, k ...].
+        // c: no histogram (scheduler probe not loaded on its node).
+        conn.batch_execute(
+            "TRUNCATE pod_compute_history; \
+             INSERT INTO pod_compute_history (container_uid, pod_uid, namespace, pod_name, \
+               container, node, ts, resolution_secs, cpu_usage_millis_avg, cpu_usage_millis_max, \
+               cpu_usage_millis_last, cpu_period_usec, cpu_nr_periods, cpu_nr_throttled, \
+               cpu_throttled_usec, cpu_psi_some10_avg, cpu_psi_some10_max, cpu_psi_full10_avg, \
+               cpu_psi_full10_max, mem_current_avg, mem_current_max, mem_current_last, \
+               mem_working_set_avg, mem_working_set_max, mem_working_set_last, \
+               mem_psi_some10_avg, mem_psi_some10_max, mem_psi_full10_avg, mem_psi_full10_max, \
+               mem_events_high, mem_events_max, mem_oom_kill, mem_refault, mem_pgmajfault, \
+               runq_hist) \
+             SELECT c || '/app', c, 'ns', c, 'app', 'n', \
+               timestamp '2026-09-01 00:00' + k * interval '1 minute', 60, \
+               0, 0, 0, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
+               CASE c WHEN 'a' THEN ARRAY[k, 1]::bigint[] \
+                      WHEN 'b' THEN ARRAY[0, 0, k]::bigint[] END \
+             FROM unnest(ARRAY['a', 'b', 'c']) c, generate_series(0, 10) k",
+        )
+        .expect("seed pod_compute_history");
+
+        let at = |s: &str| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").expect("timestamp")
+        };
+        let written = sql_query(DOWNSAMPLE_INSERT_SQL)
+            .bind::<Timestamp, _>(at("2026-09-01 00:00"))
+            .bind::<Timestamp, _>(at("2026-09-01 00:10"))
+            .execute(&mut conn)
+            .expect("fold two buckets");
+        assert_eq!(written, 6, "three containers x two buckets");
+
+        #[derive(QueryableByName, Debug, PartialEq)]
+        struct Folded {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            container_uid: String,
+            #[diesel(sql_type = diesel::sql_types::Timestamp)]
+            ts: chrono::NaiveDateTime,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Array<diesel::sql_types::BigInt>>)]
+            runq_hist: Option<Vec<i64>>,
+        }
+        let folded = sql_query(
+            "SELECT container_uid, ts, runq_hist FROM pod_compute_history \
+             WHERE resolution_secs = 300 ORDER BY container_uid, ts",
+        )
+        .load::<Folded>(&mut conn)
+        .expect("read the folded rows");
+        let row = |uid: &str, ts: &str, hist: Option<Vec<i64>>| Folded {
+            container_uid: uid.into(),
+            ts: at(ts),
+            runq_hist: hist,
+        };
+        // Minutes 0-4 sum to 10, 5-9 to 35; minute 10 is outside the range.
+        assert_eq!(
+            folded,
+            vec![
+                row("a/app", "2026-09-01 00:00", Some(vec![10, 5])),
+                row("a/app", "2026-09-01 00:05", Some(vec![35, 5])),
+                row("b/app", "2026-09-01 00:00", Some(vec![0, 0, 10])),
+                row("b/app", "2026-09-01 00:05", Some(vec![0, 0, 35])),
+                row("c/app", "2026-09-01 00:00", None),
+                row("c/app", "2026-09-01 00:05", None),
+            ]
+        );
+        conn.batch_execute("TRUNCATE pod_compute_history")
+            .expect("leave the table empty for the other live tests");
+    }
+
+    fn minute_index_valid(conn: &mut PgConnection) -> Option<bool> {
+        sql_query(
+            "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)) AS valid",
+        )
+        .bind::<diesel::sql_types::Text, _>(MINUTE_INDEX)
+        .get_result::<IndexValid>(conn)
+        .expect("read the index state")
+        .valid
+    }
+
+    /// The background task's one step: builds the missing index, does
+    /// nothing to a valid one, rebuilds an INVALID one (what a failed or
+    /// interrupted CONCURRENTLY build leaves, and what `IF NOT EXISTS`
+    /// alone would skip forever), and stands aside while another session
+    /// holds the build lock. INVALID is simulated by flipping `indisvalid`,
+    /// which needs the superuser the CI and local test databases run as.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_minute_index_is_built_idempotent_and_self_heals() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        conn.batch_execute(DROP_MINUTE_INDEX_SQL)
+            .expect("start without the index");
+        assert_eq!(minute_index_valid(&mut conn), None);
+
+        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Built);
+        assert_eq!(minute_index_valid(&mut conn), Some(true));
+        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Valid);
+
+        conn.batch_execute(
+            "UPDATE pg_index SET indisvalid = false \
+             WHERE indexrelid = 'idx_pod_compute_history_minute_ts'::regclass",
+        )
+        .expect("mark the index INVALID (needs superuser)");
+        assert_eq!(minute_index_valid(&mut conn), Some(false));
+        assert_eq!(
+            ensure_minute_index(&mut conn).unwrap(),
+            MinuteIndex::Rebuilt
+        );
+        assert_eq!(minute_index_valid(&mut conn), Some(true));
+
+        // Another replica (or a build orphaned by a killed pod) holds the
+        // lock: this one neither builds nor drops anything.
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let mut other = PgConnection::establish(&url).expect("connect");
+        sql_query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind::<diesel::sql_types::Text, _>(MINUTE_INDEX_LOCK_KEY)
+            .execute(&mut other)
+            .expect("hold the build lock");
+        conn.batch_execute(DROP_MINUTE_INDEX_SQL)
+            .expect("drop the index again");
+        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Busy);
+        assert_eq!(minute_index_valid(&mut conn), None, "nothing built");
+        drop(other);
+        assert_eq!(ensure_minute_index(&mut conn).unwrap(), MinuteIndex::Built);
+    }
+
+    /// The downsample's starting point must come from the partial minute
+    /// index, and be the first entry of it, not a walk of the (ts) index
+    /// through every five-minute row below the cutoff. Seeded like steady
+    /// state: six days of folded five-minute rows, then a day of minute
+    /// rows, the oldest of which is just past the cutoff.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_oldest_minute_row_reads_the_minute_index() {
+        use diesel::connection::SimpleConnection;
+        use diesel::sql_types::Timestamp;
+        let mut conn = live_conn();
+        conn.batch_execute(
+            "TRUNCATE pod_compute_history; \
+             INSERT INTO pod_compute_history (container_uid, pod_uid, namespace, pod_name, \
+               container, node, ts, resolution_secs, cpu_usage_millis_avg, cpu_usage_millis_max, \
+               cpu_usage_millis_last, cpu_period_usec, cpu_nr_periods, cpu_nr_throttled, \
+               cpu_throttled_usec, cpu_psi_some10_avg, cpu_psi_some10_max, cpu_psi_full10_avg, \
+               cpu_psi_full10_max, mem_current_avg, mem_current_max, mem_current_last, \
+               mem_working_set_avg, mem_working_set_max, mem_working_set_last, \
+               mem_psi_some10_avg, mem_psi_some10_max, mem_psi_full10_avg, mem_psi_full10_max, \
+               mem_events_high, mem_events_max, mem_oom_kill, mem_refault, mem_pgmajfault) \
+             SELECT 'c' || c || '/app', 'c' || c, 'ns', 'p' || c, 'app', 'n', s.ts, s.res, \
+               0, 0, 0, 100000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 \
+             FROM generate_series(1, 20) c, LATERAL ( \
+               SELECT ts, 300 AS res FROM generate_series( \
+                 timezone('UTC', NOW()) - INTERVAL '7 days', \
+                 timezone('UTC', NOW()) - INTERVAL '25 hours', INTERVAL '5 minutes') ts \
+               UNION ALL \
+               SELECT ts, 60 FROM generate_series( \
+                 timezone('UTC', NOW()) - INTERVAL '24 hours 10 minutes', \
+                 timezone('UTC', NOW()), INTERVAL '1 minute') ts \
+             ) s; \
+             ANALYZE pod_compute_history",
+        )
+        .expect("seed pod_compute_history");
+        assert_ne!(
+            ensure_minute_index(&mut conn).expect("ensure the minute index"),
+            MinuteIndex::Busy
+        );
+
+        let cutoff = chrono::Utc::now().naive_utc()
+            - chrono::Duration::hours(i64::from(DEFAULT_COMPUTE_MINUTE_HOURS));
+        let oldest = sql_query(OLDEST_MINUTE_ROW_SQL)
+            .bind::<Timestamp, _>(cutoff)
+            .get_result::<OldestRow>(&mut conn)
+            .expect("oldest minute row")
+            .ts
+            .expect("minute rows older than the cutoff exist");
+        assert!(oldest < cutoff);
+        assert!(
+            cutoff - oldest <= chrono::Duration::minutes(11),
+            "the oldest MINUTE row, not the oldest five-minute one: {oldest} vs {cutoff}"
+        );
+
+        #[derive(QueryableByName)]
+        struct PlanLine {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            #[diesel(column_name = "QUERY PLAN")]
+            line: String,
+        }
+        // Penalised heap walks, as in the seccomp capture-index test: at
+        // this fixture's size the planner may not need the index, but it
+        // must be able to answer from it with no filter step.
+        conn.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off")
+            .expect("penalise the heap walks");
+        let plan = sql_query(format!("EXPLAIN {OLDEST_MINUTE_ROW_SQL}"))
+            .bind::<Timestamp, _>(cutoff)
+            .load::<PlanLine>(&mut conn)
+            .expect("explain")
+            .into_iter()
+            .map(|l| l.line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.batch_execute("RESET enable_seqscan; RESET enable_bitmapscan")
+            .expect("restore the planner");
+        assert!(
+            plan.contains("idx_pod_compute_history_minute_ts"),
+            "served by the partial minute index:\n{plan}"
+        );
+        assert!(
+            !plan.contains("Filter"),
+            "no row is read only to be discarded:\n{plan}"
+        );
+        conn.batch_execute("TRUNCATE pod_compute_history")
+            .expect("leave the table empty for the other live tests");
     }
 
     // ---- seccomp denial retention ----------------------------------
