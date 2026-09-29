@@ -1,0 +1,46 @@
+{{- if .Values.broker.leaderElection.enabled }}
+{{- /*
+  Leader election for the broker's cluster-singleton background jobs
+  (broker/src/leader.rs). Namespaced, and only on Leases: the broker reads
+  and renews its own Lease and can create one, nothing else. get/update are
+  pinned to the Lease's name; create cannot be (RBAC never sees a name on a
+  create), so it is granted on leases in this namespace. list, watch and
+  patch are not used and not granted. test/helm-values-compat.sh asserts
+  this shape.
+
+  The release namespace, not kguardian.namespace: the broker Deployment and
+  its ServiceAccount carry no namespace of their own, so they land in the
+  release namespace, and that is where the broker creates its Lease.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kguardian.name" . }}-broker-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    resourceNames: [{{ include "kguardian.brokerLeaseName" . | quote }}]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kguardian.name" . }}-broker-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kguardian.name" . }}-broker-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ default "broker" .Values.broker.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

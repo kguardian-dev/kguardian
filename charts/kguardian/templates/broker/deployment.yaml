@@ -430,6 +430,31 @@ spec:
               {{- if .Values.broker.networkPolicy.enabled }}{{- $features = append $features "netpol" }}{{- end }}
               {{- if .Values.frontend.sso.enabled }}{{- $features = append $features "sso" }}{{- end }}
               value: {{ join "," $features | quote }}
+            # Leader election for the cluster-singleton background jobs
+            # (retention, compute downsample, profile snapshotter, sweeps):
+            # with replicaCount > 1 only the Lease holder runs them. Off,
+            # every replica runs them.
+            - name: LEADER_ELECTION_ENABLED
+              value: {{ .Values.broker.leaderElection.enabled | quote }}
+            {{- if .Values.broker.leaderElection.enabled }}
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: {{ include "kguardian.brokerLeaseName" . | quote }}
+            - name: LEADER_ELECTION_LEASE_DURATION_SECS
+              value: {{ .Values.broker.leaderElection.leaseDurationSeconds | quote }}
+            - name: LEADER_ELECTION_RENEW_DEADLINE_SECS
+              value: {{ .Values.broker.leaderElection.renewDeadlineSeconds | quote }}
+            - name: LEADER_ELECTION_RETRY_PERIOD_SECS
+              value: {{ .Values.broker.leaderElection.retryPeriodSeconds | quote }}
+            # The Lease holder identity and namespace.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
@@ -462,6 +487,39 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.broker.leaderElection.enabled }}
+          volumeMounts:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          {{- end }}
+      {{- if .Values.broker.leaderElection.enabled }}
+      {{- /*
+        The API credentials leader election needs, and only when it is on.
+        The pod keeps automountServiceAccountToken: false and mounts the
+        same projected token automount would, explicitly: a token exists in
+        the broker only when there is a Role for it to use, and a future
+        container added to this pod does not inherit one by default.
+      */}}
+      volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+      {{- end }}
       {{- with .Values.broker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

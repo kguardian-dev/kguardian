@@ -666,9 +666,10 @@ render "supplychain-grype-existing-claim" "${SC_ON[@]}" --set supplychain.grype.
   assert_has    "supplychain-grype-existing-claim" "claimName: my-db"
   assert_absent "supplychain-grype-existing-claim" "name: kguardian-supplychain-grype-db"
 }
-# Trivy source off: no projected token anywhere in the pod.
+# Trivy source off: no projected token anywhere in the pod. Scoped to the
+# supplychain Deployment: the broker mounts its own for leader election.
 render "supplychain-no-api" "${SC_ON[@]}" --set supplychain.sources.trivyOperator.enabled=false \
-  --set supplychain.grype.enabled=true && {
+  --set supplychain.grype.enabled=true -s templates/supplychain/deployment.yaml && {
   assert_absent "supplychain-no-api" "kube-api-access"
 }
 
@@ -953,6 +954,48 @@ assert_render_fails "allowed-hosts-map" "frontend.allowedHosts must be a list" -
 # The full in-cluster name follows global.clusterDomain.
 render "allowed-hosts-cluster-domain" -n kg --set 'frontend.allowedHosts[0]=x.example.com' --set global.clusterDomain=corp.internal && \
   assert_has "allowed-hosts-cluster-domain" "kguardian-frontend.kg.svc.corp.internal\""
+
+# 15. Broker leader election. On by default at any replica count: a Role
+# limited to the broker's own Lease in the release namespace, the downward
+# API identity, and a token mounted only for it (the pod keeps
+# automountServiceAccountToken: false).
+for replicas in 1 3; do
+  label="leader-election-replicas-$replicas"
+  render "$label" -n kg --set broker.replicaCount=$replicas && {
+    assert_has "$label" "kind: Role$"
+    assert_has "$label" "name: kguardian-broker-leader-election"
+    assert_has "$label" 'resourceNames: \["compat-kguardian-broker-leader"\]'
+    assert_has "$label" "value: \"compat-kguardian-broker-leader\""
+    assert_has "$label" "fieldPath: metadata.name"
+    assert_has "$label" "mountPath: /var/run/secrets/kubernetes.io/serviceaccount"
+    assert_has "$label" "automountServiceAccountToken: false"
+  }
+done
+if OUT="$(helm template compat "$CHART" -n kg -s templates/broker/role.yaml 2>/dev/null)"; then
+  # Leases only, namespaced, never cluster-wide or list/watch/patch/delete.
+  assert_absent "leader-election-rbac" "ClusterRole"
+  assert_absent "leader-election-rbac" "list\|watch\|patch\|delete"
+  assert_has    "leader-election-rbac" "namespace: kg"
+  [ "$(grep -c 'resources: \[leases\]' <<<"$OUT")" = 2 ] || \
+    { echo "FAIL [leader-election-rbac]: expected exactly two leases rules"; fail=1; }
+  grep -A1 'resourceNames:' <<<"$OUT" | grep -q 'verbs: \[get, update\]' || \
+    { echo "FAIL [leader-election-rbac]: get/update must be pinned to the Lease name"; fail=1; }
+else
+  echo "FAIL [leader-election-rbac]: Role did not render"; fail=1
+fi
+# Off: no Role, no token, and the broker is told election is off.
+render "leader-election-off" -n kg --set broker.leaderElection.enabled=false && {
+  assert_absent "leader-election-off" "broker-leader-election"
+  assert_absent "leader-election-off" "kube-api-access"
+  assert_absent "leader-election-off" "LEADER_ELECTION_LEASE_NAME"
+  assert_has    "leader-election-off" "name: LEADER_ELECTION_ENABLED"
+}
+# A custom ServiceAccount name is the RoleBinding's subject.
+render "leader-election-custom-sa" -n kg --set broker.serviceAccount.name=kg-broker && \
+  assert_has "leader-election-custom-sa" "name: kg-broker"
+# Timings reach the broker.
+render "leader-election-timings" -n kg --set broker.leaderElection.leaseDurationSeconds=30 && \
+  assert_has "leader-election-timings" 'value: "30"'
 
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"

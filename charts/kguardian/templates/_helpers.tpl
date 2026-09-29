@@ -425,3 +425,13 @@ OOMKilled. Empty input renders nothing; an unparseable one fails.
 {{- printf "%d" (mulf $num (get $units $unit) 0.8 | floor | int64) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Name of the broker's leader election Lease: one per release, so two
+releases in one namespace never share a leader. Used by the broker
+Deployment (LEADER_ELECTION_LEASE_NAME) and its Role's resourceNames, so
+they cannot disagree.
+*/}}
+{{- define "kguardian.brokerLeaseName" -}}
+{{- printf "%s-broker-leader" (include "kguardian.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}

@@ -944,6 +944,29 @@ broker:
     minAvailable: 1
     maxUnavailable: ""
 
+  # Lease-based leader election for the broker's cluster-singleton background
+  # jobs: retention prunes, the compute downsample, the workload profile
+  # snapshotter, the stale-pod sweep and the supply-chain rollups. With
+  # replicaCount > 1 only the replica holding the Lease runs them (every
+  # replica still serves the API); without it they run on every replica and
+  # duplicate work and rows. Harmless at replicaCount 1.
+  leaderElection:
+    # -- Enable leader election. Adds a Role/RoleBinding limited to the
+    # broker's own Lease in the release namespace and mounts a service
+    # account token into the broker pod. With it off, every replica runs
+    # every background job, which is only safe at replicaCount 1.
+    enabled: true
+    # -- Seconds a follower waits after the leader's last renewal before it
+    # takes over (how long the jobs pause when a leader dies without a
+    # graceful shutdown).
+    leaseDurationSeconds: 15
+    # -- Seconds the leader keeps running the jobs without a successful
+    # renewal. Must be below leaseDurationSeconds.
+    renewDeadlineSeconds: 10
+    # -- Seconds between renew/acquire attempts. Must be below
+    # renewDeadlineSeconds / 1.2. An invalid combination falls back to 15/10/2.
+    retryPeriodSeconds: 2
+
   # -- Scoped bearer-token auth on the broker HTTP API. Without it any pod
   # that can reach the broker Service can read everything and forge
   # rows (pod specs, syscalls, mark_dead, seccomp status). With it, every
