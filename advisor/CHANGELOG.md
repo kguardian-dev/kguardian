@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.4](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.3...advisor/v1.11.4) (2026-09-29)
+
+
+### Bug Fixes
+
+* **advisor:** allow a Service's targetPort, not its port, on egress rules ([947355f](https://github.com/kguardian-dev/kguardian/commit/947355fbcd16f7a9a9d00b4528cddc7fd3689cea))
+* **advisor:** resolve a named targetPort to its number for host-network Service backends ([725157e](https://github.com/kguardian-dev/kguardian/commit/725157eba685e3a25c9b15cec4f8985da40fe17c))
+* **broker:** allow a Service's targetPort in generated egress rules ([82b8135](https://github.com/kguardian-dev/kguardian/commit/82b8135d3e9f92670e4ed80a0fd018cd79bc73df))
+
 ## [1.11.3](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.2...advisor/v1.11.3) (2026-09-29)
 
 
