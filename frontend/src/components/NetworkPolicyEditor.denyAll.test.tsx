@@ -72,12 +72,13 @@ test('a failed traffic read is named as the cause, not presented as zero traffic
   expect(within(alert).queryByRole('button', { name: 'Dismiss policy notice' })).toBeNull();
 });
 
-test('the audit format keeps the deny-all warning and names its Save accordingly', async () => {
+test('the audit format keeps the deny-all warning and its Save label', async () => {
   render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={workload([])} initialPolicyType="network" />);
   await waitForYaml('kind: NetworkPolicy');
   fireEvent.click(screen.getByRole('radio', { name: /AuditNetworkPolicy/ }));
   expect(screen.getByRole('alert').textContent).toContain('allows nothing');
-  expect(screen.getByRole('button', { name: 'Save Deny-All Audit Policy' })).toBeTruthy();
+  // The format stays out of the label, as it does for every other policy.
+  expect(screen.getByRole('button', { name: 'Save Deny-All Policy' })).toBeTruthy();
 });
 
 test('the Cilium format: enableDefaultDeny both true, same warning', async () => {

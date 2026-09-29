@@ -61,7 +61,9 @@ test('the network tab offers Audit, NetworkPolicy and Cilium; Audit only swaps t
   fireEvent.click(screen.getByRole('radio', { name: /Audit/ }));
   expect(yamlHeader()).toEqual(header('kguardian.dev/v1alpha1', 'AuditNetworkPolicy'));
   expect(screen.getByText('Audit Network Policy Builder')).toBeTruthy();
-  expect(screen.getByText('Save Audit Policy')).toBeTruthy();
+  // The save button carries one label for every format: what is about to be
+  // written is the footer note's job, not the button's.
+  expect(screen.getByRole('button', { name: 'Save Policy' })).toBeTruthy();
 
   fireEvent.click(screen.getByRole('radio', { name: 'NetworkPolicy' }));
   expect(yamlHeader()).toEqual(header('networking.k8s.io/v1', 'NetworkPolicy'));
