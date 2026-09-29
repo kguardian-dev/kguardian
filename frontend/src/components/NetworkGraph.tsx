@@ -22,7 +22,7 @@ import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { EDGE_COLOR_CONTENTION, buildContentionEdges } from '../utils/contentionEdges';
 import { focusEdges, focusNeighborhood as focusNeighborhoodOf } from '../utils/focus';
-import { hasComputeGauges, nodeHeight } from '../utils/compute';
+import { hasComputeGauges, nodeHeight, sameFindings } from '../utils/compute';
 import {
   isRectInView,
   keepOnMap,
@@ -296,9 +296,15 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // findings. Built against every external node (hidden DaemonSet peers
   // included) so a culprit that already is a traffic peer reuses its node;
   // edges to a node that is not drawn are dropped below.
+  // The findings poll hands over a new array every 15 s even when the answer
+  // is unchanged; keep the one we have then, like `trafficPods` above, so the
+  // contention edges, the drawn external nodes and the traffic edges built
+  // from them are not rebuilt for nothing.
+  const [findings, setFindings] = useState(computeFindings);
+  if (findings !== computeFindings && !sameFindings(findings, computeFindings)) setFindings(computeFindings);
   const contention = useMemo(
-    () => buildContentionEdges(computeFindings, trafficPods, externalNodes, allPodsLookup),
-    [computeFindings, trafficPods, externalNodes, allPodsLookup],
+    () => buildContentionEdges(findings, trafficPods, externalNodes, allPodsLookup),
+    [findings, trafficPods, externalNodes, allPodsLookup],
   );
   const contentionCount = contention.edges.length;
 

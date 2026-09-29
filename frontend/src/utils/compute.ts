@@ -554,6 +554,16 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
   };
 }
 
+/**
+ * The same findings, in the same order, field for field. The findings poll
+ * answers with a new array every 15 s whether or not anything changed; this
+ * lets a consumer keep the one it has. The list is bounded, so comparing the
+ * serialised rows is cheap.
+ */
+export function sameFindings(a: readonly ComputeFinding[], b: readonly ComputeFinding[]): boolean {
+  return a === b || (a.length === b.length && a.every((f, i) => f === b[i] || JSON.stringify(f) === JSON.stringify(b[i])));
+}
+
 /** Throttled share of the sample's CFS periods (D3), 0..1, or null without periods. */
 export function throttledRatio(c: Pick<ComputeContainer, 'cpu_throttled_usec' | 'cpu_nr_periods' | 'cpu_period_usec'>): number | null {
   const denom = c.cpu_nr_periods * c.cpu_period_usec;
