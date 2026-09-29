@@ -1087,18 +1087,8 @@ fn live_database_reads_filter_page_and_group() {
     assert!(c1.fixable);
     assert_eq!(all.items[0].in_use_state, "unknown");
     let page1 = list_cves(&mut conn, None, None, None, false, None, 2).unwrap();
-    let cur = page1.next_after.unwrap();
-    let (r, id) = cur.split_once('.').unwrap();
-    let page2 = list_cves(
-        &mut conn,
-        None,
-        None,
-        None,
-        false,
-        Some((r.parse().unwrap(), id.to_string())),
-        2,
-    )
-    .unwrap();
+    let cur = crate::supplychain_read::parse_cve_cursor(page1.next_after.as_deref()).unwrap();
+    let page2 = list_cves(&mut conn, None, None, None, false, cur, 2).unwrap();
     assert_eq!(
         page2
             .items
@@ -3165,4 +3155,325 @@ fn live_database_sbom_matched_by_a_report_follows_it_to_the_running_digest() {
     assert_eq!(p.reports[0].join, "platform_manifest");
     assert_eq!(p.items.len(), 6);
     assert_eq!(relink_batch(&mut conn, None, 100).unwrap().0, 0);
+}
+
+/// `vuln_id` narrows the per-image list to one id, case-insensitively,
+/// together with every other filter and the cursor; without it the list
+/// is the same as before.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_image_vulns_filter_by_vuln_id() {
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let mut conn = live_conn();
+    seed_inventory(
+        &mut conn,
+        &d(61),
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "api",
+        0,
+    );
+    let mut v = vulns_json(
+        &d(61),
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2024-0001", "CRITICAL", Some("2")),
+            ("GHSA-AbCd-1234-efGH", "HIGH", None),
+            ("CVE-2024-0002", "HIGH", None),
+            ("CVE-2024-0001", "LOW", None),
+            ("CVE-2024-0001", "MEDIUM", Some("3")),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    // One id, three packages.
+    for (i, pkg) in [(3, "zlib"), (4, "openssl")] {
+        v["vulnerabilities"][i]["package"]["name"] = json!(pkg);
+    }
+    store_v(&mut conn, v);
+
+    let ids_pkgs = |conn: &mut PgConnection, f: &ListFilters, limit: i64| {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let p = image_vulnerabilities_filtered(conn, &d(61), None, f, after, limit).unwrap();
+            out.extend(
+                p.items
+                    .iter()
+                    .map(|f| (f.id.clone(), f.package.name.clone())),
+            );
+            match p.next_after {
+                Some(c) => {
+                    let (r, id) = c.split_once('.').unwrap();
+                    after = Some((r.parse().unwrap(), id.parse().unwrap()));
+                }
+                None => break,
+            }
+        }
+        out
+    };
+    let by_id = |id: &str| ListFilters {
+        vuln_id: Some(id.into()),
+        ..Default::default()
+    };
+    let one = [
+        ("CVE-2024-0001".to_string(), "pkg-CVE-2024-0001".to_string()),
+        ("CVE-2024-0001".to_string(), "openssl".to_string()),
+        ("CVE-2024-0001".to_string(), "zlib".to_string()),
+    ];
+    // Exact, and any case, in severity order.
+    assert_eq!(ids_pkgs(&mut conn, &by_id("CVE-2024-0001"), 50), one);
+    assert_eq!(ids_pkgs(&mut conn, &by_id("cve-2024-0001"), 50), one);
+    assert_eq!(
+        ids_pkgs(&mut conn, &by_id("ghsa-abcd-1234-EFGH"), 50),
+        [(
+            "GHSA-AbCd-1234-efGH".to_string(),
+            "pkg-GHSA-AbCd-1234-efGH".to_string()
+        )]
+    );
+    // Paging one row at a time walks every match exactly once.
+    assert_eq!(ids_pkgs(&mut conn, &by_id("Cve-2024-0001"), 1), one);
+    // With another filter.
+    let fixable = ListFilters {
+        fixable: Some(true),
+        ..by_id("cve-2024-0001")
+    };
+    assert_eq!(
+        ids_pkgs(&mut conn, &fixable, 1),
+        [one[0].clone(), one[1].clone()]
+    );
+    let low = ListFilters {
+        severities: Some(vec![2]),
+        ..by_id("CVE-2024-0001")
+    };
+    assert_eq!(ids_pkgs(&mut conn, &low, 50), [one[2].clone()]);
+    let p0 = ListFilters {
+        tiers: Some(vec![0]),
+        ..by_id("CVE-2024-0001")
+    };
+    assert!(ids_pkgs(&mut conn, &p0, 50).is_empty());
+    // A prefix is not the id.
+    assert!(ids_pkgs(&mut conn, &by_id("CVE-2024-000"), 50).is_empty());
+    // Without it: every finding, most severe first, as before.
+    let all = ids_pkgs(&mut conn, &ListFilters::default(), 2);
+    assert_eq!(
+        all.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(),
+        [
+            "CVE-2024-0001",
+            "GHSA-AbCd-1234-efGH",
+            "CVE-2024-0002",
+            "CVE-2024-0001",
+            "CVE-2024-0001"
+        ]
+    );
+}
+
+/// Inserts one CVE summary row with the given tier.
+fn summary_row(conn: &mut PgConnection, scope: &str, id: &str, sev: i16, tier: Option<i16>) {
+    let tier = tier.map_or("NULL".to_string(), |t| t.to_string());
+    exec(
+        conn,
+        &format!(
+            "INSERT INTO vuln_cve_summary (scope_namespace, vuln_id, severity_rank, fixable, \
+                images, workloads, running_workloads, namespaces, weakest_rank, tier) \
+             VALUES ('{scope}', '{id}', {sev}, true, 1, 1, 1, 1, 1, {tier})"
+        ),
+    );
+}
+
+/// The CVE list is ordered by tier (P0, not computed yet, P1, P2,
+/// Background), then severity, then id, and the cursor pages it with no
+/// row missed or repeated, across tier boundaries and with filters.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
+    use crate::supplychain_read::{list_cves_filtered, parse_cve_cursor, ListFilters};
+    let mut conn = live_conn();
+    for (id, sev, tier) in [
+        ("CVE-I", 5, Some(3)),
+        ("CVE-J", 1, Some(2)),
+        ("CVE-A", 2, Some(0)),
+        ("CVE-G", 4, Some(1)),
+        ("CVE-C", 5, None),
+        ("CVE-H", 5, Some(2)),
+        ("CVE-B", 5, Some(0)),
+        ("CVE-E", 5, Some(1)),
+        ("CVE-D", 3, None),
+        ("CVE-F", 4, Some(1)),
+    ] {
+        summary_row(&mut conn, "", id, sev, tier);
+    }
+    // Another scope's row never shows in the cluster-wide list.
+    summary_row(&mut conn, NS, "CVE-0", 5, Some(0));
+    let expected = [
+        "CVE-B", "CVE-A", "CVE-C", "CVE-D", "CVE-E", "CVE-F", "CVE-G", "CVE-H", "CVE-J", "CVE-I",
+    ];
+    let walk = |conn: &mut PgConnection, f: &ListFilters, limit: i64| {
+        let mut out: Vec<String> = Vec::new();
+        let mut after = None;
+        loop {
+            let p = list_cves_filtered(conn, f, None, false, after, limit).unwrap();
+            assert_eq!(p.order, "tier");
+            out.extend(p.items.iter().map(|c| c.summary.id.clone()));
+            match p.next_after {
+                Some(c) => {
+                    assert!(c.starts_with('t'), "{c}");
+                    after = parse_cve_cursor(Some(&c)).unwrap();
+                }
+                None => break,
+            }
+        }
+        out
+    };
+    let all = ListFilters::default();
+    for limit in 1..=11 {
+        assert_eq!(walk(&mut conn, &all, limit), expected, "limit {limit}");
+    }
+    let first = list_cves_filtered(&mut conn, &all, None, false, None, 3).unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|c| c.summary.tier.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("P0"), Some("P0"), None]
+    );
+    // The cursor names the last row's tier position, severity and id.
+    assert_eq!(first.next_after.as_deref(), Some("t1.5.CVE-C"));
+    // The tier filter keeps working, and pages in the same order.
+    let p1p2 = ListFilters {
+        tiers: Some(vec![1, 2]),
+        ..Default::default()
+    };
+    for limit in 1..=3 {
+        assert_eq!(
+            walk(&mut conn, &p1p2, limit),
+            ["CVE-E", "CVE-F", "CVE-G", "CVE-H", "CVE-J"]
+        );
+    }
+    let crit = ListFilters {
+        severities: Some(vec![5]),
+        ..Default::default()
+    };
+    assert_eq!(
+        walk(&mut conn, &crit, 2),
+        ["CVE-B", "CVE-C", "CVE-E", "CVE-H", "CVE-I"]
+    );
+    // A namespace scope is its own list.
+    let ns = list_cves_filtered(&mut conn, &all, Some(NS), false, None, 10).unwrap();
+    assert_eq!(ns.items.len(), 1);
+    assert_eq!(ns.items[0].summary.id, "CVE-0");
+}
+
+/// Over HTTP: `vuln_id` on the per-image list, the CVE list's `order`,
+/// and a cursor from before the tier order refused with a 400.
+#[actix_web::test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+async fn live_database_http_vuln_id_filter_and_tier_ordered_cves() {
+    let mut conn = live_conn();
+    seed_inventory(
+        &mut conn,
+        &d(62),
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "api",
+        0,
+    );
+    let mut v = vulns_json(
+        &d(62),
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2024-0001", "CRITICAL", Some("2")),
+            ("CVE-2024-0002", "HIGH", None),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    store_v(&mut conn, v);
+    for (id, sev, tier) in [
+        ("CVE-X", 5, Some(1)),
+        ("CVE-Y", 2, Some(0)),
+        ("CVE-Z", 5, None),
+    ] {
+        summary_row(&mut conn, "", id, sev, tier);
+    }
+    drop(conn);
+    let url = std::env::var("KG_TEST_DATABASE_URL").unwrap();
+    let pool = r2d2::Pool::builder()
+        .max_size(2)
+        .build(ConnectionManager::<PgConnection>::new(url))
+        .unwrap();
+    let app = atest::init_service(
+        App::new()
+            .wrap(from_fn(crate::auth::authenticate))
+            .app_data(web::Data::new(auth(&[("BROKER_TOKEN_READ", READ_TOK)])))
+            .app_data(web::Data::new(pool))
+            .app_data(web::Data::new(crate::ReadBudget::with_budget_kib(
+                64 * 1024,
+                std::time::Duration::from_secs(1),
+            )))
+            .configure(crate::routes::configure),
+    )
+    .await;
+    let get = |uri: String| {
+        atest::TestRequest::get()
+            .uri(&uri)
+            .insert_header((header::AUTHORIZATION, format!("Bearer {READ_TOK}")))
+    };
+    let ids = |body: &serde_json::Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let vpath = format!("/images/{}/vulnerabilities", d(62));
+    let body: serde_json::Value = atest::call_and_read_body_json(
+        &app,
+        get(format!("{vpath}?vuln_id=cve-2024-0002")).to_request(),
+    )
+    .await;
+    assert_eq!(ids(&body), ["CVE-2024-0002"]);
+    // Empty is no filter; a malformed id is a 400.
+    let body: serde_json::Value =
+        atest::call_and_read_body_json(&app, get(format!("{vpath}?vuln_id=")).to_request()).await;
+    assert_eq!(ids(&body), ["CVE-2024-0001", "CVE-2024-0002"]);
+    assert!(body.get("order").is_none());
+    assert_eq!(
+        status!(app, get(format!("{vpath}?vuln_id=CVE%201"))),
+        StatusCode::BAD_REQUEST
+    );
+
+    let body: serde_json::Value =
+        atest::call_and_read_body_json(&app, get("/vulnerabilities?limit=2".into()).to_request())
+            .await;
+    assert_eq!(body["order"], "tier");
+    assert_eq!(ids(&body), ["CVE-Y", "CVE-Z"]);
+    assert!(body["items"][0].get("tierOrder").is_none());
+    let next = body["nextAfter"].as_str().unwrap().to_string();
+    assert_eq!(next, "t1.5.CVE-Z");
+    let body: serde_json::Value = atest::call_and_read_body_json(
+        &app,
+        get(format!("/vulnerabilities?limit=2&after={next}")).to_request(),
+    )
+    .await;
+    assert_eq!(ids(&body), ["CVE-X"]);
+    assert!(body["nextAfter"].is_null());
+    // A severity-first cursor from an older broker: 400, start again.
+    let resp = atest::call_service(
+        &app,
+        get("/vulnerabilities?limit=2&after=5.CVE-X".into()).to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = atest::read_body(resp).await;
+    assert!(
+        std::str::from_utf8(&text)
+            .unwrap()
+            .contains("request the first page again"),
+        "{text:?}"
+    );
 }
