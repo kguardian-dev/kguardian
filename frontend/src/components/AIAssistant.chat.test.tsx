@@ -235,6 +235,28 @@ it('opens external links from a reply in a new tab without a referrer or opener'
   expect(link.getAttribute('rel')).toBe('noopener noreferrer');
 });
 
+// A browser resolves each of these to another origin although none starts
+// with `//` or `scheme://`. (The Markdown parser percent-encodes backslashes,
+// so those two stay on this origin; they are here so any link that does
+// leave it is caught.)
+it.each(['https:evil.example/x', 'HTTP:evil.example/x', '/\\evil.example/x', '\\\\\\\\evil.example/x'])('a reply link to %s that leaves this origin opens in a new tab', async (href) => {
+  replyWith(`See [the page](${href}).`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const link = await screen.findByRole('link', { name: 'the page' });
+  if (new URL(link.getAttribute('href')!, location.href).origin === location.origin) return;
+  expect(link.getAttribute('target')).toBe('_blank');
+  expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+});
+
+it('keeps a same-origin reply link in this tab', async () => {
+  replyWith('Open [the map](#/map?ns=argocd).');
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const link = await screen.findByRole('link', { name: 'the map' });
+  expect(link.getAttribute('target')).toBeNull();
+});
+
 it('sends only completed exchanges as history: failed, stopped and empty replies are left out', async () => {
   const turn = (id: string, role: 'user' | 'assistant', content: string) => ({ id, role, content, timestamp: at });
   sessionStorage.setItem(CONVERSATION_KEY, JSON.stringify([

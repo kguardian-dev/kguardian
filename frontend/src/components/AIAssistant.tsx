@@ -165,8 +165,18 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
 // handle back to this page.
 const ReplyImage: React.FC<{ alt?: string }> = ({ alt }) => <span>{alt ? `[image: ${alt}]` : '[image]'}</span>;
 
+// Whether the browser would take `href` to another origin. It decides, not a
+// pattern: `https:evil.example` and backslash forms leave the page too.
+function leavesOrigin(href: string): boolean {
+  try {
+    return new URL(href, window.location.href).origin !== window.location.origin;
+  } catch {
+    return true;
+  }
+}
+
 const ReplyLink: React.FC<{ href?: string; children?: React.ReactNode }> = ({ href, children }) =>
-  href && /^(https?:)?\/\//i.test(href) ? (
+  href && leavesOrigin(href) ? (
     <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
   ) : (
     <a href={href}>{children}</a>
