@@ -1846,7 +1846,10 @@ macro_rules! cve_list_rank_sql {
 /// [`cve_list_rank_sql`] then `vuln_id`, which idx_vuln_cve_summary_list
 /// serves; the keyset ($5, $6) is the last row's (list rank, vuln_id), a
 /// row comparison the index reads as a range, so a deep page costs the
-/// same as the first.
+/// same as the first. $12 ([`list_ranks_for`]) is the list ranks a tier
+/// or severity filter allows: the index reads just those (in order, with
+/// the cursor), rather than walking the scope and filtering. The tier and
+/// severity predicates stay as the exact test.
 pub(crate) const CVES_SQL: &str = concat!(
     "\
 SELECT vuln_id AS id, \
@@ -1870,6 +1873,9 @@ WHERE scope_namespace = COALESCE($3, '') \
   AND ($1::smallint[] IS NULL OR severity_rank = ANY($1)) \
   AND ($2::bool IS NULL OR fixable = $2) \
   AND ($4::bool IS NOT TRUE OR running_workloads > 0) \
+  AND ($12::smallint[] IS NULL OR ",
+    cve_list_rank_sql!(),
+    " = ANY($12)) \
   AND ($5::smallint IS NULL OR (",
     cve_list_rank_sql!(),
     ", vuln_id) > ($5, $6)) \
@@ -1878,6 +1884,38 @@ ORDER BY ",
     ", vuln_id \
 LIMIT $7"
 );
+
+/// The list ranks ([`cve_list_rank_sql`]) a tier and severity filter can
+/// match, ascending, or `None` with neither filter. A tier filter (0..3,
+/// [`parse_tiers`]) never includes the not-yet-computed position, as
+/// `tier = ANY(...)` never matches a NULL tier.
+pub(crate) fn list_ranks_for(
+    tiers: Option<&[i16]>,
+    severities: Option<&[i16]>,
+) -> Option<Vec<i16>> {
+    if tiers.is_none() && severities.is_none() {
+        return None;
+    }
+    let positions: Vec<i16> = match tiers {
+        Some(t) => t
+            .iter()
+            .filter(|t| (0..=3).contains(*t))
+            .map(|&t| if t == 0 { 0 } else { t + 1 })
+            .collect(),
+        None => (0..=4).collect(),
+    };
+    let sevs: Vec<i16> = match severities {
+        Some(s) => s.iter().copied().filter(|s| (0..=5).contains(s)).collect(),
+        None => (0..=5).collect(),
+    };
+    let mut out: Vec<i16> = positions
+        .iter()
+        .flat_map(|p| sevs.iter().map(move |s| p * 10 + (5 - s)))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
 
 #[derive(QueryableByName)]
 struct SummaryState {
@@ -1927,6 +1965,10 @@ pub fn list_cves_filtered(
         .bind::<Nullable<Double>, _>(f.epss_min)
         .bind::<Nullable<Array<Text>>, _>(f.in_use.as_deref())
         .bind::<Nullable<Array<SmallInt>>, _>(f.tiers.as_deref())
+        .bind::<Nullable<Array<SmallInt>>, _>(list_ranks_for(
+            f.tiers.as_deref(),
+            f.severities.as_deref(),
+        ))
         .load(conn)?;
     let state: Option<SummaryState> = sql_query(
         "SELECT refreshed_at, \
@@ -2732,7 +2774,25 @@ mod tests {
         let up =
             include_str!("../db/migrations/2026-10-02-100000_vuln_cve_summary_list_rank/up.sql");
         assert!(up.contains(cve_list_rank_sql!()));
-        assert_eq!(CVES_SQL.matches(cve_list_rank_sql!()).count(), 3);
+        assert_eq!(CVES_SQL.matches(cve_list_rank_sql!()).count(), 4);
+    }
+
+    #[test]
+    fn tier_and_severity_filters_become_list_ranks() {
+        assert_eq!(list_ranks_for(None, None), None);
+        // P1 is position 2: ranks 20 (critical) .. 25 (unknown).
+        assert_eq!(
+            list_ranks_for(Some(&[1]), None),
+            Some(vec![20, 21, 22, 23, 24, 25])
+        );
+        // P0 and Background, high only; never the not-yet-computed 10..15.
+        assert_eq!(list_ranks_for(Some(&[3, 0]), Some(&[4])), Some(vec![1, 41]));
+        // Severity alone spans every position, not-yet-computed included.
+        assert_eq!(
+            list_ranks_for(None, Some(&[5])),
+            Some(vec![0, 10, 20, 30, 40])
+        );
+        assert_eq!(list_ranks_for(Some(&[2]), Some(&[])), Some(vec![]));
     }
 
     #[test]

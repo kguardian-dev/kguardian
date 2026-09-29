@@ -3378,7 +3378,7 @@ fn live_database_cve_list_is_ordered_by_tier_and_pages_across_tiers() {
 
 /// The tier-ordered CVE list is read off idx_vuln_cve_summary_list: the
 /// first page and a deep page both walk the index in order, with no sort
-/// and the cursor as the index range.
+/// and the cursor as the index range; a tier filter reads only its ranks.
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
 fn live_database_cve_list_pages_are_served_by_the_list_index() {
@@ -3406,7 +3406,8 @@ fn live_database_cve_list_pages_are_served_by_the_list_index() {
     // in order.
     conn.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off")
         .expect("penalise the heap walks");
-    let plan = |conn: &mut PgConnection, after: Option<(i16, &str)>| {
+    let plan = |conn: &mut PgConnection, after: Option<(i16, &str)>, tiers: Option<Vec<i16>>| {
+        let ranks = crate::supplychain_read::list_ranks_for(tiers.as_deref(), None);
         sql_query(format!("EXPLAIN {}", crate::supplychain_read::CVES_SQL))
             .bind::<Nullable<Array<SmallInt>>, _>(None::<Vec<i16>>)
             .bind::<Nullable<Bool>, _>(None::<bool>)
@@ -3418,7 +3419,8 @@ fn live_database_cve_list_pages_are_served_by_the_list_index() {
             .bind::<Nullable<Bool>, _>(None::<bool>)
             .bind::<Nullable<Double>, _>(None::<f64>)
             .bind::<Nullable<Array<Text>>, _>(None::<Vec<String>>)
-            .bind::<Nullable<Array<SmallInt>>, _>(None::<Vec<i16>>)
+            .bind::<Nullable<Array<SmallInt>>, _>(tiers)
+            .bind::<Nullable<Array<SmallInt>>, _>(ranks)
             .load::<PlanLine>(conn)
             .expect("explain")
             .into_iter()
@@ -3426,11 +3428,29 @@ fn live_database_cve_list_pages_are_served_by_the_list_index() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let first = plan(&mut conn, None);
-    let deep = plan(&mut conn, Some((32, "CVE-2026-0100")));
+    let first = plan(&mut conn, None, None);
+    let deep = plan(&mut conn, Some((32, "CVE-2026-0100")), None);
+    let tiered = plan(&mut conn, None, Some(vec![1]));
+    let tiered_deep = plan(&mut conn, Some((22, "CVE-2026-0100")), Some(vec![1, 3]));
     conn.batch_execute("RESET enable_seqscan; RESET enable_bitmapscan")
         .expect("restore the planner");
-    for (name, p) in [("first", &first), ("deep", &deep)] {
+    // A tier filter is a set of rank ranges read off the index, in order.
+    for (name, p) in [("tiered", &tiered), ("tiered deep", &tiered_deep)] {
+        let cond = p
+            .lines()
+            .find(|l| l.contains("Index Cond"))
+            .unwrap_or_default();
+        assert!(
+            cond.contains("= ANY"),
+            "{name} page reads only the tier's ranks:\n{p}"
+        );
+    }
+    for (name, p) in [
+        ("first", &first),
+        ("deep", &deep),
+        ("tiered", &tiered),
+        ("tiered deep", &tiered_deep),
+    ] {
         assert!(
             p.contains("idx_vuln_cve_summary_list"),
             "{name} page served by the list index:\n{p}"
