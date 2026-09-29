@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.28.5](https://img.shields.io/badge/Version-1.28.5-informational?style=flat-square)
+![Version: 1.28.6](https://img.shields.io/badge/Version-1.28.6-informational?style=flat-square)
 
 ## Overview
 
