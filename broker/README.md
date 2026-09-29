@@ -60,7 +60,39 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `IMAGE_INVENTORY_RETENTION_DAYS` | `30` | Prune image inventory digests no running pod has refreshed for this long; `0` disables pruning |
 | `IMAGE_INVENTORY_RETENTION_INTERVAL_SECS` | `3600` | Pruner cadence (min 60) |
 | `IMAGE_INVENTORY_RETENTION_BATCH_SIZE` | `5000` | Rows deleted per pruning batch, clamped to [100, 100000] |
+| `LEADER_ELECTION_ENABLED` | auto | `true`/`false`; unset or `auto` means on when running in a pod (`KUBERNETES_SERVICE_HOST` set and a service account token mounted). Off: this replica runs every background job |
+| `LEADER_ELECTION_LEASE_NAME` | `kguardian-broker-leader` | The `coordination.k8s.io/v1` Lease replicas contend for (chart: `<fullname>-broker-leader`) |
+| `LEADER_ELECTION_NAMESPACE` | `POD_NAMESPACE`, then the service account namespace | Namespace of the Lease |
+| `LEADER_ELECTION_LEASE_DURATION_SECS` | `15` | How long a follower waits after the leader's last renewal before taking over |
+| `LEADER_ELECTION_RENEW_DEADLINE_SECS` | `10` | How long the leader keeps running the jobs without a successful renewal; must be below the lease duration |
+| `LEADER_ELECTION_RETRY_PERIOD_SECS` | `2` | Renew/acquire cadence; must be below renew deadline / 1.2 (a bad combination falls back to 15/10/2) |
+| `POD_NAME` | hostname | Lease holder identity (downward API) |
 | `RUST_LOG` | `info` | Log level |
+
+### Running more than one replica
+
+Every replica serves the whole API, but the background jobs that prune or
+derive shared data (retention prunes, the compute downsample, the workload
+profile snapshotter, the peer late-resolve and stale-pod sweep, the
+supply-chain rollups, the image attestation prune) run only on the replica
+holding a Lease. The rest, which feed each replica's own `/metrics` and
+`GET /version`, run everywhere. The full list is in `src/leader.rs`.
+
+A leader that stops renewing stops those jobs after the renew deadline; a
+follower takes over once the lease has gone unrenewed for the lease duration
+(by its own clock, so node clock skew does not matter). A leader shutting down
+gracefully clears the holder, and a follower takes over within one retry
+period. A pass that loses leadership stops at its next batch boundary.
+
+If the Lease API refuses the broker at startup (no Role bound to its service
+account, e.g. hand-written manifests) or stays unreachable for about 20
+seconds, the broker logs a warning and runs
+every job itself, which is the behaviour before leader election existed.
+`/metrics` shows the state:
+
+- `broker_leader`: 1 on the replica running the jobs
+- `broker_leader_election_active{mode="elected|disabled|fallback_forbidden|fallback_unreachable"}`: 1 only while contending for the Lease
+- `broker_leader_transitions_total`: acquisitions and losses on this replica
 
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
 natively in CI and the broker image is smoke-executed on both amd64 and arm64

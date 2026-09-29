@@ -3613,7 +3613,10 @@ pub fn snapshot_tick(
             }
             seen.push(k);
         }
-        if !full || started.elapsed() >= budget {
+        if !full
+            || started.elapsed() >= budget
+            || !crate::leader::still_leader("workload profile snapshotter")
+        {
             break;
         }
     }
@@ -3639,6 +3642,12 @@ pub fn spawn(pool: DbPool) {
     actix_web::rt::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
+            // Leader only (leader.rs): two replicas snapshotting the same
+            // workload can both see the old hash and both write a version.
+            if !crate::leader::is_leader() {
+                tokio::time::sleep(interval).await;
+                continue;
+            }
             let pool = pool.clone();
             let r = tokio::task::spawn_blocking(move || -> Result<TickStats, DbError> {
                 let mut conn = pool.get()?;

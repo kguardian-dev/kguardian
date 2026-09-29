@@ -321,6 +321,12 @@ async fn main() -> Result<(), std::io::Error> {
         info!("audit evaluator integration disabled (set EVALUATOR_URL to enable)");
     }
 
+    // Lease-based leader election (api::leader). Started before every
+    // background loop: with election on, the leader-only loops below wait
+    // for this replica to hold the lease; off (not in a cluster), this
+    // replica is always the leader, as before.
+    api::leader::spawn();
+
     // Background pruner for audit_verdicts. Runs in-process so the
     // broker is self-contained — no separate CronJob needed in the
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
@@ -382,7 +388,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     let listener = broker_listener()?;
     info!(addr = %listener.local_addr()?, "broker HTTP server starting");
-    HttpServer::new(move || {
+    let served = HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
@@ -409,7 +415,11 @@ async fn main() -> Result<(), std::io::Error> {
     })
     .listen(listener)?
     .run()
-    .await
+    .await;
+    // The server has drained (SIGTERM): hand the lease to a successor now
+    // rather than making it wait the lease out.
+    api::leader::shutdown().await;
+    served
 }
 
 // Verifying schema state on /health (rather than just connectivity) is
@@ -707,6 +717,8 @@ pub async fn metrics(
     body.push_str(&api::image_inventory_malformed_metrics());
     // In-memory, refreshed on its own timer (profile_drift.rs).
     body.push_str(&drift.get_ref().render());
+    // Atomic loads (leader.rs).
+    body.push_str(&api::leader::render_metrics());
 
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")
