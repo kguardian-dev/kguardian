@@ -341,6 +341,7 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   const listGen = useRef(0);
   // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
   const firstPageInFlight = useRef(false);
+  const loadedFor = useRef<string | null>(null);
 
   const enrich = useCallback(
     async (rows: ImageSummary[], current: () => boolean) => {
@@ -374,6 +375,14 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
     setLoading(true);
     // A new first page supersedes any page-more in flight, whose own reset is skipped.
     setLoadingMore(false);
+    // Another namespace's rows, cursor and error are not this one's; a same-scope Refresh keeps the rows until the new page lands.
+    const scope = namespace ?? '';
+    if (loadedFor.current !== scope) {
+      loadedFor.current = scope;
+      setItems([]);
+      setNextAfter(null);
+      setError(null);
+    }
     try {
       const p = await api.listImages({ limit: IMAGE_PAGE_SIZE, ...(namespace ? { namespace } : {}) });
       if (!current()) return;
