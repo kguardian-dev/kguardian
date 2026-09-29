@@ -3821,3 +3821,34 @@ fn live_database_cve_rebuilds_write_only_what_changed() {
     );
     exec(&mut conn, "DROP TABLE kept_summary, kept_facts");
 }
+
+/// The CVE summary rebuild writes and compares exactly the table's columns:
+/// a column added to `vuln_cve_summary` but not to `CVE_SUMMARY_VALUES`
+/// would never be updated once its row exists.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_summary_rebuild_names_every_column() {
+    let mut conn = live_conn();
+    #[derive(QueryableByName)]
+    struct Col {
+        #[diesel(sql_type = Text)]
+        column_name: String,
+    }
+    let mut table: Vec<String> = sql_query(
+        "SELECT column_name::text AS column_name FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'vuln_cve_summary'",
+    )
+    .load::<Col>(&mut conn)
+    .unwrap()
+    .into_iter()
+    .map(|c| c.column_name)
+    .collect();
+    table.sort();
+    let mut written: Vec<String> = ["scope_namespace", "vuln_id"]
+        .iter()
+        .chain(crate::supplychain_read::CVE_SUMMARY_VALUES.iter())
+        .map(|c| c.to_string())
+        .collect();
+    written.sort();
+    assert_eq!(written, table);
+}

@@ -1783,7 +1783,7 @@ fn refresh_cve_summary_sql() -> String {
 /// [`refresh_cve_summary_sql`] writes and compares. A column added to the
 /// table must be added here, or a change to only that column would never
 /// reach the table.
-const CVE_SUMMARY_VALUES: [&str; 19] = [
+pub(crate) const CVE_SUMMARY_VALUES: [&str; 19] = [
     "severity_rank",
     "max_score",
     "fixable",
