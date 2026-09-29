@@ -388,6 +388,29 @@ describe('buildPodComputeData', () => {
     expect(d.status).toBe('warning');
     expect(hasComputeGauges(d)).toBe(true);
   });
+  // The history buffers are per pod uid, and a card's sparkline reads the
+  // first replica's. The gauges divide by every replica's capacity, so they
+  // must read every replica's usage too: 3 replicas each at 400m of a 500m
+  // limit used to read 400m of 1.50 cores, 26.7% instead of 80%.
+  test('a multi-replica card reads every replica\'s usage against every replica\'s capacity', () => {
+    const replica = (i: number) => container({
+      container_uid: `uid-${i}/app`, pod_uid: `uid-${i}`, pod_name: `api-${i}`,
+      cpu_usage_millis: 400, cpu_limit_millis: 500, mem_working_set: 100, mem_limit: 200,
+    });
+    const containers = [replica(0), replica(1), replica(2)];
+    const now = Date.parse('2026-09-14T10:00:00Z');
+    // What the hooks do: one buffer per uid, and the card reads the first uid's.
+    const buf = new RingBuffer<ComputeSample>();
+    appendSample(buf, podLevelSample([containers[0]], now));
+    const d = buildPodComputeData({ containers, nodesByName: new Map([['worker-1', node()]]), findings: [], samples: buf.values(), now });
+    expect(d.cpuMillis).toBe(1200);
+    expect(d.cpuCapacityMillis).toBe(1500);
+    expect(d.cpuPct).toBeCloseTo(80);
+    expect(d.memBytes).toBe(300);
+    expect(d.memPct).toBeCloseTo(50);
+    // The sparkline is still the one replica it always drew.
+    expect(d.sparkCpu).toEqual([{ at: now, value: 400 }]);
+  });
   test('falls back to node capacity (cores × 1000) when nothing is set', () => {
     const rows = [container({ cpu_limit_millis: null, cpu_request_millis: null, mem_limit: null, mem_request: null, cpu_usage_millis: 400, mem_working_set: 4000 })];
     const d = buildPodComputeData({ containers: rows, nodesByName: new Map([['worker-1', node()]]), findings: [], samples: [] })!;

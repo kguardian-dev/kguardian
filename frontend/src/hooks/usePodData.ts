@@ -238,6 +238,8 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
       const nodeState = nodeComputeState(compute.nodesByName.get(nodeName));
       // One uid per identity drives the sparkline (replica sums are summed in
       // podLevelSample per uid; a multi-replica identity shows the first).
+      // The gauges of a multi-replica card read every replica's live rows
+      // (buildPodComputeData), not this one uid's samples.
       const uid = containers[0]?.pod_uid;
       const samples = uid ? compute.history.get(uid)?.values() ?? [] : [];
       const data = buildPodComputeData({ containers, nodesByName: compute.nodesByName, findings, samples, nodeState, now });

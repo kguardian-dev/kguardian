@@ -494,7 +494,12 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
   const series = windowedSamples(samples, now);
   // The newest sample INSIDE the window, else the live rows: a buffer whose
   // newest bucket has aged out must not keep reporting it as the current value.
-  const latest = series.latest ?? podLevelSample(containers, now);
+  // The samples describe ONE pod uid (the sparkline's). When the card spans
+  // several replicas the gauges read every replica's live rows instead: the
+  // denominators below sum every replica's capacity, and one replica's usage
+  // over all of it under-reported the card by the replica count.
+  const multiReplica = containers.some((c) => c.pod_uid !== containers[0].pod_uid);
+  const latest = (multiReplica ? undefined : series.latest) ?? podLevelSample(containers, now);
   const cpuDen = pickDenominator(
     containers.map((c) => c.cpu_limit_millis),
     containers.map((c) => c.cpu_request_millis),
