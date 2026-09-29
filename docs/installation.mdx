@@ -229,8 +229,10 @@ and get/update only the Broker's own, and mounts a service account token into
 the Broker pod. When the leader dies, the jobs pause for up to
 `leaseDurationSeconds` before a follower takes over; on a graceful shutdown
 the handover takes a couple of seconds. With `leaderElection.enabled: false`
-every replica runs every job, which duplicates work, so keep `replicaCount: 1`
-in that case. See `broker_leader` and `broker_leader_election_active` on
+every replica runs every job, which duplicates work, so the chart refuses to
+render it with `replicaCount` above 1. The timings must satisfy
+`leaseDurationSeconds` > `renewDeadlineSeconds` > 1.2 x `retryPeriodSeconds`,
+or the chart refuses to render. See `broker_leader` and `broker_leader_election_active` on
 `/metrics` for which replica is leading.
 
 Each replica keeps 4 database connections open and grows its pool up to
