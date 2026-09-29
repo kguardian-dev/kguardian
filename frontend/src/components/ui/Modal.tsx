@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './Button';
-import { openModalDialogs } from '../../hooks/useDialogFocus';
+import { MODAL_DIALOG, openModalDialogs } from '../../hooks/useDialogFocus';
 import { useDrawerDock } from '../../hooks/useAssistantDock';
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | 'full';
@@ -56,7 +56,7 @@ function returnChain(): HTMLElement[] {
   if (typeof document === 'undefined') return [];
   const el = document.activeElement as HTMLElement | null;
   if (!el) return [];
-  const host = el.closest<HTMLElement>('[role="dialog"][aria-modal="true"]');
+  const host = el.closest<HTMLElement>(MODAL_DIALOG);
   return [el, ...(host ? returnChainOf.get(host) ?? [] : [])];
 }
 
@@ -239,7 +239,11 @@ export function Modal({
         <div
           ref={panelRef}
           role="dialog"
-          aria-modal="true"
+          // Docked beside the assistant, the drawer is not modal to assistive
+          // tech (the assistant's replies must stay readable); the marker keeps
+          // its Esc and focus handling (openModalDialogs).
+          data-modal-dialog=""
+          aria-modal={dockOffset ? undefined : true}
           aria-labelledby={title && !hideHeader ? labelId : undefined}
           aria-label={title && !hideHeader ? undefined : ariaLabel}
           tabIndex={-1}

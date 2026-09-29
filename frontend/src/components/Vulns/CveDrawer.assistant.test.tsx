@@ -209,6 +209,32 @@ test('focus in the docked assistant is not pulled back into the drawer', async (
   }
 });
 
+test('beside the docked assistant the drawer drops aria-modal; alone it is modal again', async () => {
+  render(<Shell />);
+  await screen.findByRole('dialog', { name: exposure.id });
+  expect(drawer().getAttribute('aria-modal')).toBe('true');
+  await askAI();
+  expect(drawer().hasAttribute('aria-modal')).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Close AI Assistant' }));
+  expect(drawer().getAttribute('aria-modal')).toBe('true');
+});
+
+test('with the assistant closed the drawer still traps Tab and closes on Esc', async () => {
+  const offsetParent = withLayout();
+  try {
+    render(<Shell />);
+    await screen.findByRole('dialog', { name: exposure.id });
+    const outside = screen.getByRole('button', { name: 'Open CVE' });
+    outside.focus();
+    expect(fireEvent.keyDown(outside, { key: 'Tab' })).toBe(false);
+    expect(drawer().contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: exposure.id })).toBeNull());
+  } finally {
+    offsetParent.mockRestore();
+  }
+});
+
 test('modal assistant: stacks over the drawer, which keeps its width; Esc closes only the assistant', async () => {
   localStorage.setItem('kguardian.ai-assistant.view-mode', 'modal');
   render(<Shell />);
@@ -223,7 +249,7 @@ test('modal assistant: stacks over the drawer, which keeps its width; Esc closes
   expect(document.activeElement).toBe(ask);
 });
 
-test('centred dialogs ignore the docked assistant', async () => {
+test('centred dialogs ignore the docked assistant and stay aria-modal', async () => {
   render(
     <Docked width={448}>
       <Modal isOpen onClose={() => {}} title="Centred">
@@ -233,4 +259,5 @@ test('centred dialogs ignore the docked assistant', async () => {
   );
   const dialog = await screen.findByRole('dialog', { name: 'Centred' });
   expect(dialog.closest<HTMLElement>('.fixed.inset-0')!.style.right).toBe('');
+  expect(dialog.getAttribute('aria-modal')).toBe('true');
 });
