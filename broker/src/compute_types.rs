@@ -503,7 +503,9 @@ impl PodComputeLatest {
 /// HOT heap update nothing but VACUUM reclaims them (740 MB of the table's
 /// 982 MB on the dev cluster within hours of autovacuum stopping). Five
 /// culprits of ordinary names is under 1 KB, so the row stays inline
-/// without even being compressed. The readers of this list show the top
+/// uncompressed; at the longest names Kubernetes allows the value is
+/// compressed in place, still inline and still with no TOAST writes. The
+/// readers of this list show the top
 /// few (the pod panel's blame table); the findings engine reads the
 /// minute pairs in `pod_contention_history`, which keeps the full top 10.
 pub const LATEST_BLAME_LIMIT: usize = 5;

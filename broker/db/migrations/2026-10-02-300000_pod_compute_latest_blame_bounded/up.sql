@@ -12,10 +12,13 @@
 -- does not apply to them, and only VACUUM reclaims them.
 --
 -- The Broker now keeps the heaviest five culprits, at most 1 KB of JSON
--- (`bound_blame` in src/compute_types.rs), so the row stays inline without
--- compression. These two columns record what it left off, so the UI's
--- blame shares are still taken over the whole list and the panel can say
--- that more culprits exist. 0 is the truth for rows written before this
+-- (`bound_blame` in src/compute_types.rs), so the row stays inline: with
+-- ordinary names uncompressed, and at the longest names Kubernetes allows
+-- compressed in place, with no TOAST writes either way. These two columns
+-- record what it left off, so the UI's blame shares are taken over
+-- everything the Controller sent (its own top 20 per container,
+-- SAMPLE_BLAME_LIMIT) rather than over the five kept, and the panel can
+-- say that more culprits exist. 0 is the truth for rows written before this
 -- migration, by a Broker that did not truncate. An older Broker still
 -- upserting during a rolling update never sets these columns, so a row it
 -- rewrites keeps the new Broker's last counts next to its own full list
