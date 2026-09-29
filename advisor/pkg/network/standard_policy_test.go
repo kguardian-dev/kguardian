@@ -361,6 +361,8 @@ func TestParsePort_RejectsTrailingJunkAndDecimals(t *testing.T) {
 		{"0xff", "hex literal — must reject (not parse as 0)"},
 		{"08.0", "decimal with leading zeros"},
 		{"\t80", "tab whitespace"},
+		{"+80", "leading sign — the TS generators reject it too"},
+		{"-80", "negative"},
 	}
 	for _, c := range cases {
 		t.Run(c.desc, func(t *testing.T) {
