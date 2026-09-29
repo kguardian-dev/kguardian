@@ -284,6 +284,22 @@ test('a Refresh that failed keeps the loaded graph, with the error above it', as
   expect(screen.queryByText(/could not be loaded/)).toBeNull();
 });
 
+test('a failed pod listing: the header says so instead of "0 workloads · 0 pods"', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Workloads in payments could not be loaded')).not.toBeNull());
+  expect(screen.getByText('Could not load')).not.toBeNull();
+  expect(screen.queryByText(/0 workloads/)).toBeNull();
+});
+
+test('a failed pod listing reaches the Policy Builder, so its picker does not say "No workloads"', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Could not load')).not.toBeNull());
+  fireEvent.click(screen.getAllByText('Policy Builder')[0].closest('button')!);
+  await waitFor(() => expect(screen.getByTestId('policy-builder').dataset.error).toBe('timeout of 35000ms exceeded'));
+});
+
 // A failed Service read used to blank the whole map with the pod listing's
 // error state. It is a warning over a map that still loads.
 test('a failed Service listing is a warning over the map, and the Policy Builder is told the listing is unknown', async () => {

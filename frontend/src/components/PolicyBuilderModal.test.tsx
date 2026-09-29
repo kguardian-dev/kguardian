@@ -94,3 +94,12 @@ test('with every read complete the picker is unchanged', () => {
   expect(screen.queryByText('syscall read failed')).toBeNull();
   expect(screen.queryByRole('status')).toBeNull();
 });
+
+// A failed pod listing used to read "No workloads in this namespace" with
+// advice to switch namespaces.
+test('a failed pod listing with nothing listed says so, not "No workloads"', () => {
+  render(<PolicyBuilderModal onClose={() => {}} initialPod={null} workloads={[]} error="timeout of 35000ms exceeded" />);
+  expect(screen.queryByText('No workloads in this namespace')).toBeNull();
+  expect(screen.getByText('Workloads could not be loaded')).not.toBeNull();
+  expect(screen.getByText(/timeout of 35000ms exceeded/)).not.toBeNull();
+});

@@ -21,6 +21,8 @@ interface PolicyBuilderModalProps {
   /** The pod listing is still loading: the picker shows a loading row, not
    *  "No workloads in this namespace" with advice to switch namespaces. */
   loading?: boolean;
+  /** The pod listing failed: the picker says so instead of "No workloads". */
+  error?: string | null;
 }
 
 function label(pod: PodNodeData): string {
@@ -46,6 +48,7 @@ export function PolicyBuilderModal({
   podsLookup,
   services,
   loading = false,
+  error = null,
 }: PolicyBuilderModalProps) {
   const [chosen, setChosen] = useState<PolicyWorkload | null>(initialPod);
 
@@ -62,7 +65,7 @@ export function PolicyBuilderModal({
       />
     );
   }
-  return <WorkloadPicker workloads={workloads} onPick={setChosen} onClose={onClose} loading={loading} />;
+  return <WorkloadPicker workloads={workloads} onPick={setChosen} onClose={onClose} loading={loading} error={error} />;
 }
 
 function WorkloadPicker({
@@ -70,11 +73,13 @@ function WorkloadPicker({
   onPick,
   onClose,
   loading,
+  error,
 }: {
   workloads: PolicyWorkload[];
   onPick: (pod: PolicyWorkload) => void;
   onClose: () => void;
   loading: boolean;
+  error: string | null;
 }) {
   const [query, setQuery] = useState('');
   // Workloads with at least one failed traffic read: their "0 conns" is unknown, not zero.
@@ -149,6 +154,13 @@ function WorkloadPicker({
             <RefreshCw className="w-4 h-4 animate-spin" />
             Loading workloads…
           </div>
+        ) : error && workloads.length === 0 ? (
+          <EmptyState
+            icon={Server}
+            title="Workloads could not be loaded"
+            description={`${error}. Refresh from the header to try again.`}
+            compact
+          />
         ) : (
           <EmptyState
             icon={Server}

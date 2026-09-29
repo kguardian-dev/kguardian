@@ -599,7 +599,9 @@ function App() {
     view === 'map'
       ? podsSettling && pods.length === 0
         ? 'Loading…'
-        : `${plural(pods.length, 'workload')} · ${plural(podTotal, 'pod')}`
+        : error && pods.length === 0
+          ? 'Could not load'
+          : `${plural(pods.length, 'workload')} · ${plural(podTotal, 'pod')}`
       : view === 'workload'
         ? loc.params.kind ?? ''
         : '';
@@ -950,6 +952,7 @@ function App() {
             // generators then look Services up by IP instead of reading "none".
             services={servicesListing ?? undefined}
             loading={podsSettling}
+            error={error}
           />
         </Suspense>
       )}
