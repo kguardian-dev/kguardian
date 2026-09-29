@@ -83,6 +83,12 @@ const podsByIp: Record<string, PodInfo> = {
     pod_name: 'maintainerr-0', pod_ip: '10.0.0.41', pod_namespace: 'media', node_name: 'worker-2',
     workload_name: 'maintainerr', workload_selector_labels: { app: 'maintainerr' }, host_network: false,
   }),
+  // (j) a kube-dns backend: its name is not the Service's, and its labels
+  // carry more than the Service's selector does.
+  '10.0.0.53': podRecord({
+    pod_name: 'coredns-5d78c9869d-abcde', pod_ip: '10.0.0.53', pod_namespace: 'kube-system', node_name: 'worker-1',
+    workload_name: 'coredns', workload_selector_labels: { 'k8s-app': 'kube-dns', 'pod-template-hash': '5d78c9869d' }, host_network: false,
+  }),
   // (d) legacy row: host_network unknown
   '10.0.0.40': podRecord({
     pod_name: 'legacy-abc', pod_ip: '10.0.0.40', pod_namespace: 'prod',
@@ -117,6 +123,13 @@ const services: Record<string, unknown> = {
   // (f) cross-namespace Service peer of prod/web
   '10.96.0.50': { svc_name: 'prometheus', svc_namespace: 'monitoring', svc_ip: '10.96.0.50',
     service_spec: { spec: { selector: { app: 'prometheus' } } } },
+  // (j) Services whose selector is not `{app: <name>}`: kube-dns selects
+  // `k8s-app: kube-dns`, and grafana (same namespace as prometheus) selects
+  // on the recommended labels.
+  '10.96.0.53': { svc_name: 'kube-dns', svc_namespace: 'kube-system', svc_ip: '10.96.0.53',
+    service_spec: { spec: { selector: { 'k8s-app': 'kube-dns' } } } },
+  '10.96.0.30': { svc_name: 'grafana', svc_namespace: 'monitoring', svc_ip: '10.96.0.30',
+    service_spec: { spec: { selector: { 'app.kubernetes.io/name': 'grafana', 'app.kubernetes.io/instance': 'obs' } } } },
 };
 let serviceLookup: Record<string, unknown> = {};
 const useServices = () => { serviceLookup = services; };
@@ -510,12 +523,14 @@ describe('generateNetworkPolicy — no traffic and selector-less Services', () =
       expect(ruleComments(yaml)).toEqual([`# unattributed peer ${ip} at 2026-09-03T00:00:00`]);
       expect(yaml).not.toContain('has no selector');
     }
-    // By IP with an unknown spec: the pre-existing Service path, not a selector-less claim.
+    // By IP with an unknown spec: unattributed exactly as the stored path is,
+    // not a selector-less claim and not a selector guessed from the name
+    // (`app: pg`, which this test used to expect and which matches nothing).
     yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [egressRow('10.96.0.88', '5432')])));
     expect(yaml).not.toContain('has no selector');
-    expect(yaml).not.toContain('ipBlock');
+    expect(ruleComments(yaml)).toEqual(['# unattributed peer 10.96.0.88 at 2026-09-03T00:00:00']);
     expect(spec(parse(yaml)).egress).toEqual([
-      { to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'db' } }, podSelector: { matchLabels: { app: 'pg' } } }], ports: [{ protocol: 'TCP', port: 5432 }] },
+      { to: [{ ipBlock: { cidr: '10.96.0.88/32' } }], ports: [{ protocol: 'TCP', port: 5432 }] },
     ]);
   });
 
@@ -659,5 +674,67 @@ describe('generators — supplied pod and Service listings', () => {
     vi.mocked(apiClient.getAllPods).mockClear();
     await generateNetworkPolicy(egressPeer, { pods: [], services: [] });
     expect(vi.mocked(apiClient.getAllPods)).toHaveBeenCalledTimes(1);
+  });
+});
+
+// (j) A Service peer is selected by the Service's own `spec.selector`, as the
+// advisor renders it (standard_policy.go), never by a label guessed from the
+// Service's name. The fixtures above all happen to select `{app: <name>}`;
+// kube-dns (`k8s-app: kube-dns`) is the one every workload talks to.
+describe('generators — a Service peer renders the Service selector', () => {
+  const dnsRow = { ...egressRow('10.96.0.53', '53'), ip_protocol: 'UDP' };
+  const dnsAndGrafana = target(prometheus, [dnsRow, egressRow('10.96.0.30', '3000')]);
+  const kubeDnsPeer = {
+    podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
+    namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+  };
+  const grafanaLabels = { 'app.kubernetes.io/name': 'grafana', 'app.kubernetes.io/instance': 'obs' };
+
+  test('standard: kube-dns is k8s-app: kube-dns in kube-system; a same-namespace Service has no namespaceSelector', async () => {
+    useDefaults();
+    useServices();
+    const yaml = policyToYAML(await generateNetworkPolicy(dnsAndGrafana));
+    expect(spec(parse(yaml)).egress).toEqual([
+      { to: [{ podSelector: { matchLabels: grafanaLabels } }], ports: [{ protocol: 'TCP', port: 3000 }] },
+      { to: [kubeDnsPeer], ports: [{ protocol: 'UDP', port: 53 }] },
+    ]);
+    expect(yaml).not.toContain('app: "kube-dns"');
+    expect(yaml).not.toContain('app: grafana');
+    // The backend pod's extra labels are not the Service's selector.
+    expect(yaml).not.toContain('pod-template-hash');
+  });
+
+  test('cilium: toEndpoints carries the Service selector plus the peer namespace label', async () => {
+    useDefaults();
+    useServices();
+    const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(dnsAndGrafana));
+    expect((spec(parse(yaml)).egress as Rule[]).map((r) => r.toEndpoints)).toEqual([
+      [{ matchLabels: grafanaLabels }],
+      [{ matchLabels: { 'k8s-app': 'kube-dns', 'k8s:io.kubernetes.pod.namespace': 'kube-system' } }],
+    ]);
+    expect(yaml).not.toContain('app: "kube-dns"');
+  });
+
+  test('a flow to the backend pod collapses into the Service rule and its selector', async () => {
+    useDefaults();
+    useServices();
+    const podRow = { ...egressRow('10.0.0.53', '53'), ip_protocol: 'UDP' };
+    const yaml = policyToYAML(await generateNetworkPolicy(target(prometheus, [dnsRow, podRow])));
+    expect(spec(parse(yaml)).egress).toEqual([{ to: [kubeDnsPeer], ports: [{ protocol: 'UDP', port: 53 }] }]);
+  });
+
+  test('a Service whose spec the broker never stored is pinned with the unattributed note, in both generators', async () => {
+    useDefaults();
+    useSelectorlessServices();
+    const row = egressRow('10.96.0.88', '5432');
+    const std = policyToYAML(await generateNetworkPolicy(target(prometheus, [row])));
+    expect(spec(parse(std)).egress).toEqual([{ to: [{ ipBlock: { cidr: '10.96.0.88/32' } }], ports: [{ protocol: 'TCP', port: 5432 }] }]);
+    const cnp = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(target(prometheus, [row])));
+    expect(spec(parse(cnp)).egress).toEqual([{ toCIDR: ['10.96.0.88/32'], toPorts: [{ ports: [{ port: '5432', protocol: 'TCP' }] }] }]);
+    for (const yaml of [std, cnp]) {
+      expect(ruleComments(yaml)).toEqual(['# unattributed peer 10.96.0.88 at 2026-09-03T00:00:00']);
+      expect(yaml).not.toContain('app: pg');
+      expect(yaml).not.toContain('has no selector');
+    }
   });
 });

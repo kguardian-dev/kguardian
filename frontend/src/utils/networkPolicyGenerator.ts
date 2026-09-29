@@ -193,8 +193,6 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
         };
       }
 
-      // Service - use podSelector with service label
-      // Try to get labels (workload or pod labels) for pods behind this service
       // A Service fronting host-network pods fronts node IPs: its selector
       // matches labels no policy can see. NetworkPolicy is evaluated after
       // the Service DNAT, so the ClusterIP never appears on the wire either —
@@ -215,11 +213,19 @@ export async function generateNetworkPolicy(pod: PodNodeData, sources: IdentityS
         };
       }
 
-      const facts = await getPeerPodFacts(identity.svcName);
+      // The Service's own selector picks its backends, as the advisor renders
+      // it; kube-dns selects `k8s-app: kube-dns`, not `app: kube-dns`. The
+      // resolver turns a Service with an unknown spec into an unattributed
+      // peer, so a missing selector here is never guessed from the name.
+      if (!identity.svcSelector) {
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return null;
+        return { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(peerInfo.ip, undefined) };
+      }
 
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: facts.labels || { app: identity.svcName },
+          matchLabels: identity.svcSelector,
         },
       };
 

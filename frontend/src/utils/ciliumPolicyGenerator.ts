@@ -209,8 +209,14 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
           ),
         };
       }
-      const facts = await getPeerPodFacts(identity.svcName);
-      return { selector: { matchLabels: withPeerNamespace(facts.labels || { app: identity.svcName }, identity.svcNamespace) } };
+      // The Service's own selector, never a label guessed from its name —
+      // see the sibling comment in networkPolicyGenerator.
+      if (!identity.svcSelector) {
+        const cidr = peerCIDR(peerInfo.ip);
+        if (cidr === null) return {};
+        return { cidr, comment: unattributedPeerComment(peerInfo.ip, undefined) };
+      }
+      return { selector: { matchLabels: withPeerNamespace(identity.svcSelector, identity.svcNamespace) } };
     } else if (identity.podName) {
       const facts = await getPeerPodFacts(identity.podName);
       const hostNetwork = identity.hostNetwork ?? facts.hostNetwork;
