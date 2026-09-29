@@ -1,19 +1,20 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { useCallback, useState } from 'react';
+import { useCallback, useState, type ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CveDrawer } from './CveDrawer';
 import AIAssistant from '../AIAssistant';
+import { Modal } from '../ui/Modal';
 import { VulnApi } from '../../services/vulnApi';
 import { ProfileApi } from '../../services/profileApi';
 import { vulnCapture } from '../../fixtures/vulns';
-import { AssistantDockContext, assistantDockWidth } from '../../hooks/useAssistantDock';
+import { AssistantDockContext, assistantDockWidth, drawerMinWidth, useAssistantDockState } from '../../hooks/useAssistantDock';
 import { UI_DIMENSIONS } from '../../constants/ui';
 import type { Exposure } from '../../types/vulns';
 
-// "Ask AI" on a CVE opens the assistant beside the drawer, not on top of it:
-// the drawer's right edge moves to where the docked panel begins and comes
-// back when the panel closes. Esc and focus follow the topmost thing.
+// "Ask AI" on a CVE opens the assistant beside the drawer, never on top of
+// it: the drawer's right edge moves to where the docked panel begins and
+// comes back when the panel closes. Esc and focus follow the topmost thing.
 
 const exposure = vulnCapture<Exposure>('exposure-CVE-2099-0001').body;
 const api = new VulnApi({
@@ -26,28 +27,36 @@ const api = new VulnApi({
 });
 const noProfiles = new ProfileApi({ fetchImpl: (async () => new Response('', { status: 404 })) as typeof fetch });
 
-const originalMatchMedia = window.matchMedia;
+const originalWidth = window.innerWidth;
+function setViewport(width: number) {
+  Object.defineProperty(window, 'innerWidth', { value: width, configurable: true, writable: true });
+  window.dispatchEvent(new Event('resize'));
+}
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
+  setViewport(1280);
 });
 afterEach(() => {
   cleanup();
-  window.matchMedia = originalMatchMedia;
+  setViewport(originalWidth);
 });
 
 // The assistant and drawer wired the way App wires them.
-function Shell() {
-  const [drawerOpen, setDrawerOpen] = useState(true);
+function Shell({ drawerAtStart = true }: { drawerAtStart?: boolean }) {
+  const [drawerOpen, setDrawerOpen] = useState(drawerAtStart);
   const [aiOpen, setAiOpen] = useState(false);
-  const [dock, setDock] = useState(0);
+  const [width, setWidth] = useState(0);
+  const dock = useAssistantDockState(width);
   const [prefill, setPrefill] = useState<{ text: string; nonce: number }>();
-  const onLayoutChange = useCallback((side: boolean, collapsed: boolean, width?: number) => {
-    setDock(assistantDockWidth(side, collapsed, width ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH));
+  const onLayoutChange = useCallback((side: boolean, collapsed: boolean, w?: number) => {
+    setWidth(assistantDockWidth(side, collapsed, w ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH));
   }, []);
   return (
     <AssistantDockContext.Provider value={dock}>
+      <button onClick={() => setDrawerOpen(true)}>Open CVE</button>
+      <button onClick={() => setAiOpen(true)}>Rail assistant</button>
       {drawerOpen && (
         <CveDrawer
           id={exposure.id}
@@ -67,7 +76,7 @@ function Shell() {
           isOpen
           onClose={() => {
             setAiOpen(false);
-            setDock(0);
+            setWidth(0);
           }}
           onLayoutChange={onLayoutChange}
           namespace="payments"
@@ -77,6 +86,10 @@ function Shell() {
       )}
     </AssistantDockContext.Provider>
   );
+}
+
+function Docked({ width, children }: { width: number; children: ReactNode }) {
+  return <AssistantDockContext.Provider value={useAssistantDockState(width)}>{children}</AssistantDockContext.Provider>;
 }
 
 const drawer = () => screen.getByRole('dialog', { name: exposure.id });
@@ -89,6 +102,11 @@ async function askAI() {
   ask.focus();
   fireEvent.click(ask);
   return ask;
+}
+
+function dragAssistantTo(clientX: number) {
+  fireEvent.mouseDown(screen.getByTitle('Drag to resize'));
+  fireEvent.mouseMove(document, { clientX });
 }
 
 test('docked: the drawer ends where the assistant begins, and gets its width back on close', async () => {
@@ -116,6 +134,41 @@ test('docked: the drawer ends where the assistant begins, and gets its width bac
   expect(document.activeElement).toBe(ask);
 });
 
+test('at 1280px with the assistant dragged to its maximum, the drawer keeps max(280px, 20vw) beside it', async () => {
+  render(<Shell />);
+  await askAI();
+  const room = 1280 - drawerMinWidth(1280);
+  expect(drawerMinWidth(1280)).toBe(280);
+
+  dragAssistantTo(0); // as wide as the drag allows
+  // Mid-drag the drawer edge follows without its transition.
+  expect(drawerLayer().className).not.toContain('transition-[right]');
+  expect(assistant()!.style.width).toBe(`${room}px`);
+  expect(drawerLayer().style.right).toBe(`${room}px`);
+  fireEvent.mouseUp(document);
+  expect(drawerLayer().className).toContain('transition-[right]');
+  expect(drawerLayer().style.right).toBe(`${room}px`);
+});
+
+test('an assistant already wider than that gives way when a drawer opens, and gets its width back after', async () => {
+  render(<Shell drawerAtStart={false} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Rail assistant' }));
+  dragAssistantTo(0);
+  fireEvent.mouseUp(document);
+  const maxAlone = 1280 * UI_DIMENSIONS.AI_PANEL_MAX_WIDTH_RATIO;
+  expect(assistant()!.style.width).toBe(`${maxAlone}px`);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Open CVE' }));
+  await screen.findByRole('dialog', { name: exposure.id });
+  const room = 1280 - drawerMinWidth(1280);
+  expect(assistant()!.style.width).toBe(`${room}px`);
+  expect(drawerLayer().style.right).toBe(`${room}px`);
+
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: exposure.id })).toBeNull());
+  expect(assistant()!.style.width).toBe(`${maxAlone}px`);
+});
+
 test('Esc closes the assistant first, then the drawer; the scroll lock goes with the drawer', async () => {
   render(<Shell />);
   const ask = await askAI();
@@ -132,11 +185,15 @@ test('Esc closes the assistant first, then the drawer; the scroll lock goes with
   expect(document.body.style.overflow).toBe('');
 });
 
-test('Tab inside the docked assistant stays with it, not pulled back into the drawer', async () => {
-  // jsdom lays nothing out, so the trap would see no visible items and do nothing.
-  const offsetParent = vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockImplementation(function (this: HTMLElement) {
+// jsdom lays nothing out, so the trap would see no visible items and do nothing.
+function withLayout() {
+  return vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockImplementation(function (this: HTMLElement) {
     return this.parentElement;
   });
+}
+
+test('focus in the docked assistant is not pulled back into the drawer', async () => {
+  const offsetParent = withLayout();
   try {
     render(<Shell />);
     await askAI();
@@ -166,31 +223,13 @@ test('modal assistant: stacks over the drawer, which keeps its width; Esc closes
   expect(document.activeElement).toBe(ask);
 });
 
-test('too little room beside a wide assistant: the drawer overlays the edge as before', async () => {
-  // Every width query matches: the window is narrower than dock + minimum.
-  window.matchMedia = ((query: string) => ({
-    matches: query.startsWith('(max-width'),
-    media: query,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  })) as unknown as typeof window.matchMedia;
-  render(
-    <AssistantDockContext.Provider value={900}>
-      <CveDrawer id={exposure.id} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />
-    </AssistantDockContext.Provider>,
-  );
-  await screen.findByRole('dialog', { name: exposure.id });
-  expect(drawerLayer().style.right).toBe('');
-});
-
 test('centred dialogs ignore the docked assistant', async () => {
-  const { Modal } = await import('../ui/Modal');
   render(
-    <AssistantDockContext.Provider value={448}>
+    <Docked width={448}>
       <Modal isOpen onClose={() => {}} title="Centred">
         <button>ok</button>
       </Modal>
-    </AssistantDockContext.Provider>,
+    </Docked>,
   );
   const dialog = await screen.findByRole('dialog', { name: 'Centred' });
   expect(dialog.closest<HTMLElement>('.fixed.inset-0')!.style.right).toBe('');

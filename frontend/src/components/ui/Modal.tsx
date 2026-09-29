@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './Button';
 import { openModalDialogs } from '../../hooks/useDialogFocus';
-import { useDrawerDockOffset } from '../../hooks/useAssistantDock';
+import { useDrawerDock } from '../../hooks/useAssistantDock';
 
 type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | 'full';
 
@@ -209,7 +209,8 @@ export function Modal({
 
   const drawer = align === 'right';
   // A drawer ends where the docked assistant begins, so both stay readable.
-  const dockOffset = useDrawerDockOffset(drawer);
+  // Its edge follows a drag of the assistant's width without the transition.
+  const { offset: dockOffset, resizing: dockResizing } = useDrawerDock(drawer && mounted);
 
   if (!mounted) return null;
 
@@ -220,7 +221,7 @@ export function Modal({
 
   return (
     <div
-      className={`fixed inset-0 z-50 ${drawer ? 'transition-[right] duration-300' : ''}`}
+      className={`fixed inset-0 z-50 ${drawer && !dockResizing ? 'transition-[right] duration-300' : ''}`}
       style={dockOffset ? { right: `${dockOffset}px` } : undefined}
       aria-hidden={!isOpen}
     >
