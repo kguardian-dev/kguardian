@@ -356,10 +356,11 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   const blame = useMemo(() => {
     if (!compute) return { rows: [] as Array<ComputeBlame & { victim: string }>, totalWaitNs: 0, hiddenCount: 0, hiddenWaitNs: 0 };
     // One list across the pod's containers, largest wait first. The share is
-    // over EVERY culprit, not the ten shown, so the visible rows never sum to
-    // 100% when a long tail was cut off. That includes the culprits the
-    // broker keeps off each row (it stores the heaviest few, with the count
-    // and wait of the rest).
+    // over every culprit reported, not the ten shown, so the visible rows
+    // never sum to 100% when a long tail was cut off. That includes the
+    // culprits the broker keeps off each row (it stores the heaviest few,
+    // with the count and wait of the rest). "Reported" is the controller's
+    // per-sample top 20 per container: culprits past that are not counted.
     const all: Array<ComputeBlame & { victim: string }> = [];
     let omittedCount = 0;
     let omittedWaitNs = 0;

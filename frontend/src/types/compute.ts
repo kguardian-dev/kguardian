@@ -61,8 +61,9 @@ export interface ComputeContainer {
   blame: ComputeBlame[] | null;
   updated_at: string;
   /** Culprits the broker left off `blame`, and their summed wait. A share is
-   *  over `sum(blame.wait_ns) + blame_omitted_wait_ns`. Absent from an older
-   *  broker, which sent the whole list. */
+   *  over `sum(blame.wait_ns) + blame_omitted_wait_ns`, i.e. over the
+   *  controller's per-sample top 20. Absent from an older broker, which
+   *  stored that top 20 whole. */
   blame_omitted?: number;
   blame_omitted_wait_ns?: number;
 }
