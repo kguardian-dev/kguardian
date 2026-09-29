@@ -46,6 +46,17 @@ import { isPrivateAddress } from './ipCidr';
 /** Tooltip for the map node that aggregates guarded-out peers. */
 export const UNATTRIBUTED_PEER_TOOLTIP = 'former holder of this IP; no live pod matched at flow time';
 
+/** Tooltip for an unattributed peer whose Service lookup failed (`reason: 'service-lookup-failed'`): no pod ever held it. */
+export const SERVICE_LOOKUP_FAILED_TOOLTIP = 'Service lookup failed, so this may be a Service ClusterIP; Refresh to retry';
+
+/**
+ * Why a peer no pod ever held is unattributed rather than external: the
+ * Service lookup (listing or `/svc/ip`) failed, so it may be a ClusterIP;
+ * or, in the generators' by-IP path, `/pod/ip` failed, so it may be a pod.
+ * Absent for a guarded-out former holder or a gone stored peer.
+ */
+export type UnattributedReason = 'service-lookup-failed' | 'pod-lookup-failed';
+
 /** `externalNamespace` of the map's Unattributed node (like 'internet'). */
 export const UNATTRIBUTED_NAMESPACE = 'unattributed';
 
@@ -244,8 +255,8 @@ export type PeerResolution =
    *  consumers render that as unattributed. The generators decide for
    *  themselves whether `svc` can become a selector. */
   | { kind: 'service'; namespace: string | null; name: string | null; svc: ServiceInfo | null; stored: boolean }
-  /** No stored peer and the guard excluded every pod that ever held the IP. */
-  | { kind: 'unattributed'; ip: string; at: string }
+  /** No stored peer and the guard excluded every pod that ever held the IP; or (`reason`) no pod ever held it and a lookup failed. */
+  | { kind: 'unattributed'; ip: string; at: string; reason?: UnattributedReason }
   /** No stored peer, no pod ever held the IP: the caller's pre-v4 path
    *  (Service by IP, else external). */
   | { kind: 'unknown' };
@@ -331,7 +342,7 @@ export function mayBeUncheckedClusterIP(ip: string): boolean {
 export function resolvePeerForView(row: NetworkTraffic, index: PeerIndex, servicesKnown: boolean): PeerResolution {
   const peer = resolvePeer(row, index);
   const ip = row.traffic_in_out_ip;
-  if (peer.kind === 'unknown' && !servicesKnown && ip && mayBeUncheckedClusterIP(ip)) return { kind: 'unattributed', ip, at: row.time_stamp };
+  if (peer.kind === 'unknown' && !servicesKnown && ip && mayBeUncheckedClusterIP(ip)) return { kind: 'unattributed', ip, at: row.time_stamp, reason: 'service-lookup-failed' };
   return peer;
 }
 

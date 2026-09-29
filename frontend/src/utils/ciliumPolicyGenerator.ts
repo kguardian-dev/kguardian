@@ -248,7 +248,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData, sources: Ide
       const cidr = peerCIDR(peerInfo.ip);
       if (cidr === null) return {};
       if (identity.unattributed) {
-        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service) };
+        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at, identity.unattributed.service, identity.unattributed.reason) };
       }
       return { cidr };
     }

@@ -470,7 +470,7 @@ describe('generators — a failed /svc/ip lookup', () => {
       { to: [{ ipBlock: { cidr: '10.96.0.50/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
       { to: [{ ipBlock: { cidr: '203.0.113.9/32' } }], ports: [{ protocol: 'TCP', port: 443 }] },
     ]);
-    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01']);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
     // The comment sits above the ClusterIP's rule, not the public address's.
     const lines = yaml.split('\n');
     const at = lines.findIndex((l) => l.trim().startsWith('#'));
@@ -484,16 +484,27 @@ describe('generators — a failed /svc/ip lookup', () => {
     svcLookupFails = true;
     const yaml = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(both));
     expect((spec(parse(yaml)).egress as Rule[]).map((r) => r.toCIDR)).toEqual([['10.96.0.50/32'], ['203.0.113.9/32']]);
-    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01']);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
   });
 
   test('pod listing unavailable too: the by-IP fallback treats the failed Service lookup the same way', async () => {
     svcLookupFails = true;
     listing = () => { throw new Error('broker down'); };
     const standard = policyToYAML(await generateNetworkPolicy(both));
-    expect(commentLines(standard)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01']);
+    expect(commentLines(standard)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
     const cilium = ciliumPolicyToYAML(await generateCiliumNetworkPolicy(both));
-    expect(commentLines(cilium)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01']);
+    expect(commentLines(cilium)).toEqual(['# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)']);
+  });
+
+  test('one policy with a former holder and a failed lookup: only the failed lookup carries the note; the default comment is unchanged', async () => {
+    svcLookupFails = true;
+    const pod = target(cmangosDatabase, [...(staleIpPeer.traffic as Partial<NetworkTraffic>[]), clusterIpRow]);
+    for (const yaml of [policyToYAML(await generateNetworkPolicy(pod)), ciliumPolicyToYAML(await generateCiliumNetworkPolicy(pod))]) {
+      expect(commentLines(yaml)).toEqual([
+        '# unattributed peer 10.244.12.199 at 2026-07-23T10:00:00',
+        '# unattributed peer 10.96.0.50 at 2026-09-03T05:00:01 (Service lookup failed)',
+      ]);
+    }
   });
 
   test('a 404 (not a Service) is external, as before: no comment', async () => {

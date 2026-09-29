@@ -5,7 +5,12 @@
 
 import type { NetworkTraffic } from '../types';
 import type { TrafficIdentity } from './trafficIdentity';
-import { parseBrokerTime } from './peerResolution';
+import { parseBrokerTime, type UnattributedReason } from './peerResolution';
+
+const UNATTRIBUTED_REASON_NOTE: Record<UnattributedReason, string> = {
+  'service-lookup-failed': 'Service lookup failed',
+  'pod-lookup-failed': 'pod lookup failed',
+};
 
 /**
  * The `# ...` line above an ipBlock / CIDR rule for an unattributed peer:
@@ -13,10 +18,14 @@ import { parseBrokerTime } from './peerResolution';
  * pod that ever held the IP, or the stored peer is gone). `at` is the NEWEST
  * `time_stamp` among the rule's rows, printed verbatim; when none parses the
  * ` at …` part is omitted. `service` (frontend only; the advisor has no such
- * case) adds why a Service ClusterIP ended up here.
+ * case) adds why a Service ClusterIP ended up here. `reason` (frontend only)
+ * appends which lookup failed for an address no pod ever held.
  */
-export function unattributedPeerComment(ip: string, at: string | undefined, service?: string): string {
-  const lead = at !== undefined && parseBrokerTime(at) !== null ? `unattributed peer ${ip} at ${at}` : `unattributed peer ${ip}`;
+export function unattributedPeerComment(ip: string, at: string | undefined, service?: string, reason?: UnattributedReason): string {
+  const base = at !== undefined && parseBrokerTime(at) !== null ? `unattributed peer ${ip} at ${at}` : `unattributed peer ${ip}`;
+  // A failed lookup (frontend only; the advisor and llm-bridge have no such
+  // case, so the goldens never see it) says so; the default line is unchanged.
+  const lead = reason ? `${base} (${UNATTRIBUTED_REASON_NOTE[reason]})` : base;
   // A ClusterIP of a Service whose selector is unknown (its spec was never
   // stored): say what the address is and what to put in its place.
   if (service) return `${lead} — ClusterIP of Service ${service}, selector unknown: will not match after DNAT; replace with the Service's selector`;

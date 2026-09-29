@@ -11,6 +11,7 @@ import {
   resolvePeer,
   serviceSelector,
   type PeerIndex,
+  type UnattributedReason,
 } from './peerResolution';
 
 export interface TrafficIdentity {
@@ -43,7 +44,7 @@ export interface TrafficIdentity {
    *  with the `unattributed peer` comment, never as a selector. `at` is the
    *  row's `time_stamp` verbatim. `service` (`<ns>/<name>`) is set when the IP
    *  is a Service ClusterIP whose selector is unknown (spec never stored). */
-  unattributed?: { ip: string; at: string; service?: string };
+  unattributed?: { ip: string; at: string; service?: string; reason?: UnattributedReason };
   isExternal: boolean;
 }
 
@@ -133,7 +134,7 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
   }
 
   // No pod, and the Service lookup failed: a ClusterIP is not external.
-  if (serviceUnchecked && mayBeUncheckedClusterIP(ip)) return { isExternal: true, unattributed: { ip, at: at ?? '' } };
+  if (serviceUnchecked && mayBeUncheckedClusterIP(ip)) return { isExternal: true, unattributed: { ip, at: at ?? '', reason: 'service-lookup-failed' } };
 
   // Priority 3: External traffic
   return { isExternal: true };
@@ -249,7 +250,7 @@ export async function createRowIdentityResolver(sources: IdentitySources = {}): 
         // No pod ever held the IP: Service ClusterIP, else external. A
         // lookup that failed cannot say it is not a ClusterIP.
         const svc = await lookupService(ip);
-        if (svc === LOOKUP_FAILED) return mayBeUncheckedClusterIP(ip) ? { isExternal: true, unattributed: { ip, at: row.time_stamp } } : { isExternal: true };
+        if (svc === LOOKUP_FAILED) return mayBeUncheckedClusterIP(ip) ? { isExternal: true, unattributed: { ip, at: row.time_stamp, reason: 'service-lookup-failed' } } : { isExternal: true };
         return svc && svc.svc_name ? serviceRowIdentity(svc, ip, row.time_stamp) : { isExternal: true };
       }
     }

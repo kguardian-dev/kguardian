@@ -21,6 +21,7 @@ import {
   UNATTRIBUTED_LABEL,
   UNATTRIBUTED_NAMESPACE,
   UNATTRIBUTED_PEER_TOOLTIP,
+  SERVICE_LOOKUP_FAILED_TOOLTIP,
   isPlaceholderPod,
   peerGroupIdentity,
   peerKey,
@@ -78,6 +79,13 @@ export function localNodeForPeer(
   return key ? localPodByWorkload.get(key) : undefined;
 }
 
+/** The Unattributed node's tooltip: what its addresses are (former holders, failed Service lookups, or both). */
+function unattributedTooltip(lookupFailed: readonly boolean[]): string {
+  if (lookupFailed.every(Boolean)) return SERVICE_LOOKUP_FAILED_TOOLTIP;
+  if (!lookupFailed.some(Boolean)) return UNATTRIBUTED_PEER_TOOLTIP;
+  return `${UNATTRIBUTED_PEER_TOOLTIP}; for some addresses: ${SERVICE_LOOKUP_FAILED_TOOLTIP}`;
+}
+
 export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
   const { pods, services, rowPeers, localPodByName, localPodByWorkload, svcIpToLocalPod, podNameToSvcIp } = input;
 
@@ -93,6 +101,8 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
     ip: string;
     stored: boolean;
     unattributed: boolean;
+    /** Unattributed because the Service lookup failed (no pod ever held the IP), not a former holder. */
+    lookupFailed?: boolean;
     ingressTraffic: NetworkTraffic[];
     egressTraffic: NetworkTraffic[];
   }
@@ -131,10 +141,13 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
         // private address the cluster has no record of (split in step 3).
         e = entry(`ip:${remoteIp}`, { podInfo: null, svc: null, ip: remoteIp, stored: false, unattributed: false });
       } else {
-        // Guarded out, or a stored Service that no longer fronts the IP: the
-        // Unattributed node — the same peer the generators render as an
-        // ipBlock. Never re-derived from the IP.
-        e = entry(`unattributed:${remoteIp}`, { podInfo: null, svc: null, ip: remoteIp, stored: false, unattributed: true });
+        // Guarded out, a stored Service that no longer fronts the IP, or a
+        // failed Service lookup: the Unattributed node — the same peer the
+        // generators render as an ipBlock. Never re-derived from the IP.
+        const lookupFailed = peer.kind === 'unattributed' && peer.reason === 'service-lookup-failed';
+        e = entry(`unattributed:${remoteIp}`, { podInfo: null, svc: null, ip: remoteIp, stored: false, unattributed: true, lookupFailed });
+        // A lookup-failed entry is one whose every row failed the lookup.
+        if (!lookupFailed) e.lookupFailed = false;
       }
 
       const trafficType = traffic.traffic_type?.toLowerCase();
@@ -206,7 +219,7 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
   };
   const internetEntries: { pod: PodInfo; ingressTraffic: NetworkTraffic[]; egressTraffic: NetworkTraffic[] }[] = [];
   const privateEntries: typeof internetEntries = [];
-  const unattributedEntries: { pod: PodInfo; peerKey: string; ingressTraffic: NetworkTraffic[]; egressTraffic: NetworkTraffic[] }[] = [];
+  const unattributedEntries: { pod: PodInfo; peerKey: string; lookupFailed: boolean; ingressTraffic: NetworkTraffic[]; egressTraffic: NetworkTraffic[] }[] = [];
   const placeholderEntries: Array<[string, Entry]> = [];
   const groupByWorkload = new Map<string, string>(); // workloadKey → identity group key
 
@@ -215,6 +228,7 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
       unattributedEntries.push({
         pod: { pod_name: ext.ip, pod_ip: ext.ip, pod_namespace: UNATTRIBUTED_NAMESPACE, time_stamp: '', node_name: '', is_dead: false },
         peerKey: entryKey,
+        lookupFailed: ext.lookupFailed === true,
         ingressTraffic: ext.ingressTraffic,
         egressTraffic: ext.egressTraffic,
       });
@@ -360,7 +374,7 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
       unattributedEntries.flatMap((e) => e.ingressTraffic),
       unattributedEntries.flatMap((e) => e.egressTraffic),
       UNATTRIBUTED_NAMESPACE,
-      { peerKeys: unattributedEntries.map((e) => e.peerKey), tooltip: UNATTRIBUTED_PEER_TOOLTIP },
+      { peerKeys: unattributedEntries.map((e) => e.peerKey), tooltip: unattributedTooltip(unattributedEntries.map((e) => e.lookupFailed)) },
     );
   }
 

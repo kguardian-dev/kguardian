@@ -16,7 +16,7 @@ import {
 import type { ComputeBlame, ComputeContainer } from '../types/compute';
 import { describeDrop, isDrop } from '../utils/dropCause';
 import { displaySyscallList } from '../utils/syscalls';
-import { PRIVATE_PEER_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeerForView } from '../utils/peerResolution';
+import { PRIVATE_PEER_TOOLTIP, SERVICE_LOOKUP_FAILED_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeerForView } from '../utils/peerResolution';
 import { isPrivateAddress } from '../utils/ipCidr';
 
 interface DataTableProps {
@@ -35,8 +35,10 @@ interface TrafficIdentity {
   podNamespace?: string;
   svcName?: string;
   svcNamespace?: string;
-  /** The start-time guard excluded every pod that ever held the IP. */
+  /** The start-time guard excluded every pod that ever held the IP, or (`lookupFailed`) the Service lookup failed. */
   unattributed?: boolean;
+  /** No pod ever held the IP and the Service listing could not be read: it may be a ClusterIP. */
+  lookupFailed?: boolean;
   isExternal: boolean;
 }
 
@@ -162,7 +164,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       // flow time, a private address (a load balancer, a VPC endpoint), or
       // the Internet. The same split as the map's aggregate cards.
       const kind = identity.unattributed
-        ? { label: 'Unattributed', title: UNATTRIBUTED_PEER_TOOLTIP }
+        ? { label: 'Unattributed', title: identity.lookupFailed ? SERVICE_LOOKUP_FAILED_TOOLTIP : UNATTRIBUTED_PEER_TOOLTIP }
         : !ip ? { label: 'External', title: undefined }
         : isPrivateAddress(ip) ? { label: 'Private IP', title: PRIVATE_PEER_TOOLTIP }
         : { label: 'Internet', title: undefined };
@@ -290,7 +292,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
             : { isExternal: true, unattributed: true });
           break;
         case 'unattributed':
-          identities.set(t, { isExternal: true, unattributed: true });
+          identities.set(t, { isExternal: true, unattributed: true, ...(peer.reason === 'service-lookup-failed' && { lookupFailed: true }) });
           break;
         default:
           // No pod ever held the IP and it is no ClusterIP. Never derived
