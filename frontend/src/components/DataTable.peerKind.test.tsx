@@ -54,8 +54,11 @@ const openTraffic = (sel: PodNodeData) => {
   fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
 };
 
+/** Escapes every regex metacharacter, so `ip` is matched literally. */
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /** The table cell naming the peer at `ip`. */
-const peerCell = (ip: string) => screen.getAllByText(new RegExp(`^${ip.replace(/\./g, '\\.')}(:\\d+)?$`))[0].closest('td')!;
+const peerCell = (ip: string) => screen.getAllByText(new RegExp(`^${escapeRegExp(ip)}(:\\d+)?$`))[0].closest('td')!;
 
 test('the Private network card: each unresolved private IP is a Private IP, never a Pod', () => {
   const cards = externalCards([flow('10.20.30.40'), flow('10.20.30.41')]);
