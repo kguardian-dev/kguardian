@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.28.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.2...chart/v1.28.3) (2026-09-29)
+
+
+### Bug Fixes
+
+* **chart:** leave catch-all ingress installs unrestricted and document the UI host check ([a886fbe](https://github.com/kguardian-dev/kguardian/commit/a886fbe1cb1aaa367b72c09dac4d7977eb058038))
+* **chart:** move to frontend 1.20.5 ([#1814](https://github.com/kguardian-dev/kguardian/issues/1814)) ([df92006](https://github.com/kguardian-dev/kguardian/commit/df92006e149de9578499c05ee251e33a613739ac))
+* **chart:** pass the UI's known host names to the frontend as ALLOWED_HOSTS ([858e750](https://github.com/kguardian-dev/kguardian/commit/858e7501ec9e341f1083c1b1626d40fd497e9bfd))
+* **frontend:** harden the assistant and the UI server, and make the workloads table usable ([8da9687](https://github.com/kguardian-dev/kguardian/commit/8da9687529f16d1f34e268bcb9f9976f31a7c70d))
+
 ## [1.28.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.1...chart/v1.28.2) (2026-09-29)
 
 
