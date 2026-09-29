@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.4](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.3...llm-bridge/v1.12.4) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** filter image findings by CVE and rank the CVE list by tier from an index ([6b53778](https://github.com/kguardian-dev/kguardian/commit/6b537788db624bb84a318069ec32b48a4dec33f1))
+* **broker:** filter image findings by vuln_id and rank the CVE list by tier ([7edf033](https://github.com/kguardian-dev/kguardian/commit/7edf033f97682868017f45967200d38f1fd4cdab))
+* **broker:** serve the tier-ordered CVE list from an index ([0182084](https://github.com/kguardian-dev/kguardian/commit/01820842412980072b93ffd0459f594eaf6fc752))
+
 ## [1.12.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.2...llm-bridge/v1.12.3) (2026-09-28)
 
 
