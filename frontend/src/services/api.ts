@@ -197,15 +197,18 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get service details by IP address
+   * The Service whose ClusterIP is `serviceIP`. 404 (no such Service)
+   * resolves to null; any other failure is rethrown, never returned as
+   * null: a lookup that failed does not say the address is not a Service.
    */
   async getServiceByIP(serviceIP: string): Promise<ServiceInfo | null> {
     try {
       const response = await this.client.get(`/svc/ip/${serviceIP}`);
       return response.data;
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null;
       console.error('Error fetching service by IP:', error);
-      return null;
+      throw error;
     }
   }
 

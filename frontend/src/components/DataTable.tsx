@@ -16,13 +16,15 @@ import {
 import type { ComputeBlame, ComputeContainer } from '../types/compute';
 import { describeDrop, isDrop } from '../utils/dropCause';
 import { displaySyscallList } from '../utils/syscalls';
-import { PRIVATE_PEER_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeer } from '../utils/peerResolution';
+import { PRIVATE_PEER_TOOLTIP, UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, resolvePeerForView } from '../utils/peerResolution';
 import { isPrivateAddress } from '../utils/ipCidr';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
   allPodsLookup: PodInfo[];
   services: ServiceInfo[];
+  /** No Service listing could be read: a private address no pod held may be a ClusterIP, so it is unattributed. */
+  servicesUnavailable?: boolean;
   /** The live compute poll is failing and backing off (hooks/useComputeData). */
   computeUnavailable?: boolean;
 }
@@ -98,7 +100,7 @@ const SortableHeader: React.FC<{
   </th>
 );
 
-const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services, computeUnavailable = false }) => {
+const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services, servicesUnavailable = false, computeUnavailable = false }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
   // Every section starts collapsed. The panel shares the screen with the map
   // and a selection now focuses the graph as well as opening the card, so the
@@ -269,7 +271,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   const remoteIdentities = useMemo(() => {
     const identities = new Map<NetworkTraffic, TrafficIdentity>();
     selectedPod?.traffic?.forEach((t) => {
-      const peer = resolvePeer(t, peerIndex);
+      const peer = resolvePeerForView(t, peerIndex, !servicesUnavailable);
       switch (peer.kind) {
         case 'pod':
         case 'node':
@@ -297,7 +299,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       }
     });
     return identities;
-  }, [selectedPod, peerIndex]);
+  }, [selectedPod, peerIndex, servicesUnavailable]);
 
   // Compute available protocols and ports for filter dropdowns
   const availableProtocols = useMemo(() => {

@@ -41,6 +41,7 @@
 // networkpolicy pin all three.
 
 import type { NetworkTraffic, PodInfo, ServiceInfo } from '../types';
+import { isPrivateAddress } from './ipCidr';
 
 /** Tooltip for the map node that aggregates guarded-out peers. */
 export const UNATTRIBUTED_PEER_TOOLTIP = 'former holder of this IP; no live pod matched at flow time';
@@ -308,6 +309,30 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
   const svc = index.servicesByIp.get(ip);
   if (svc) return { kind: 'service', namespace: svc.svc_namespace ?? null, name: svc.svc_name ?? null, svc, stored: false };
   return { kind: 'unknown' };
+}
+
+/**
+ * An address no pod ever held, when whether it is a Service ClusterIP could
+ * not be established (the Service listing or the `/svc/ip` lookup failed):
+ * a ClusterIP is allocated from the cluster's Service CIDR, which is private
+ * address space, so a private address may be one and is unattributed, never
+ * external. A public address cannot be a ClusterIP and stays external.
+ */
+export function mayBeUncheckedClusterIP(ip: string): boolean {
+  return isPrivateAddress(ip);
+}
+
+/**
+ * `resolvePeer` for a view with no by-IP Service lookup of its own (the map,
+ * the traffic table). `servicesKnown` false means the Service listing could
+ * not be read: an address no pod ever held that may be a ClusterIP is
+ * unattributed, as the generators render it when `/svc/ip` fails.
+ */
+export function resolvePeerForView(row: NetworkTraffic, index: PeerIndex, servicesKnown: boolean): PeerResolution {
+  const peer = resolvePeer(row, index);
+  const ip = row.traffic_in_out_ip;
+  if (peer.kind === 'unknown' && !servicesKnown && ip && mayBeUncheckedClusterIP(ip)) return { kind: 'unattributed', ip, at: row.time_stamp };
+  return peer;
 }
 
 /**
