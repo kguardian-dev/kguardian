@@ -1449,9 +1449,9 @@ async fn run_downsample(pool: &DbPool, minute_hours: u32) {
 /// Where the next downsample batch starts: the oldest minute row older
 /// than the cutoff, or NULL once the tier is fully folded. A constant so
 /// the live test plans the SAME statement. It needs the partial
-/// [`crate::background_index::MINUTE_INDEX`], which that module builds: through the
-/// plain `(ts)` index it walked every five-minute row below the cutoff
-/// first, and on a 16 M-row table that hit the statement timeout.
+/// [`crate::background_index::MINUTE_INDEX`], which that module builds:
+/// through the plain `(ts)` index it walked every five-minute row below the
+/// cutoff first, and on a 16 M-row table that hit the statement timeout.
 const OLDEST_MINUTE_ROW_SQL: &str =
     "SELECT min(ts) AS ts FROM pod_compute_history WHERE resolution_secs = 60 AND ts < $1";
 

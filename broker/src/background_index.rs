@@ -42,9 +42,10 @@
 //! the lock taken and waits for its next attempt. ANALYZE takes the same
 //! table lock, so the stale-statistics ANALYZE this task runs
 //! ([`analyze_if_stale`]) goes through [`with_table_maintenance`] too.
-//! Autovacuum does not take these locks; while a build runs, Postgres cancels an ordinary autovacuum
-//! of the table in the build's favour, and an anti-wraparound one makes the
-//! build wait instead. Both are one-off costs of the first build.
+//! Autovacuum does not take these locks; while a build runs, Postgres
+//! cancels an ordinary autovacuum of the table in the build's favour, and an
+//! anti-wraparound one makes the build wait instead. Both are one-off costs
+//! of the first build.
 
 use diesel::connection::SimpleConnection;
 use diesel::pg::PgConnection;
@@ -73,35 +74,17 @@ pub(crate) struct BackgroundIndex {
 pub(crate) const MINUTE_INDEX: &str = "idx_pod_compute_history_minute_ts";
 
 /// Every index this task maintains, in build order. The minute index goes
-/// first: the downsample times out without it.
+/// first (the downsample times out without it), then the indexes the older
+/// migrations may have skipped (the traffic prune and ingest dedup need
+/// them), and the new history and contention read indexes last: those are
+/// the multi-hour builds on a large install, and the reads they serve work,
+/// more slowly, without them.
 pub(crate) const INDEXES: &[BackgroundIndex] = &[
     BackgroundIndex {
         name: MINUTE_INDEX,
         table: "pod_compute_history",
         create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pod_compute_history_minute_ts \
                  ON pod_compute_history (ts) WHERE resolution_secs = 60",
-        history_only: true,
-    },
-    // GET /compute/findings?namespace= finds its victims by namespace in
-    // the last few minutes (compute_api.rs `load_findings_victims`).
-    // Without it that read walks every row of the window for every
-    // namespace, and on a table with stale statistics the planner picks far
-    // worse (see that function).
-    BackgroundIndex {
-        name: "idx_pod_compute_history_ns_minute_ts",
-        table: "pod_compute_history",
-        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pod_compute_history_ns_minute_ts \
-                 ON pod_compute_history (namespace, ts) WHERE resolution_secs = 60",
-        history_only: true,
-    },
-    // GET /compute/contention?namespace= (compute_api.rs
-    // `contention_pairs`), which otherwise reads every namespace's pairs in
-    // the window and filters.
-    BackgroundIndex {
-        name: "idx_pod_contention_history_ns_ts",
-        table: "pod_contention_history",
-        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pod_contention_history_ns_ts \
-                 ON pod_contention_history (victim_namespace, ts DESC)",
         history_only: true,
     },
     // The next seven are the migrations' own definitions (2026-06-01,
@@ -159,6 +142,28 @@ pub(crate) const INDEXES: &[BackgroundIndex] = &[
         create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_image_sbom_components_name \
                  ON image_sbom_components (digest, source, name)",
         history_only: false,
+    },
+    // GET /compute/findings?namespace= finds its victims by namespace in
+    // the last few minutes (compute_api.rs `load_findings_victims`).
+    // Without it that read walks every row of the window for every
+    // namespace, and on a table with stale statistics the planner picks far
+    // worse (see that function).
+    BackgroundIndex {
+        name: "idx_pod_compute_history_ns_minute_ts",
+        table: "pod_compute_history",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pod_compute_history_ns_minute_ts \
+                 ON pod_compute_history (namespace, ts) WHERE resolution_secs = 60",
+        history_only: true,
+    },
+    // GET /compute/contention?namespace= (compute_api.rs
+    // `contention_pairs`), which otherwise reads every namespace's pairs in
+    // the window and filters.
+    BackgroundIndex {
+        name: "idx_pod_contention_history_ns_ts",
+        table: "pod_contention_history",
+        create: "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pod_contention_history_ns_ts \
+                 ON pod_contention_history (victim_namespace, ts DESC)",
+        history_only: true,
     },
 ];
 
@@ -299,7 +304,6 @@ pub(crate) fn ensure_index(
 ///
 /// `conn` must be a real session (see [`ensure_index`]); the locks are
 /// released before this returns, whatever `f` did.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn with_table_maintenance<T>(
     conn: &mut PgConnection,
     table: &str,
@@ -344,6 +348,10 @@ const ANALYZED: [&str; 2] = ["pod_compute_history", "pod_contention_history"];
 /// autovacuum keeps this a no-op.
 const ANALYZE_STALE_HOURS: i32 = 24;
 
+/// How long the stale-statistics ANALYZE waits for its table lock before
+/// skipping the table until the next pass.
+const ANALYZE_LOCK_TIMEOUT: &str = "5s";
+
 #[derive(diesel::QueryableByName)]
 struct Stale {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
@@ -354,8 +362,10 @@ struct Stale {
 /// [`ANALYZE_STALE_HOURS`]. `Some(true)`: analyzed; `Some(false)`: its
 /// statistics are fresh; `None`: skipped, because an index build on the
 /// table holds its lock (ANALYZE takes the same SHARE UPDATE EXCLUSIVE lock
-/// as the build and VACUUM, so it goes through [`with_table_maintenance`]).
-/// ANALYZE reads a fixed sample, not the table, and blocks no writes.
+/// as the build and VACUUM, so it goes through [`with_table_maintenance`]),
+/// or because that lock was not granted within [`ANALYZE_LOCK_TIMEOUT`]
+/// (an anti-wraparound autovacuum, or a manual VACUUM, holds it). ANALYZE
+/// reads a fixed sample, not the table, and blocks no writes.
 pub(crate) fn analyze_if_stale(conn: &mut PgConnection, table: &str) -> QueryResult<Option<bool>> {
     let stale = sql_query(
         "SELECT (SELECT COALESCE(GREATEST(last_analyze, last_autoanalyze) \
@@ -370,13 +380,38 @@ pub(crate) fn analyze_if_stale(conn: &mut PgConnection, table: &str) -> QueryRes
         return Ok(Some(false));
     }
     conn.batch_execute("SET statement_timeout = 0")?;
+    // Bounded wait for the table lock: the pass is sequential and holds the
+    // build locks while it waits, so an unbounded wait behind an
+    // anti-wraparound autovacuum (which never yields) would stall every
+    // build after it.
     let analyzed = with_table_maintenance(conn, table, |c| {
-        c.batch_execute(&format!("ANALYZE {table}"))
+        c.batch_execute(&format!("SET lock_timeout = '{ANALYZE_LOCK_TIMEOUT}'"))?;
+        let r = c.batch_execute(&format!("ANALYZE {table}"));
+        c.batch_execute("RESET lock_timeout")?;
+        match r {
+            Ok(()) => Ok(true),
+            Err(diesel::result::Error::DatabaseError(_, info))
+                if info.message().contains("lock timeout") =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     })?;
-    if analyzed.is_some() {
-        info!(table, "statistics missing or stale; analyzed");
+    match analyzed {
+        Some(true) => {
+            info!(table, "statistics missing or stale; analyzed");
+            Ok(Some(true))
+        }
+        Some(false) => {
+            info!(
+                table,
+                "statistics missing or stale; table lock busy, analyzing later"
+            );
+            Ok(None)
+        }
+        None => Ok(None),
     }
-    Ok(analyzed.map(|()| true))
 }
 
 /// The indexes this Broker maintains, given whether compute history is on.
@@ -729,6 +764,28 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert_eq!(fresh, Some(false), "analyzed once, then fresh");
+
+        // A session holding the table lock (as an anti-wraparound
+        // autovacuum would) makes the ANALYZE give up after its lock
+        // timeout, skip the table, and release the build locks.
+        sql_query("SELECT pg_stat_reset_single_table_counters('pod_compute_history'::regclass)")
+            .execute(&mut conn)
+            .expect("forget the table's last analyze again");
+        builder
+            .batch_execute("BEGIN; LOCK TABLE pod_compute_history IN SHARE UPDATE EXCLUSIVE MODE")
+            .expect("hold the table lock");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            analyze_if_stale(&mut conn, "pod_compute_history").unwrap(),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        builder.batch_execute("ROLLBACK").expect("release");
+        assert_ne!(
+            ensure_index(&mut builder, &INDEXES[0]).unwrap(),
+            IndexState::Busy,
+            "the build locks were released"
+        );
 
         let other = with_table_maintenance(&mut conn, "pod_details", |c| {
             c.batch_execute("VACUUM pod_details")

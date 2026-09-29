@@ -129,7 +129,9 @@ $$;
 -- (broker/src/background_index.rs). Fresh installs have empty tables and
 -- always get it here. lock_timeout: a queued SHARE lock request blocks
 -- every later insert too, so give up after 5 s and let the migration
--- retry rather than wait behind a long transaction.
+-- retry rather than wait behind a long transaction. It stays set for the
+-- rest of this migration, so the ALTER TABLEs below give up the same way on
+-- a busy table: the migration fails and the Broker retries it.
 SET LOCAL lock_timeout = '5s';
 
 DO $$
