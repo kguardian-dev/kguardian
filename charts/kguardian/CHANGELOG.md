@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.28.4](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.3...chart/v1.28.4) (2026-09-29)
+
+
+### Bug Fixes
+
+* **broker:** elect one replica to run the cluster-wide background jobs ([62c632b](https://github.com/kguardian-dev/kguardian/commit/62c632ba77e9ec800c955a66d2cfac6947676242))
+* **chart:** grant the broker a Lease for leader election ([d121bcf](https://github.com/kguardian-dev/kguardian/commit/d121bcf1f20ac0d083962ffe4c7ce8167356e97a))
+* **chart:** move to broker 1.19.6, frontend 1.20.6 and llm-bridge 1.12.4 ([#1826](https://github.com/kguardian-dev/kguardian/issues/1826)) ([bcf6e51](https://github.com/kguardian-dev/kguardian/commit/bcf6e51d61bac7fb1f0262dea6f912e9108a1138))
+* **chart:** name the leader election Role per release and document the database restart ([c7c7c90](https://github.com/kguardian-dev/kguardian/commit/c7c7c90cd392e61dca25774765d338b768335da2))
+* **chart:** size the bundled database's max_connections for every broker replica ([de57ddc](https://github.com/kguardian-dev/kguardian/commit/de57ddc3ae7203db9c618877ee55d2e4de553f68))
+
 ## [1.28.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.2...chart/v1.28.3) (2026-09-29)
 
 
