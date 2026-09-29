@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
-import type { NetworkTraffic, PodInfo, SyscallInfo } from '../types';
+import type { NetworkTraffic, PodInfo, ServiceInfo, SyscallInfo } from '../types';
 
 // F-02 (MAP-01, MAP-08, TOOL-15): two overlapping runs shared one pod listing
 // and the superseded one's `finally` cleared `loading` while the real one
@@ -33,11 +33,12 @@ vi.mock('./useComputeData', () => ({
 type Deferred<T> = { resolve: (v: T) => void; reject: (e: unknown) => void };
 const traffic = new Map<string, Deferred<NetworkTraffic[]>>();
 const getAllPods = vi.fn<() => Promise<PodInfo[]>>();
+const getAllServices = vi.fn<() => Promise<ServiceInfo[]>>();
 
 vi.mock('../services/api', () => ({
   apiClient: {
     getAllPods: () => getAllPods(),
-    getAllServices: vi.fn(async () => []),
+    getAllServices: () => getAllServices(),
     // Traffic reads stay pending until the test settles them by pod name.
     getPodTrafficByName: (name: string) =>
       new Promise<NetworkTraffic[]>((resolve, reject) => traffic.set(name, { resolve, reject })),
@@ -67,6 +68,8 @@ beforeEach(async () => {
   traffic.clear();
   getAllPods.mockReset();
   getAllPods.mockImplementation(async () => ALL_PODS);
+  getAllServices.mockReset();
+  getAllServices.mockImplementation(async () => []);
   ({ usePodData } = await import('./usePodData'));
 });
 
@@ -183,6 +186,43 @@ describe('usePodData sequences its runs', () => {
     await waitFor(() => expect(result.current.error).toBe('timeout of 35000ms exceeded'));
     expect(result.current.loading).toBe(false);
     expect(result.current.pods.map((p) => p.id)).toEqual(['beta-b', 'beta-c']);
+  });
+});
+
+// Pods and Services were read in one Promise.all, so once the Service
+// listing rejected on failure a failed Service read blanked the whole map.
+describe('a failed Service listing is not a failed load', () => {
+  const svc = { svc_name: 'api', svc_namespace: 'beta', svc_ip: '10.96.0.10' } as ServiceInfo;
+
+  test('first load: the pods load, services are unknown (null), and the failure is reported apart', async () => {
+    getAllServices.mockRejectedValueOnce(new Error('Service Unavailable'));
+    const { result } = renderHook(() => usePodData('beta'));
+    await settleTraffic('b-1', [flow]);
+    await settleTraffic('c-1', [flow]);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.pods).toHaveLength(2);
+    expect(result.current.servicesError).toBe('Service Unavailable');
+    expect(result.current.services).toEqual([]);
+    expect(result.current.servicesListing).toBeNull();
+  });
+
+  test('a refresh whose Service read fails keeps the Services it had', async () => {
+    getAllServices.mockResolvedValueOnce([svc]);
+    const { result } = renderHook(() => usePodData('beta'));
+    await settleTraffic('b-1', [flow]);
+    await settleTraffic('c-1', [flow]);
+    await waitFor(() => expect(result.current.services).toEqual([svc]));
+    traffic.clear();
+
+    getAllServices.mockRejectedValueOnce(new Error('Service Unavailable'));
+    act(() => result.current.refreshData());
+    await settleTraffic('b-1', [flow]);
+    await settleTraffic('c-1', [flow]);
+    await waitFor(() => expect(result.current.servicesError).toBe('Service Unavailable'));
+    expect(result.current.services).toEqual([svc]);
+    expect(result.current.servicesListing).toEqual([svc]);
+    expect(result.current.error).toBeNull();
   });
 });
 

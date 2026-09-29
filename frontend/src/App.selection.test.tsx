@@ -75,6 +75,7 @@ vi.mock('./hooks/usePodData', () => ({
       compute: { findings: [], enabled: false, supported: false, history: new Map() },
       allPodsLookup: [],
       services: [],
+      failedReads: { traffic: 0, syscalls: 0 },
       loading: false,
       error: null,
       refreshData: () => {},

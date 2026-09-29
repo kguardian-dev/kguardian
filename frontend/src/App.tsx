@@ -187,7 +187,7 @@ function App() {
   const namespaceKnown = loc.params.ns !== undefined || !namespacesLoading;
   const podDataEnabled = namespaceKnown && (view !== 'images' || isPolicyBuilderOpen || isAIAssistantOpen);
   const computeEnabled = namespaceKnown && (view === 'map' || view === 'risks');
-  const { pods: rawPods, compute, allPodsLookup, services, failedReads, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
+  const { pods: rawPods, compute, allPodsLookup, services, servicesListing, servicesError, failedReads, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId, {
     enabled: podDataEnabled,
     compute: computeEnabled,
   });
@@ -588,6 +588,13 @@ function App() {
   // `pods` is one entry per workload identity; the pod count is its members.
   const podTotal = useMemo(() => pods.reduce((n, p) => n + (p.pods?.length || 1), 0), [pods]);
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  // Per-pod reads that did not answer: each card says so, and this says why.
+  const failedReadCount = failedReads.traffic + failedReads.syscalls;
+  const readNote = failedReadCount === 0
+    ? null
+    : failedReads.shed
+      ? `${plural(failedReadCount, 'read')} ${failedReadCount === 1 ? 'was' : 'were'} refused by the Broker because it is busy; those cards say "read failed". Refresh to read them again.`
+      : `${plural(failedReadCount, 'read')} failed; those cards say "read failed". Refresh to read them again.`;
   const sectionSubtitle =
     view === 'map'
       ? podsSettling && pods.length === 0
@@ -777,6 +784,24 @@ function App() {
             <p className="text-sm">Error: {error}</p>
           </div>
         )}
+        {/* Partial data: the map is drawn, but part of what it is drawn from
+            did not arrive. Same shape as the node-reporting banner. */}
+        {pods.length > 0 && (servicesError || readNote) && (
+          <div role="status" className="flex flex-col gap-0.5 px-4 py-1.5 border-b border-hubble-border bg-severity-medium/10 text-xs text-severity-medium">
+            {servicesError && (
+              <span className="flex items-center gap-2" title={servicesError}>
+                <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                Service attribution is unavailable: the Service listing could not be read ({servicesError}). Refresh to retry.
+              </span>
+            )}
+            {readNote && (
+              <span className="flex items-center gap-2">
+                <TriangleAlert className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                {readNote}
+              </span>
+            )}
+          </div>
+        )}
 
         {podsSettling && pods.length === 0 ? (
           <div className="flex-1 min-h-0">
@@ -921,7 +946,9 @@ function App() {
             // the inventory; `loading` so the picker never reads "No workloads"
             // while the namespace is still on its way.
             podsLookup={allPodsLookup}
-            services={services}
+            // Absent, not `[]`, while no Service listing has been read: the
+            // generators then look Services up by IP instead of reading "none".
+            services={servicesListing ?? undefined}
             loading={podsSettling}
           />
         </Suspense>

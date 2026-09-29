@@ -21,7 +21,11 @@ export interface UsePodDataOptions {
 export interface FailedReads {
   traffic: number;
   syscalls: number;
+  /** The Broker shed reads with 503 (it is busy), so the rest were not sent. */
+  shed?: true;
 }
+
+const NO_SERVICES: ServiceInfo[] = [];
 
 const NO_FAILURES: FailedReads = { traffic: 0, syscalls: 0 };
 
@@ -51,7 +55,9 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
   const computeEnabled = opts.compute ?? enabled;
   const [basePods, setPods] = useState<PodNodeData[]>([]);
   const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
-  const [services, setServices] = useState<ServiceInfo[]>([]);
+  // null until a Service listing has been read: "unknown", never "none".
+  const [services, setServices] = useState<ServiceInfo[] | null>(null);
+  const [servicesError, setServicesError] = useState<string | null>(null);
   const [failedReads, setFailedReads] = useState<FailedReads>(NO_FAILURES);
   const [loading, setLoading] = useState<boolean>(enabled);
   const [error, setError] = useState<string | null>(null);
@@ -78,14 +84,25 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
     setError(null);
 
     try {
-      // Fetch all pods and services from broker
-      const [allPods, allServices] = await Promise.all([
+      // Fetch all pods and services from broker. Only the pod listing is
+      // fatal: without Services the map still draws every workload and loses
+      // only their Service attribution, so a failed Service read keeps the
+      // listing it had (or none) and is reported on its own.
+      const [podsRead, servicesRead] = await Promise.allSettled([
         apiClient.getAllPods(),
         apiClient.getAllServices(),
       ]);
       if (!current()) return;
 
-      setServices(allServices);
+      if (servicesRead.status === 'fulfilled') {
+        setServices(servicesRead.value);
+        setServicesError(null);
+      } else {
+        const reason: unknown = servicesRead.reason;
+        setServicesError(reason instanceof Error ? reason.message : String(reason));
+      }
+      if (podsRead.status === 'rejected') throw podsRead.reason;
+      const allPods = podsRead.value;
 
       // Keep all pods (including dead) for cross-namespace IP resolution.
       // Dead pods resolve so their IPs are recognised as cluster-internal
@@ -167,6 +184,7 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
       setFailedReads({
         traffic: results.reduce((n, r) => n + r.trafficFailed, 0),
         syscalls: results.reduce((n, r) => n + r.syscallsFailed, 0),
+        ...(shed ? { shed: true as const } : {}),
       });
     } catch (err) {
       if (!current()) return;
@@ -282,7 +300,12 @@ export const usePodData = (namespace: string, selectedPodId: string | null = nul
     pods,
     compute,
     allPodsLookup,
-    services,
+    services: services ?? NO_SERVICES,
+    /** The last Service listing read, or null when none has been: the policy
+     *  generators then look Services up by IP instead of reading "none". */
+    servicesListing: services,
+    /** The last Service read failed (the map is still drawn; attribution is not). */
+    servicesError,
     /** Per-pod reads that failed in the last load, so a consumer (the Policy
      *  Builder picker) can say "N reads failed" instead of "0 conns". */
     failedReads,

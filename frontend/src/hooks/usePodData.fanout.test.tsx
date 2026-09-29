@@ -76,6 +76,6 @@ test('once the Broker sheds a read with 503, the reads not yet sent are marked f
   // About one wave, not all 400.
   expect(state.calls).toBeLessThanOrEqual(20);
   // Every read that was not answered is still counted as failed, never as empty.
-  expect(result.current.failedReads).toEqual({ traffic: 200, syscalls: 200 });
+  expect(result.current.failedReads).toEqual({ traffic: 200, syscalls: 200, shed: true });
   expect(result.current.pods.every((p) => p.trafficError && p.syscallsError)).toBe(true);
 });
