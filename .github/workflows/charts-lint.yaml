@@ -64,7 +64,8 @@ jobs:
 
       # A chart bump PR typically references images whose release builds
       # are still running — release-please cuts the tag minutes before
-      # the bump PR opens, and the Rust builds take ~30 minutes. Without
+      # the bump PR opens, and the multi-arch Rust builds take 50-80
+      # minutes (arm64 runs under QEMU). Without
       # this, ct install fails on ErrImagePull through no fault of the
       # chart and every bump PR is born red (it has happened on three
       # consecutive bumps). Wait — bounded — for each kguardian image
@@ -77,11 +78,12 @@ jobs:
             | sed -E 's/image: *"?([^"]+)"?/\1/' \
             | grep '^ghcr.io/kguardian-dev/' | sort -u)
           echo "chart references:"; echo "$images"
-          deadline=$(( $(date +%s) + 1500 ))
+          # 100 minutes: longer than the slowest broker release build seen.
+          deadline=$(( $(date +%s) + 6000 ))
           for img in $images; do
             until docker manifest inspect "$img" >/dev/null 2>&1; do
               if [ "$(date +%s)" -gt "$deadline" ]; then
-                echo "::error::$img still absent after 25 minutes — release build failed or tag never cut"
+                echo "::error::$img still absent after 100 minutes — release build failed or tag never cut"
                 exit 1
               fi
               echo "waiting for $img ..."
