@@ -2,6 +2,7 @@ import axios from 'axios';
 import type { AxiosInstance } from 'axios';
 import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo, AuditVerdict, ClusterEnvironment } from '../types';
 import { UNKNOWN_CLUSTER_ENVIRONMENT } from '../types';
+import { BROKER_STATEMENT_TIMEOUT_MS } from './readTimeout';
 import type {
   ComputeFindingsResponse,
   ComputeHistoryRow,
@@ -38,6 +39,14 @@ export function orderNamespaces(namespaces: string[]): string[] {
   }
   return sorted;
 }
+
+/**
+ * The pod and service listings are the heaviest responses the broker builds
+ * (72 MB of pods on a 43k-pod cluster) and can legitimately take most of its
+ * statement timeout. Giving up at the default 10 s turned every slow listing
+ * into a failure while the statement kept running server-side.
+ */
+const LISTING_TIMEOUT_MS = BROKER_STATEMENT_TIMEOUT_MS + 5_000;
 
 class BrokerAPIClient {
   private client: AxiosInstance;
@@ -170,18 +179,20 @@ class BrokerAPIClient {
   private servicesInFlight: Promise<ServiceInfo[]> | null = null;
 
   /**
-   * Get all service details
+   * Get all service details. A failed read is rethrown, never returned as
+   * `[]`: an empty list means the cluster has no Services, and a failed read
+   * must not silently drop every Service attribution on the map.
    */
   async getAllServices(): Promise<ServiceInfo[]> {
     if (this.servicesInFlight) return this.servicesInFlight;
 
     const request = (async () => {
       try {
-        const response = await this.client.get('/svc/info');
+        const response = await this.client.get('/svc/info', { timeout: LISTING_TIMEOUT_MS });
         return response.data || [];
       } catch (error) {
         console.error('Error fetching all services:', error);
-        return [];
+        throw error;
       }
     })();
 
@@ -244,9 +255,6 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get all pod details
-   */
-  /**
    * In-flight `/pod/info` request, shared by every concurrent caller.
    *
    * The whole pod inventory is the single heaviest response the broker
@@ -262,6 +270,10 @@ class BrokerAPIClient {
    * change still fetch genuinely fresh data. The entry is cleared as soon as
    * the request settles, failures included, so a failed load does not poison
    * the next attempt.
+   *
+   * A failed read (timeout, 5xx, network) is rethrown to every caller sharing
+   * it, never returned as `[]`: an empty listing means the namespace has no
+   * pods, and the map would show "No workloads" for one that failed to load.
    */
   private podsInFlight: Promise<PodInfo[]> | null = null;
 
@@ -270,7 +282,7 @@ class BrokerAPIClient {
 
     const request = (async () => {
       try {
-        const response = await this.client.get('/pod/info');
+        const response = await this.client.get('/pod/info', { timeout: LISTING_TIMEOUT_MS });
         // Ensure we always return an array
         if (Array.isArray(response.data)) {
           return response.data;
@@ -279,7 +291,7 @@ class BrokerAPIClient {
         return [];
       } catch (error) {
         console.error('Error fetching all pods:', error);
-        return [];
+        throw error;
       }
     })();
 
@@ -319,28 +331,19 @@ class BrokerAPIClient {
     return this.namespacesFromPods();
   }
 
-  /** Pre-`/pod/namespaces` brokers: derive the list from the pod inventory. */
+  /**
+   * Pre-`/pod/namespaces` brokers: derive the list from the pod inventory. A
+   * failed listing is rethrown, as `getNamespaces` does for its own read.
+   */
   private async namespacesFromPods(): Promise<string[]> {
-    try {
-      const pods = await this.getAllPods();
-
-      // Ensure pods is an array
-      if (!Array.isArray(pods)) {
-        console.error('getAllPods() did not return an array:', pods);
-        return ['default'];
+    const pods = await this.getAllPods();
+    const namespaces = new Set<string>();
+    pods.forEach(pod => {
+      if (pod.pod_namespace && !pod.is_dead) {
+        namespaces.add(pod.pod_namespace);
       }
-
-      const namespaces = new Set<string>();
-      pods.forEach(pod => {
-        if (pod.pod_namespace && !pod.is_dead) {
-          namespaces.add(pod.pod_namespace);
-        }
-      });
-      return orderNamespaces(Array.from(namespaces));
-    } catch (error) {
-      console.error('Error fetching namespaces:', error);
-      return ['default'];
-    }
+    });
+    return orderNamespaces(Array.from(namespaces));
   }
 
   // ── Compute gauges / contention (docs/design/compute-contention-monitoring.md) ──

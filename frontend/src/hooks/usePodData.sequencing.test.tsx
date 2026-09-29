@@ -169,6 +169,21 @@ describe('usePodData sequences its runs', () => {
     expect(result.current.pods).toHaveLength(2);
     expect(getAllPods).toHaveBeenCalledTimes(2);
   });
+
+  // The listing rejects on failure (api.ts). A failed Refresh must not
+  // replace a loaded graph with nothing: the cards stay, the error is set.
+  test('a refresh whose pod listing fails keeps the loaded pods and surfaces the error', async () => {
+    const { result } = renderHook(() => usePodData('beta'));
+    await settleTraffic('b-1', [flow]);
+    await settleTraffic('c-1', [flow]);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    getAllPods.mockRejectedValueOnce(new Error('timeout of 35000ms exceeded'));
+    act(() => result.current.refreshData());
+    await waitFor(() => expect(result.current.error).toBe('timeout of 35000ms exceeded'));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.pods.map((p) => p.id)).toEqual(['beta-b', 'beta-c']);
+  });
 });
 
 describe('usePodData marks failed reads instead of hiding them', () => {

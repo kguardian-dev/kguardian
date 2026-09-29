@@ -41,7 +41,7 @@ const ImagesView = lazyRetry(() => import('./components/ImagesView'));
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
-import { Server } from 'lucide-react';
+import { CloudOff, Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { MapLens, PodNodeData } from './types';
@@ -766,7 +766,8 @@ function App() {
           />
         ) : (
         <>
-        {error && (
+        {/* A failed Refresh keeps the graph it had, under this banner. */}
+        {error && pods.length > 0 && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
             <p className="text-sm">Error: {error}</p>
           </div>
@@ -776,7 +777,22 @@ function App() {
           <div className="flex-1 min-h-0">
             <GraphSkeleton />
           </div>
-        ) : !error && pods.length === 0 ? (
+        ) : error && pods.length === 0 ? (
+          // The listing failed: say so, never "No workloads", which is a claim
+          // about the namespace the Broker did not get to make.
+          <div className="flex-1 flex items-center justify-center">
+            <EmptyState
+              icon={CloudOff}
+              title={`Workloads in ${effectiveNamespace} could not be loaded`}
+              description={error}
+              action={
+                <Button variant="secondary" size="sm" leftIcon={RefreshCw} onClick={refreshData}>
+                  Refresh
+                </Button>
+              }
+            />
+          </div>
+        ) : pods.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
             <EmptyState
               icon={Server}

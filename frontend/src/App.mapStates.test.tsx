@@ -10,7 +10,7 @@ import type { PodInfo, PodNodeData } from './types';
 // and heavy children are stubbed; each of those has its own tests.
 
 const podDataCalls: unknown[][] = [];
-const podDataState = { pods: [] as PodNodeData[], loading: false };
+const podDataState = { pods: [] as PodNodeData[], loading: false, error: null as string | null };
 const nsState = { namespaces: ['payments', 'other'], loading: false, error: null as string | null };
 
 vi.mock('./components/NetworkGraph', () => ({ default: () => <div data-testid="map" /> }));
@@ -32,7 +32,7 @@ vi.mock('./hooks/usePodData', () => ({
       services: [],
       failedReads: { traffic: 0, syscalls: 0 },
       loading: podDataState.loading,
-      error: null,
+      error: podDataState.error,
       refreshData: () => {},
     };
   },
@@ -55,6 +55,7 @@ beforeEach(() => {
   podDataCalls.length = 0;
   podDataState.pods = [];
   podDataState.loading = false;
+  podDataState.error = null;
   nsState.namespaces = ['payments', 'other'];
   nsState.loading = false;
   nsState.error = null;
@@ -252,4 +253,24 @@ test('a palette pick matches a member pod name and focuses the workload like a c
 
   await waitFor(() => expect(hashParams().get('pod')).toBe('payments-api'));
   expect(hashParams().get('focus')).toBe('payments-api'); // opened AND focused, as a card click does
+});
+
+// A timed-out or shed /pod/info used to come back as `[]`, and the map said
+// "No workloads in payments — This namespace has no observed pods yet".
+test('a pod listing that failed shows the error, never the empty state', async () => {
+  podDataState.error = 'timeout of 35000ms exceeded';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByText('Workloads in payments could not be loaded')).not.toBeNull());
+  expect(screen.getByText('timeout of 35000ms exceeded')).not.toBeNull();
+  expect(screen.queryByText(/No workloads in/)).toBeNull();
+  expect(screen.queryByTestId('map')).toBeNull();
+});
+
+test('a Refresh that failed keeps the loaded graph, with the error above it', async () => {
+  podDataState.pods = workloads();
+  podDataState.error = 'Service Unavailable';
+  renderAt('#/map?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('map')).not.toBeNull());
+  expect(screen.getByText('Error: Service Unavailable')).not.toBeNull();
+  expect(screen.queryByText(/could not be loaded/)).toBeNull();
 });

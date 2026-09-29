@@ -54,6 +54,6 @@ test('a failed /svc/info does not poison the next one', async () => {
     calls += 1;
     return calls === 1 ? Promise.reject(new Error('broker unavailable')) : Promise.resolve({ data: [{ svc_ip: '10.100.0.1' }] });
   }) as never);
-  expect(await apiClient.getAllServices()).toEqual([]);
+  await expect(apiClient.getAllServices()).rejects.toThrow('broker unavailable');
   expect(await apiClient.getAllServices()).toHaveLength(1);
 });
