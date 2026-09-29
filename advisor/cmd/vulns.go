@@ -643,7 +643,8 @@ var vulnsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List vulnerabilities affecting inventory images",
 	Long: `List every vulnerability affecting an image in the inventory, grouped by id,
-most severe first, with its risk tier (the most urgent over every affected
+most urgent tier first (P0, not yet computed, P1, P2, Background; most severe
+first within a tier), with its risk tier (the most urgent over every affected
 workload container), the strongest in-use state, and how many images,
 workloads (running) and namespaces it affects. It reads a summary the broker rebuilds every few minutes; the
 freshness is printed on stderr.
