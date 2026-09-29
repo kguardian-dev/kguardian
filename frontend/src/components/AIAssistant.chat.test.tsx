@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import AIAssistant from './AIAssistant';
 import { streamChatMessage, type StreamHandlers, type StreamOptions } from '../services/aiApi';
 
-vi.mock('../services/aiApi', () => ({ streamChatMessage: vi.fn() }));
+vi.mock('../services/aiApi', async (actual) => ({ ...(await actual<typeof import('../services/aiApi')>()), streamChatMessage: vi.fn() }));
 
 interface Stream {
   handlers: StreamHandlers;
@@ -233,6 +233,54 @@ it('opens external links from a reply in a new tab without a referrer or opener'
   const link = await screen.findByRole('link', { name: 'the docs' });
   expect(link.getAttribute('target')).toBe('_blank');
   expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+});
+
+// A browser resolves each of these to another origin although none starts
+// with `//` or `scheme://`. (The Markdown parser percent-encodes backslashes,
+// so those two stay on this origin; they are here so any link that does
+// leave it is caught.)
+it.each(['https:evil.example/x', 'HTTP:evil.example/x', '/\\evil.example/x', '\\\\\\\\evil.example/x'])('a reply link to %s that leaves this origin opens in a new tab', async (href) => {
+  replyWith(`See [the page](${href}).`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const link = await screen.findByRole('link', { name: 'the page' });
+  if (new URL(link.getAttribute('href')!, location.href).origin === location.origin) return;
+  expect(link.getAttribute('target')).toBe('_blank');
+  expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+});
+
+it.each(['javascript:alert(1)', 'data:text/html,<b>x</b>'])('renders a reply link to %s as plain text, so clicking it cannot reload the page', async (href) => {
+  replyWith(`See [the page](${href}) now.`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const text = await screen.findByText('the page');
+  expect(text.tagName).toBe('SPAN');
+  expect(text.closest('a')).toBeNull();
+  expect(screen.queryByRole('link', { name: 'the page' })).toBeNull();
+});
+
+it('keeps a same-origin reply link in this tab', async () => {
+  replyWith('Open [the map](#/map?ns=argocd).');
+  render(<AIAssistant isOpen onClose={() => {}} namespace="argocd" podNames={[]} />);
+  send(QUESTION);
+  const link = await screen.findByRole('link', { name: 'the map' });
+  expect(link.getAttribute('target')).toBeNull();
+});
+
+it("clips the context to llm-bridge's 2,000 characters, so long pod names never make every message fail", async () => {
+  replyWith('ok');
+  // Kubernetes allows 253-character pod names; 20 of them are about 5,000 characters.
+  const podNames = Array.from({ length: 20 }, (_, i) => `${'a'.repeat(240)}-${i}`);
+  render(<AIAssistant isOpen onClose={() => {}} namespace="payments" podNames={podNames} />);
+  send(QUESTION);
+  await waitFor(() => expect(streamChatMessage).toHaveBeenCalled());
+  const context = vi.mocked(streamChatMessage).mock.calls[0][2]!;
+  expect(context.length).toBeLessThanOrEqual(2000);
+  const parsed = JSON.parse(context);
+  expect(parsed.namespace).toBe('payments');
+  // As many whole names as fit, in order.
+  expect(parsed.podNames.length).toBeGreaterThan(0);
+  expect(parsed.podNames).toEqual(podNames.slice(0, parsed.podNames.length));
 });
 
 it('sends only completed exchanges as history: failed, stopped and empty replies are left out', async () => {

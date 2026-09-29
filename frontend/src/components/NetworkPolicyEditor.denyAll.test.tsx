@@ -197,3 +197,37 @@ test('visual editor: a selector-less Service ipBlock is labelled as a cluster Se
   expect(screen.getByDisplayValue('10.96.0.1/32')).toBeTruthy();
   expect(screen.getByDisplayValue('52.1.2.3/32')).toBeTruthy();
 });
+
+// Syscall reads fail the same way traffic reads do (a 503 under Broker load
+// marks every unsent read failed). A profile built from the replicas that
+// answered would block syscalls the others use, and one built from nothing
+// denies everything, so neither may read as an ordinary profile.
+const syscallsOf = (names: string) =>
+  names ? ([{ pod_name: coredns.pod_name, pod_namespace: 'kube-system', syscalls: names, arch: 'x86_64' }] as PolicyWorkload['syscalls']) : [];
+
+test('seccomp, syscalls plus a failed member read: a dismissible incomplete-syscalls warning and an honest footer', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={workload([], { syscalls: syscallsOf('read,write,openat'), syscallsError: true })} initialPolicyType="seccomp" />);
+  await waitForYaml('openat');
+  expect(screen.queryByText(/Syscall read failed/)).toBeNull();
+  const note = screen.getByText(/Syscalls for this workload are incomplete/).closest('[role="note"]')!;
+  expect(note.textContent).toMatch(/syscall read failed/);
+  expect(within(note as HTMLElement).getByRole('button', { name: 'Dismiss policy notice' })).toBeTruthy();
+  expect(screen.getByText(/generated from incomplete syscalls/)).toBeTruthy();
+  expect(screen.queryByText(/^Generated from observed syscalls/)).toBeNull();
+});
+
+test('seccomp, no syscalls because the read failed: a non-dismissible read-failed error', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={workload([], { syscalls: syscallsOf(''), syscallsError: true })} initialPolicyType="seccomp" />);
+  const alert = await screen.findByText(/Syscall read failed, so this profile allows no syscalls/);
+  const box = alert.closest('[role="alert"]') as HTMLElement;
+  expect(box.textContent).toContain('not evidence');
+  expect(within(box).queryByRole('button', { name: 'Dismiss policy notice' })).toBeNull();
+  expect(screen.queryByText(/Syscalls for this workload are incomplete/)).toBeNull();
+  expect(screen.getByText(/The syscall read for this workload failed/)).toBeTruthy();
+});
+
+test('seccomp with every read answered shows neither notice', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={workload([], { syscalls: syscallsOf('read,write,openat') })} initialPolicyType="seccomp" />);
+  await waitForYaml('openat');
+  expect(screen.queryByText(/Syscalls for this workload are incomplete|Syscall read failed/)).toBeNull();
+});

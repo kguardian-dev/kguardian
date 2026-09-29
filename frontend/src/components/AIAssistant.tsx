@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { X, Send, Square, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
-import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
+import { chatContext, streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 import { initialViewMode, storeViewMode, type AssistantViewMode } from '../utils/assistantViewMode';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -165,8 +165,22 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
 // handle back to this page.
 const ReplyImage: React.FC<{ alt?: string }> = ({ alt }) => <span>{alt ? `[image: ${alt}]` : '[image]'}</span>;
 
+// Whether the browser would take `href` to another origin. It decides, not a
+// pattern: `https:evil.example` and backslash forms leave the page too.
+function leavesOrigin(href: string): boolean {
+  try {
+    return new URL(href, window.location.href).origin !== window.location.origin;
+  } catch {
+    return true;
+  }
+}
+
+// react-markdown blanks unsafe hrefs (javascript:, data:) to "". An <a href="">
+// would reload the page and lose the conversation, so those render as text.
 const ReplyLink: React.FC<{ href?: string; children?: React.ReactNode }> = ({ href, children }) =>
-  href && /^(https?:)?\/\//i.test(href) ? (
+  !href ? (
+    <span>{children}</span>
+  ) : leavesOrigin(href) ? (
     <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
   ) : (
     <a href={href}>{children}</a>
@@ -491,13 +505,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     const patchAssistant = (patch: (m: Message) => Message) =>
       setMessages(prev => prev.map(m => (m.id === assistantId ? patch(m) : m)));
 
-    // Build structured context for every message
-    const context = JSON.stringify({
-      namespace: namespace || undefined,
-      // Cap at 20 to match the bridge's getSystemPrompt truncation — sending
-      // more just gets dropped server-side.
-      podNames: podNames?.slice(0, 20),
-    });
+    const context = chatContext(namespace, podNames);
 
     // Cancel any prior in-flight stream, then start a fresh abortable one.
     abortRef.current?.abort();

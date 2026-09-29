@@ -166,11 +166,13 @@ export function mergeFindings(matches: readonly Finding[]): Finding | null {
  */
 export function workloadFactors(w: ExposedWorkload, e: Exposure, imageFinding: Finding | null, privileged: Parameters<typeof privilegedFactor>[0]): Factor[] {
   const broker = brokerFactors(imageFinding?.tierFactors, imageFinding?.inUseDetail).filter((x) => x.key !== 'severity');
+  // Fixable in this image, not in any image: every package carrying the CVE here has a fix (the merged finding says so when it was read).
+  const packages = e.images.find((i) => i.digest === w.imageDigest)?.packages;
   const facts = factChips({
     kev: imageFinding?.kev,
     epss: imageFinding?.epss,
     score: imageFinding?.score,
-    fixable: e.fixable,
+    fixable: imageFinding ? imageFinding.fixable : packages?.length ? packages.every((p) => p.fixedVersions.length > 0) : undefined,
     fixedVersions: fixedVersionsFor(e, w.imageDigest),
   });
   const own = [inUseFactor(w.inUseState), exposureFactor(w.network ? w.network.exposed : null, w.network?.exposedVia, w.network?.windowHours), privilegedFactor(privileged)].filter(

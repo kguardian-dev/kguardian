@@ -383,7 +383,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                             </span>
                           </td>
                           <td className="px-3 py-2.5">{r.profile.cr ? <CrNodes cr={r.profile.cr} /> : <span className="font-mono text-xs text-tertiary">—</span>}</td>
-                          <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} /></td>
+                          <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} known={r.seccomp !== 'unknown'} /></td>
                           <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{r.profile.syscallCount}</td>
                         </>
                       ) : (
@@ -400,7 +400,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                               <span className="text-xs text-tertiary" title="No syscalls aggregated for this workload yet (bare pods have no profile)">no profile</span>
                             )}
                           </td>
-                          <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} /></td>
+                          <td className="px-3 py-2.5 text-xs"><DriftCell drift={r.drift} known={r.seccomp !== 'unknown'} /></td>
                           <td className="px-3 py-2.5">
                             {r.capture ? (
                               <CaptureBadge capture={r.capture} />

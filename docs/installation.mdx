@@ -404,6 +404,8 @@ frontend:
 
 This renders two Envoy Gateway objects, and nothing at all while `enabled` is `false`: a `SecurityPolicy` that ext-auths the frontend route against oauth2-proxy, and an `/oauth2/*` HTTPRoute so the OIDC callback and `/oauth2/userinfo` are served same-origin. The UI detects the session from `/oauth2/userinfo` at runtime, so there is no rebuild and no build flag; without the proxy it stays in local mode.
 
+If SSO is on but the UI still shows local mode, check where `/oauth2/userinfo` is answered: `curl -sI https://<ui-host>/oauth2/userinfo`. A `204` with `X-Kguardian-Sso: none` came from the UI's own server, so the `/oauth2/*` route is missing or not attached and the request never reached oauth2-proxy. oauth2-proxy itself answers `200` with a session or `401` without one.
+
 <Warning>
   The oauth2-proxy Service usually lives in another namespace, so a `ReferenceGrant` **in that namespace** must allow `SecurityPolicy` and `HTTPRoute` from the release namespace to reference it. The chart cannot render this for you. Without it the policy attaches but the route cannot reach the proxy.
 </Warning>

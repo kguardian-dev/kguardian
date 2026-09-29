@@ -208,6 +208,28 @@ test('column filters: rows whose value is unknown are left out and the table say
   });
 });
 
+// Drift has no value without a CR. The cell used to read a bare "—" for both
+// "no CR" and "not known yet", so the rows the Drift filter's No CR selects
+// did not look like they belonged to any option.
+test('drift column: a row without a CR says "no CR", as the Drift filter names it; one not known yet reads unknown', async () => {
+  renderView();
+  await waitFor(() => expect(tileValue('Would-deny (recent)')).toBe('1'));
+  const [flux, grafana, api] = rows();
+  for (const r of [flux, grafana]) expect(within(r).getByTestId('drift-no-cr').textContent).toBe('no CR');
+  expect(within(api).queryByTestId('drift-no-cr')).toBeNull();
+  choose('Drift', 'no-cr');
+  expect(names()).toEqual(['source-controller', 'grafana']);
+  cleanup();
+
+  await withSeccomp({ profiles: [], loading: true, error: null }, async () => {
+    renderView();
+    for (const r of rows()) {
+      expect(within(r).queryByTestId('drift-no-cr')).toBeNull();
+      expect(within(r).getByTestId('drift-unknown').getAttribute('title')).toMatch(/^Unknown/);
+    }
+  });
+});
+
 test('column filters: the network filter shows nothing and says why while the audit verdicts are loading, then after they fail', async () => {
   let fail: (e: Error) => void = () => {};
   const pending = () => new Promise<AuditVerdict[]>((_, reject) => { fail = reject; });

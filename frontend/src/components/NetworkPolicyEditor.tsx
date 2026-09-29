@@ -11,7 +11,9 @@ import {
   enforcementAdvisory,
   denyAllAdvisory,
   describeDenied,
+  incompleteSyscallsAdvisory,
   incompleteTrafficAdvisory,
+  syscallsReadFailedAdvisory,
   type DeniedDirection,
   type DenyAllCause,
 } from '../utils/cniPolicySupport';
@@ -309,6 +311,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   const denyAllNotice = denyAll ? denyAllAdvisory(denyAllCause, deniedDirections) : null;
   // Rules exist but a member pod's read failed: peers may be missing.
   const incompleteNotice = !denyAll && pod?.trafficError && policyType !== 'seccomp' ? incompleteTrafficAdvisory() : null;
+  // The same for a profile: some syscall reads failed, or every one did and nothing came back.
+  const noSyscalls = !(pod?.syscalls ?? []).some((s) => s.syscalls.trim() !== '');
+  const syscallsNotice =
+    policyType === 'seccomp' && pod?.syscallsError ? (noSyscalls ? syscallsReadFailedAdvisory() : incompleteSyscallsAdvisory()) : null;
 
   if (!isOpen || !pod) return null;
 
@@ -349,6 +355,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
           {advisory && <PolicyAdvisoryNotice advisory={advisory} />}
           {!isLoading && denyAllNotice && <PolicyAdvisoryNotice advisory={denyAllNotice} />}
           {!isLoading && incompleteNotice && <PolicyAdvisoryNotice advisory={incompleteNotice} />}
+          {!isLoading && syscallsNotice && <PolicyAdvisoryNotice advisory={syscallsNotice} />}
           {!isLoading && (
             <HostNetworkWarningBanner
               warnings={policyType === 'network' ? policy?.warnings : policyType === 'cilium' ? ciliumPolicy?.warnings : undefined}
@@ -2316,7 +2323,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
             <div className="flex items-center justify-between">
               <p className="text-xs text-tertiary">
                 {policyType === 'seccomp'
-                  ? seccompFormat === 'spo'
+                  ? syscallsNotice
+                    ? noSyscalls
+                      ? 'The syscall read for this workload failed and the profile allows no syscalls: enforcing it denies every syscall.'
+                      : "This profile was generated from incomplete syscalls: a member pod's syscall read failed, so syscalls may be missing."
+                    : seccompFormat === 'spo'
                     ? 'Generated from observed syscalls, exported as a Security Profiles Operator SeccompProfile CR (requires SPO).'
                     : seccompFormat === 'json'
                       ? 'Generated from observed syscalls, exported as a raw seccomp JSON document.'

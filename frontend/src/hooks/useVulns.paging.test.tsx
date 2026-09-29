@@ -151,6 +151,32 @@ describe('useImageList', () => {
     expect(result.current.loadingMore).toBe(false);
     expect(result.current.items.map((i) => i.digest)).toEqual(['sha256:1']);
   });
+
+  test("a scope change drops the previous namespace's rows, cursor and error; a failed first page shows none of them", async () => {
+    const reads: string[] = [];
+    let release = () => {};
+    const fetchImpl = ((input: RequestInfo | URL) => {
+      const u = new URL(String(input), 'http://x');
+      if (/^\/api\/images\/sha256:/.test(u.pathname)) return Promise.resolve(new Response('', { status: 404 }));
+      reads.push(u.search);
+      const ns = u.searchParams.get('namespace');
+      if (ns === 'b') return new Promise<Response>((r) => { release = () => r(new Response('boom', { status: 500 })); });
+      return Promise.resolve(new Response(JSON.stringify({ items: [image(`sha256:${ns}`)], nextAfter: 'cursor-of-a' })));
+    }) as typeof fetch;
+    const a = new VulnApi({ fetchImpl });
+    const { result, rerender } = renderHook(({ ns }) => useImageList(ns, 0, a), { initialProps: { ns: 'a' } });
+    await waitFor(() => expect(result.current.items).toHaveLength(1));
+    rerender({ ns: 'b' });
+    // While b's first page loads, a's rows are not shown under it.
+    expect(result.current.items).toEqual([]);
+    expect(result.current.hasMore).toBe(false);
+    await act(async () => { release(); });
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.items).toEqual([]);
+    expect(result.current.hasMore).toBe(false);
+    await act(async () => { await result.current.loadMore(); });
+    expect(reads.some((q) => q.includes('after=cursor-of-a') && q.includes('namespace=b'))).toBe(false);
+  });
 });
 
 describe('useImageVulns', () => {

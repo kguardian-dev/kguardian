@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { boundHistory, MAX_HISTORY_MESSAGES, streamChatMessage, type HistoryMessage } from './aiApi';
+import { boundHistory, BRIDGE_MAX_CONTEXT_CHARS, chatContext, MAX_HISTORY_MESSAGES, streamChatMessage, type HistoryMessage } from './aiApi';
 
 // llm-bridge: express.json({ limit: '100kb' }), history.max(100), content.max(50000).
 const BRIDGE_MAX_BODY_BYTES = 100 * 1024;
@@ -94,5 +94,27 @@ describe('boundHistory', () => {
     expect(bytes(kept)).toBeLessThanOrEqual(BRIDGE_MAX_BODY_BYTES);
     expect(kept.map((m) => m.role)).toEqual(['user', 'assistant']);
     expect(kept[1].content).toMatch(/^€+\n\n\[… the rest of this message was not sent\]$/);
+  });
+});
+
+describe('chatContext', () => {
+  it('sends the namespace and up to 20 pod names when they fit', () => {
+    const names = Array.from({ length: 25 }, (_, i) => `web-${i}`);
+    expect(JSON.parse(chatContext('prod', names)!)).toEqual({ namespace: 'prod', podNames: names.slice(0, 20) });
+    expect(JSON.parse(chatContext(undefined, undefined)!)).toEqual({});
+  });
+
+  it('drops whole pod names from the end until it fits the bridge limit', () => {
+    const names = Array.from({ length: 20 }, (_, i) => `${'p'.repeat(250)}${i}`);
+    const context = chatContext('prod', names)!;
+    expect(context.length).toBeLessThanOrEqual(BRIDGE_MAX_CONTEXT_CHARS);
+    const parsed = JSON.parse(context);
+    expect(parsed.podNames).toEqual(names.slice(0, parsed.podNames.length));
+    // One more name would not have fitted.
+    expect(JSON.stringify({ ...parsed, podNames: names.slice(0, parsed.podNames.length + 1) }).length).toBeGreaterThan(BRIDGE_MAX_CONTEXT_CHARS);
+  });
+
+  it('sends no context rather than one the bridge would refuse', () => {
+    expect(chatContext('n'.repeat(3000), ['a'])).toBeUndefined();
   });
 });
