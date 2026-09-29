@@ -37,10 +37,15 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   const begin = useLatest();
   const key = JSON.stringify(q);
   const loadedFor = useRef<string | null>(null);
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
 
   const load = useCallback(async () => {
     const current = begin();
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
     // Another scope's or filter's rows are not this one's; a same-query Refresh keeps them until the new page lands.
     if (loadedFor.current !== key) {
       loadedFor.current = key;
@@ -60,7 +65,10 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
   }, [api, key, begin]);
 
@@ -70,7 +78,7 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   }, [load, refreshTick]);
 
   const loadMore = useCallback(async () => {
-    if (!nextAfter) return;
+    if (!nextAfter || firstPageInFlight.current) return;
     const current = begin();
     setLoadingMore(true);
     try {
@@ -294,6 +302,8 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   // cancel the enrichment of rows already on screen.
   const begin = useLatest();
   const listGen = useRef(0);
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
 
   const enrich = useCallback(
     async (rows: ImageSummary[], current: () => boolean) => {
@@ -323,7 +333,10 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   const load = useCallback(async () => {
     const current = begin();
     const gen = ++listGen.current;
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
     try {
       const p = await api.listImages({ limit: IMAGE_PAGE_SIZE, ...(namespace ? { namespace } : {}) });
       if (!current()) return;
@@ -331,12 +344,16 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
       setItems(p.items);
       setNextAfter(p.nextAfter);
       setError(null);
+      firstPageInFlight.current = false;
       setLoading(false);
       await enrich(p.items, () => gen === listGen.current);
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
   }, [api, namespace, begin, enrich]);
 
@@ -346,7 +363,7 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   }, [load, refreshTick]);
 
   const loadMore = useCallback(async () => {
-    if (!nextAfter) return;
+    if (!nextAfter || firstPageInFlight.current) return;
     const current = begin();
     const gen = listGen.current;
     setLoadingMore(true);
@@ -377,11 +394,16 @@ export function useImageVulns(digest: string | null, api: VulnApi = vulnApi, pag
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
   const loadedFor = useRef<string | null>(null);
+  // A first page in flight owns the sequence: a page-more issued meanwhile would supersede it and page the wrong list.
+  const firstPageInFlight = useRef(false);
 
   const load = useCallback(async () => {
     if (!digest) return;
     const current = begin();
+    firstPageInFlight.current = true;
     setLoading(true);
+    // A new first page supersedes any page-more in flight, whose own reset is skipped.
+    setLoadingMore(false);
     // A new digest starts empty, so nothing of the previous image shows under it; a same-digest reload keeps its rows.
     if (loadedFor.current !== digest) {
       loadedFor.current = digest;
@@ -400,7 +422,10 @@ export function useImageVulns(digest: string | null, api: VulnApi = vulnApi, pag
     } catch (err) {
       if (current()) setError(err);
     } finally {
-      if (current()) setLoading(false);
+      if (current()) {
+        firstPageInFlight.current = false;
+        setLoading(false);
+      }
     }
   }, [api, digest, pageSize, begin]);
 
@@ -410,7 +435,7 @@ export function useImageVulns(digest: string | null, api: VulnApi = vulnApi, pag
   }, [load]);
 
   const loadMore = useCallback(async () => {
-    if (!digest || !nextAfter) return;
+    if (!digest || !nextAfter || firstPageInFlight.current) return;
     const current = begin();
     setLoadingMore(true);
     try {

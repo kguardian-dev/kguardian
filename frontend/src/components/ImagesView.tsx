@@ -254,7 +254,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                       Privilege and per-workload exposure are in the CVE drawer.
                     </span>
                     {cves.hasMore && (
-                      <Button variant="secondary" size="sm" onClick={() => void cves.loadMore()} disabled={cves.loadingMore}>
+                      <Button variant="secondary" size="sm" onClick={() => void cves.loadMore()} disabled={cves.loadingMore || cves.loading}>
                         {cves.loadingMore ? 'Loading…' : 'Load more CVEs'}
                       </Button>
                     )}
@@ -359,7 +359,7 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
           <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
             <span>Keyed by digest. Each row reads the image and its vulnerability reports, then its SBOMs when a source reported on it (2 to 3 reads per digest, a few at a time).</span>
             {list.hasMore && (
-              <Button variant="secondary" size="sm" onClick={() => void list.loadMore()} disabled={list.loadingMore}>
+              <Button variant="secondary" size="sm" onClick={() => void list.loadMore()} disabled={list.loadingMore || list.loading}>
                 {list.loadingMore ? 'Loading…' : 'Load more images'}
               </Button>
             )}
