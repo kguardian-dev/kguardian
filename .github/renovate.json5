@@ -44,6 +44,23 @@
       "pinDigests": false,
     },
     {
+      // The cataloger (Syft as a library) produces the SBOMs the supplychain
+      // matcher (Grype) matches, so both must resolve the same Syft and
+      // stereoscope: cataloger/hack/check-syft-version.sh fails CI when they
+      // differ, and cataloger-difftest.yaml re-proves the cataloger's
+      // resolver against the new Syft. One PR bumps them together; go mod
+      // tidy refreshes the matcher's indirect Syft that Grype pulls in.
+      // Not auto-merged: a Syft bump is reviewed with its difftest result.
+      "description": "Bump Syft (cataloger) and Grype (supplychain-matcher) together",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["cataloger/go.mod", "supplychain-matcher/go.mod"],
+      "matchDepNames": ["github.com/anchore/syft", "github.com/anchore/grype", "github.com/anchore/stereoscope"],
+      "groupName": "syft-grype",
+      "postUpdateOptions": ["gomodTidy"],
+      "automerge": false,
+      "addLabels": ["needs-manual-review"],
+    },
+    {
       // TypeScript 7 (the Go-native compiler) is GA on npm's `latest`, but
       // typescript-eslint refuses to run against it — it throws
       // "typescript-eslint does not support TS 7.0" at load, breaking
