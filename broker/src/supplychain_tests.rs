@@ -3861,9 +3861,9 @@ fn live_database_cve_summary_rebuild_names_every_column() {
 // like every live test here they need `--test-threads=1`.
 // ---------------------------------------------------------------------
 
-/// The guard as first written (kg_node_sbom_guard evaluated on every
-/// kg_pkg_in_use call): the shipped function, which reads it once per
-/// container from runtime_node_sbom_guard, must give the same text.
+/// The guard as first written, through one combined kg_node_pkg_guard: the
+/// shipped kg_pkg_in_use (kg_node_sbom_guard then kg_node_pkg_flags, both
+/// at read time) must give the same text in every state.
 const NODE_GUARD_PER_CALL: &str = include_str!("../test/fixtures/node_guard_per_call.sql");
 
 /// After an in-use refresh: kg_pkg_in_use equals the per-call reference
@@ -3944,8 +3944,23 @@ fn node_guard_same_as_per_call(conn: &mut PgConnection) {
     });
     rolled_back(conn, "node platform changed", &|c| {
         for n in &nodes {
-            crate::node_catalog::record_platform(c, n, "linux/s390x").unwrap();
+            sql_query(crate::node_catalog::UPSERT_PLATFORM_SQL)
+                .bind::<Text, _>(n)
+                .bind::<Text, _>("linux/s390x")
+                .execute(c)
+                .unwrap();
         }
+    });
+    rolled_back(conn, "new instance on another node", &|c| {
+        exec(
+            c,
+            &format!(
+                "INSERT INTO runtime_coverage SELECT (jsonb_populate_record(r, jsonb_build_object( \
+                     'container_id', r.container_id || '-new', 'node_name', 'n2', \
+                     'pod_name', r.pod_name || '-new'))).* \
+                 FROM runtime_coverage r WHERE r.pod_namespace = '{NS}'"
+            ),
+        )
     });
     rolled_back(conn, "claim platform changed", &|c| {
         exec(c, "UPDATE node_catalog_claims SET platform = 'linux/s390x'")
@@ -3967,13 +3982,14 @@ fn guard_text(conn: &mut PgConnection, sql: &str) -> Option<String> {
     sql_query(sql).get_result::<T>(conn).expect(sql).t
 }
 
-/// Between two in-use refreshes, what the stored guard row was judged on
-/// can change; each change fails closed at once, with no refresh: (a) the
-/// SBOM re-cataloged partial with unchanged content, (b) the SBOM replaced
+/// The node SBOM guard is judged when a verdict is read, never from the
+/// last in-use refresh: with no refresh in between, each change fails
+/// closed at once (and passes again once undone): (a) the SBOM
+/// re-cataloged partial with unchanged content, (b) the SBOM replaced
 /// (content hash no longer the one the claim describes), (c) a node that
-/// ran the container reporting another platform (its offer marks the row;
-/// reporting the old platform again does not clear it, only a refresh
-/// does), and the claim's platform changing.
+/// ran the container reporting another platform through its offer, the
+/// claim's platform changing, and a new instance starting on a node of
+/// another platform or of no recorded platform.
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
 fn live_database_a_stale_guard_row_fails_closed_between_refreshes() {
@@ -4045,22 +4061,35 @@ fn live_database_a_stale_guard_row_fails_closed_between_refreshes() {
     };
     crate::node_catalog::claim(&mut conn, &offer("n1", "linux/arm64"), true, 900).unwrap();
     assert_eq!(
-        guard_text(&mut conn, "SELECT reason AS t FROM runtime_node_sbom_guard").as_deref(),
-        Some("platform_mismatch")
-    );
-    assert_eq!(
         node_guard_bar(&mut conn, &img),
         unknown("platform_mismatch")
     );
     crate::node_catalog::claim(&mut conn, &offer("n1", "linux/amd64"), true, 900).unwrap();
     assert_eq!(
         node_guard_bar(&mut conn, &img),
-        unknown("platform_mismatch"),
-        "stays failed until a refresh judges it again"
+        ino,
+        "read time: back at once"
     );
-    // An offer with the same platform marks nothing.
-    node_guard_refresh(&mut conn);
-    crate::node_catalog::claim(&mut conn, &offer("n1", "linux/amd64"), true, 900).unwrap();
+
+    // A new instance starts on a node of another platform, then on a node
+    // with no recorded platform.
+    node_guard_instance(&mut conn, &img, "g9", "n2", "full");
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    exec(
+        &mut conn,
+        "UPDATE runtime_coverage SET node_name = 'n3' WHERE container_id = 'sc-guard-g9'",
+    );
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id = 'sc-guard-g9'",
+    );
     assert_eq!(node_guard_bar(&mut conn, &img), ino);
 
     // The claim's platform changes (a re-catalog for another platform).
@@ -4329,42 +4358,6 @@ fn live_database_node_sbom_in_use_guard() {
 
     // Every guard passes.
     assert_eq!(node_guard_coverage(&mut conn), (true, None));
-    // The guard table is updated in place: an unchanged refresh rewrites
-    // no row (same xmin), a changed reason rewrites only that row.
-    let guard_rows = |conn: &mut PgConnection| {
-        #[derive(QueryableByName)]
-        struct G {
-            #[diesel(sql_type = Text)]
-            x: String,
-            #[diesel(sql_type = Nullable<Text>)]
-            reason: Option<String>,
-        }
-        sql_query("SELECT xmin::text AS x, reason FROM runtime_node_sbom_guard")
-            .load::<G>(conn)
-            .unwrap()
-            .into_iter()
-            .map(|g| (g.x, g.reason))
-            .collect::<Vec<_>>()
-    };
-    let first = guard_rows(&mut conn);
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].1, None);
-    node_guard_refresh(&mut conn);
-    assert_eq!(guard_rows(&mut conn), first, "unchanged: not rewritten");
-    exec(
-        &mut conn,
-        "UPDATE node_catalog_claims SET completeness = 'partial'",
-    );
-    node_guard_refresh(&mut conn);
-    let changed = guard_rows(&mut conn);
-    assert_eq!(changed[0].1.as_deref(), Some("sbom_incomplete"));
-    assert_ne!(changed[0].0, first[0].0);
-    exec(
-        &mut conn,
-        "UPDATE node_catalog_claims SET completeness = 'full'",
-    );
-    node_guard_refresh(&mut conn);
-    assert_eq!(guard_rows(&mut conn)[0].1, None);
     assert_eq!(
         node_guard_states(&mut conn, &img),
         [

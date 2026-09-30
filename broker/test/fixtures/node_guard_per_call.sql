@@ -1,8 +1,8 @@
--- Test reference (not a migration): the in-use guard as first written, with
--- kg_node_sbom_guard evaluated live on every kg_pkg_in_use call rather than
--- once per container in runtime_node_sbom_guard. The live tests install it
--- beside the shipped kg_pkg_in_use (it calls the shipped kg_node_sbom_guard)
--- and assert both give the same text after every in-use refresh.
+-- Test reference (not a migration): the in-use guard as first written, the
+-- SBOM guard and the package flags in one kg_node_pkg_guard. The live tests
+-- install it beside the shipped kg_pkg_in_use (it calls the shipped
+-- kg_node_sbom_guard) and assert both give the same text after every in-use
+-- refresh and after each change that can land before the next one.
 CREATE OR REPLACE FUNCTION kg_node_pkg_guard_per_call(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text, p_image text,
     p_pkg text, p_window_hours integer)

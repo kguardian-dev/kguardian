@@ -114,8 +114,8 @@ elects normally. `/metrics` shows the state:
 
 A few tables are rewritten every few seconds but stay small:
 `pod_compute_latest` (every live container, every 5 s), `node_compute_latest`,
-`seccomp_crs`, `seccomp_denial_nodes`, `runtime_in_use_coverage`,
-`runtime_node_sbom_guard` and `workload_containers`. Autovacuum normally keeps them clean (the migrations
+`seccomp_crs`, `seccomp_denial_nodes`, `runtime_in_use_coverage` and
+`workload_containers`. Autovacuum normally keeps them clean (the migrations
 give the compute tables aggressive per-table settings), but the broker does
 not depend on it: with autovacuum stopped on a shared cluster,
 `pod_compute_latest` once grew to about 1 GB an hour.
@@ -193,8 +193,9 @@ was cataloged for (a node with no recorded platform fails), capture in mode
 the node SBOM is the image's only SBOM, `runtime_in_use_coverage` carries the
 first two as the container's reason; beside a Trivy Operator or registry
 SBOM, packages those list files for are judged exactly as before and only
-node-only packages are guarded. The container half of the guard is computed
-once per in-use refresh into `runtime_node_sbom_guard`.
+node-only packages are guarded. The guard is evaluated when a verdict is
+read, so a re-catalog, a platform change or a new instance on another node
+takes effect at once, not at the next in-use refresh.
 
 Changed reason value: `inUseDetail.reason` for a container captured in exec
 mode (or without the library probe) is now `libraries_not_tracked`, where it

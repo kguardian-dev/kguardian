@@ -5,37 +5,10 @@
 -- whole guard below, and anything short of it is 'unknown' with a reason.
 -- Nothing changes for Trivy Operator or registry SBOMs.
 --
--- One new (derived) table, two new functions and kg_pkg_in_use
--- redefined: nothing here locks or rewrites an existing table, so the
--- migration is safe at startup behind long reads. Every statement is
--- IF NOT EXISTS / OR REPLACE, so a re-run is a no-op. Timestamps are
--- naive UTC, like runtime_coverage.
-
--- kg_node_sbom_guard (below) per workload container whose image has a
--- node SBOM linked, refreshed in place by every in-use refresh
--- (in_use_store::refresh_coverage, in the same transaction and with the
--- same window as runtime_in_use_coverage: a row is written only when its
--- reason changes; on the maintenance VACUUM list), so kg_pkg_in_use evaluates it
--- once per container rather than once per package. reason NULL = passes.
--- A container with no row here fails closed (sbom_incomplete).
--- sbom_platform is the claim's platform the row was judged against. What
--- can change between two refreshes is re-checked when the row is read
--- (kg_pkg_in_use): the SBOM's completeness and content hash, and the
--- claim's platform against sbom_platform. A node whose platform changes
--- marks its containers' passing rows platform_mismatch in the offer's
--- transaction (node_catalog::claim).
-CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard (
-    cluster_id     VARCHAR NOT NULL,
-    pod_namespace  VARCHAR NOT NULL,
-    workload_kind  VARCHAR NOT NULL,
-    workload_name  VARCHAR NOT NULL,
-    container_name VARCHAR NOT NULL,
-    image_digest   VARCHAR NOT NULL,
-    reason         VARCHAR NULL,
-    sbom_platform  VARCHAR NULL,
-    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name,
-                 image_digest)
-);
+-- Two new functions and kg_pkg_in_use redefined: nothing here locks or
+-- rewrites a table, so the migration is safe at startup behind long
+-- reads. Every statement is CREATE OR REPLACE, so a re-run is a no-op.
+-- Timestamps are naive UTC, like runtime_coverage.
 
 -- Whether the node SBOM linked to p_image may support
 -- installed_not_observed for the workload container: NULL when it may,
@@ -114,13 +87,12 @@ $fn$;
 --   * a non-node SBOM lists the package's files: installed_not_observed,
 --     exactly as before (Trivy Operator and registry SBOMs unchanged);
 --   * no SBOM lists them: unknown:no_package_files, as before;
---   * only a node SBOM lists them: installed_not_observed only when all
---     pass, else unknown:<the first failing>: the stored node SBOM is,
---     now, complete and described by its claim (sbom_incomplete); the
---     container's runtime_node_sbom_guard row exists (sbom_incomplete) and
---     passed (its reason); the claim's platform is, now, the one the row
---     was judged against (platform_mismatch); the package's
---     kg_node_pkg_flags.
+--   * only a node SBOM lists them: installed_not_observed only when
+--     kg_node_sbom_guard and then kg_node_pkg_flags both pass, else
+--     unknown:<the first reason>. Both are evaluated when the row is read,
+--     never from a stored snapshot, so a change between two in-use
+--     refreshes (a re-catalog, a replaced SBOM, a node or claim platform,
+--     a new instance on another node) takes effect at once.
 CREATE OR REPLACE FUNCTION kg_pkg_in_use(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text,
     p_image text, p_pkg text, p_observable boolean
@@ -150,28 +122,11 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
                 WHERE l.image_digest = p_image AND l.source = 'node'
                   AND cardinality(sc.file_paths) > 0)
                 THEN 'unknown:no_package_files'
-            ELSE COALESCE('unknown:' || (
-                SELECT CASE
-                    WHEN NOT EXISTS (
-                        SELECT 1 FROM vuln_sources vs
-                        JOIN node_catalog_claims cl ON cl.inventory_digest = vs.digest
-                        WHERE vs.digest = p_image AND vs.source = 'node' AND vs.kind = 'sbom'
-                          AND cl.completeness = 'full' AND cl.content_hash = vs.content_hash)
-                        THEN 'sbom_incomplete'
-                    WHEN ng.image_digest IS NULL THEN 'sbom_incomplete'
-                    WHEN ng.reason IS NOT NULL THEN ng.reason
-                    WHEN ng.sbom_platform IS NULL OR ng.sbom_platform IS DISTINCT FROM (
-                        SELECT cl.platform FROM node_catalog_claims cl
-                        WHERE cl.inventory_digest = p_image)
-                        THEN 'platform_mismatch'
-                    ELSE kg_node_pkg_flags(p_image, p_pkg)
-                END
-                FROM (SELECT 1) one
-                LEFT JOIN runtime_node_sbom_guard ng
-                  ON ng.cluster_id = p_cluster AND ng.pod_namespace = p_ns
-                 AND ng.workload_kind = p_kind AND ng.workload_name = p_name
-                 AND ng.container_name = p_container AND ng.image_digest = p_image),
-                'installed_not_observed')
+            ELSE COALESCE('unknown:' || COALESCE(
+                              kg_node_sbom_guard(p_cluster, p_ns, p_kind, p_name, p_container,
+                                  p_image, c.window_hours),
+                              kg_node_pkg_flags(p_image, p_pkg)),
+                          'installed_not_observed')
          END
          FROM (SELECT (SELECT covered FROM runtime_in_use_coverage cv
                        WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns
@@ -182,6 +137,11 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
                        WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns
                          AND cv.workload_kind = p_kind AND cv.workload_name = p_name
                          AND cv.container_name = p_container AND cv.image_digest = p_image)
-                          AS reason) c)
+                          AS reason,
+                      (SELECT window_hours FROM runtime_in_use_coverage cv
+                       WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns
+                         AND cv.workload_kind = p_kind AND cv.workload_name = p_name
+                         AND cv.container_name = p_container AND cv.image_digest = p_image)
+                          AS window_hours) c)
     )
 $$;

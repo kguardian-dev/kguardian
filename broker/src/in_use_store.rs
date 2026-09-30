@@ -534,10 +534,6 @@ pub struct UseEvidence {
 /// `capture_gap`, so nothing is claimed installed-but-not-observed from
 /// part of the evidence.
 ///
-/// It also rebuilds `runtime_node_sbom_guard`: `kg_node_sbom_guard` once
-/// per container of an image with a node SBOM, which `kg_pkg_in_use`
-/// reads per package.
-///
 /// Node catalog guard (design node-catalog.md section 2): where the
 /// image's only SBOM is a node catalog SBOM, a covered container stays
 /// covered only if `kg_node_sbom_guard` passes (the SBOM is
@@ -556,44 +552,6 @@ pub fn refresh_coverage(
     let available = coverage_available(conn)?;
     conn.transaction(|conn| {
         sql_query("DELETE FROM runtime_in_use_coverage").execute(conn)?;
-        // The node SBOM guard, once per container of an image with a node
-        // SBOM linked (kg_pkg_in_use reads it per package), over the same
-        // window as the coverage below. Updated in place: a row is written
-        // only when its reason changed, and deleted only when its
-        // container no longer qualifies, so a steady state leaves no dead
-        // tuples (it is also on the maintenance VACUUM list).
-        sql_query(
-            "WITH want AS ( \
-                 SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
-                     wc.container_name, wc.image_digest, \
-                     kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
-                         wc.workload_name, wc.container_name, wc.image_digest, $1) AS reason, \
-                     (SELECT c.platform FROM node_catalog_claims c \
-                      WHERE c.inventory_digest = wc.image_digest) AS sbom_platform \
-                 FROM workload_containers wc \
-                 WHERE EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
-                     ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-                     WHERE l.image_digest = wc.image_digest AND l.source = 'node')), \
-             gone AS ( \
-                 DELETE FROM runtime_node_sbom_guard g WHERE NOT EXISTS ( \
-                     SELECT 1 FROM want w WHERE w.cluster_id = g.cluster_id \
-                       AND w.pod_namespace = g.pod_namespace \
-                       AND w.workload_kind = g.workload_kind \
-                       AND w.workload_name = g.workload_name \
-                       AND w.container_name = g.container_name \
-                       AND w.image_digest = g.image_digest)) \
-             INSERT INTO runtime_node_sbom_guard AS g (cluster_id, pod_namespace, \
-                 workload_kind, workload_name, container_name, image_digest, reason, \
-                 sbom_platform) \
-             SELECT * FROM want \
-             ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, \
-                 container_name, image_digest) \
-             DO UPDATE SET reason = EXCLUDED.reason, sbom_platform = EXCLUDED.sbom_platform \
-             WHERE g.reason IS DISTINCT FROM EXCLUDED.reason \
-                OR g.sbom_platform IS DISTINCT FROM EXCLUDED.sbom_platform",
-        )
-        .bind::<Integer, _>(s.min_window_hours as i32)
-        .execute(conn)?;
         let select = if available {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, \
@@ -610,16 +568,16 @@ pub fn refresh_coverage(
                  wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest, $1) k \
                  ON true \
              CROSS JOIN LATERAL (SELECT (NOT $2 OR wc.image_digest = ANY($3)) AS gap) g \
-             LEFT JOIN runtime_node_sbom_guard ng ON ng.cluster_id = wc.cluster_id \
-                 AND ng.pod_namespace = wc.pod_namespace AND ng.workload_kind = wc.workload_kind \
-                 AND ng.workload_name = wc.workload_name \
-                 AND ng.container_name = wc.container_name AND ng.image_digest = wc.image_digest \
              CROSS JOIN LATERAL (SELECT CASE \
-                 WHEN k.covered IS TRUE AND NOT g.gap AND ng.image_digest IS NOT NULL \
+                 WHEN k.covered IS TRUE AND NOT g.gap \
+                     AND EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
+                         ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
+                         WHERE l.image_digest = wc.image_digest AND l.source = 'node') \
                      AND NOT EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
                          ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
                          WHERE l.image_digest = wc.image_digest AND l.source <> 'node') \
-                 THEN ng.reason END AS reason) n"
+                 THEN kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                     wc.workload_name, wc.container_name, wc.image_digest, $1) END AS reason) n"
         } else {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, false, 'no_runtime_data', \
@@ -1221,7 +1179,7 @@ mod tests {
         assert_eq!(kg_pkg_in_use(down), kg_pkg_in_use(pr1));
         assert_ne!(kg_pkg_in_use(up), kg_pkg_in_use(pr1));
         assert!(kg_pkg_in_use(up).contains("kg_node_pkg_flags("));
-        assert!(kg_pkg_in_use(up).contains("runtime_node_sbom_guard"));
+        assert!(kg_pkg_in_use(up).contains("kg_node_sbom_guard("));
         for f in ["kg_node_pkg_flags", "kg_node_sbom_guard"] {
             assert!(
                 down.contains(&format!("DROP FUNCTION IF EXISTS {f}(")),
@@ -1232,11 +1190,7 @@ mod tests {
                 "{f}"
             );
         }
-        // Only its own new table: nothing existing is altered.
-        assert_eq!(up.matches("CREATE TABLE IF NOT EXISTS").count(), 1);
-        assert!(up.contains("CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard ("));
-        assert!(down.contains("DROP TABLE IF EXISTS runtime_node_sbom_guard;"));
-        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("CREATE TABLE") && !up.contains("ALTER TABLE"));
     }
 
     #[test]

@@ -169,8 +169,8 @@ Deviations from section 1b and the final review changes, with the reason:
   entry budget; an incomplete read is `lang_whiteout_unknown`.
 
 #### PR 6 implementation notes (Broker in-use guard)
-Migration `2026-10-04-100000_node_in_use_guard` (functions plus one new derived table, nothing
-existing altered; its down restores the PR 1 `kg_pkg_in_use` byte for byte):
+Migration `2026-10-04-100000_node_in_use_guard` (functions only, `CREATE OR REPLACE`; its down
+restores the PR 1 `kg_pkg_in_use` byte for byte):
 - **`kg_node_sbom_guard(cluster, ns, kind, name, container, image, window_hours)`**: NULL when the
   node SBOM linked to the image may support `installed_not_observed`, else the first failing of
   `sbom_incomplete` (no SBOM, no claim row whose `content_hash` is the stored SBOM's, or
@@ -180,24 +180,19 @@ existing altered; its down restores the PR 1 `kg_pkg_in_use` byte for byte):
   `runtime_coverage.node_name` whose `node_catalog_platforms` row is missing or differs from the
   claim's `platform`, or the claim has none). "In the window" is `kg_runtime_coverage`'s rule (a
   heartbeat within `window_hours`). Platforms compare as exact strings.
-- **`runtime_node_sbom_guard`**: `kg_node_sbom_guard` once per workload container of an image
-  with a node SBOM, refreshed in place by `refresh_coverage` (a row written only when its reason
-  changes, deleted when its container no longer qualifies; on the maintenance VACUUM list) in the
-  same transaction and window as `runtime_in_use_coverage`, so `kg_pkg_in_use` does not re-evaluate it per package. A container
-  without a row fails closed (`sbom_incomplete`). What can change between two refreshes is not
-  trusted to the row: at read time `kg_pkg_in_use` re-checks that the stored node SBOM is `full` and
-  described by its claim (same `content_hash`), else `sbom_incomplete`, and that the claim's
-  platform is still the row's `sbom_platform`, else `platform_mismatch`. A node whose recorded
-  platform changes marks the passing rows of containers with an instance on it `platform_mismatch`
-  in its offer's transaction (`node_catalog::record_platform`); only the next refresh clears that.
-  Residual: an instance starting on a node of another platform between two refreshes is judged at
-  the next refresh (at most one refresh interval). A live reference (the first, per-call version,
-  `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh in the tests.
+- **Read time, not a snapshot:** `kg_pkg_in_use` calls `kg_node_sbom_guard` and then
+  `kg_node_pkg_flags` when the verdict is read, so a re-catalog, a replaced SBOM, a node or claim
+  platform change, or a new instance on another node takes effect at once, not at the next
+  refresh. (A per-container snapshot table was tried and dropped: it failed open between
+  refreshes, and saved about 4 % over 180k calls.) The container-level guard in
+  `refresh_coverage` stays as defence in depth. A live reference (the first version,
+  `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh and after each
+  such change in the tests.
 - **`kg_node_pkg_flags(image, pkg)`**: the package's flags over every version the SBOM lists:
   bit 2 → `interpreted_content`, bit 1 → `sbom_incomplete`.
 - **`kg_pkg_in_use`**: unchanged up to the file-list test. A non-node SBOM listing the package's
   files → `installed_not_observed` exactly as before; no SBOM → `no_package_files`; only the node
-  SBOM → `installed_not_observed` when the container's guard row and then `kg_node_pkg_flags` pass,
+  SBOM → `installed_not_observed` when `kg_node_sbom_guard` and then `kg_node_pkg_flags` pass,
   else `unknown:<the first reason>`. Trivy-only and registry-only data is byte-identical (a live
   test compares it with the PR 1 definition across the capture reasons). A live test checks the
   SQL against the Rust mirror (`in_use::NodeFiles::guard`) on all 32 guard combinations.

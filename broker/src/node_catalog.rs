@@ -710,40 +710,6 @@ pub struct ClaimResponse {
     pub grant: Option<Grant>,
 }
 
-/// A node whose recorded platform is about to change: the in-use guard
-/// rows that passed for containers with an instance on it were judged
-/// against the old platform, so they are marked `platform_mismatch` (fail
-/// closed) until the next in-use refresh judges them again. Rows that
-/// already failed keep their reason, which ranks first. Runs in the
-/// offer's transaction, before [`UPSERT_PLATFORM_SQL`].
-pub(crate) const INVALIDATE_GUARD_SQL: &str = "\
-UPDATE runtime_node_sbom_guard g SET reason = 'platform_mismatch' \
-WHERE g.reason IS NULL \
-  AND EXISTS (SELECT 1 FROM node_catalog_platforms p WHERE p.node = $1 AND p.platform <> $2) \
-  AND EXISTS (SELECT 1 FROM runtime_coverage rc WHERE rc.node_name = $1 \
-      AND rc.cluster_id = g.cluster_id AND rc.pod_namespace = g.pod_namespace \
-      AND rc.workload_kind = g.workload_kind AND rc.workload_name = g.workload_name \
-      AND rc.container_name = g.container_name AND rc.image_digest = g.image_digest)";
-
-/// Record the platform `node` reports, invalidating the in-use guard rows
-/// judged against its old one ([`INVALIDATE_GUARD_SQL`]). Call inside a
-/// transaction.
-pub(crate) fn record_platform(
-    conn: &mut PgConnection,
-    node: &str,
-    platform: &str,
-) -> QueryResult<()> {
-    sql_query(INVALIDATE_GUARD_SQL)
-        .bind::<Text, _>(node)
-        .bind::<Text, _>(platform)
-        .execute(conn)?;
-    sql_query(UPSERT_PLATFORM_SQL)
-        .bind::<Text, _>(node)
-        .bind::<Text, _>(platform)
-        .execute(conn)?;
-    Ok(())
-}
-
 pub(crate) const UPSERT_PLATFORM_SQL: &str = "\
 INSERT INTO node_catalog_platforms (node, platform, seen_at) VALUES ($1, $2, now()) \
 ON CONFLICT (node) DO UPDATE SET platform = EXCLUDED.platform, seen_at = EXCLUDED.seen_at \
@@ -816,7 +782,10 @@ pub fn claim(
     window_secs: i64,
 ) -> QueryResult<Option<Grant>> {
     let row = conn.transaction(|conn| {
-        record_platform(conn, &offer.node, &offer.platform)?;
+        sql_query(UPSERT_PLATFORM_SQL)
+            .bind::<Text, _>(&offer.node)
+            .bind::<Text, _>(&offer.platform)
+            .execute(conn)?;
         if offer.digests.is_empty() {
             return Ok(None);
         }
