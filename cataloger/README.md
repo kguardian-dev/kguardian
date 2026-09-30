@@ -214,8 +214,9 @@ not path strings, keeps every access inside the root:
   so the rule follows the pinned Syft. Runtime data (logs, caches, `.pyc`
   bytecode caches, pid and lock files, temp files) does not make it
   partial. `stats` splits the count into `ctime_dropped_evidence` and
-  `ctime_dropped_data` and samples up to 20 of the paths (PROTOCOL.md
-  §4.2).
+  `ctime_dropped_data` (a bounded match: past its budget the rest count
+  as evidence, `ctime_dropped_unclassified`) and samples up to 20 of the
+  paths (PROTOCOL.md §4.2).
 - Runtime deletions leave no new ctime, so this rule cannot see them. The
   Controller's upperdir check covers the four OS package databases
   (a write, whiteout, replaced parent or opaque directory: `drift`) and

@@ -250,6 +250,10 @@ type Stats struct {
 	// CtimeDroppedSample: up to MaxDriftSample dropped paths, evidence
 	// first, each at most MaxDriftSamplePathLen bytes.
 	CtimeDroppedSample []string `json:"ctime_dropped_sample,omitempty"`
+	// CtimeDroppedUnclassified: dropped entries counted as evidence
+	// without being judged (the glob matching ran past its budget); part
+	// of CtimeDroppedEvidence.
+	CtimeDroppedUnclassified int64 `json:"ctime_dropped_unclassified"`
 	// Reclaims: heap collections before a large file was read, and the
 	// time they took.
 	Reclaims          int64  `json:"reclaims"`

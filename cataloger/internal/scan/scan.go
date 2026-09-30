@@ -268,6 +268,7 @@ func classifyDrift(resp *protocol.Response, res *rootfs.Resolver) {
 	// left out and the next one taken.
 	d := res.ClassifyDropped(4 * protocol.MaxDriftSample)
 	resp.Stats.CtimeDroppedEvidence, resp.Stats.CtimeDroppedData = d.Evidence, d.Data
+	resp.Stats.CtimeDroppedUnclassified = d.Unclassified
 	resp.Stats.CtimeDroppedSample = nil
 	for _, p := range d.Sample {
 		if len(resp.Stats.CtimeDroppedSample) == protocol.MaxDriftSample {

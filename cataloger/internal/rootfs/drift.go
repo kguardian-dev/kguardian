@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	stereofile "github.com/anchore/stereoscope/pkg/file"
 	"github.com/anchore/stereoscope/pkg/filetree"
@@ -64,6 +65,10 @@ func (q *queries) listedAll() {
 type DriftSummary struct {
 	Evidence int64
 	Data     int64
+	// Unclassified: entries counted as evidence without being judged,
+	// because the glob matching ran past its budget (included in
+	// Evidence).
+	Unclassified int64
 	// Sample: up to the requested number of dropped paths (as walked,
 	// unbounded in length), evidence first, each group sorted.
 	Sample []string
@@ -133,9 +138,9 @@ func (r *Resolver) ClassifyDropped(sampleMax int) DriftSummary {
 		}
 	}
 	r.pathEvidence(q.paths, names, evidence)
-	r.globEvidence(q.globs, names, evidence)
+	unclassified := r.globEvidence(q.globs, names, evidence)
 
-	var s DriftSummary
+	s := DriftSummary{Unclassified: unclassified}
 	var ev, data []string
 	for p := range dropped {
 		if evidence[p] {
@@ -219,24 +224,36 @@ func (r *Resolver) pathEvidence(paths map[string]struct{}, names map[string][]st
 // it by: /var/lib/apk-store/db/installed also as /lib/apk/db/installed
 // when lib/apk/db links there. A glob ending in "/*" is also matched
 // directly against the real names with doublestar, as a second line.
-func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]string, evidence map[string]bool) {
+//
+// Only symlinks that resolve to a directory holding a candidate somewhere
+// below it are added: a link to a file, to an unrelated directory, or
+// dangling cannot give a candidate another path (a link to a dropped file
+// is dangling for the live resolver too). The work is bounded
+// (driftMaxPairs links x names, driftBudget of wall-clock time): past
+// it, every candidate not yet matched counts as evidence, the fail-safe
+// answer, and the count is returned.
+func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]string, evidence map[string]bool) (unclassified int64) {
 	if len(globs) == 0 || len(names) == 0 {
-		return
+		return 0
 	}
+	start := time.Now()
 	mark := func(n string) {
 		for _, p := range names[n] {
 			evidence[p] = true
 		}
 	}
-	tree := filetree.New()
-	index := filetree.NewIndex()
-	type link struct{ at, to string }
-	var links []link
-	for _, ref := range r.tree.AllFiles(stereofile.TypeSymLink) {
-		if e, err := r.index.Get(ref); err == nil && e.LinkDestination != "" {
-			links = append(links, link{string(ref.RealPath), e.LinkDestination})
+	giveUp := func() {
+		for n := range names {
+			for _, p := range names[n] {
+				if !evidence[p] {
+					evidence[p] = true
+					unclassified++
+				}
+			}
 		}
 	}
+	tree := filetree.New()
+	index := filetree.NewIndex()
 	dirs := map[string]bool{"/": true}
 	addAncestors := func(p string) {
 		for d := path.Dir(p); !dirs[d]; d = path.Dir(d) {
@@ -245,6 +262,21 @@ func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]st
 	}
 	for n := range names {
 		addAncestors(n)
+	}
+	type link struct{ at, to string }
+	var links []link
+	for _, ref := range r.tree.AllFiles(stereofile.TypeSymLink) {
+		e, err := r.index.Get(ref)
+		if err != nil || e.LinkDestination == "" {
+			continue
+		}
+		if real, md, ok := r.Lookup(e.LinkDestination); ok && md.IsDir() && dirs[real] {
+			links = append(links, link{string(ref.RealPath), e.LinkDestination})
+		}
+	}
+	if int64(len(links))*int64(len(names)) > driftMaxPairs {
+		giveUp()
+		return unclassified
 	}
 	for _, l := range links {
 		addAncestors(l.at)
@@ -279,6 +311,10 @@ func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]st
 	}
 	search := filetree.NewSearchContext(tree, index)
 	for g := range globs {
+		if time.Since(start) > driftBudget {
+			giveUp()
+			return unclassified
+		}
 		if res, err := search.SearchByGlob(g, filetree.FollowBasenameLinks); err == nil {
 			for _, rv := range res {
 				mark(string(rv.RealPath))
@@ -292,7 +328,16 @@ func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]st
 			}
 		}
 	}
+	return 0
 }
+
+// Bounds of the glob matching (globEvidence). A pair costs about 1.4 us
+// in stereoscope's search, so the pair cap is about 6 s; the time budget
+// catches everything else (many globs, deep trees).
+var (
+	driftMaxPairs int64 = 4 << 20
+	driftBudget         = 30 * time.Second
+)
 
 // Queries returns what the catalogers asked for so far (sorted): globs,
 // paths, MIME types, and whether any listed every file.

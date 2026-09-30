@@ -1,5 +1,7 @@
 package rootfs
 
+import "time"
+
 // SetBundleFilter switches the .NET bundle marker check for a test and
 // returns a function that restores it.
 func SetBundleFilter(on bool) func() {
@@ -27,4 +29,11 @@ func SetReclaimAbove(n uint64) func() {
 	old := reclaimAbove
 	reclaimAbove = n
 	return func() { reclaimAbove = old }
+}
+
+// SetDriftBounds changes the glob matching bounds for a test.
+func SetDriftBounds(pairs int64, budget time.Duration) func() {
+	op, ob := driftMaxPairs, driftBudget
+	driftMaxPairs, driftBudget = pairs, budget
+	return func() { driftMaxPairs, driftBudget = op, ob }
 }

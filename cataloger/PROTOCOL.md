@@ -210,7 +210,8 @@ means the Controller does not claim.
     "files": 412, "dirs": 97, "components": 16, "duration_ms": 184,
     "syft_version": "v1.52.0", "worker_version": "0.1.0",
     "eacces": 0, "ctime_dropped": 2, "ctime_dropped_evidence": 0,
-    "ctime_dropped_data": 2, "ctime_dropped_sample": ["/run/app.pid", "/var/log/app.log"],
+    "ctime_dropped_data": 2, "ctime_dropped_unclassified": 0,
+    "ctime_dropped_sample": ["/run/app.pid", "/var/log/app.log"],
     "mount_skipped": 3, "depth_limited": 0, "reclaims": 0, "reclaim_ms": 0,
     "components_dropped": 0, "attempts": 1, "caps_model": "i",
     "max_rss_bytes": 58720256,
@@ -310,7 +311,14 @@ counts them). After cataloging, each is classified:
   image, following links as the resolver does, so a dropped file is
   matched under every path a cataloger could reach it by: a rewritten
   `/var/lib/apk-store/db/installed` also as `/lib/apk/db/installed` when
-  `lib/apk/db` links there at image time.
+  `lib/apk/db` links there at image time. Only symlinks that resolve to
+  a directory with a dropped entry somewhere below it take part (others
+  cannot give one another path). The matching is bounded: at most about
+  4 million symlink x entry pairs and 30 s. Past either bound every
+  dropped entry not yet matched counts as evidence without being judged
+  (`stats.ctime_dropped_unclassified`, included in
+  `ctime_dropped_evidence`), so the SBOM is `partial` rather than the
+  scan timing out.
 - **Data** (`stats.ctime_dropped_data`): everything else. Logs, caches,
   Python bytecode caches (`__pycache__/*.pyc`), pid and lock files, temp
   files, migrations or config written at start, compiled templates.
