@@ -37,6 +37,12 @@ type Emission struct {
 	Digest string
 	Vulns  *types.ImageVulnerabilities
 	SBOM   *types.ImageSBOM
+	// PinPlatform limits the payload to one platform: after enrichment
+	// only Platform's entry in image.platform_manifests is kept (none when
+	// Platform is empty), so the broker links it to no other platform of
+	// the index. Set for matches that include a node SBOM.
+	PinPlatform bool
+	Platform    string
 }
 
 // objEntry is what the tracker remembers about one Kubernetes report

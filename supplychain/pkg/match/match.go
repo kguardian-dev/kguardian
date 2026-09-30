@@ -5,15 +5,25 @@
 // repository can attach one. So an unverified document may only ADD to
 // what is matched, never remove from it. For each image the matcher's
 // input is the UNION of every SBOM held for it - Trivy's SbomReport (a
-// scan of the running image) and any registry SBOM - with duplicate
-// packages merged. A registry SBOM that lists fewer packages than Trivy
-// found can therefore never hide a finding.
+// scan of the running image), the node catalog's SBOM (the same image
+// cataloged on a node that runs it) and any registry SBOM - with
+// duplicate packages merged. On a collision the precedence is Trivy >
+// node > registry: a lower source may only add to a higher one's entry.
+// A registry SBOM that lists fewer packages than Trivy or the node
+// catalog found can therefore never hide a finding, and a node SBOM can
+// never change one of Trivy's packages.
 //
 // Join key. BuildKit registry SBOMs are keyed by a platform manifest
 // digest (with image.index_digest set), while Trivy usually reports the
 // index digest. A platform SBOM whose index has a Trivy SBOM is folded
 // into the index's group, so the two meet; it is not matched on its own
 // (an unverified document is never the only input while Trivy's exists).
+//
+// A node SBOM describes one platform of its inventory digest and is keyed
+// by that digest alone: it is never folded into another group, never
+// pulls other platforms' SBOMs into its own, and a match that includes it
+// is pinned to its platform (see PinPlatform), so its findings reach no
+// other platform of an index.
 //
 // Everything held is re-matched when the Matcher reports a new database,
 // without fetching any SBOM again.
@@ -247,6 +257,12 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.init()
 	d := sbom.Image.Digest
 	h := &held{sbom: sbom, lastUsed: c.now(), bytes: heldBytes(sbom)}
+	// The digest may move groups (a node SBOM takes it out of its index's
+	// group): the group it leaves is matched again without it.
+	oldKey := ""
+	if _, ok := c.sboms[d]; ok {
+		oldKey = c.groupKeyLocked(d)
+	}
 	if old, ok := c.sboms[d][sbom.Source]; ok {
 		c.heldBytes -= old.bytes
 		delete(c.sboms[d], sbom.Source)
@@ -259,6 +275,9 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.heldBytes += h.bytes
 	k := c.groupKeyLocked(d)
 	c.queue[k] = struct{}{}
+	if oldKey != "" && oldKey != k {
+		c.queue[oldKey] = struct{}{}
+	}
 	gs := c.groups[k]
 	if gs == nil {
 		gs = &groupState{}
@@ -301,8 +320,13 @@ func (c *Coordinator) parentLocked(d string) string {
 }
 
 // groupKeyLocked is the digest a digest's SBOMs are matched under: its
-// index when that index has a Trivy SBOM, else itself.
+// index when that index has a Trivy SBOM, else itself. A digest with a
+// node SBOM is always matched under itself: that SBOM belongs to the
+// inventory digest it was cataloged for and to no index.
 func (c *Coordinator) groupKeyLocked(d string) string {
+	if _, ok := c.sboms[d][types.SourceNode]; ok {
+		return d
+	}
 	if p := c.parentLocked(d); p != "" {
 		if _, ok := c.sboms[p][types.SourceTrivyOperator]; ok {
 			return p
@@ -604,6 +628,10 @@ type union struct {
 	trust       string
 	observedIn  []types.WorkloadRef
 	fingerprint string
+	// pinned: a node SBOM is among the inputs, so the payload is limited
+	// to its platform (empty when the catalog did not record one).
+	pinned   bool
+	platform string
 }
 
 func (c *Coordinator) unionLocked(key string) *union {
@@ -634,14 +662,38 @@ func (c *Coordinator) unionLocked(key string) *union {
 			img = m.Image
 			u.observedIn = m.ObservedIn
 		}
+		if m.Source == types.SourceNode {
+			u.pinned, u.platform = true, m.Platform
+		}
 	}
 	sort.Strings(u.sources)
 	img.Digest = key
+	if u.pinned {
+		PinPlatform(&img, u.platform)
+	}
 	u.sbom = &types.ImageSBOM{Image: img, Components: comps}
 	b, _ := json.Marshal(comps)
+	if u.pinned {
+		b = append(b, "\x00platform="+u.platform...)
+	}
 	sum := sha256.Sum256(b)
 	u.fingerprint = hex.EncodeToString(sum[:])
 	return u
+}
+
+// PinPlatform limits img to one platform: only platform's entry in
+// PlatformManifests is kept (none when platform is empty or absent) and
+// IndexDigest is cleared. The broker links a payload to the inventory
+// images its digest, platform manifests and index name, so this keeps a
+// match that includes a single-platform SBOM (the node catalog's) off
+// every other platform of the index.
+func PinPlatform(img *types.ImageRef, platform string) {
+	var kept map[string]string
+	if d, ok := img.PlatformManifests[platform]; ok && platform != "" {
+		kept = map[string]string{platform: d}
+	}
+	img.PlatformManifests = kept
+	img.IndexDigest = ""
 }
 
 func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db time.Time, crashes int) {
@@ -675,7 +727,7 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 		vulns = []types.Vulnerability{}
 	}
 	built := db
-	c.Sink.Enqueue(trivy.Emission{Kind: trivy.KindVulnerabilities, Digest: key, Vulns: &types.ImageVulnerabilities{
+	c.Sink.Enqueue(trivy.Emission{Kind: trivy.KindVulnerabilities, Digest: key, PinPlatform: in.pinned, Platform: in.platform, Vulns: &types.ImageVulnerabilities{
 		SchemaVersion:   types.SchemaVersion,
 		Image:           in.sbom.Image,
 		Source:          types.SourceGrype,
@@ -913,31 +965,41 @@ func componentKey(c types.Component) string {
 }
 
 // mergeComponents returns the union of the members' components and how
-// many were dropped by the cap. Trivy's scan is authoritative; registry
-// SBOMs are unverified and may only add:
+// many were dropped by the cap. The precedence is Trivy > node > registry.
+// Trivy's scan is authoritative; the node catalog's SBOM (a scan of the
+// same image on a node) comes next; registry SBOMs are unverified and may
+// only add:
 //
 //   - Every Trivy component is kept exactly as Trivy reported it. On a
-//     collision (same type, name and version) a registry entry may only add
-//     file paths and licences, and fill a PURL Trivy left empty; it never
-//     changes Trivy's PURL (distro, arch, upstream), source package or
-//     version.
-//   - The operating-system component is Trivy's when it has one; a
-//     registry one is used only when Trivy has none.
+//     collision (same type, name and version) a node or registry entry may
+//     only add file paths and licences, and fill a PURL Trivy left empty;
+//     it never changes Trivy's PURL (distro, arch, upstream), source
+//     package or version.
+//   - Node components not in Trivy's scan are kept as the node SBOM
+//     reported them, and a registry entry colliding with one may only add
+//     to it, on the same terms.
+//   - The operating-system component is Trivy's when it has one, else the
+//     node SBOM's; a registry one is used only when neither has one.
 //   - The cap never evicts a Trivy component (unless Trivy alone exceeds
-//     it). Registry components fill only the capacity left over, split
-//     evenly between registry SBOMs, so one SBOM full of junk cannot crowd
-//     out another; what does not fit is counted as dropped.
+//     it), and registry components never evict node ones: node components
+//     fill the capacity Trivy leaves, and registry components only what is
+//     left after that, split evenly between registry SBOMs, so one SBOM
+//     full of junk cannot crowd out another; what does not fit is counted
+//     as dropped.
 //   - Between registry SBOMs the first to name a package wins, on the same
 //     add-only terms.
 func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, int) {
 	if max <= 0 {
 		max = int(^uint(0) >> 1)
 	}
-	var trivySBOMs, others []*types.ImageSBOM
+	var trivySBOMs, nodeSBOMs, others []*types.ImageSBOM
 	for _, m := range members {
-		if m.Source == types.SourceTrivyOperator {
+		switch m.Source {
+		case types.SourceTrivyOperator:
 			trivySBOMs = append(trivySBOMs, m)
-		} else {
+		case types.SourceNode:
+			nodeSBOMs = append(nodeSBOMs, m)
+		default:
 			others = append(others, m)
 		}
 	}
@@ -989,21 +1051,20 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 		room = 0
 	}
 
-	// Registry SBOMs: add-only, within an even share of what is left.
-	var added []string
-	for i, m := range others {
-		share := room / (len(others) - i)
+	// addFrom merges one lower-precedence SBOM, add-only, keeping at most
+	// share of its new components (lowest keys first) and taking its OS
+	// component only when none is held yet. It returns the new keys kept.
+	addFrom := func(m *types.ImageSBOM, share int) []string {
 		var fresh []string
 		for _, c := range m.Components {
 			if c.Type == "operating-system" {
 				if osComp == nil {
-					osComp = clone(c)
 					if room > 0 {
+						osComp = clone(c)
 						room--
 						share = min(share, room)
 					} else {
 						dropped++
-						osComp = nil
 					}
 				}
 				continue
@@ -1025,15 +1086,32 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 			fresh = fresh[:share]
 		}
 		room -= len(fresh)
-		added = append(added, fresh...)
+		return fresh
+	}
+
+	// Node SBOMs: after Trivy, before any registry SBOM, within all the
+	// room Trivy left.
+	var fromNode []string
+	for _, m := range nodeSBOMs {
+		fromNode = append(fromNode, addFrom(m, room)...)
+	}
+	sort.Strings(fromNode)
+
+	// Registry SBOMs: add-only, within an even share of what is left.
+	var added []string
+	for i, m := range others {
+		added = append(added, addFrom(m, room/(len(others)-i))...)
 	}
 	sort.Strings(added)
 
-	out := make([]types.Component, 0, len(base)+len(added)+1)
+	out := make([]types.Component, 0, len(base)+len(fromNode)+len(added)+1)
 	if osComp != nil {
 		out = append(out, *osComp)
 	}
 	for _, k := range base {
+		out = append(out, *byKey[k])
+	}
+	for _, k := range fromNode {
 		out = append(out, *byKey[k])
 	}
 	for _, k := range added {
