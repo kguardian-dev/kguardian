@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.29.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.6...chart/v1.29.0) (2026-09-30)
+
+
+### Features
+
+* **chart:** match node catalog SBOMs in supplychain via supplychain.sources.node ([#1866](https://github.com/kguardian-dev/kguardian/issues/1866)) ([8fb5563](https://github.com/kguardian-dev/kguardian/commit/8fb5563ace3d6bc9fc5a1ba31ae8f5f368ff945b))
+* **chart:** move to the node catalog releases ([#1875](https://github.com/kguardian-dev/kguardian/issues/1875)) ([130ae2c](https://github.com/kguardian-dev/kguardian/commit/130ae2c91ed05b6933290dabbea7ac4e31c4dd27))
+* **chart:** run the node cataloger as a controller sidecar behind nodeCatalog.enabled ([#1858](https://github.com/kguardian-dev/kguardian/issues/1858)) ([e07a1b1](https://github.com/kguardian-dev/kguardian/commit/e07a1b199e113e09254a54304bd30590e0d6c492))
+
 ## [1.28.6](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.5...chart/v1.28.6) (2026-09-29)
 
 
