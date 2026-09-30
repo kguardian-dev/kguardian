@@ -267,7 +267,7 @@ per-package flags the Controller forwards to the catalog route (they end up in
   every package that owns it; a runtime-created binary never becomes a
   package of its own.
 - The broker's generic SBOM route keeps 16 paths per component
-  (`MAX_FILE_PATHS`); the catalog route (PR 1) must accept up to 4096.
+  (`MAX_FILE_PATHS`); the catalog route accepts 4096 (§4.5).
 
 `interpreted_content` is computed from the **complete** owned-file list,
 before the executable filter and the cap. It is `true` if any owned regular
@@ -313,11 +313,14 @@ The Controller maps `too_many_components` and `output_too_large` to the
 broker's `error` backoff, `busy` to a local retry, and `bad_request` /
 `unsupported_protocol` to a logged `error` (a bug, not the image's fault).
 
-### 4.5 Mapping to `ImageSBOM` v1
+### 4.5 Catalog route body (`POST /catalog/images/{digest}/sbom`)
 
-The worker does not know the image; the Controller builds the payload:
+The worker does not know the image; the Controller builds each page. The
+body is the supply-chain `ImageSBOM` v1 (same pages, same staging) plus the
+catalog route's own top-level fields (`broker/src/node_catalog.rs`), with
+the `X-Kguardian-Claim` header carrying the claim token:
 
-| `ImageSBOM` field | From |
+| Body field | From |
 |---|---|
 | `schema_version` | `1` |
 | `image.digest` etc. | the Controller's claim (inventory digest, platform manifests) |
@@ -326,12 +329,30 @@ The worker does not know the image; the Controller builds the payload:
 | `scanner` | response `scanner` |
 | `scanned_at` | Controller clock when the response arrived |
 | `format` | `kguardian-cataloger` |
-| `components` | response `components`, minus the two flag fields, paged at 2 000 |
-| `os` (vulns payload only) | response `os` |
+| `page` | `{set_id, index, total}`, as for any paged `ImageSBOM` |
+| `components` | response `components` **as they are, including `files_truncated` and `interpreted_content`**: the catalog route reads both per component (they end up in `node_sbom_package_flags`) |
+| `epoch` | **required on every page**; the grant's epoch (echoed in the response). Missing is 400; below the row's epoch is 409. |
+| `completeness` | response `completeness` |
+| `partial_reasons` | response `partial_reasons` (the broker keeps at most 16) |
+| `stats` | response `stats` (the broker keeps at most 16 KiB serialised) |
+| `platform` | optional: the platform the SBOM was catalogued for (`os/arch[/variant]`) |
 
-`completeness`, `partial_reasons`, `stats` and the per-package flags go to
-the catalog route's own fields (PR 1: `node_catalog_claims.completeness`,
-`stats`, `node_sbom_package_flags`).
+Send `epoch`, `completeness`, `partial_reasons`, `stats` and `platform` at
+the top level of **every** page; the broker stores the values from the page
+that completes the set.
+
+Catalog-route limits, which set how the Controller pages:
+
+| Limit | Value |
+|---|---|
+| File paths per component | 4096 (the generic SBOM route keeps 16) |
+| File paths per page, all components | 200 000 |
+| Components per page | 10 000 (the Controller uses 2 000, and fewer when the page would pass 200 000 paths) |
+| Components per SBOM | 50 000 |
+| Page body | 8 MiB compressed, 16 MiB inflated |
+
+The response's `os` is for the Controller's logs; the SBOM carries the
+distro as its `operating-system` component.
 
 ## 5. Versioning
 
