@@ -536,7 +536,7 @@ nodeCatalog:
       # -- Cataloger image pull policy
       pullPolicy: IfNotPresent
       # -- Cataloger version tag
-      tag: "v0.1.0"
+      tag: "v0.1.1"
       # -- Overrides the image tag using SHA digest
       sha: ""
     # -- Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes
