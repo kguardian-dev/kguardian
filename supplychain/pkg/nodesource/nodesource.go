@@ -3,25 +3,30 @@
 // node that runs it and store the result in the broker as source "node"
 // (docs/design/node-catalog.md). This source reads them back and offers
 // them to the match coordinator, which matches them with Grype in the
-// union with every other SBOM held for the digest (precedence Trivy >
-// node > registry; see pkg/match).
+// union with every other SBOM held for the digest. There a node SBOM only
+// adds packages: Trivy's and registry SBOMs keep everything they give
+// (see pkg/match).
 //
 // Every Interval it lists the broker's image inventory (GET /images, read
 // scope) and fetches, components only, the node SBOM of each running
-// digest whose sbomSources include "node" and whose nodeCatalog.catalogedAt
-// changed since it was last fetched (or that has not been fetched for
-// RecheckAfter, so an SBOM the coordinator dropped to stay within its
-// budget comes back). Node SBOMs are never sent to the broker again: they
-// go to the coordinator only, not through the dispatch queue.
+// digest whose sbomSources include "node" when it is new, when its
+// nodeCatalog.catalogedAt changed, when the coordinator no longer holds
+// it (dropped to stay within budget), or once every RecheckAfter. A node
+// SBOM that goes away (deleted, stored empty, or its digest no longer
+// running) is replaced by an empty one, so its packages are released.
+// Node SBOMs are never sent to the broker again: they go to the
+// coordinator only, not through the dispatch queue.
 //
-// Against a broker without the node catalog (its catalog routes answer
+// Against a broker without the node catalog (GET /catalog/status answers
 // 404) the source idles: it logs once, lists nothing, and asks again only
-// every IdleRecheck.
+// every IdleRecheck. A token the broker refuses (401/403) is logged once
+// at error level and retried at the same pace.
 package nodesource
 
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +53,8 @@ type Broker interface {
 // Offerer takes SBOMs for matching (match.Coordinator).
 type Offerer interface {
 	Offer(sbom *types.ImageSBOM)
+	// Holds reports whether an SBOM from source is held for digest.
+	Holds(digest, source string) bool
 }
 
 // Source polls the inventory and offers changed node SBOMs.
@@ -62,8 +69,8 @@ type Source struct {
 	// RecheckAfter is how long an unchanged node SBOM goes before it is
 	// fetched and offered again. Default 24h.
 	RecheckAfter time.Duration
-	// IdleRecheck is how often a broker without the node catalog is asked
-	// again. Default 1h.
+	// IdleRecheck is how often a broker without the node catalog, or one
+	// that refuses the token, is asked again. Default 1h.
 	IdleRecheck time.Duration
 	// Workers bounds concurrent fetches. Default 2.
 	Workers int
@@ -76,15 +83,17 @@ type Source struct {
 	fetched   map[string]fetchState // digest -> last fetch
 	ready     bool
 	available bool      // the broker has the node catalog
-	idle      bool      // idling on a broker without it (logged once)
-	nextProbe time.Time // while idle
+	idle      bool      // on a broker without it (logged once)
+	denied    bool      // the broker refuses the token (logged once)
+	nextProbe time.Time // while idle or denied
 	probeErr  bool      // the last probe failed (logged once per streak)
 }
 
 type fetchState struct {
 	version string // nodeCatalog.catalogedAt when fetched
 	at      time.Time
-	offered bool // a non-empty SBOM was offered
+	offered bool         // a non-empty SBOM was offered and not replaced
+	image   broker.Image // for the empty replacement
 }
 
 func (s *Source) defaults() {
@@ -111,13 +120,21 @@ func (s *Source) defaults() {
 	}
 }
 
-// Ready is true once the first pass has run, whatever its outcome: an
-// unreachable or old broker must not keep the pod NotReady, and fetches
-// continue in the background.
+// Ready is true once the first pass has listed the inventory (or found it
+// cannot), whatever the outcome. It does not wait for that pass's
+// fetches: on a fresh pod every node SBOM is due, and reading them all
+// can take minutes, which would fail a helm/Flux --wait upgrade. An
+// unreachable or old broker must not keep the pod NotReady either.
 func (s *Source) Ready() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ready
+}
+
+func (s *Source) setReady() {
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
 }
 
 // Idle reports whether the source is idling on a broker without the node
@@ -144,21 +161,23 @@ func (s *Source) Run(ctx context.Context) {
 // Pass runs one inventory listing and the fetches it calls for.
 func (s *Source) Pass(ctx context.Context) {
 	s.defaults()
-	defer func() {
-		s.mu.Lock()
-		s.ready = true
-		s.mu.Unlock()
-	}()
 	if !s.checkAvailable(ctx) {
+		s.setReady()
 		return
 	}
 	images, err := s.Broker.RunningImages(ctx)
+	s.setReady()
 	if err != nil {
 		s.Log.WithError(err).Warn("node sbom source: listing running images failed")
 		s.count("list_error")
 		return
 	}
-	due := s.due(images)
+	due, gone := s.due(images)
+	for _, im := range gone {
+		// Deleted, or no longer running: release what was offered.
+		s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
+		s.count("released")
+	}
 	work := make(chan broker.Image)
 	var wg sync.WaitGroup
 	for range s.Workers {
@@ -184,14 +203,14 @@ func (s *Source) Pass(ctx context.Context) {
 }
 
 // checkAvailable asks the broker whether it has the node catalog until it
-// says yes, at most once per IdleRecheck while it says no.
+// says yes, at most once per IdleRecheck while it says no (or refuses).
 func (s *Source) checkAvailable(ctx context.Context) bool {
 	s.mu.Lock()
 	if s.available {
 		s.mu.Unlock()
 		return true
 	}
-	if s.idle && s.now().Before(s.nextProbe) {
+	if (s.idle || s.denied) && s.now().Before(s.nextProbe) {
 		s.mu.Unlock()
 		return false
 	}
@@ -200,17 +219,33 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 	err := s.Broker.NodeCatalogAvailable(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var se *broker.StatusError
 	switch {
 	case err == nil:
-		s.available, s.probeErr = true, false
-		if s.idle {
-			s.Log.Info("node sbom source: the broker now has the node catalog; resuming")
+		if s.idle || s.denied {
+			s.Log.Info("node sbom source: the broker now serves the node catalog; resuming")
 		}
-		s.idle = false
-		s.setAvailable(1)
+		s.available, s.idle, s.denied, s.probeErr = true, false, false, false
+		s.setGauges(1, 1)
 		return true
 	case errors.Is(err, broker.ErrNoNodeCatalog):
-		s.goIdleLocked()
+		if !s.idle {
+			s.Log.WithField("recheck", s.IdleRecheck.String()).
+				Info("node sbom source: the broker has no node catalog (GET /catalog/status answers 404); idle")
+		}
+		s.idle, s.denied, s.probeErr = true, false, false
+		s.nextProbe = s.now().Add(s.IdleRecheck)
+		s.setGauges(0, 1)
+		return false
+	case errors.As(err, &se) && (se.StatusCode == http.StatusUnauthorized || se.StatusCode == http.StatusForbidden):
+		s.count("probe_denied")
+		if !s.denied {
+			s.Log.WithError(err).WithField("recheck", s.IdleRecheck.String()).
+				Error("node sbom source: the broker refuses this token (it needs the read scope); not reading node SBOMs")
+		}
+		s.denied, s.idle, s.probeErr = true, false, false
+		s.nextProbe = s.now().Add(s.IdleRecheck)
+		s.setGauges(-1, 0)
 		return false
 	default:
 		// Transient (network, 5xx): try again next pass, one line per streak.
@@ -223,46 +258,40 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 	}
 }
 
-// goIdleLocked switches to idle: logged once, then quiet, asking again
-// every IdleRecheck.
-func (s *Source) goIdleLocked() {
-	if !s.idle {
-		s.Log.WithField("recheck", s.IdleRecheck.String()).
-			Info("node sbom source: the broker has no node catalog (its catalog routes answer 404); idle")
-	}
-	s.idle, s.available, s.probeErr = true, false, false
-	s.nextProbe = s.now().Add(s.IdleRecheck)
-	s.setAvailable(0)
-}
-
-// due returns the running images whose node SBOM is new, changed or due
-// for its recheck, and forgets digests no longer listed with one.
-func (s *Source) due(images []broker.Image) []broker.Image {
+// due returns the running images whose node SBOM is new, changed, no
+// longer held by the coordinator, or due for its recheck; and, for the
+// digests no longer listed with a node SBOM whose SBOM was offered, the
+// images to release. Digests no longer listed are forgotten.
+func (s *Source) due(images []broker.Image) (due, gone []broker.Image) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	listed := make(map[string]bool, len(images))
-	var out []broker.Image
 	for _, im := range images {
 		if !strings.HasPrefix(im.Digest, "sha256:") || !im.HasSBOM(types.SourceNode) {
 			continue
 		}
 		listed[im.Digest] = true
 		f, ok := s.fetched[im.Digest]
-		if ok && f.version == version(im) && now.Sub(f.at) < s.RecheckAfter {
+		if ok && f.version == version(im) && now.Sub(f.at) < s.RecheckAfter &&
+			(!f.offered || s.Matcher.Holds(im.Digest, types.SourceNode)) {
 			continue
 		}
-		out = append(out, im)
+		due = append(due, im)
 	}
-	for d := range s.fetched {
-		if !listed[d] {
-			delete(s.fetched, d)
+	for d, f := range s.fetched {
+		if listed[d] {
+			continue
 		}
+		if f.offered {
+			gone = append(gone, f.image)
+		}
+		delete(s.fetched, d)
 	}
 	if s.Metrics != nil {
 		s.Metrics.TrackedDigests.WithLabelValues(SourceName, "sbom").Set(float64(len(listed)))
 	}
-	return out
+	return due, gone
 }
 
 func version(im broker.Image) string {
@@ -275,16 +304,15 @@ func version(im broker.Image) string {
 func (s *Source) fetch(ctx context.Context, im broker.Image) {
 	doc, err := s.Broker.NodeSBOM(ctx, im.Digest, s.MaxComponents)
 	switch {
-	case errors.Is(err, broker.ErrNoNodeCatalog):
-		s.mu.Lock()
-		s.goIdleLocked()
-		s.mu.Unlock()
-		return
 	case errors.Is(err, broker.ErrNodeSBOMTooLarge):
 		// Fails the same way until it changes: not fetched again before.
+		// A smaller version offered before is replaced by an empty one:
+		// it no longer describes the image.
 		s.count("too_large")
-		s.mark(im, false)
 		s.Log.WithError(err).WithField("digest", im.Digest).Warn("node sbom source: node SBOM too large to match; skipped")
+		if s.mark(im, nil) {
+			s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
+		}
 		return
 	case errors.Is(err, broker.ErrNodeSBOMChanged):
 		s.count("changed")
@@ -297,27 +325,35 @@ func (s *Source) fetch(ctx context.Context, im broker.Image) {
 		return
 	}
 	if doc == nil || len(doc.Components) == 0 {
-		// Gone since the listing, or stored empty (no_packages_found).
-		// If an earlier version was offered, replace it with an empty one
-		// so its packages are not matched (and reported) any more.
+		// Gone since the listing, or stored empty (no_packages_found). If
+		// an earlier version was offered, replace it with an empty one so
+		// its packages are not matched (and reported) any more.
 		s.count("none")
-		if s.mark(im, false) {
+		offered := false
+		if s.mark(im, &offered) {
 			s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
 		}
 		return
 	}
 	s.count("fetched")
-	s.mark(im, true)
+	offered := true
+	s.mark(im, &offered)
 	s.Matcher.Offer(toSBOM(im, doc))
 }
 
 // mark records a fetch of im and reports whether a non-empty SBOM had
-// been offered for it before.
-func (s *Source) mark(im broker.Image, offered bool) bool {
+// been offered for it before. offered sets the new state; nil keeps it
+// (a too-large SBOM is replaced by an empty one, but a later empty one
+// may still be offered on top, harmlessly).
+func (s *Source) mark(im broker.Image, offered *bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	was := s.fetched[im.Digest].offered
-	s.fetched[im.Digest] = fetchState{version: version(im), at: s.now(), offered: offered}
+	now := was
+	if offered != nil {
+		now = *offered
+	}
+	s.fetched[im.Digest] = fetchState{version: version(im), at: s.now(), offered: now, image: im}
 	return was
 }
 
@@ -327,10 +363,16 @@ func (s *Source) count(result string) {
 	}
 }
 
-func (s *Source) setAvailable(v float64) {
-	if s.Metrics != nil {
-		s.Metrics.SourceAvailable.WithLabelValues(SourceName).Set(v)
+// setGauges sets source_available (skipped when negative) and
+// source_healthy for this source.
+func (s *Source) setGauges(available, healthy float64) {
+	if s.Metrics == nil {
+		return
 	}
+	if available >= 0 {
+		s.Metrics.SourceAvailable.WithLabelValues(SourceName).Set(available)
+	}
+	s.Metrics.SourceHealthy.WithLabelValues(SourceName).Set(healthy)
 }
 
 // toSBOM builds the coordinator's ImageSBOM for a node SBOM. It is keyed

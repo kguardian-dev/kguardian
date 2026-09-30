@@ -30,6 +30,7 @@ type fakeBroker struct {
 	listings  int
 	fetches   map[string]int
 	lastLimit int
+	block     chan struct{} // NodeSBOM waits on it when set
 }
 
 func (f *fakeBroker) NodeCatalogAvailable(context.Context) error {
@@ -47,6 +48,9 @@ func (f *fakeBroker) RunningImages(context.Context) ([]broker.Image, error) {
 }
 
 func (f *fakeBroker) NodeSBOM(_ context.Context, digest string, max int) (*broker.NodeSBOM, error) {
+	if f.block != nil {
+		<-f.block
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fetches == nil {
@@ -71,11 +75,48 @@ func (f *fakeBroker) fetched() map[string]int {
 }
 
 type offers struct {
-	mu sync.Mutex
-	s  []*types.ImageSBOM
+	mu      sync.Mutex
+	s       []*types.ImageSBOM
+	evicted map[string]bool
 }
 
-func (o *offers) Offer(s *types.ImageSBOM) { o.mu.Lock(); o.s = append(o.s, s); o.mu.Unlock() }
+func (o *offers) Offer(s *types.ImageSBOM) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.s = append(o.s, s)
+	delete(o.evicted, s.Image.Digest)
+}
+
+// Holds is true for every digest offered and not evicted since.
+func (o *offers) Holds(digest, source string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if source != types.SourceNode || o.evicted[digest] {
+		return false
+	}
+	for _, s := range o.s {
+		if s.Image.Digest == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *offers) evict(digest string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.evicted == nil {
+		o.evicted = map[string]bool{}
+	}
+	o.evicted[digest] = true
+}
+
+func (o *offers) n() int { o.mu.Lock(); defer o.mu.Unlock(); return len(o.s) }
+func (o *offers) last() *types.ImageSBOM {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.s[len(o.s)-1]
+}
 func (o *offers) digests() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -355,5 +396,139 @@ func TestRunStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return")
+	}
+}
+
+// Readiness does not wait for the fetches: a fresh pod with many node
+// SBOMs due must pass /readyz as soon as the inventory is listed.
+func TestReadyBeforeFetchesFinish(t *testing.T) {
+	fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t", "node")},
+		docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}, block: make(chan struct{})}
+	log, _ := test.NewNullLogger()
+	s := newSource(fb, &offers{}, log, nil, &clock{t: time.Unix(1, 0)})
+	done := make(chan struct{})
+	go func() { s.Pass(context.Background()); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.Ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("not ready while a fetch is blocked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("pass finished although the fetch is blocked")
+	default:
+	}
+	close(fb.block)
+	<-done
+}
+
+// A node SBOM the coordinator dropped to stay within budget is fetched
+// and offered again on the next pass, not a day later.
+func TestReoffersWhatTheCoordinatorEvicted(t *testing.T) {
+	fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t", "node")},
+		docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
+	o := &offers{}
+	log, _ := test.NewNullLogger()
+	s := newSource(fb, o, log, nil, &clock{t: time.Unix(1, 0)})
+	s.Pass(context.Background())
+	s.Pass(context.Background())
+	if fb.fetched()["sha256:aa"] != 1 {
+		t.Fatalf("held and unchanged, yet fetched %d times", fb.fetched()["sha256:aa"])
+	}
+	o.evict("sha256:aa")
+	s.Pass(context.Background())
+	if fb.fetched()["sha256:aa"] != 2 || o.n() != 2 || len(o.last().Components) != 1 {
+		t.Errorf("after eviction: %d fetches, %d offers", fb.fetched()["sha256:aa"], o.n())
+	}
+}
+
+// An SBOM that grows past the limit after a smaller one was offered
+// replaces it with an empty one, and a later empty SBOM is still offered.
+func TestTooLargeAfterAnOfferReleasesIt(t *testing.T) {
+	fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t1", "node")},
+		docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}, fetchErr: map[string]error{}}
+	o := &offers{}
+	log, _ := test.NewNullLogger()
+	s := newSource(fb, o, log, nil, &clock{t: time.Unix(1, 0)})
+	s.Pass(context.Background())
+	fb.mu.Lock()
+	fb.images = []broker.Image{img("sha256:aa", "t2", "node")}
+	fb.fetchErr["sha256:aa"] = broker.ErrNodeSBOMTooLarge
+	fb.mu.Unlock()
+	s.Pass(context.Background())
+	if o.n() != 2 || len(o.last().Components) != 0 {
+		t.Fatalf("too large: %d offers, last %+v", o.n(), o.last())
+	}
+	fb.mu.Lock()
+	fb.images = []broker.Image{img("sha256:aa", "t3", "node")}
+	delete(fb.fetchErr, "sha256:aa")
+	fb.docs["sha256:aa"] = doc()
+	fb.mu.Unlock()
+	s.Pass(context.Background())
+	if o.n() != 3 || len(o.last().Components) != 0 {
+		t.Errorf("empty after too large: %d offers", o.n())
+	}
+}
+
+// A digest that stops running, or whose node SBOM is deleted, has what
+// was offered for it replaced by an empty SBOM.
+func TestReleasesWhenNoLongerListed(t *testing.T) {
+	for _, next := range [][]broker.Image{
+		{},                                   // no longer running
+		{img("sha256:aa", "t1", "registry")}, // node SBOM deleted
+	} {
+		fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t1", "node")},
+			docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
+		o := &offers{}
+		log, _ := test.NewNullLogger()
+		m := metrics.New()
+		s := newSource(fb, o, log, m, &clock{t: time.Unix(1, 0)})
+		s.Pass(context.Background())
+		fb.mu.Lock()
+		fb.images = next
+		fb.mu.Unlock()
+		s.Pass(context.Background())
+		if o.n() != 2 || o.last().Image.Digest != "sha256:aa" || len(o.last().Components) != 0 || o.last().Source != types.SourceNode {
+			t.Fatalf("%v: offers %d, last %+v", next, o.n(), o.last())
+		}
+		s.Pass(context.Background())
+		if o.n() != 2 || testutil.ToFloat64(m.NodeSBOMFetches.WithLabelValues("released")) != 1 {
+			t.Errorf("%v: released more than once", next)
+		}
+	}
+}
+
+// A token the broker refuses: one error line, the health gauge at 0, and
+// no more probes until IdleRecheck.
+func TestProbeDeniedBacksOff(t *testing.T) {
+	for _, code := range []int{401, 403} {
+		fb := &fakeBroker{probeErr: &broker.StatusError{Path: "/catalog/status", StatusCode: code}}
+		log, hook := test.NewNullLogger()
+		m := metrics.New()
+		c := &clock{t: time.Unix(1, 0)}
+		s := newSource(fb, &offers{}, log, m, c)
+		for range 5 {
+			s.Pass(context.Background())
+			c.t = c.t.Add(5 * time.Minute)
+		}
+		if fb.probes != 1 || fb.listings != 0 || !s.Ready() {
+			t.Fatalf("%d: %d probes, %d listings", code, fb.probes, fb.listings)
+		}
+		if len(hook.AllEntries()) != 1 || hook.LastEntry().Level != logrus.ErrorLevel {
+			t.Fatalf("%d: logs %+v", code, hook.AllEntries())
+		}
+		if v := testutil.ToFloat64(m.SourceHealthy.WithLabelValues("node")); v != 0 {
+			t.Errorf("%d: healthy gauge %v", code, v)
+		}
+		c.t = c.t.Add(time.Hour)
+		fb.mu.Lock()
+		fb.probeErr = nil
+		fb.mu.Unlock()
+		s.Pass(context.Background())
+		if fb.probes != 2 || fb.listings != 1 || testutil.ToFloat64(m.SourceHealthy.WithLabelValues("node")) != 1 {
+			t.Errorf("%d: after the fix: %d probes, %d listings", code, fb.probes, fb.listings)
+		}
 	}
 }
