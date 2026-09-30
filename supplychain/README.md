@@ -295,7 +295,8 @@ read. A 401 or 403 (the token lacks the read scope) is logged once at
 error level, sets `kguardian_supplychain_source_healthy{source="node"}`
 to 0 and is asked again on the same backoff. Each line is logged once
 per streak, not per probe. A network or 5xx failure warns once and is
-retried on the next interval. A 404 on the SBOM route itself is an ordinary fetch error.
+retried on the next interval (30s on while idling, without doubling
+the backoff). A 404 on the SBOM route itself is an ordinary fetch error.
 
 Counted in `kguardian_supplychain_node_sbom_fetches_total{result}`
 (`fetched`, `none`, `changed`, `too_large`, `error`, `released`,
@@ -562,7 +563,7 @@ and no identity.
 | `REGISTRY_SBOM_ENABLED` | `false` | Fetch registry-attached SBOMs for running digests (opt-in; egress to image registries). Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
 | `NODE_SBOM_ENABLED` | `false` | Match the node catalog's SBOMs (source `node`, stored in the broker) with Grype. Needs `GRYPE_MATCHER_URL` (ignored with a warning without it), `BROKER_URL` and a token with the read scope. The chart will set it from `supplychain.sources.node.enabled`, which defaults to `nodeCatalog.enabled`. See [Node SBOM source](#node-sbom-source). |
-| `NODE_SBOM_INTERVAL` | `5m` | How often to list running images for new or changed node SBOMs. |
+| `NODE_SBOM_INTERVAL` | `5m` | How often to list running images for new or changed node SBOMs. At least `1s`. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `GRYPE_ERROR_QUARANTINE_TTL` | `1h` | How long a digest whose match keeps failing waits before one more try; doubles per repeat, at most 24h. At least `5m`. |
 | `GRYPE_NODE_GROUP_MAX_WAIT` | `30m` | With the node source on: how long a group last matched with a node SBOM waits, after its SBOMs were dropped, for the other SBOMs of that match before it is matched with what it holds (from its last registry refetch; at most twice this from the start). At least `1m`. |

@@ -364,8 +364,8 @@ func TestRolledBeforeBrokerResumesAtFirstRetry(t *testing.T) {
 	if fb.probes != 1 {
 		t.Fatalf("probed before the retry was due: %d probes", fb.probes)
 	}
-	if w := s.wait(); w != 12*time.Second {
-		t.Errorf("Run would wait %v, want what is left of the retry (12s)", w)
+	if w := s.wait(); w != 30*time.Second {
+		t.Errorf("Run would wait %v, want the IdleRetry floor (30s), not what is left (12s)", w)
 	}
 	c.t = c.t.Add(12 * time.Second)
 	s.Pass(context.Background())
@@ -412,6 +412,81 @@ func TestRunRetriesOnTheBackoffNotTheInterval(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A 404, then connection refused while the new broker starts: each
+// transient failure schedules the next probe IdleRetry on (no doubling),
+// so Run does not spin, and wait never drops below IdleRetry.
+func TestTransientErrorsWhileIdleDoNotSpin(t *testing.T) {
+	fb := &fakeBroker{probeErr: broker.ErrNoNodeCatalog}
+	log := logrus.New()
+	log.SetOutput(io.Discard)
+	retry := 20 * time.Millisecond
+	s := &Source{Broker: fb, Matcher: &offers{}, Log: log, Interval: time.Hour, IdleRetry: retry}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	for {
+		fb.mu.Lock()
+		probed := fb.probes >= 1
+		if probed {
+			fb.probeErr = errors.New("connection refused")
+		}
+		fb.mu.Unlock()
+		if probed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	const run = 500 * time.Millisecond
+	time.Sleep(run)
+	cancel()
+	<-done
+	fb.mu.Lock()
+	probes := fb.probes
+	fb.mu.Unlock()
+	// At most one probe per IdleRetry (plus the first two), and more than
+	// one: it keeps retrying on the schedule.
+	if limit := int(run/retry) + 2; probes > limit || probes < 3 {
+		t.Errorf("%d probes in %v, want 3..%d", probes, run, limit)
+	}
+	if !s.Idle() {
+		t.Error("a transient failure ended the idle streak")
+	}
+
+	// On the fake clock: the next probe is IdleRetry on, not doubled.
+	fb2 := &fakeBroker{probeErr: broker.ErrNoNodeCatalog}
+	lg, hook := test.NewNullLogger()
+	c := &clock{t: time.Unix(1, 0)}
+	s2 := newSource(fb2, &offers{}, lg, nil, c)
+	s2.Pass(context.Background())
+	c.t = c.t.Add(30 * time.Second)
+	s2.Pass(context.Background()) // 404 again: backoff 1m
+	fb2.mu.Lock()
+	fb2.probeErr = errors.New("connection refused")
+	fb2.mu.Unlock()
+	c.t = c.t.Add(time.Minute)
+	for range 3 {
+		s2.Pass(context.Background())
+		s2.mu.Lock()
+		next, backoff := s2.nextProbe, s2.backoff
+		s2.mu.Unlock()
+		if next.Sub(c.t) != 30*time.Second || backoff != time.Minute {
+			t.Fatalf("after a transient error: next in %v, backoff %v", next.Sub(c.t), backoff)
+		}
+		if w := s2.wait(); w != 30*time.Second {
+			t.Errorf("wait %v", w)
+		}
+		s2.Pass(context.Background()) // not due: no probe
+		c.t = next
+	}
+	if fb2.probes != 5 {
+		t.Errorf("%d probes, want 5", fb2.probes)
+	}
+	// One info line for the streak, one warning for the transient streak.
+	if len(hook.AllEntries()) != 2 {
+		t.Errorf("logs %+v", hook.AllEntries())
+	}
 }
 
 // The backoff doubles from IdleRetry to IdleRecheck and stays there; a

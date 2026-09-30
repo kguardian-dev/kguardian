@@ -162,8 +162,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.NodeSBOM, err = strconv.ParseBool(env("NODE_SBOM_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("NODE_SBOM_ENABLED: %w", err)
 	}
-	if c.NodeSBOMInterval, err = time.ParseDuration(env("NODE_SBOM_INTERVAL", "5m")); err != nil || c.NodeSBOMInterval <= 0 {
-		return c, fmt.Errorf("NODE_SBOM_INTERVAL must be a positive duration")
+	if c.NodeSBOMInterval, err = time.ParseDuration(env("NODE_SBOM_INTERVAL", "5m")); err != nil || c.NodeSBOMInterval < time.Second {
+		return c, fmt.Errorf("NODE_SBOM_INTERVAL must be a duration of at least 1s")
 	}
 	if c.TrivyResync, err = time.ParseDuration(env("TRIVY_RESYNC_PERIOD", "10m")); err != nil || c.TrivyResync <= 0 {
 		return c, fmt.Errorf("TRIVY_RESYNC_PERIOD must be a positive duration")

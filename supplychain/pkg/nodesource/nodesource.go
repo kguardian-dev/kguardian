@@ -177,14 +177,15 @@ func (s *Source) Run(ctx context.Context) {
 }
 
 // wait is how long Run sleeps before the next pass: Interval, or less
-// while idle or denied when the next probe is due sooner.
+// while idle or denied when the next probe is due sooner, but never less
+// than IdleRetry, so a probe schedule in the past cannot spin Run.
 func (s *Source) wait() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.available || (!s.idle && !s.denied) {
 		return s.Interval
 	}
-	return min(s.Interval, max(s.nextProbe.Sub(s.now()), 0))
+	return min(s.Interval, max(s.nextProbe.Sub(s.now()), s.IdleRetry))
 }
 
 // Pass runs one inventory listing and the fetches it calls for.
@@ -280,7 +281,13 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 		return false
 	default:
 		// Transient (network, 5xx): try again next pass, one line per streak.
+		// While idle or denied (a 404, then connection refused while the
+		// new broker starts), the next probe is IdleRetry on: the backoff
+		// is not doubled, and nextProbe no longer lies in the past.
 		s.count("probe_error")
+		if s.idle || s.denied {
+			s.nextProbe = s.now().Add(s.IdleRetry)
+		}
 		if !s.probeErr {
 			s.Log.WithError(err).Warn("node sbom source: cannot tell whether the broker has the node catalog; will retry")
 		}
