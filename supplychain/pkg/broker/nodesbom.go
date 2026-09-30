@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 )
@@ -33,22 +34,31 @@ const nodeCatalogProbeNode = "kguardian-supplychain-probe"
 // nodeSBOMPageLimit is the page size asked for (the broker's maximum).
 const nodeSBOMPageLimit = 500
 
+// A page answered 503 (the broker's read budget shedding load) is asked
+// again after its Retry-After, at most maxPageRetries times per page and
+// never waiting longer than maxRetryAfter at a time.
+const (
+	maxPageRetries = 3
+	maxRetryAfter  = 30 * time.Second
+)
+
 // NodeCatalogAvailable reports whether the broker has the node catalog,
 // with one cheap read (GET /catalog/status, read scope). It returns
-// ErrNoNodeCatalog on a 404. A 503 (catalog token not configured) still
+// ErrNoNodeCatalog on a 404 and a *StatusError for any other refusal
+// (401 and 403 included). A 503 (catalog token not configured) still
 // counts as available: node SBOMs stored earlier can be read.
 func (c *ReadClient) NodeCatalogAvailable(ctx context.Context) error {
-	status, body, err := c.get(ctx, "/catalog/status?"+url.Values{"node": {nodeCatalogProbeNode}}.Encode())
+	resp, err := c.get(ctx, "/catalog/status?"+url.Values{"node": {nodeCatalogProbeNode}}.Encode())
 	if err != nil {
 		return err
 	}
 	switch {
-	case status == http.StatusNotFound:
+	case resp.status == http.StatusNotFound:
 		return ErrNoNodeCatalog
-	case status/100 == 2, status == http.StatusServiceUnavailable:
+	case resp.status/100 == 2, resp.status == http.StatusServiceUnavailable:
 		return nil
 	}
-	return &StatusError{Path: "/catalog/status", StatusCode: status, Body: errorBody(body)}
+	return &StatusError{Path: "/catalog/status", StatusCode: resp.status, Body: errorBody(resp.body)}
 }
 
 // NodeSBOM is a node catalog SBOM as the broker serves it, components
@@ -97,7 +107,19 @@ type nodeSBOMPage struct {
 // read scope, paged). It returns nil, nil when there is none, and
 // ErrNodeSBOMTooLarge past maxComponents (<= 0: no limit). A node SBOM is
 // linked only to its own digest, so a report under another digest is
-// refused.
+// refused. Any non-2xx answer is a *StatusError (a 404 here is not a sign
+// of an old broker: this route predates the node catalog).
+//
+// Paging consistency: the pages are read one request at a time, so the
+// SBOM can be replaced in between. Each page repeats the report header,
+// and a page whose scannedAt or receivedAt differs from the first page's
+// ends the read with ErrNodeSBOMChanged. A replacement the header does
+// not reveal (both timestamps equal to the second) still heals itself:
+// the replacement carries a new catalogedAt in GET /images, so the next
+// pass reads it again whole. And a mixed read can only be wrong by adding
+// or missing node packages for one pass; it cannot touch what Trivy or a
+// registry SBOM contribute, since a node SBOM only ever adds to the
+// union.
 func (c *ReadClient) NodeSBOM(ctx context.Context, digest string, maxComponents int) (*NodeSBOM, error) {
 	path := "/images/" + url.PathEscape(digest) + "/sbom"
 	var out *NodeSBOM
@@ -108,18 +130,15 @@ func (c *ReadClient) NodeSBOM(ctx context.Context, digest string, maxComponents 
 		if after > 0 {
 			q.Set("after", strconv.FormatInt(after, 10))
 		}
-		status, body, err := c.get(ctx, path+"?"+q.Encode())
+		resp, err := c.getRetrying(ctx, path+"?"+q.Encode())
 		if err != nil {
 			return nil, err
 		}
-		if status == http.StatusNotFound {
-			return nil, ErrNoNodeCatalog
-		}
-		if status/100 != 2 {
-			return nil, &StatusError{Path: path, StatusCode: status, Body: errorBody(body)}
+		if resp.status/100 != 2 {
+			return nil, &StatusError{Path: path, StatusCode: resp.status, Body: errorBody(resp.body)}
 		}
 		var p nodeSBOMPage
-		if err := json.Unmarshal(body, &p); err != nil {
+		if err := json.Unmarshal(resp.body, &p); err != nil {
 			return nil, fmt.Errorf("GET %s: %w", path, err)
 		}
 		if p.Report == nil {
@@ -157,12 +176,68 @@ func (c *ReadClient) NodeSBOM(ctx context.Context, digest string, maxComponents 
 	}
 }
 
-// get performs one authorised GET and returns the status and a body of at
-// most maxPageBytes.
-func (c *ReadClient) get(ctx context.Context, pathAndQuery string) (int, []byte, error) {
+type getResult struct {
+	status     int
+	body       []byte
+	retryAfter string
+}
+
+// getRetrying is get, asking again after a 503's Retry-After (bounded; see
+// maxPageRetries). A 503 without Retry-After, or still 503 after the
+// retries, is returned as it is.
+func (c *ReadClient) getRetrying(ctx context.Context, pathAndQuery string) (getResult, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.get(ctx, pathAndQuery)
+		if err != nil || resp.status != http.StatusServiceUnavailable || attempt == maxPageRetries {
+			return resp, err
+		}
+		wait, ok := parseRetryAfter(resp.retryAfter)
+		if !ok {
+			return resp, nil
+		}
+		sleep := c.sleep
+		if sleep == nil {
+			sleep = sleepCtx
+		}
+		if err := sleep(ctx, min(wait, maxRetryAfter)); err != nil {
+			return resp, err
+		}
+	}
+}
+
+// parseRetryAfter reads Retry-After in seconds (the form the broker
+// sends); an HTTP date is also accepted.
+func parseRetryAfter(v string) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(time.Until(t), 0), true
+	}
+	return 0, false
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// get performs one authorised GET and returns the status, a body of at
+// most maxPageBytes and any Retry-After.
+func (c *ReadClient) get(ctx context.Context, pathAndQuery string) (getResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+pathAndQuery, nil)
 	if err != nil {
-		return 0, nil, err
+		return getResult{}, err
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -173,17 +248,17 @@ func (c *ReadClient) get(ctx context.Context, pathAndQuery string) (int, []byte,
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("GET %s: %w", path, err)
+		return getResult{}, fmt.Errorf("GET %s: %w", path, err)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
 	_ = resp.Body.Close()
 	if err != nil {
-		return 0, nil, fmt.Errorf("GET %s: %w", path, err)
+		return getResult{}, fmt.Errorf("GET %s: %w", path, err)
 	}
 	if len(body) > maxPageBytes {
-		return 0, nil, fmt.Errorf("GET %s: response exceeds %d bytes", path, maxPageBytes)
+		return getResult{}, fmt.Errorf("GET %s: response exceeds %d bytes", path, maxPageBytes)
 	}
-	return resp.StatusCode, body, nil
+	return getResult{status: resp.StatusCode, body: body, retryAfter: resp.Header.Get("Retry-After")}, nil
 }
 
 func errorBody(b []byte) string {

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // nodeSBOMServer serves GET /images/{digest}/sbom?source=node in the shape
@@ -124,8 +127,12 @@ func TestNodeSBOMOutcomes(t *testing.T) {
 func TestNodeSBOMRefusesAnotherReport(t *testing.T) {
 	const d = "sha256:aa"
 	for _, m := range []func(int, map[string]interface{}){
-		func(_ int, b map[string]interface{}) { b["report"].(map[string]interface{})["source"] = "trivy-operator" },
-		func(_ int, b map[string]interface{}) { b["report"].(map[string]interface{})["reportDigest"] = "sha256:bb" },
+		func(_ int, b map[string]interface{}) {
+			b["report"].(map[string]interface{})["source"] = "trivy-operator"
+		},
+		func(_ int, b map[string]interface{}) {
+			b["report"].(map[string]interface{})["reportDigest"] = "sha256:bb"
+		},
 	} {
 		srv := nodeSBOMServer(t, d, 3, m)
 		c, _ := NewReadClient(srv.URL, "t")
@@ -169,13 +176,68 @@ func TestNodeCatalogAvailable(t *testing.T) {
 			t.Errorf("%d: err %v, want %v", tc.status, err, tc.want)
 		}
 	}
-	// An old broker also has no node SBOM route semantics: a 404 there
-	// means the same.
+	// Only the catalog route's 404 means an old broker: the SBOM route
+	// predates the catalog, so a 404 there is a plain error.
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 	c, _ := NewReadClient(srv.URL, "")
-	if _, err := c.NodeSBOM(context.Background(), "sha256:aa", 0); !errors.Is(err, ErrNoNodeCatalog) {
+	var se *StatusError
+	if _, err := c.NodeSBOM(context.Background(), "sha256:aa", 0); errors.Is(err, ErrNoNodeCatalog) || !errors.As(err, &se) || se.StatusCode != 404 {
 		t.Errorf("404 sbom: %v", err)
+	}
+}
+
+// A page answered 503 is asked again after its Retry-After, capped, a
+// bounded number of times; without Retry-After it is an error at once.
+func TestNodeSBOMHonoursRetryAfter(t *testing.T) {
+	const d = "sha256:aa"
+	for _, tc := range []struct {
+		name       string
+		busy       int // 503s before the page is served
+		retryAfter string
+		wantErr    bool
+		wantCalls  int
+		wantWaits  []time.Duration
+	}{
+		{name: "retried", busy: 2, retryAfter: "2", wantCalls: 3, wantWaits: []time.Duration{2 * time.Second, 2 * time.Second}},
+		{name: "capped", busy: 1, retryAfter: "3600", wantCalls: 2, wantWaits: []time.Duration{maxRetryAfter}},
+		{name: "bounded", busy: 99, retryAfter: "1", wantErr: true, wantCalls: maxPageRetries + 1,
+			wantWaits: []time.Duration{time.Second, time.Second, time.Second}},
+		{name: "no retry-after", busy: 1, wantErr: true, wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			inner := nodeSBOMServer(t, d, 3, nil)
+			defer inner.Close()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls <= tc.busy {
+					if tc.retryAfter != "" {
+						w.Header().Set("Retry-After", tc.retryAfter)
+					}
+					http.Error(w, "read budget exhausted", http.StatusServiceUnavailable)
+					return
+				}
+				resp, err := http.Get(inner.URL + r.URL.RequestURI())
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer func() { _ = resp.Body.Close() }()
+				_, _ = io.Copy(w, resp.Body)
+			}))
+			defer srv.Close()
+			c, _ := NewReadClient(srv.URL, "t")
+			var waits []time.Duration
+			c.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			doc, err := c.NodeSBOM(context.Background(), d, 0)
+			if (err != nil) != tc.wantErr || (!tc.wantErr && len(doc.Components) != 3) {
+				t.Fatalf("doc %v err %v", doc, err)
+			}
+			if calls != tc.wantCalls || !reflect.DeepEqual(waits, tc.wantWaits) {
+				t.Errorf("%d calls, waits %v; want %d, %v", calls, waits, tc.wantCalls, tc.wantWaits)
+			}
+		})
 	}
 }
 

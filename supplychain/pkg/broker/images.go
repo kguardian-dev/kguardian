@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Image is one row of the broker's image inventory (GET /images).
@@ -66,6 +67,8 @@ type ReadClient struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// sleep waits out a Retry-After (replaced in tests).
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
 // NewReadClient returns a read client for the broker at baseURL.
@@ -74,7 +77,7 @@ func NewReadClient(baseURL, token string) (*ReadClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ReadClient{baseURL: c.baseURL, token: c.token, http: c.http}, nil
+	return &ReadClient{baseURL: c.baseURL, token: c.token, http: c.http, sleep: sleepCtx}, nil
 }
 
 // RunningImages lists every image the inventory says is running now,
