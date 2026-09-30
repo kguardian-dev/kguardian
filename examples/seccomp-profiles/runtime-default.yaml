@@ -1,0 +1,60 @@
+# The comparison baseline: the web Deployment from workloads.yaml on the
+# container runtime's default seccomp profile instead of a kguardian one.
+#
+# RuntimeDefault is the profile containerd or CRI-O ships. It is written for
+# every container at once: it allows several hundred syscalls and leaves out
+# a few dozen dangerous ones (kexec_load, open_by_handle_at, bpf and mount
+# without the matching capability, and so on). It is safe for almost any
+# workload, and Pod Security Admission's "restricted" level requires at least
+# this.
+#
+# A kguardian profile is written for one workload: it allows only the ~90
+# syscalls that workload was observed to make and denies everything else.
+# The attack surface is much smaller, but the profile only holds for the
+# workload it was recorded from.
+#
+# Use this file:
+#   - as the starting point before kguardian has observed the workload;
+#   - to fall back to if an enforcing Localhost profile turns out too tight.
+#     Switching back is this one field plus a rollout restart. Alternatively,
+#     set the SeccompProfile's defaultAction back to SCMP_ACT_LOG and keep the
+#     Localhost reference.
+#
+# This file and workloads.yaml both define prod/web, so apply only one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels:
+    app: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi

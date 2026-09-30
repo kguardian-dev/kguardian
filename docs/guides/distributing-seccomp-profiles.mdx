@@ -18,6 +18,14 @@ file it describes exists at a known path on every node, tells you when that is
 true, and tells you when what it observes has drifted from what you committed.
 </Info>
 
+<Tip>
+Worked samples of every stage below (an exported audit-mode CR, the same CR
+promoted to enforcing, a stricter batch-job profile, the exact file each
+controller writes to the node, and the workloads that reference them) are in
+[`examples/seccomp-profiles`](https://github.com/kguardian-dev/kguardian/tree/main/examples/seccomp-profiles).
+They show the format only. Generate your own profiles from observed syscalls.
+</Tip>
+
 ---
 
 ## The lifecycle

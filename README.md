@@ -137,7 +137,7 @@ kubectl kguardian gen netpol --all -n staging --type cilium --output-dir ./polic
 kubectl kguardian gen seccomp -A --output-dir ./seccomp
 ```
 
-Review the generated YAML, then apply it yourself (`kubectl apply -f ./policies`). Manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are covered in the [Installation Guide](https://docs.kguardian.dev/installation).
+Review the generated YAML, then apply it yourself (`kubectl apply -f ./policies`). For what the output looks like and how to wire it up, see the samples in [`examples/`](examples/): [`seccomp-profiles/`](examples/seccomp-profiles/) (`SeccompProfile` CRs, from audit mode to enforcing, and the pod `Localhost` reference) and [`audit-network-policy/`](examples/audit-network-policy/). Manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are covered in the [Installation Guide](https://docs.kguardian.dev/installation).
 
 ## 🛠️ Usage
 

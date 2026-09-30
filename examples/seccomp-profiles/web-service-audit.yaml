@@ -1,0 +1,145 @@
+# Example SeccompProfile, audit mode: an nginx Deployment as kguardian
+# exports it.
+#
+# This is a SAMPLE. Do not copy the syscall list into your cluster. A real
+# profile has to come from your own workload's observed syscalls, because a
+# different image, libc, config or code path makes a different set. Generate
+# yours (UI: Workloads > seccomp columns > Export, or the API):
+#
+#   kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+#   curl -s localhost:9090/seccomp/profiles/prod/Deployment/web/export \
+#     > seccomp/prod/deployment-web.yaml
+#
+# Everything from the "# kguardian SeccompProfile export" line down has the
+# shape of that export: defaultAction SCMP_ACT_LOG, one SCMP_ACT_ALLOW rule
+# with the names sorted, the capture annotations, and a workloadRef so
+# kguardian keeps reporting Drift and denials against the workload.
+#
+# SCMP_ACT_LOG blocks nothing. The kernel logs every syscall outside the list,
+# and kguardian's audit_seccomp kprobe turns those records into
+# status.denials and the DenialsObserved condition. Promote only once the CR
+# reads DenialsObserved=False with status.denials.observed: 0 (Unknown or an
+# absent status.denials means "no data", not "clean"):
+#
+#   kubectl -n prod get seccompprofile deployment-web -o json \
+#     | jq '{c: (.status.conditions[] | select(.type=="DenialsObserved")), d: .status.denials}'
+#
+# To promote, change defaultAction to SCMP_ACT_ERRNO and commit. The result is
+# web-service.yaml. Both files define prod/deployment-web, so apply only one.
+#
+# Mixed-architecture note: the workload ran on amd64 and arm64 nodes, so the
+# list is the union of both. A few names exist only on x86_64 (access,
+# arch_prctl, chown, dup2, epoll_create, epoll_wait, mkdir, pipe). aarch64 has
+# no such syscalls, and there glibc calls faccessat, mkdirat, dup3 and so on
+# instead. The container runtime skips a name that an architecture does not
+# define, so one list works on both. See README.md.
+#
+# kguardian SeccompProfile export
+# workload: prod Deployment/web
+# observed syscalls: 86 (aarch64,x86_64)
+# capture: full — complete (6 contributing pod(s))
+apiVersion: kguardian.dev/v1alpha1
+kind: SeccompProfile
+metadata:
+  name: deployment-web
+  namespace: prod
+  annotations:
+    kguardian.dev/capture-complete: "true"
+    kguardian.dev/capture-level: full
+spec:
+  defaultAction: SCMP_ACT_LOG
+  architectures:
+    - SCMP_ARCH_AARCH64
+    - SCMP_ARCH_X86_64
+  syscalls:
+    - names:
+        - accept4
+        - access
+        - arch_prctl
+        - bind
+        - brk
+        - capget
+        - capset
+        - chdir
+        - chown
+        - clock_nanosleep
+        - clone
+        - clone3
+        - close
+        - connect
+        - dup2
+        - dup3
+        - epoll_create
+        - epoll_create1
+        - epoll_ctl
+        - epoll_pwait
+        - epoll_wait
+        - execve
+        - exit
+        - exit_group
+        - faccessat
+        - faccessat2
+        - fchown
+        - fchownat
+        - fcntl
+        - fstat
+        - futex
+        - getcwd
+        - getdents64
+        - getegid
+        - geteuid
+        - getgid
+        - getpid
+        - getppid
+        - getrandom
+        - getsockname
+        - getsockopt
+        - gettid
+        - getuid
+        - ioctl
+        - kill
+        - listen
+        - lseek
+        - madvise
+        - mkdir
+        - mkdirat
+        - mmap
+        - mprotect
+        - munmap
+        - newfstatat
+        - openat
+        - pipe
+        - pipe2
+        - prctl
+        - pread64
+        - prlimit64
+        - read
+        - recvfrom
+        - recvmsg
+        - rseq
+        - rt_sigaction
+        - rt_sigprocmask
+        - rt_sigreturn
+        - rt_sigsuspend
+        - sched_getaffinity
+        - sendfile
+        - sendmsg
+        - sendto
+        - set_robust_list
+        - set_tid_address
+        - setgid
+        - setgroups
+        - setsockopt
+        - setuid
+        - shutdown
+        - socket
+        - socketpair
+        - umask
+        - uname
+        - wait4
+        - write
+        - writev
+      action: SCMP_ACT_ALLOW
+  workloadRef:
+    kind: Deployment
+    name: web
