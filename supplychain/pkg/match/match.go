@@ -153,8 +153,10 @@ type groupState struct {
 	lastNode      map[string]bool
 	nodeWaitSince time.Time
 	// othersWaitSince is when the group started waiting for one of
-	// lastOthers; past NodeGroupMaxWait it is matched with what it holds.
+	// lastOthers, lastRefetch when it last asked a source for one with
+	// external work; see waitLocked for the cap.
 	othersWaitSince time.Time
+	lastRefetch     time.Time
 }
 
 // maxErrorQuarantineTTL caps the doubling of ErrorQuarantineTTL.
@@ -215,8 +217,10 @@ type Coordinator struct {
 	NodeRefetchGrace time.Duration
 	// NodeGroupMaxWait caps how long such a group waits for the other
 	// SBOMs of its last match (after an eviction, until their sources
-	// emit them again or declare them gone). Past it the group is matched
-	// with what it holds, under the usual union rules, and counted in
+	// emit them again or declare them gone), counted from the later of
+	// the start of the wait and its last external refetch, and at most
+	// twice this from the start. Past it the group is matched with what it
+	// holds, under the usual union rules, and counted in
 	// kguardian_supplychain_grype_node_group_wait_expired_total.
 	// Default 30m.
 	NodeGroupMaxWait time.Duration
@@ -402,6 +406,19 @@ type Refetcher interface {
 
 type refetchRequest struct {
 	source, digest string
+}
+
+// InMemoryRefetcher is a Refetcher that answers from what it holds (no
+// network, nothing sent to the broker), like Trivy's tracker. Its
+// refetches are not rate-limited.
+type InMemoryRefetcher interface {
+	Refetcher
+	RefetchesFromMemory() bool
+}
+
+func inMemory(f Refetcher) bool {
+	m, ok := f.(InMemoryRefetcher)
+	return ok && m.RefetchesFromMemory()
 }
 
 // SetRefetcher registers the source that can emit source's SBOMs again.
@@ -599,23 +616,40 @@ func (c *Coordinator) waitLocked(key string) int {
 		now := c.now()
 		if gs.othersWaitSince.IsZero() {
 			gs.othersWaitSince = now
-			// Ask the sources for what is missing: Trivy re-emits only a
-			// changed SBOM, and the registry source rechecks daily.
-			for d, srcs := range gs.lastOthers {
-				for src := range srcs {
-					if _, held := c.sboms[d][src]; !held && c.refetchers[src] != nil {
-						if r := (refetchRequest{src, d}); c.allowRefetchLocked(r) {
-							c.refetchQueue = append(c.refetchQueue, r)
-						}
-					}
+		}
+		// Ask the sources for what is missing, on every pass while the
+		// group waits (the ticker brings it back): Trivy re-emits only a
+		// changed SBOM, and the registry source rechecks daily. A source
+		// that answers from memory is asked every time; one that does
+		// external work is spaced by the per-SBOM backoff.
+		for d, srcs := range gs.lastOthers {
+			for src := range srcs {
+				f := c.refetchers[src]
+				if _, held := c.sboms[d][src]; held || f == nil {
+					continue
+				}
+				r := refetchRequest{src, d}
+				if inMemory(f) {
+					c.refetchQueue = append(c.refetchQueue, r)
+				} else if c.allowRefetchLocked(r) {
+					c.refetchQueue = append(c.refetchQueue, r)
+					gs.lastRefetch = now
 				}
 			}
 		}
-		if now.Sub(gs.othersWaitSince) < c.NodeGroupMaxWait {
+		// The cap runs from the later of the start of the wait and the
+		// last external refetch, so an SBOM asked for late still has
+		// NodeGroupMaxWait to arrive; and never past twice the cap from
+		// the start, so the wait always ends.
+		from := gs.othersWaitSince
+		if gs.lastRefetch.After(from) {
+			from = gs.lastRefetch
+		}
+		if now.Sub(from) < c.NodeGroupMaxWait && now.Sub(gs.othersWaitSince) < 2*c.NodeGroupMaxWait {
 			return waitOthers
 		}
 		// Waited long enough: matched with what it holds.
-		gs.othersWaitSince, gs.nodeWaitSince = time.Time{}, time.Time{}
+		gs.othersWaitSince, gs.nodeWaitSince, gs.lastRefetch = time.Time{}, time.Time{}, time.Time{}
 		gs.lastOthers = nil
 		if c.Metrics != nil {
 			c.Metrics.GrypeNodeGroupWaitExpired.Inc()
@@ -625,7 +659,7 @@ func (c *Coordinator) waitLocked(key string) int {
 		}
 		return matchReady
 	}
-	gs.othersWaitSince = time.Time{}
+	gs.othersWaitSince, gs.lastRefetch = time.Time{}, time.Time{}
 	for d := range gs.lastNode {
 		if _, held := c.sboms[d][types.SourceNode]; held {
 			continue
@@ -651,7 +685,14 @@ func (c *Coordinator) recordMatchLocked(key string, gs *groupState, in *union) {
 			delete(c.lastNodeIn, d)
 		}
 	}
-	gs.nodeWaitSince, gs.othersWaitSince = time.Time{}, time.Time{}
+	gs.nodeWaitSince, gs.othersWaitSince, gs.lastRefetch = time.Time{}, time.Time{}, time.Time{}
+	// Matched with these SBOMs: a later wait for one starts its refetch
+	// backoff afresh.
+	for d, srcs := range in.others {
+		for src := range srcs {
+			delete(c.refetchState, refetchRequest{src, d})
+		}
+	}
 	if len(in.nodes) == 0 {
 		// Kept (once any node SBOM has been seen) so that a node SBOM
 		// joining this group later cannot be matched without them.

@@ -286,6 +286,14 @@ func (t *Tracker) DeleteSbomReport(r *SbomReport) []Emission {
 // so the broker never sees it again. It does not block and does not call
 // out.
 func (t *Tracker) Refetch(digest string) *types.ImageSBOM {
+	return t.refetch(digest)
+}
+
+// RefetchesFromMemory: Refetch only reads what the tracker holds, so the
+// coordinator does not rate-limit it.
+func (t *Tracker) RefetchesFromMemory() bool { return true }
+
+func (t *Tracker) refetch(digest string) *types.ImageSBOM {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	ds := t.sbomDigests[digest]

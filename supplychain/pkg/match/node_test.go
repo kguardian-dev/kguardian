@@ -685,9 +685,18 @@ func emission(t *testing.T, s *sink, digest string) trivy.Emission {
 }
 
 type recordingRefetcher struct {
-	mu      sync.Mutex
-	digests []string
-	hold    map[string]*types.ImageSBOM // returned by Refetch (a source that holds SBOMs)
+	mu       sync.Mutex
+	digests  []string
+	hold     map[string]*types.ImageSBOM // returned by Refetch (a source that holds SBOMs)
+	inMemory bool                        // answers from memory, like Trivy's tracker
+}
+
+func (r *recordingRefetcher) RefetchesFromMemory() bool { return r.inMemory }
+
+func (r *recordingRefetcher) setHold(d string, sb *types.ImageSBOM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hold[d] = sb
 }
 
 func (r *recordingRefetcher) Refetch(d string) *types.ImageSBOM {
@@ -725,7 +734,7 @@ func TestChangedNodeSBOMAfterEvictionIsMatched(t *testing.T) {
 		s := &sink{}
 		c := &Coordinator{Matcher: m, Sink: s, Log: quiet(), Metrics: met}
 		c.now = func() time.Time { return now }
-		tr, reg := &recordingRefetcher{hold: map[string]*types.ImageSBOM{}}, &recordingRefetcher{}
+		tr, reg := &recordingRefetcher{hold: map[string]*types.ImageSBOM{}, inMemory: true}, &recordingRefetcher{}
 		if trivyHolds {
 			tr.hold["sha256:d"] = trivySBOM("sha256:d", "openssl")
 		}
@@ -740,7 +749,7 @@ func TestChangedNodeSBOMAfterEvictionIsMatched(t *testing.T) {
 		}
 		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "zlib")) // a new catalog
 		pass(c)
-		if !reflect.DeepEqual(tr.got(), []string{"sha256:d"}) || reg.calls() != 0 {
+		if !reflect.DeepEqual(tr.got(), []string{"sha256:d"}) || reg.calls() != 0 || (trivyHolds && tr.calls() != 1) {
 			t.Fatalf("waiting asked trivy %v, registry %v", tr.got(), reg.got())
 		}
 		for _, e := range s.es {
@@ -768,40 +777,121 @@ func TestChangedNodeSBOMAfterEvictionIsMatched(t *testing.T) {
 	}
 }
 
-// Refetches of one SBOM are rate-limited: at most once per window,
-// doubling from RefetchMinInterval, and counted.
-func TestRefetchesAreRateLimited(t *testing.T) {
+// Refetches that cost external work (a registry lookup) are spaced by the
+// backoff but retried on every pass while the group waits; the cap runs
+// from the last of them, bounded by twice the cap from the start.
+func TestExternalRefetchesAreSpacedAndExtendTheCap(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m := &mockMatcher{built: time.Unix(100, 0)}
 	met := metrics.New()
 	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet(), Metrics: met}
 	c.now = func() time.Time { return now }
-	tr := &recordingRefetcher{}
+	reg := &recordingRefetcher{}
+	c.SetRefetcher(types.SourceRegistry, reg)
+	c.Offer(registrySBOM("sha256:d", "", "musl"))
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+	pass(c)
+	evictAll(c)
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "zlib"))
+	pass(c)
+	var at []int
+	matchedAt := -1
+	for minute := 0; minute <= 70; minute++ {
+		before := reg.calls()
+		if minute > 0 {
+			advance(c, &now, time.Minute)
+		}
+		if reg.calls() > before || (minute == 0 && reg.calls() == 1) {
+			at = append(at, minute)
+		}
+		if matchedAt < 0 && m.n("sha256:d") > 1 {
+			matchedAt = minute
+		}
+	}
+	if !reflect.DeepEqual(at, []int{0, 10, 30}) {
+		t.Errorf("registry refetches at minutes %v, want 0, 10, 30", at)
+	}
+	// The last refetch at 30 would put the cap at 60; twice the cap from
+	// the start is also 60.
+	if matchedAt != 60 {
+		t.Errorf("matched at minute %d, want 60", matchedAt)
+	}
+	if testutil.ToFloat64(met.GrypeRefetches.WithLabelValues(types.SourceRegistry, "requested")) != 3 ||
+		testutil.ToFloat64(met.GrypeRefetches.WithLabelValues(types.SourceRegistry, "limited")) == 0 {
+		t.Error("refetch counters")
+	}
+}
+
+// The reviewer's case: Trivy's SBOM dropped twice, five minutes apart,
+// and the tracker holding it only later. Trivy's refetches answer from
+// memory, so they are never limited and are retried on every pass: the
+// group re-matches with Trivy's SBOM inside the wait, and no Trivy
+// finding is lost.
+func TestTrivyRefetchIsRetriedAndNeverLimited(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	met := metrics.New()
+	s := &sink{}
+	c := &Coordinator{Matcher: m, Sink: s, Log: quiet(), Metrics: met}
+	c.now = func() time.Time { return now }
+	tr := &recordingRefetcher{hold: map[string]*types.ImageSBOM{}, inMemory: true}
 	c.SetRefetcher(types.SourceTrivyOperator, tr)
 	c.Offer(trivySBOM("sha256:d", "openssl"))
 	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
 	pass(c)
-	var at []int
-	for minute := 0; minute < 80; minute++ {
-		// Complete again, then dropped and its node SBOM offered back alone:
-		// each minute the group starts waiting anew.
-		c.Offer(trivySBOM("sha256:d", "openssl"))
-		pass(c)
+	for i := 0; i < 2; i++ { // evicted twice, five minutes apart
 		evictAll(c)
-		before := tr.calls()
-		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", fmt.Sprint(minute)))
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", fmt.Sprint(i)))
 		pass(c)
-		if tr.calls() > before {
-			at = append(at, minute)
+		advance(c, &now, 5*time.Minute)
+	}
+	before := tr.calls()
+	advance(c, &now, 5*time.Minute)
+	if tr.calls() <= before {
+		t.Fatal("Trivy's refetch was not retried while the group waits")
+	}
+	tr.setHold("sha256:d", trivySBOM("sha256:d", "openssl")) // the tracker has it again
+	advance(c, &now, time.Minute)
+	if got := names(m.input("sha256:d")); got != "openssl,1,libc6" {
+		t.Errorf("re-matched with %s, want Trivy's openssl and the node's libc6,1", got)
+	}
+	for _, v := range s.vulns() {
+		found := false
+		for _, f := range v.Vulnerabilities {
+			found = found || f.Package.Name == "openssl"
 		}
-		now = now.Add(time.Minute)
+		if !found {
+			t.Fatalf("a payload without Trivy's openssl finding: %v", v.SBOMSources)
+		}
 	}
-	if !reflect.DeepEqual(at, []int{0, 10, 30, 70}) {
-		t.Errorf("refetched at minutes %v, want 0, 10, 30, 70", at)
+	if testutil.ToFloat64(met.GrypeRefetches.WithLabelValues(types.SourceTrivyOperator, "limited")) != 0 {
+		t.Error("an in-memory refetch was rate-limited")
 	}
-	if testutil.ToFloat64(met.GrypeRefetches.WithLabelValues(types.SourceTrivyOperator, "requested")) != 4 ||
-		testutil.ToFloat64(met.GrypeRefetches.WithLabelValues(types.SourceTrivyOperator, "limited")) == 0 {
-		t.Error("refetch counters")
+}
+
+// A successful match with an SBOM resets its refetch backoff: the next
+// wait asks for it at once.
+func TestRefetchBackoffResetsAfterAMatch(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet()}
+	c.now = func() time.Time { return now }
+	reg := &recordingRefetcher{}
+	c.SetRefetcher(types.SourceRegistry, reg)
+	c.Offer(registrySBOM("sha256:d", "", "musl"))
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+	pass(c)
+	evictAll(c)
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "a"))
+	pass(c) // refetch 1; window now 10m
+	advance(c, &now, time.Minute)
+	c.Offer(registrySBOM("sha256:d", "", "musl")) // the source re-emits it
+	pass(c)                                       // matched: backoff reset
+	evictAll(c)
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "b"))
+	pass(c)
+	if reg.calls() != 2 {
+		t.Errorf("%d refetches, want 2: the second wait asks at once", reg.calls())
 	}
 }
 

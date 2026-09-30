@@ -71,7 +71,7 @@ func TestSustainedPressureCausesNoReuploads(t *testing.T) {
 	up := &brokerSink{}
 	tee := c.Tee(up)
 
-	tr := &recordingRefetcher{hold: map[string]*types.ImageSBOM{}}
+	tr := &recordingRefetcher{hold: map[string]*types.ImageSBOM{}, inMemory: true}
 	var images []broker.Image
 	digest := func(i int) string { return fmt.Sprintf("sha256:%02d%062d", i, 0) }
 	for i := 0; i < groups; i++ {
@@ -119,9 +119,10 @@ func TestSustainedPressureCausesNoReuploads(t *testing.T) {
 	if up.sboms != baseline {
 		t.Errorf("%d SBOM re-uploads to the broker under pressure", up.sboms-baseline)
 	}
-	// Per SBOM at most one refetch per window (10m, 20m, 40m, 80m, 160m
-	// in four hours), so at most 5 lookups each beyond the first.
-	if extra := f.n() - lookups; extra > 5*groups {
+	// A registry refetch only drops the image's recheck mark: the lookup
+	// happens on the source's next pass, so at most one per image per
+	// pass (the refetch backoff restarts after each successful match).
+	if extra := f.n() - lookups; extra > groups*minutes/15 {
 		t.Errorf("%d registry lookups in %d minutes for %d images", extra, minutes, groups)
 	}
 	if tr.calls() == 0 || f.n() == lookups {
