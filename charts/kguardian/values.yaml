@@ -479,7 +479,12 @@ compute:
 # stores them as SBOM source `node` (trust `scanned`, never overriding
 # Trivy). Off by default: with `enabled: false` nothing below renders.
 nodeCatalog:
-  # -- Catalog node SBOMs. Requires `broker.auth.enabled=true` with
+  # -- Catalog node SBOMs. Upgrade with `-f <values>` or
+  # `--reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`, which
+  # keeps the previous chart's defaults (every key below then falls back to
+  # the chart's built-in default, the same as listed here). With `--set`,
+  # use `--set-string` for a numeric-looking image tag or Secret key name.
+  # Requires `broker.auth.enabled=true` with
   # `broker.auth.mode=scoped` and a `catalog` key in the auth Secret (key
   # name `broker.auth.keys.catalog`). Enabling restarts the Controller
   # DaemonSet and the Broker once. A missing key does not crash anything:
@@ -515,7 +520,7 @@ nodeCatalog:
   # (`NODE_CATALOG_MIN_SCAN_INTERVAL_SECS`), at least 30.
   minScanIntervalSeconds: 30
   # -- Host PSI `some avg10` percent (cpu, io or memory) above which scans
-  # wait (`NODE_CATALOG_PRESSURE_THRESHOLD`).
+  # wait (`NODE_CATALOG_PRESSURE_THRESHOLD`), a whole number 0 to 100.
   pressureThreshold: 40
   # -- Longest a scan waits for pressure to drop
   # (`NODE_CATALOG_MAX_PRESSURE_DEFER_SECS`), at most 86400.
@@ -534,24 +539,32 @@ nodeCatalog:
       tag: "v0.1.0"
       # -- Overrides the image tag using SHA digest
       sha: ""
-    # -- Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`, `Ki`/`Mi`/`Gi`
-    # or bytes). The worker reports `oom` and retries OS packages only when
-    # a scan passes it.
+    # -- Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes
+    # (a number or a string) or a whole number of `Ki`, `Mi`, `Gi` or `Ti`;
+    # the chart hands the worker bytes. The worker reports `oom` and
+    # retries OS packages only when a scan passes it.
     memoryLimit: 640Mi
     # -- Scan temp space (`CATALOG_TMP_LIMIT`) and the `sizeLimit` of the
-    # memory-backed `/tmp` emptyDir. Tmpfs pages count against the
-    # container's memory limit.
+    # memory-backed `/tmp` emptyDir, in the same forms as `memoryLimit`.
+    # Tmpfs pages count against the container's memory limit.
     tmpLimit: 192Mi
     # -- Worker resources. The memory limit must hold `memoryLimit` +
     # `tmpLimit` + 128Mi (the child's burst margin and the parent), so the
     # worker's own limits always trip before a cgroup OOM kill, which on
     # cgroup v2 takes the whole container (kubelet sets
     # `memory.oom.group`; `singleProcessOOMKill: true` on Kubernetes 1.32+
-    # kills only the child). The chart refuses a smaller limit.
+    # kills only the child). The chart refuses a smaller limit. The
+    # request (512Mi, half the limit) is reserved on every node, since this
+    # runs in a DaemonSet. Under node memory pressure the
+    # kubelet evicts pods using more than their request first, and this
+    # pod is the Controller's. Lowering it saves that reservation per node
+    # but makes the Controller pod an earlier eviction candidate while a
+    # large scan runs; raising it to the limit (1Gi) takes it off that list
+    # at the cost of 1Gi per node.
     resources:
       requests:
         cpu: 50m
-        memory: 128Mi
+        memory: 512Mi
       limits:
         cpu: 500m
         memory: 1Gi

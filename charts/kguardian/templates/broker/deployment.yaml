@@ -98,18 +98,18 @@ spec:
               value: "0.0.0.0:{{ .Values.broker.container.port }}"
             {{- end }}
             {{- include "kguardian.brokerAuthServerEnv" . | nindent 12 }}
-            {{- if include "kguardian.nodeCatalogEnabled" . }}
-            {{- $nc := .Values.nodeCatalog }}
+            {{- $nc := include "kguardian.nodeCatalog" . | fromJson }}
+            {{- if $nc.enabled }}
             # Node catalog (values.yaml `nodeCatalog`). GRANTS is the kill
             # switch; MAX_EPOCH bounds the Controllers' NODE_CATALOG_EPOCH.
             - name: NODE_CATALOG_GRANTS
-              value: {{ ne (toString $nc.grants) "false" | quote }}
+              value: {{ $nc.grants | toString | quote }}
             - name: NODE_CATALOG_RETENTION_DAYS
-              value: {{ hasKey $nc "retentionDays" | ternary $nc.retentionDays 14 | int64 | quote }}
+              value: {{ $nc.retentionDays | quote }}
             - name: NODE_CATALOG_MAX_EPOCH
-              value: {{ hasKey $nc "maxEpoch" | ternary $nc.maxEpoch 1000 | int64 | quote }}
+              value: {{ $nc.maxEpoch | quote }}
             - name: NODE_CATALOG_MAX_HOLD_SECS
-              value: {{ hasKey $nc "maxHoldSeconds" | ternary $nc.maxHoldSeconds 7200 | int64 | quote }}
+              value: {{ $nc.maxHoldSeconds | quote }}
             {{- end }}
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL

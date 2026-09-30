@@ -45,14 +45,17 @@ spec:
           annotations:
             summary: "An LSM denies the cataloger access to container roots"
             description: >-
-              {{`{{ $value | humanize }}`}} node(s) were skipped with lsm_denied in the
-              last hour. Check nodeCatalog.worker.seLinuxOptions and
+              {{`{{ $value | humanize }}`}} node x digest skip(s) with lsm_denied in the
+              last hour (each is one node skipped for one digest for 24 h). Check nodeCatalog.worker.seLinuxOptions and
               appArmorProfile; `GET /catalog/status?node=<name>` names the nodes.
             runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
 
+        # Only the reasons that mean the scan itself failed. pid_gone,
+        # drift and exited_before_catalog are normal churn (the container
+        # went away or changed), released to another node at once.
         - alert: KguardianNodeCatalogFailureRate
           expr: |
-            sum by (reason) (increase(kguardian_node_catalog_failed_total[1h]))
+            sum by (reason) (increase(kguardian_node_catalog_failed_total{reason=~"timeout|oom|error"}[1h]))
               / on () group_left
             sum(increase(kguardian_node_catalog_granted_total[1h])) > 0.2
             and on ()
@@ -69,23 +72,32 @@ spec:
               timeout: raise nodeCatalog.scanTimeoutSeconds.
             runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
 
-        # Work is queued but nothing completes: every node deferred,
-        # refused or idle, or the kill switch is off.
+        # Grants went out but none completed in 6 hours. Keyed on grants
+        # rather than queue_depth: a digest no node can take (every node
+        # skipped it for a per-node reason) stays in the queue without
+        # anything being wrong, while a grant means a Controller took the
+        # work. A grant ends in cataloged_total (full, partial, os_only,
+        # no_packages_found, superseded), failed_total or skipped_total;
+        # only the first is progress. Silenced while the kill switch is off
+        # on every Broker replica (grants_enabled 0), when no grants are
+        # expected. Both counters are per replica, so they are summed.
         - alert: KguardianNodeCatalogStalled
           expr: |
-            max(kguardian_node_catalog_queue_depth) > 0
+            sum(increase(kguardian_node_catalog_granted_total[6h])) > 0
             and on ()
             (sum(increase(kguardian_node_catalog_cataloged_total[6h])) or on () vector(0)) == 0
+            unless on ()
+            max(kguardian_node_catalog_grants_enabled) == 0
           for: 30m
           labels:
             severity: warning
           annotations:
-            summary: "Node catalog made no progress in 6 hours"
+            summary: "Node catalog granted work but completed none in 6 hours"
             description: >-
-              {{`{{ $value }}`}} digests are waiting and none was cataloged in 6 hours.
-              Check kguardian_node_catalog_grants_enabled (the nodeCatalog.grants
-              kill switch), the skipped/failed counters by reason, and the
-              cataloger container's logs.
+              {{`{{ $value | humanize }}`}} node catalog grants in the last 6 hours and no
+              completed SBOM. Check kguardian_node_catalog_failed_total and
+              skipped_total by reason, the cataloger container's logs, and
+              `GET /catalog/status?node=<name>`.
             runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
 
         # Nodes too busy to scan for hours: scans wait while host PSI is

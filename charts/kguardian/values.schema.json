@@ -34,10 +34,10 @@
         "maxEpoch": { "type": "integer", "minimum": 1 },
         "maxHoldSeconds": { "type": "integer", "minimum": 900 },
         "scanTimeoutSeconds": { "type": "integer", "minimum": 10, "maximum": 1800 },
-        "maxFiles": { "type": "integer", "minimum": 1 },
+        "maxFiles": { "type": "integer", "minimum": 1, "maximum": 10000000 },
         "maxComponents": { "type": "integer", "minimum": 1, "maximum": 50000 },
         "minScanIntervalSeconds": { "type": "integer", "minimum": 30 },
-        "pressureThreshold": { "type": "number", "minimum": 0, "maximum": 100 },
+        "pressureThreshold": { "type": "integer", "minimum": 0, "maximum": 100 },
         "maxPressureDeferSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
         "readOnlyClone": { "type": "boolean" },
         "worker": {
@@ -54,8 +54,8 @@
                 "sha": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$" }
               }
             },
-            "memoryLimit": { "type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi)?$" },
-            "tmpLimit": { "type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi)?$" },
+            "memoryLimit": { "type": ["string", "integer"], "minimum": 1, "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti)?$" },
+            "tmpLimit": { "type": ["string", "integer"], "minimum": 1, "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti)?$" },
             "resources": { "type": "object" },
             "seLinuxOptions": {
               "type": "object",

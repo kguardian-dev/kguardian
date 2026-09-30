@@ -1156,8 +1156,15 @@ render "node-catalog-on" "${NC_ON[@]}" && {
   grep -qE 'BROKER_|privileged|hostPath|name: hostproc' <<<"$cat_c" && \
     { echo "FAIL [node-catalog-on]: cataloger must get no token, privilege or host mount"; fail=1; }
   grep -A3 '^      - name: catalog-tmp' <<<"$OUT" | tr -d ' ' | tr '\n' ' ' | \
-    grep -q 'medium:Memory sizeLimit:192Mi' || \
-    { echo "FAIL [node-catalog-on]: /tmp must be a memory emptyDir sized to tmpLimit"; fail=1; }
+    grep -q 'medium:Memory sizeLimit:"201326592"' || \
+    { echo "FAIL [node-catalog-on]: /tmp must be a memory emptyDir sized to tmpLimit (192Mi)"; fail=1; }
+  grep -q 'readinessProbe' <<<"$cat_c" && \
+    { echo "FAIL [node-catalog-on]: the cataloger must have no readiness probe"; fail=1; }
+  grep -A2 'requests:' <<<"$cat_c" | grep -q 'memory: 512Mi' || \
+    { echo "FAIL [node-catalog-on]: the cataloger must request 512Mi"; fail=1; }
+  for a in 'eks.amazonaws.com/skip-containers: cataloger' 'azure.workload.identity/skip-containers: cataloger'; do
+    grep -qF "$a" <<<"$OUT" || { echo "FAIL [node-catalog-on]: pod lacks annotation $a"; fail=1; }
+  done
   grep -A5 'name: BROKER_TOKEN_CATALOG' <<<"$broker_doc" | grep -q 'optional: true' || \
     { echo "FAIL [node-catalog-on]: broker BROKER_TOKEN_CATALOG must be optional"; fail=1; }
   for v in 'NODE_CATALOG_GRANTS' 'NODE_CATALOG_RETENTION_DAYS' 'NODE_CATALOG_MAX_EPOCH' 'NODE_CATALOG_MAX_HOLD_SECS'; do
@@ -1174,6 +1181,57 @@ render "node-catalog-custom" "${NC_ON[@]}" --set broker.auth.keys.catalog=node-s
     { echo "FAIL [node-catalog-custom]: grants=false must reach the broker"; fail=1; }
   assert_has "node-catalog-custom" "kguardian-broker-node-catalog"
 }
+# `helm upgrade --reuse-values` from a release before nodeCatalog existed
+# renders the new templates over the OLD chart's values: no nodeCatalog
+# block and no broker.auth.keys.catalog, then `--set nodeCatalog.enabled=true`.
+# Simulated with a copy of the chart whose values.yaml has both removed.
+# Every key must fall back to the value values.yaml ships, so the workloads
+# match a normal install byte for byte. The cataloger image line is left out
+# of the comparison: Renovate bumps the tag in values.yaml only, and the
+# built-in fallback in _helpers.tpl may trail it by a release.
+PRE="$(mktemp -d)"
+trap 'rm -rf "$PRE"' EXIT
+cp -R "$CHART" "$PRE/kguardian"
+awk '/^nodeCatalog:/ { skip = 1; next }
+     skip && /^[a-zA-Z]/ { skip = 0 }
+     !skip && !/^      catalog: catalog$/' "$CHART/values.yaml" > "$PRE/kguardian/values.yaml"
+if grep -qE '^nodeCatalog:|catalog: catalog' "$PRE/kguardian/values.yaml"; then
+  echo "FAIL [node-catalog-reuse-values]: could not strip the nodeCatalog defaults"; fail=1
+fi
+nc_workloads() { # nc_workloads <chart>: the Controller and Broker docs, enabled
+  local out
+  out="$(helm template compat "$1" "${NC_ON[@]}" --set database.password=cmp 2>&1)" || { echo "RENDER FAILED: $out"; return; }
+  OUT="$out"
+  { workload DaemonSet kguardian-controller; workload Deployment kguardian-broker; } | \
+    grep -v 'image: "ghcr.io/kguardian-dev/kguardian/cataloger'
+}
+want="$(nc_workloads "$CHART")"
+got="$(nc_workloads "$PRE/kguardian")"
+grep -q 'RENDER FAILED' <<<"$got" && { echo "FAIL [node-catalog-reuse-values]: ${got:0:300}"; fail=1; }
+[ "$got" = "$want" ] || {
+  echo "FAIL [node-catalog-reuse-values]: output differs from a full install:"
+  diff <(echo "$want") <(echo "$got") | head -20; fail=1; }
+if notes="$(helm install compat "$PRE/kguardian" --dry-run=client "${NC_ON[@]}" 2>&1)"; then
+  grep -q 'need the "catalog"' <<<"$notes" || \
+    { echo "FAIL [node-catalog-reuse-values]: NOTES must name the catalog key"; fail=1; }
+else
+  echo "FAIL [node-catalog-reuse-values]: dry-run install failed"; fail=1
+fi
+# Sizes as numbers (YAML reads 671088640 as a float) and in Ti reach the
+# worker as bytes.
+render "node-catalog-numeric-sizes" "${NC_ON[@]}" --set nodeCatalog.worker.memoryLimit=671088640 \
+  --set nodeCatalog.worker.tmpLimit=201326592 && {
+  grep -A1 'name: CATALOG_MEMORY_LIMIT' <<<"$OUT" | grep -q 'value: "671088640"' || \
+    { echo "FAIL [node-catalog-numeric-sizes]: numeric memoryLimit must render as bytes"; fail=1; }
+}
+render "node-catalog-ti" "${NC_ON[@]}" --set nodeCatalog.worker.memoryLimit=1Ti \
+  --set nodeCatalog.worker.resources.limits.memory=2Ti && {
+  grep -A1 'name: CATALOG_MEMORY_LIMIT' <<<"$OUT" | grep -q 'value: "1099511627776"' || \
+    { echo "FAIL [node-catalog-ti]: 1Ti must render as bytes"; fail=1; }
+}
+assert_render_fails "node-catalog-limit-milli" "the milli suffix m is not a byte count" \
+  "${NC_ON[@]}" --set nodeCatalog.worker.resources.limits.memory=1000000000000m
+
 # Guards, at template time and in values.schema.json.
 assert_render_fails "node-catalog-needs-auth" "nodeCatalog.enabled=true requires broker.auth.enabled=true" \
   --set nodeCatalog.enabled=true

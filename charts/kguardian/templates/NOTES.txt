@@ -107,16 +107,21 @@ VulnerabilityReports/SbomReports (read-only) and, until broker ingest
 ships, only logs what it would send:
   kubectl -n {{ include "kguardian.namespace" . | trim }} logs deploy/{{ .Values.supplychain.service.name }}
 {{- end }}
-{{- if include "kguardian.nodeCatalogEnabled" . }}
+{{- $nc := include "kguardian.nodeCatalog" . | fromJson }}
+{{- if $nc.enabled }}
 
-Node catalog: ENABLED (epoch {{ .Values.nodeCatalog.epoch }}{{ if not .Values.nodeCatalog.grants }}, grants PAUSED by nodeCatalog.grants=false{{ end }}).
-Each Controller pod runs a cataloger sidecar; SBOMs need the "{{ .Values.broker.auth.keys.catalog }}"
-key in Secret "{{ .Values.broker.auth.existingSecret }}" (optional: without it nothing is cataloged). Add it with:
+Node catalog: ENABLED (epoch {{ $nc.epoch }}{{ if not $nc.grants }}, grants PAUSED by nodeCatalog.grants=false{{ end }}).
+Each Controller pod runs a cataloger sidecar; SBOMs need the "{{ $nc.catalogKey }}"
+key in Secret "{{ .Values.broker.auth.existingSecret }}" (optional: without it nothing is cataloged).
+If External Secrets, Sealed Secrets or GitOps manage that Secret, add the key at its source.
+Otherwise add it with:
   kubectl -n {{ include "kguardian.namespace" . | trim }} patch secret {{ .Values.broker.auth.existingSecret }} \
-    -p "{\"stringData\":{\"{{ .Values.broker.auth.keys.catalog }}\":\"$(openssl rand -hex 32)\"}}"
+    -p "{\"stringData\":{\"{{ $nc.catalogKey }}\":\"$(openssl rand -hex 32)\"}}"
   kubectl -n {{ include "kguardian.namespace" . | trim }} rollout restart deploy/{{ include "kguardian.name" . }}-broker ds/{{ include "kguardian.name" . }}-controller
 Coverage and per-node state:
   GET /catalog/coverage and GET /catalog/status?node=<name> on the Broker (read scope)
+Upgrade with -f <values> or --reset-then-reuse-values (Helm 3.14+) rather than --reuse-values,
+which keeps the previous chart's defaults (new keys then take the chart's built-in defaults).
 {{- end }}
 {{- if include "kguardian.llmBridgeEnabled" . }}
 
