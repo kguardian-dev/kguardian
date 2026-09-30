@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.1.1...supplychain/v0.2.0) (2026-09-30)
+
+
+### Features
+
+* **supplychain:** match node-cataloged SBOMs with Grype ([#1865](https://github.com/kguardian-dev/kguardian/issues/1865)) ([cf1fe79](https://github.com/kguardian-dev/kguardian/commit/cf1fe7902bd37a65216b9437492ffb8ba25881fe))
+
 ## [0.1.1](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.1.0...supplychain/v0.1.1) (2026-09-27)
 
 
