@@ -15,14 +15,16 @@ shape kguardian exports and distributes.
 |------|---------------|
 | [`web-service-audit.yaml`](web-service-audit.yaml) | An nginx Deployment's profile as the Broker exports it: `defaultAction: SCMP_ACT_LOG`, one sorted `SCMP_ACT_ALLOW` rule, capture annotations and `workloadRef`. This is the audit-first stage. |
 | [`web-service.yaml`](web-service.yaml) | The same profile after promotion to `SCMP_ACT_ERRNO`, with hand-written comments on why each unusual syscall is there. |
-| [`batch-job.yaml`](batch-job.yaml) | A stricter profile for a CronJob running a static Go binary: 38 syscalls and `SCMP_ACT_KILL_PROCESS`. |
-| [`workloads.yaml`](workloads.yaml) | The Deployment and CronJob referencing those profiles with `seccompProfile.type: Localhost`. |
+| [`batch-job.yaml`](batch-job.yaml) | A stricter profile for a CronJob running a static Go binary: 39 syscalls and `SCMP_ACT_KILL_PROCESS`, reached only after an audit-mode stage. |
+| [`web-workload.yaml`](web-workload.yaml) | The nginx Deployment referencing its profile with `seccompProfile.type: Localhost`. |
+| [`batch-workload.yaml`](batch-workload.yaml) | The CronJob referencing the batch profile the same way. |
 | [`runtime-default.yaml`](runtime-default.yaml) | The same Deployment on `RuntimeDefault`, the baseline to compare against and to fall back to. |
 | [`node-files/kguardian/`](node-files/kguardian/) | The exact JSON a kguardian Controller writes on each node for `web-service.yaml` and `batch-job.yaml`, laid out as under `<kubeletRoot>/seccomp/`. |
 
 `web-service-audit.yaml` and `web-service.yaml` are two stages of the same
-object (`prod/deployment-web`). The same goes for `workloads.yaml` and
-`runtime-default.yaml` (`prod/web`). Apply one of each pair.
+object (`prod/deployment-web`). The same goes for `web-workload.yaml` and
+`runtime-default.yaml` (`prod/web`). Apply one of each pair. The manifests
+use the `prod` and `batch` namespaces, which must already exist.
 
 ## How kguardian produces and places a profile
 
@@ -67,27 +69,68 @@ kguardian's `audit_seccomp` kprobe reads those records back and shows them as:
 
 - the CR's `DenialsObserved` condition and `status.denials`;
 - `GET /seccomp/denials` on the Broker (per event, live);
-- the `kguardian_seccomp_denials_total` metric and the
-  `KguardianSeccompDenialsObserved` alert.
+- the `kguardian_seccomp_denials_total` metric and two alerts:
+  `KguardianSeccompDenialsObserved` (warning, audit-mode profiles) and
+  `KguardianSeccompEnforcingProfileDenials` (critical, enforcing profiles
+  that are blocking or killing right now). The alerts need
+  `broker.metrics.prometheusRule.enabled` and a Prometheus that scrapes the
+  Broker.
 
 ```bash
+kubectl create namespace prod
+kubectl create namespace batch
+
+# Web service: profile in audit mode first, then the workload.
 kubectl apply -f web-service-audit.yaml
-kubectl -n prod get seccompprofile deployment-web     # wait for READY n/n
-kubectl apply -f workloads.yaml
-# ...run a full usage cycle; for a CronJob, several scheduled runs...
+kubectl -n prod get seccompprofile deployment-web          # wait for READY n/n
+kubectl apply -f web-workload.yaml
+
+# Batch job: the same profile in audit mode (your own export is already
+# SCMP_ACT_LOG; the sample is enforcing, so swap the action), then the CronJob.
+yq '.spec.defaultAction = "SCMP_ACT_LOG"' batch-job.yaml | kubectl apply -f -
+kubectl -n batch get seccompprofile cronjob-nightly-report # wait for READY n/n
+kubectl apply -f batch-workload.yaml
+
+# ...run a full usage cycle; for the CronJob, several scheduled runs...
 kubectl -n prod get seccompprofile deployment-web -o json \
-  | jq '{c: (.status.conditions[] | select(.type=="DenialsObserved")), d: .status.denials}'
+  | jq '{c: ((.status.conditions // [])[] | select(.type=="DenialsObserved")), d: .status.denials}'
 ```
 
 Promote only on an explicit `False` with `observed: 0`. `Unknown`, or an
-absent `status.denials`, means "no data", not "clean". Then apply the
-enforcing version and restart the pods, because the kubelet loads the profile
-at container start:
+absent `status.denials`, means "no data", not "clean". Two more caveats
+before you trust a clean reading:
+
+- **Broker outages look clean.** If the Broker is unreachable, the CR is not
+  updated at all and keeps its last `False` / `observed: 0`. Check that
+  `status.denials.refreshedAt` is recent (it refreshes at least every 15
+  minutes) and that the Broker is healthy (`GET /health`, and no failed
+  POSTs in the Controller logs) before promoting.
+- **Denial data has prerequisites.** It needs `seccomp.denials.enabled`
+  (default `true`) and node kernels built with `CONFIG_AUDITSYSCALL=y`.
+  Without them the condition stays `Unknown` with reason `NoDenialData`.
+
+See
+[promote to enforcing](https://docs.kguardian.dev/guides/distributing-seccomp-profiles#promote-to-enforcing)
+for the full decision. Then apply the enforcing version. Restart the web pods,
+because the kubelet loads the profile at container start. The CronJob needs
+no restart: each run starts new pods.
 
 ```bash
 kubectl apply -f web-service.yaml
 kubectl -n prod rollout restart deployment/web
+kubectl apply -f batch-job.yaml
 ```
+
+> **`SCMP_ACT_KILL_PROCESS` has no safety margin.** With an incomplete
+> profile, the first unlisted syscall kills the whole process with `SIGSYS`.
+> There is no `EPERM` the code could handle, no error message from the
+> application, and no partial output, just a failed Job. Only promote a
+> profile to a `KILL` action after it has run clean in `SCMP_ACT_LOG`.
+
+To revert, set `defaultAction` back to `SCMP_ACT_LOG`, apply, wait for
+`READY` n/n, and restart the pods
+(`kubectl -n prod rollout restart deployment/web`). A running container keeps
+the filter it started with.
 
 An enforcing profile rendered by kguardian carries
 `"flags": ["SECCOMP_FILTER_FLAG_LOG"]` (see `node-files/`), so `SCMP_ACT_ERRNO`
@@ -110,9 +153,10 @@ library the Controller uses to resolve syscall numbers):
   static Go binary has no dynamic loader and uses its own runtime instead, so
   its list has `sigaltstack`, `sched_yield` and `tgkill` in their place.
 - A few are legacy x86_64-only syscalls: `access`, `arch_prctl`, `chown`,
-  `dup2`, `epoll_create`, `epoll_wait`, `mkdir` and `pipe` (only `arch_prctl`
-  in the Go batch job). aarch64 never had them, and libc calls the `*at`,
-  `dup3`, `pipe2`, `epoll_create1` and `epoll_pwait` forms instead. They
+  `dup2`, `epoll_create`, `epoll_wait`, `mkdir`, `pipe`, `rename` and
+  `unlink` (only `arch_prctl` in the Go batch job). aarch64 never had them,
+  and libc calls the `*at`, `renameat2`, `dup3`, `pipe2`, `epoll_create1` and
+  `epoll_pwait` forms instead. They
   appear in the list because the x86_64 pods called them. runc and crun skip
   a name that the architecture does not define, which is also how the
   runtimes' own default profiles share one list across architectures.

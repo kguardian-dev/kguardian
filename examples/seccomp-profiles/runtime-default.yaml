@@ -1,4 +1,4 @@
-# The comparison baseline: the web Deployment from workloads.yaml on the
+# The comparison baseline: the web Deployment from web-workload.yaml on the
 # container runtime's default seccomp profile instead of a kguardian one.
 #
 # RuntimeDefault is the profile containerd or CRI-O ships. It is written for
@@ -16,11 +16,15 @@
 # Use this file:
 #   - as the starting point before kguardian has observed the workload;
 #   - to fall back to if an enforcing Localhost profile turns out too tight.
-#     Switching back is this one field plus a rollout restart. Alternatively,
-#     set the SeccompProfile's defaultAction back to SCMP_ACT_LOG and keep the
-#     Localhost reference.
+#     Applying this file changes the pod template, so the Deployment rolls
+#     out new pods on RuntimeDefault by itself. Alternatively, keep the
+#     Localhost reference and set the SeccompProfile's defaultAction back to
+#     SCMP_ACT_LOG. That changes only the node file, not the pod template, so
+#     the filter is not reloaded until the containers restart. Once the CR
+#     shows READY n/n, restart them yourself:
+#       kubectl -n prod rollout restart deployment/web
 #
-# This file and workloads.yaml both define prod/web, so apply only one.
+# This file and web-workload.yaml both define prod/web, so apply only one.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

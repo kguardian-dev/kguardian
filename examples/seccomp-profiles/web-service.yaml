@@ -16,14 +16,17 @@
 # "flags": ["SECCOMP_FILTER_FLAG_LOG"], so the kernel still audits every
 # denial and DenialsObserved stays accurate after promotion.
 #
-# Pods reference the file by path (see workloads.yaml):
+# Pods reference the file by path (see web-workload.yaml):
 #   securityContext.seccompProfile:
 #     type: Localhost
 #     localhostProfile: kguardian/prod/deployment-web.json
 #
 # The kubelet reads the file when a container starts. Promotion therefore
 # takes effect on each pod's next restart, and so does a profile that is too
-# tight. Reverting is a one-line change back to SCMP_ACT_LOG.
+# tight. To revert, change defaultAction back to SCMP_ACT_LOG, apply, wait for
+# READY n/n, and restart the pods. Running pods keep the filter they started
+# with until then:
+#   kubectl -n prod rollout restart deployment/web
 apiVersion: kguardian.dev/v1alpha1
 kind: SeccompProfile
 metadata:
@@ -62,11 +65,14 @@ spec:
         - epoll_ctl
         - epoll_pwait
         - epoll_wait # x86_64 only (aarch64: epoll_pwait)
+        - eventfd2 # aio completion notifications (nginx built --with-file-aio)
         - execve # the entrypoint exec after the runtime installs the filter
         - exit
         - exit_group
         - faccessat
         - faccessat2
+        - fadvise64 # md5sum in 10-listen-on-ipv6-by-default.sh
+        - fchmod # sed -i in the entrypoint scripts
         - fchown
         - fchownat
         - fcntl
@@ -84,6 +90,8 @@ spec:
         - getsockopt
         - gettid
         - getuid
+        - io_destroy
+        - io_setup # nginx probes Linux native aio at startup
         - ioctl
         - kill # the master signals workers on reload and shutdown
         - listen
@@ -104,6 +112,8 @@ spec:
         - read
         - recvfrom
         - recvmsg
+        - rename # x86_64 only (aarch64: renameat2); sed -i
+        - renameat2
         - rseq
         - rt_sigaction
         - rt_sigprocmask
@@ -124,6 +134,9 @@ spec:
         - socketpair # master/worker channel
         - umask
         - uname
+        - unlink # x86_64 only (aarch64: unlinkat); pid file removal on shutdown
+        - unlinkat
+        - utimensat # touch in the entrypoint scripts
         - wait4
         - write
         - writev

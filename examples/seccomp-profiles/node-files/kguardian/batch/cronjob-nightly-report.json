@@ -20,6 +20,7 @@
         "fcntl",
         "fstat",
         "futex",
+        "getdents64",
         "getpeername",
         "getpid",
         "getrandom",

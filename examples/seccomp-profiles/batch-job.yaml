@@ -5,7 +5,7 @@
 # workload's observed syscalls, not copied from here. See README.md.
 #
 # It is stricter than the web profile in two ways:
-#   - The list is short (38 names). A static Go binary needs no shell, no
+#   - The list is short (39 names). A static Go binary needs no shell, no
 #     setuid, no listening socket and no filesystem writes beyond stdout. Go
 #     starts threads with clone, not clone3.
 #   - defaultAction is SCMP_ACT_KILL_PROCESS, not SCMP_ACT_ERRNO. A Job that
@@ -14,20 +14,31 @@
 #     KILL verdicts unconditionally, so kguardian's denial signal still sees
 #     them.
 #
-# Capture: a CronJob's pods are attributed to the CronJob (Job -> CronJob), and
-# kguardian keeps a union across runs. Let several scheduled runs complete
-# before you export, since one run rarely takes every code path (retries,
-# empty input, the month-end branch). Then export with the action you want:
+# WARNING: SCMP_ACT_KILL_PROCESS gives an incomplete profile no second chance.
+# The first unlisted syscall kills the whole process with SIGSYS. There is no
+# EPERM for the code to handle and no partial output. Never start here.
 #
-#   curl -s "localhost:9090/seccomp/profiles/batch/CronJob/nightly-report/export?defaultAction=SCMP_ACT_KILL_PROCESS"
+# Audit first, always. A CronJob's pods are attributed to the CronJob
+# (Job -> CronJob), and kguardian keeps a union across runs.
+#   1. Export with the default action (SCMP_ACT_LOG) and apply that CR:
+#        curl -s localhost:9090/seccomp/profiles/batch/CronJob/nightly-report/export \
+#          > seccomp/batch/cronjob-nightly-report.yaml
+#   2. Let several scheduled runs complete under it. One run rarely takes
+#      every code path (retries, empty input, the month-end branch).
+#   3. Check that the CR reads DenialsObserved=False with
+#      status.denials.observed: 0 (Unknown, or an absent status.denials,
+#      means "no data", not "clean"):
+#        kubectl -n batch get seccompprofile cronjob-nightly-report -o json \
+#          | jq '{c: ((.status.conditions // [])[] | select(.type=="DenialsObserved")), d: .status.denials}'
+#   4. Only then change defaultAction to SCMP_ACT_KILL_PROCESS in git. The
+#      result is this file. The next scheduled run picks it up.
 #
-# Export returns 409 for an enforcing action while the capture is partial.
-# Treat that as a signal to raise the capture tier, not something to work
-# around. Run it in SCMP_ACT_LOG first (see web-service-audit.yaml) if the
-# job has code paths the observed runs did not reach.
+# If you export with an enforcing action directly, the export returns 409
+# while the capture is partial. Treat that as a signal to raise the capture
+# tier, not something to work around.
 #
 # Distributed to <kubeletRoot>/seccomp/kguardian/batch/cronjob-nightly-report.json
-# (see node-files/). The CronJob in workloads.yaml references that path.
+# (see node-files/). The CronJob in batch-workload.yaml references that path.
 apiVersion: kguardian.dev/v1alpha1
 kind: SeccompProfile
 metadata:
@@ -56,6 +67,7 @@ spec:
         - fcntl
         - fstat
         - futex
+        - getdents64 # crypto/x509 lists /etc/ssl/certs; runc lists /proc/self/fd
         - getpeername
         - getpid
         - getrandom

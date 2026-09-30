@@ -22,21 +22,22 @@
 # absent status.denials means "no data", not "clean"):
 #
 #   kubectl -n prod get seccompprofile deployment-web -o json \
-#     | jq '{c: (.status.conditions[] | select(.type=="DenialsObserved")), d: .status.denials}'
+#     | jq '{c: ((.status.conditions // [])[] | select(.type=="DenialsObserved")), d: .status.denials}'
 #
 # To promote, change defaultAction to SCMP_ACT_ERRNO and commit. The result is
 # web-service.yaml. Both files define prod/deployment-web, so apply only one.
 #
 # Mixed-architecture note: the workload ran on amd64 and arm64 nodes, so the
 # list is the union of both. A few names exist only on x86_64 (access,
-# arch_prctl, chown, dup2, epoll_create, epoll_wait, mkdir, pipe). aarch64 has
-# no such syscalls, and there glibc calls faccessat, mkdirat, dup3 and so on
-# instead. The container runtime skips a name that an architecture does not
-# define, so one list works on both. See README.md.
+# arch_prctl, chown, dup2, epoll_create, epoll_wait, mkdir, pipe, rename,
+# unlink). aarch64 has no such syscalls, and there glibc calls faccessat,
+# mkdirat, dup3, renameat2, unlinkat and so on instead. The container runtime
+# skips a name that an architecture does not define, so one list works on
+# both. See README.md.
 #
 # kguardian SeccompProfile export
 # workload: prod Deployment/web
-# observed syscalls: 86 (aarch64,x86_64)
+# observed syscalls: 96 (aarch64,x86_64)
 # capture: full — complete (6 contributing pod(s))
 apiVersion: kguardian.dev/v1alpha1
 kind: SeccompProfile
@@ -74,11 +75,14 @@ spec:
         - epoll_ctl
         - epoll_pwait
         - epoll_wait
+        - eventfd2
         - execve
         - exit
         - exit_group
         - faccessat
         - faccessat2
+        - fadvise64
+        - fchmod
         - fchown
         - fchownat
         - fcntl
@@ -96,6 +100,8 @@ spec:
         - getsockopt
         - gettid
         - getuid
+        - io_destroy
+        - io_setup
         - ioctl
         - kill
         - listen
@@ -116,6 +122,8 @@ spec:
         - read
         - recvfrom
         - recvmsg
+        - rename
+        - renameat2
         - rseq
         - rt_sigaction
         - rt_sigprocmask
@@ -136,6 +144,9 @@ spec:
         - socketpair
         - umask
         - uname
+        - unlink
+        - unlinkat
+        - utimensat
         - wait4
         - write
         - writev

@@ -1,4 +1,5 @@
-# Example workloads that reference kguardian-distributed seccomp profiles.
+# Example workload that references a kguardian-distributed seccomp profile:
+# the nginx Deployment that web-service-audit.yaml / web-service.yaml cover.
 #
 # kguardian never edits workloads. Adding the Localhost reference is a
 # one-time change you make to the pod template. The path is
@@ -7,9 +8,8 @@
 # /var/lib/kubelet/seccomp). The CR name stays fixed when the CR contents
 # change, so the reference never has to change after that.
 #
-# Before you roll these out:
-#   1. Apply the SeccompProfile (web-service-audit.yaml, then later
-#      web-service.yaml; batch-job.yaml).
+# Before you apply this (the prod namespace must exist):
+#   1. Apply the audit-mode SeccompProfile, web-service-audit.yaml.
 #   2. Wait until READY counts every node:
 #        kubectl -n prod get seccompprofile deployment-web
 #        NAME             ACTION         READY   DRIFT   DENIALS   AGE
@@ -18,8 +18,9 @@
 #      CreateContainerError until that node's Controller writes it.
 #
 # The kubelet loads the profile when a container starts. Changing the CR (for
-# example promoting SCMP_ACT_LOG to SCMP_ACT_ERRNO) rewrites the file on every
-# node but affects each pod only after its next restart:
+# example promoting SCMP_ACT_LOG to SCMP_ACT_ERRNO with web-service.yaml)
+# rewrites the file on every node but affects each pod only after its next
+# restart:
 #   kubectl -n prod rollout restart deployment/web
 #
 # runtime-default.yaml shows the same Deployment on RuntimeDefault, which is
@@ -71,46 +72,3 @@ spec:
               memory: 64Mi
             limits:
               memory: 128Mi
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: nightly-report
-  namespace: batch
-spec:
-  schedule: "15 2 * * *"
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      # With SCMP_ACT_KILL_PROCESS a disallowed syscall kills the process, so
-      # a too-tight profile shows up as failed Jobs. backoffLimit keeps that
-      # from turning into a retry storm.
-      backoffLimit: 1
-      template:
-        spec:
-          restartPolicy: Never
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            seccompProfile:
-              type: Localhost
-              localhostProfile: kguardian/batch/cronjob-nightly-report.json
-          containers:
-            - name: report
-              image: registry.example.com/batch/nightly-report:1.4.2
-              args: ["--output=/dev/stdout"]
-              securityContext:
-                # allowPrivilegeEscalation: false sets no_new_privs, which lets
-                # the runtime install the filter just before execve. That is
-                # why the batch profile needs no capset/setuid family.
-                allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: true
-                capabilities:
-                  drop: ["ALL"]
-              resources:
-                requests:
-                  cpu: 100m
-                  memory: 128Mi
-                limits:
-                  memory: 256Mi
