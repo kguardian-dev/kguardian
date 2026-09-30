@@ -101,5 +101,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_workload_export)
         .service(post_workload_export)
         .service(get_version)
-        .service(get_cluster_environment);
+        .service(get_cluster_environment)
+        // Node catalog (docs/design/node-catalog.md): claims and uploads
+        // need the catalog token; the upload reads and caps its own body.
+        .service(crate::node_catalog::claims_resource())
+        .service(crate::node_catalog::claim_resource())
+        .service(crate::node_catalog::sbom_resource())
+        .service(crate::node_catalog::coverage_resource())
+        .service(crate::node_catalog::status_resource());
 }

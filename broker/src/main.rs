@@ -346,6 +346,8 @@ async fn main() -> Result<(), std::io::Error> {
     } else {
         info!("broker API auth disabled (set BROKER_TOKEN_READ / BROKER_TOKEN_INGEST to require scoped bearer tokens)");
     }
+    // Node catalog: its writes answer 503 until BROKER_TOKEN_CATALOG is set.
+    api::node_catalog::record_auth(&auth_config);
     if audit_client.enabled() {
         info!(url = %audit_client.base_url(), "audit evaluator integration enabled");
     } else {
@@ -787,6 +789,8 @@ pub async fn metrics(
     );
     // Supply-chain ingest counters (process atomics, no query).
     body.push_str(&api::supplychain::render_metrics());
+    // Node catalog counters (atomics) and the leader-refreshed gauges.
+    body.push_str(&api::node_catalog::render_metrics());
     body.push_str(&api::attestation_metrics());
     body.push_str(&api::image_inventory_malformed_metrics());
     // In-memory, refreshed on its own timer (profile_drift.rs).

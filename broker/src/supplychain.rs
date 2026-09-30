@@ -117,8 +117,16 @@ pub const MAX_STAGED_BYTES: i64 = 256 * 1024 * 1024;
 /// is read BEFORE it is queued for the ingest worker, so a slow sender only ever
 /// holds its own connection.
 pub const BODY_READ_TIMEOUT_SECS: u64 = 30;
-/// The only sources accepted (supplychain README).
-pub const SOURCES: [&str; 3] = ["trivy-operator", "grype", "registry"];
+/// The only sources the supply-chain ingest routes accept (supplychain
+/// README; [`valid_source`]).
+pub const INGEST_SOURCES: [&str; 3] = ["trivy-operator", "grype", "registry"];
+/// The node catalog's source. Written only by `POST
+/// /catalog/images/{digest}/sbom` (node_catalog.rs), never by the
+/// supply-chain routes.
+pub const NODE_SOURCE: &str = "node";
+/// Every SBOM source a matcher's findings may name in `sbom_sources`: the
+/// ingest sources plus the node catalog's.
+pub const KNOWN_SBOM_SOURCES: [&str; 4] = ["trivy-operator", "grype", "registry", NODE_SOURCE];
 const MAX_OBSERVED_IN: usize = 64;
 const MAX_PLATFORM_MANIFESTS: usize = 64;
 /// File paths kept per finding / component, and their length.
@@ -165,16 +173,9 @@ pub fn max_decompressed_bytes() -> usize {
 /// request gets 503 + Retry-After instead of queueing in memory.
 pub const INGEST_QUEUE: usize = 8;
 
-/// One queued ingest: a body already read off the wire, and where to send
-/// the result.
-struct Job {
-    kind: Kind,
-    digest: String,
-    raw: actix_web::web::Bytes,
-    gzip: bool,
-    pool: Option<web::Data<DbPool>>,
-    reply: tokio::sync::oneshot::Sender<Result<Outcome, IngestError>>,
-}
+/// One queued ingest: a body already read off the wire, parsed and stored
+/// by the closure, which also sends the result back.
+type Job = Box<dyn FnOnce() + Send>;
 
 /// The single ingest worker: one long-lived OS thread does every inflate,
 /// parse and write, one at a time ([`INGEST_CONCURRENCY`] is 1). Keeping
@@ -190,37 +191,28 @@ fn ingest_worker() -> &'static std::sync::mpsc::SyncSender<Job> {
             .name("supplychain-ingest".into())
             .spawn(move || {
                 for job in rx {
-                    let Job {
-                        kind,
-                        digest,
-                        raw,
-                        gzip,
-                        pool,
-                        reply,
-                    } = job;
-                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let prepared = prepare(
-                            kind,
-                            &digest,
-                            &raw,
-                            gzip,
-                            max_decompressed_bytes(),
-                            Utc::now(),
-                        )
-                        .map_err(IngestError::Prepare)?;
-                        drop(raw);
-                        let pool =
-                            pool.ok_or_else(|| IngestError::Db("no database pool".into()))?;
-                        let mut conn = pool.get().map_err(|e| IngestError::Db(Box::new(e)))?;
-                        store(&mut conn, prepared).map_err(IngestError::Db)
-                    }))
-                    .unwrap_or_else(|_| Err(IngestError::Db("ingest worker panicked".into())));
-                    let _ = reply.send(r);
+                    job();
                 }
             })
             .expect("spawn the supply-chain ingest worker");
         tx
     })
+}
+
+/// Queue `work` on the ingest worker. `None` when the queue is full (the
+/// caller answers 503). A panic in `work` becomes `on_panic()`, so the
+/// worker thread survives it and the caller still gets an answer.
+pub(crate) fn submit_ingest<R: Send + 'static>(
+    work: impl FnOnce() -> R + Send + 'static,
+    on_panic: fn() -> R,
+) -> Option<tokio::sync::oneshot::Receiver<R>> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    let job: Job = Box::new(move || {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .unwrap_or_else(|_| on_panic());
+        let _ = reply.send(r);
+    });
+    ingest_worker().try_send(job).ok().map(|_| result)
 }
 
 /// New SBOM page sets refused because the global staging ceiling was
@@ -303,7 +295,7 @@ impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for BoundedSeq<T> {
     }
 }
 
-fn bounded_vec<'de, D, T>(d: D, max: usize, strict: bool) -> Result<Vec<T>, D::Error>
+pub(crate) fn bounded_vec<'de, D, T>(d: D, max: usize, strict: bool) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -380,7 +372,7 @@ fn de_components<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireCompo
     bounded_vec(d, MAX_COMPONENTS_PER_REQUEST, true)
 }
 
-fn de_observed_in<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn de_observed_in<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<WireWorkloadRef>, D::Error> {
     bounded_vec(d, MAX_OBSERVED_IN, false)
@@ -390,7 +382,7 @@ fn de_paths<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Er
     bounded_vec(d, MAX_FILE_PATHS, false)
 }
 
-fn de_licenses<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+pub(crate) fn de_licenses<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     bounded_vec(d, MAX_LICENSES, false)
 }
 
@@ -737,6 +729,11 @@ pub struct ComponentRow {
     pub licenses: Vec<String>,
     pub layer_digest: Option<String>,
     pub file_paths: Vec<String>,
+    /// Node catalog per-package flags (node_catalog.rs). Never set by the
+    /// supply-chain route, and left out of the JSON when unset, so every
+    /// other source's staged pages and content hash are byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<i16>,
 }
 
 /// Why a payload was refused; each maps to one 4xx.
@@ -749,7 +746,7 @@ pub enum Reject {
 }
 
 impl Reject {
-    fn into_response(self) -> HttpResponse {
+    pub(crate) fn into_response(self) -> HttpResponse {
         match self {
             Reject::Invalid(m) => HttpResponse::UnprocessableEntity().body(m),
             Reject::TooLarge(m) => HttpResponse::PayloadTooLarge().body(m),
@@ -808,12 +805,15 @@ fn clean(s: Option<&str>, max: usize) -> Option<String> {
 
 fn clean_list(v: &[String], max_items: usize, max_len: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    // A set, not `out.contains`: the node catalog keeps thousands of paths
+    // per component, where a linear scan per item is quadratic.
+    let mut seen = std::collections::HashSet::new();
     for s in v {
         if out.len() >= max_items {
             break;
         }
         if let Some(c) = clean(Some(s), max_len) {
-            if !out.contains(&c) {
+            if seen.insert(c.clone()) {
                 out.push(c);
             }
         }
@@ -851,8 +851,11 @@ fn naive(t: DateTime<Utc>) -> NaiveDateTime {
 /// sources are a closed set: an allowlist keeps a token holder from
 /// minting unbounded (digest, source) keys.
 fn valid_source(s: &str) -> bool {
-    SOURCES.contains(&s)
+    INGEST_SOURCES.contains(&s)
 }
+
+/// [`INGEST_SOURCES`] as the refusal message lists them.
+const INGEST_SOURCES_TEXT: &str = "trivy-operator, grype, registry";
 
 fn valid_set_id(s: &str) -> bool {
     !s.is_empty()
@@ -903,6 +906,7 @@ struct Common {
     scanned_at: NaiveDateTime,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_common(
     path_digest: &str,
     schema_version: i64,
@@ -910,6 +914,8 @@ fn validate_common(
     source: &str,
     scanned_at: DateTime<Utc>,
     now: DateTime<Utc>,
+    valid: fn(&str) -> bool,
+    allowed: &str,
 ) -> Result<Common, Reject> {
     if schema_version != SCHEMA_VERSION {
         return Err(Reject::Invalid(format!(
@@ -926,10 +932,8 @@ fn validate_common(
             "image.digest does not match the digest in the path".into(),
         ));
     }
-    if !valid_source(source) {
-        return Err(Reject::Invalid(
-            "source must be one of trivy-operator, grype, registry".into(),
-        ));
+    if !valid(source) {
+        return Err(Reject::Invalid(format!("source must be one of {allowed}")));
     }
     if (scanned_at - now).num_seconds() > MAX_CLOCK_SKEW_SECS {
         return Err(Reject::Invalid(
@@ -1052,6 +1056,8 @@ pub fn normalise_vulnerabilities(
         &p.source,
         p.scanned_at,
         now,
+        valid_source,
+        INGEST_SOURCES_TEXT,
     )?;
     if p.vulnerabilities.len() > MAX_VULNERABILITIES {
         return Err(Reject::TooLarge(format!(
@@ -1073,7 +1079,7 @@ pub fn normalise_vulnerabilities(
     header.sbom_sources = p
         .sbom_source
         .iter()
-        .filter(|s| SOURCES.contains(&s.trim()))
+        .filter(|s| KNOWN_SBOM_SOURCES.contains(&s.trim()))
         .map(|s| s.trim().to_string())
         .collect();
     header.sbom_sources.sort();
@@ -1152,6 +1158,28 @@ pub fn normalise_sbom(
     p: WireImageSbom,
     now: DateTime<Utc>,
 ) -> Result<SbomPayload, Reject> {
+    normalise_sbom_from(
+        path_digest,
+        p,
+        now,
+        valid_source,
+        INGEST_SOURCES_TEXT,
+        MAX_FILE_PATHS,
+    )
+}
+
+/// [`normalise_sbom`] with the source check and the per-component path cap
+/// chosen by the caller: the supply-chain route takes [`valid_source`] and
+/// [`MAX_FILE_PATHS`], the node catalog only [`NODE_SOURCE`] and its own,
+/// larger cap.
+pub(crate) fn normalise_sbom_from(
+    path_digest: &str,
+    p: WireImageSbom,
+    now: DateTime<Utc>,
+    valid: fn(&str) -> bool,
+    allowed: &str,
+    max_paths: usize,
+) -> Result<SbomPayload, Reject> {
     let c = validate_common(
         path_digest,
         p.schema_version,
@@ -1159,6 +1187,8 @@ pub fn normalise_sbom(
         &p.source,
         p.scanned_at,
         now,
+        valid,
+        allowed,
     )?;
     if p.components.len() > MAX_SBOM_COMPONENTS {
         return Err(Reject::TooLarge(format!(
@@ -1212,7 +1242,8 @@ pub fn normalise_sbom(
             src_version: clean(comp.src_version.as_deref(), LEN_VERSION),
             licenses: clean_list(&comp.licenses, MAX_LICENSES, LEN_VERSION),
             layer_digest: clean(comp.layer_digest.as_deref(), LEN_ID + 8),
-            file_paths: clean_list(&comp.file_paths, MAX_FILE_PATHS, MAX_PATH_LEN),
+            file_paths: clean_list(&comp.file_paths, max_paths, MAX_PATH_LEN),
+            flags: None,
         });
     }
     header.item_count = rows.len() as i32;
@@ -1602,7 +1633,27 @@ struct SetShape {
 }
 
 /// Store an SBOM or one page of it; see the module docs.
-pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome, DbError> {
+pub fn store_sbom(conn: &mut PgConnection, p: SbomPayload) -> Result<Outcome, DbError> {
+    store_sbom_with(conn, p, &mut |_, _| Ok(()))
+}
+
+/// The components that just replaced what was stored, handed to the
+/// [`store_sbom_with`] hook inside the same transaction.
+pub(crate) enum Assembled<'a> {
+    /// A whole SBOM: the component rows as JSON (the `ComponentRow` form).
+    Whole(&'a str),
+    /// A paged set, still in `image_sbom_pages` under this set id.
+    Paged(&'a str),
+}
+
+/// [`store_sbom`] with a hook that runs once the new components are in
+/// place, in the same transaction and before the staged pages are
+/// deleted. Only a payload that replaces what is stored reaches it.
+pub(crate) fn store_sbom_with(
+    conn: &mut PgConnection,
+    mut p: SbomPayload,
+    on_assembled: &mut dyn FnMut(&mut PgConnection, Assembled<'_>) -> Result<(), DbError>,
+) -> Result<Outcome, DbError> {
     let rows_json = serde_json::to_string(&p.rows)?;
     p.rows = Vec::new();
     conn.transaction::<_, DbError, _>(|conn| {
@@ -1647,6 +1698,7 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
 
         let Some(page) = p.page.clone() else {
             let n = replace_components_from_json(conn, &p.header, &rows_json)?;
+            on_assembled(conn, Assembled::Whole(&rows_json))?;
             p.header.item_count = n as i32;
             upsert_header(conn, &p.header)?;
             drop_superseded_pages(conn, &p.header, None)?;
@@ -1741,6 +1793,7 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
             .bind::<Text, _>(&p.header.source)
             .bind::<Text, _>(&page.set_id)
             .execute(conn)? as i64;
+        on_assembled(conn, Assembled::Paged(&page.set_id))?;
         sql_query("DELETE FROM image_sbom_pages WHERE digest = $1 AND source = $2 AND set_id = $3")
             .bind::<Text, _>(&p.header.digest)
             .bind::<Text, _>(&p.header.source)
@@ -2057,7 +2110,7 @@ pub enum PrepareError {
 }
 
 impl PrepareError {
-    fn into_response(self) -> HttpResponse {
+    pub(crate) fn into_response(self) -> HttpResponse {
         match self {
             PrepareError::Body(b) => b.into_response(),
             PrepareError::Json(m) => HttpResponse::BadRequest().body(format!("invalid JSON: {m}")),
@@ -2131,6 +2184,72 @@ enum IngestError {
     Db(DbError),
 }
 
+/// Read an ingest body: its encoding, a `Content-Length` over the limit
+/// refused up front, then at most [`MAX_COMPRESSED_BYTES`] under a
+/// [`BODY_READ_TIMEOUT_SECS`] deadline. `Ok((raw, gzip))`, or the response
+/// to send. Shared with the node catalog route.
+async fn read_ingest_body(
+    req: &HttpRequest,
+    body: web::Payload,
+    digest: &str,
+) -> Result<(web::Bytes, bool), HttpResponse> {
+    read_ingest_body_limited(req, body, digest, MAX_COMPRESSED_BYTES).await
+}
+
+/// [`read_ingest_body`] with the compressed-size limit chosen by the
+/// caller (the node catalog's pages carry more file paths).
+pub(crate) async fn read_ingest_body_limited(
+    req: &HttpRequest,
+    body: web::Payload,
+    digest: &str,
+    limit: usize,
+) -> Result<(web::Bytes, bool), HttpResponse> {
+    let gzip = match content_encoding(req) {
+        Ok(e) => e.is_some(),
+        Err(e) => return Err(e.into_response()),
+    };
+    if let Some(len) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        if len > limit as u64 {
+            return Err(HttpResponse::PayloadTooLarge().body(format!(
+                "body of {len} bytes exceeds the {limit}-byte limit"
+            )));
+        }
+    }
+    // Read the (compressed, <= `limit`) body under a deadline BEFORE taking
+    // the ingest queue: a slow sender holds only its own connection.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(BODY_READ_TIMEOUT_SECS),
+        body.to_bytes_limited(limit),
+    )
+    .await
+    {
+        Err(_) => {
+            warn!(%digest, "supply-chain ingest body not received in time");
+            Err(HttpResponse::RequestTimeout().body(format!(
+                "body not received within {BODY_READ_TIMEOUT_SECS}s"
+            )))
+        }
+        Ok(Err(_)) => {
+            Err(HttpResponse::PayloadTooLarge()
+                .body(format!("body exceeds the {limit}-byte limit")))
+        }
+        Ok(Ok(Err(e))) => Err(HttpResponse::BadRequest().body(format!("reading body: {e}"))),
+        Ok(Ok(Ok(b))) => Ok((b, gzip)),
+    }
+}
+
+/// The 503 for a full ingest queue.
+pub(crate) fn queue_full() -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", "5"))
+        .body("supply-chain ingest queue is full; retry")
+}
+
 async fn ingest(
     req: HttpRequest,
     path: web::Path<String>,
@@ -2145,61 +2264,28 @@ async fn ingest(
         return HttpResponse::BadRequest()
             .body("digest must be sha256:<64 hex> or sha512:<128 hex>");
     }
-    let gzip = match content_encoding(&req) {
-        Ok(e) => e.is_some(),
-        Err(e) => return e.into_response(),
-    };
-    if let Some(len) = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
-    {
-        if len > MAX_COMPRESSED_BYTES as u64 {
-            return HttpResponse::PayloadTooLarge().body(format!(
-                "body of {len} bytes exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
-            ));
-        }
-    }
-    // Read the (compressed, <= 1 MiB) body under a deadline BEFORE taking
-    // the ingest queue: a slow sender holds only its own connection.
-    let raw = match tokio::time::timeout(
-        std::time::Duration::from_secs(BODY_READ_TIMEOUT_SECS),
-        body.to_bytes_limited(MAX_COMPRESSED_BYTES),
-    )
-    .await
-    {
-        Err(_) => {
-            warn!(%digest, "supply-chain ingest body not received in time");
-            return HttpResponse::RequestTimeout().body(format!(
-                "body not received within {BODY_READ_TIMEOUT_SECS}s"
-            ));
-        }
-        Ok(Err(_)) => {
-            return HttpResponse::PayloadTooLarge().body(format!(
-                "body exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
-            ))
-        }
-        Ok(Ok(Err(e))) => return HttpResponse::BadRequest().body(format!("reading body: {e}")),
-        Ok(Ok(Ok(b))) => b,
+    let (raw, gzip) = match read_ingest_body(&req, body, &digest).await {
+        Ok(b) => b,
+        Err(resp) => return resp,
     };
     // Hand the read body to the ingest worker; it alone inflates, parses
     // and writes. A full queue is 503, never an unbounded backlog.
-    let (reply, result) = tokio::sync::oneshot::channel();
-    let job = Job {
-        kind,
-        digest: digest.clone(),
-        raw,
-        gzip,
-        pool: req.app_data::<web::Data<DbPool>>().cloned(),
-        reply,
+    let pool = req.app_data::<web::Data<DbPool>>().cloned();
+    let d = digest.clone();
+    let work = move || -> Result<Outcome, IngestError> {
+        let prepared = prepare(kind, &d, &raw, gzip, max_decompressed_bytes(), Utc::now())
+            .map_err(IngestError::Prepare)?;
+        drop(raw);
+        let pool = pool.ok_or_else(|| IngestError::Db("no database pool".into()))?;
+        let mut conn = pool.get().map_err(|e| IngestError::Db(Box::new(e)))?;
+        store(&mut conn, prepared).map_err(IngestError::Db)
     };
-    if ingest_worker().try_send(job).is_err() {
+    let Some(result) = submit_ingest(work, || {
+        Err(IngestError::Db("ingest worker panicked".into()))
+    }) else {
         warn!(%digest, "supply-chain ingest queue full");
-        return HttpResponse::ServiceUnavailable()
-            .insert_header(("Retry-After", "5"))
-            .body("supply-chain ingest queue is full; retry");
-    }
+        return queue_full();
+    };
     let result = result.await;
     match result {
         Ok(Ok(o)) => {
