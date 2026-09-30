@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -315,5 +317,45 @@ func TestFetchRefusedDestination(t *testing.T) {
 	_, _, err := in.FetchSBOMs(context.Background(), "169.254.169.254", "x/y", "sha256:"+strings.Repeat("a", 64))
 	if reason, ok := blockedReason(err); !ok || reason != ReasonBlockedAddress {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A 429 on the referrers step while a cosign tag still yields an SBOM is
+// a partial answer: found, but not complete. Nothing attached, with every
+// step answering, is complete.
+func TestFetchSBOMsCompleteness(t *testing.T) {
+	inner := ggcrregistry.New(ggcrregistry.WithReferrersSupport(true))
+	var throttle atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if throttle.Load() && strings.Contains(r.URL.Path, "/referrers/") {
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	r := &reg{t: t, host: strings.TrimPrefix(srv.URL, "http://")}
+	img, _ := random.Image(64, 1)
+	d := r.push("app:1", img)
+
+	_, _, complete, err := inspector().FetchSBOMsComplete(context.Background(), r.host, "app", d.String())
+	if err != nil || !complete {
+		t.Fatalf("nothing attached: complete %v, err %v", complete, err)
+	}
+
+	spdx := fixture(t, "alpine-spdx-intoto.json")
+	var stmt struct {
+		Predicate json.RawMessage `json:"predicate"`
+	}
+	_ = json.Unmarshal(spdx, &stmt)
+	r.push("app:"+strings.Replace(d.String(), ":", "-", 1)+".sbom", artifact(t, stmt.Predicate, mtSPDXJSON, nil))
+	throttle.Store(true)
+	found, _, complete, err := inspector().FetchSBOMsComplete(context.Background(), r.host, "app", d.String())
+	if err != nil || len(found) != 1 || complete {
+		t.Fatalf("429 on referrers: found %d, complete %v, err %v", len(found), complete, err)
+	}
+	// FetchSBOMs keeps its answer: what was found, no error.
+	if found, _, err := inspector().FetchSBOMs(context.Background(), r.host, "app", d.String()); err != nil || len(found) != 1 {
+		t.Errorf("FetchSBOMs: %d found, err %v", len(found), err)
 	}
 }

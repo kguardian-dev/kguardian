@@ -104,6 +104,10 @@ func New(client broker.Client, log *logrus.Logger, m *metrics.Metrics) *Dispatch
 // Enqueue queues e, replacing any unsent payload for the same key (and its
 // backoff). Never blocks.
 func (d *Dispatcher) Enqueue(e trivy.Emission) {
+	if e.MatchOnly {
+		// Re-emitted for matching only, unchanged: the broker has it.
+		return
+	}
 	d.mu.Lock()
 	k := key{e.Kind, e.Digest}
 	d.gens[k]++

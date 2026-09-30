@@ -11,7 +11,11 @@ package regsource
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +41,13 @@ type Fetcher interface {
 	FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]registry.FoundSBOM, []string, error)
 }
 
+// CompleteFetcher is a Fetcher that also says whether its answer was
+// complete (registry.Inspector.FetchSBOMsComplete). Only then can a
+// lookup show an SBOM gone (OnGone); a plain Fetcher never does.
+type CompleteFetcher interface {
+	FetchSBOMsComplete(ctx context.Context, registry, repository, digest string) ([]registry.FoundSBOM, []string, bool, error)
+}
+
 // Source polls the inventory and fetches registry SBOMs.
 type Source struct {
 	Lister  Lister
@@ -54,12 +65,29 @@ type Source struct {
 	Workers int
 	// MaxTracked bounds the per-digest bookkeeping. Default 20000.
 	MaxTracked int
+	// OnGone, when set, is called with the subject digest of an SBOM
+	// found before that two consecutive complete lookups of the same
+	// image no longer find (an error or partial answer never counts). The
+	// match coordinator uses it to stop waiting for that SBOM.
+	OnGone func(digest string)
 
 	now     func() time.Time
 	mu      sync.Mutex
 	checked map[string]time.Time
-	ready   bool
-	passed  bool // the first full pass has finished and been logged
+	// found: the subject digests found for an image digest at its last
+	// lookup, and back (subject -> image digest), for OnGone and Refetch.
+	found     map[string][]string
+	subjectOf map[string]string
+	// misses counts consecutive complete lookups that did not find a
+	// subject found before; refetched marks image digests looked up
+	// again on the coordinator's request, and sentFP the fingerprint of
+	// each subject's last emitted SBOM, so an unchanged one is re-emitted
+	// match-only.
+	misses    map[string]int
+	refetched map[string]bool
+	sentFP    map[string]string
+	ready     bool
+	passed    bool // the first full pass has finished and been logged
 }
 
 func (s *Source) defaults() {
@@ -80,6 +108,11 @@ func (s *Source) defaults() {
 	}
 	if s.checked == nil {
 		s.checked = map[string]time.Time{}
+		s.found = map[string][]string{}
+		s.subjectOf = map[string]string{}
+		s.misses = map[string]int{}
+		s.refetched = map[string]bool{}
+		s.sentFP = map[string]string{}
 	}
 }
 
@@ -185,18 +218,125 @@ func (s *Source) markChecked(digest string) {
 		for d, t := range s.checked {
 			if now.Sub(t) >= s.RecheckAfter {
 				delete(s.checked, d)
+				s.forgetFoundLocked(d)
 			}
 		}
 		if len(s.checked) >= s.MaxTracked {
 			s.checked = map[string]time.Time{}
+			s.found, s.subjectOf = map[string][]string{}, map[string]string{}
+			s.misses, s.refetched, s.sentFP = map[string]int{}, map[string]bool{}, map[string]string{}
 		}
 	}
 	s.checked[digest] = s.now()
 }
 
+// Refetch makes the next pass look digest up again (digest is an image
+// digest or a subject found for one), even within RecheckAfter; an SBOM
+// found unchanged is then emitted match-only, so the broker does not get
+// it again. It returns nil: the registry source holds no SBOMs. It does
+// not block and does not call out.
+func (s *Source) Refetch(digest string) *types.ImageSBOM {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checked == nil {
+		return nil
+	}
+	if im, ok := s.subjectOf[digest]; ok {
+		digest = im
+	}
+	delete(s.checked, digest)
+	s.refetched[digest] = true
+	return nil
+}
+
+func (s *Source) forgetFoundLocked(imageDigest string) {
+	for _, sub := range s.found[imageDigest] {
+		if s.subjectOf[sub] == imageDigest {
+			delete(s.subjectOf, sub)
+			delete(s.misses, sub)
+			delete(s.sentFP, sub)
+		}
+	}
+	delete(s.found, imageDigest)
+	delete(s.refetched, imageDigest)
+}
+
+// recordFound notes the subjects a lookup of imageDigest found and returns
+// those now gone: missing from two consecutive complete lookups. An
+// incomplete lookup only adds what it found.
+func (s *Source) recordFound(imageDigest string, subjects []string, complete bool) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keep := slices.Clone(subjects)
+	var gone []string
+	for _, prev := range s.found[imageDigest] {
+		switch {
+		case slices.Contains(subjects, prev):
+			delete(s.misses, prev)
+		case !complete:
+			keep = append(keep, prev)
+		default:
+			s.misses[prev]++
+			if s.misses[prev] >= 2 {
+				gone = append(gone, prev)
+				delete(s.misses, prev)
+				delete(s.subjectOf, prev)
+				delete(s.sentFP, prev)
+				continue
+			}
+			keep = append(keep, prev)
+		}
+	}
+	if len(keep) == 0 {
+		delete(s.found, imageDigest)
+	} else {
+		s.found[imageDigest] = keep
+	}
+	for _, sub := range keep {
+		s.subjectOf[sub] = imageDigest
+	}
+	return gone
+}
+
+// matchOnly reports whether p, found for imageDigest, is an unchanged
+// SBOM looked up again only on the coordinator's request, and records it
+// as sent otherwise.
+func (s *Source) matchOnly(imageDigest string, p *types.ImageSBOM) bool {
+	cp := *p
+	cp.ScannedAt = time.Time{}
+	b, _ := json.Marshal(&cp)
+	sum := sha256.Sum256(b)
+	fp := hex.EncodeToString(sum[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refetched[imageDigest] && s.sentFP[p.Image.Digest] == fp {
+		return true
+	}
+	s.sentFP[p.Image.Digest] = fp
+	return false
+}
+
 func (s *Source) lookup(ctx context.Context, im broker.Image) {
-	found, rejected, err := s.Fetcher.FetchSBOMs(ctx, "", im.Repository, im.Digest)
+	defer s.clearRefetched(im.Digest)
+	var found []registry.FoundSBOM
+	var rejected []string
+	var err error
+	complete := false
+	if cf, ok := s.Fetcher.(CompleteFetcher); ok && s.OnGone != nil {
+		found, rejected, complete, err = cf.FetchSBOMsComplete(ctx, "", im.Repository, im.Digest)
+	} else {
+		found, rejected, err = s.Fetcher.FetchSBOMs(ctx, "", im.Repository, im.Digest)
+	}
 	s.markChecked(im.Digest)
+	if err == nil && s.OnGone != nil {
+		subjects := make([]string, 0, len(found))
+		for _, f := range found {
+			subjects = append(subjects, f.Subject)
+		}
+		for _, d := range s.recordFound(im.Digest, subjects, complete) {
+			s.OnGone(d)
+		}
+	}
 	for _, r := range rejected {
 		s.count("rejected_" + r)
 	}
@@ -223,7 +363,13 @@ func (s *Source) lookup(ctx context.Context, im broker.Image) {
 			s.count("found_source_only")
 		}
 		p := toPayload(im, f, s.now())
-		s.Sink.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: p.Image.Digest, SBOM: p})
+		e := trivy.Emission{Kind: trivy.KindSBOM, Digest: p.Image.Digest, SBOM: p}
+		if s.OnGone != nil {
+			// Wired to the coordinator (node source on): an unchanged SBOM
+			// looked up again on its request is not sent to the broker.
+			e.MatchOnly = s.matchOnly(im.Digest, p)
+		}
+		s.Sink.Enqueue(e)
 	}
 }
 
@@ -304,4 +450,11 @@ func hasOSPackages(cs []types.Component) bool {
 		}
 	}
 	return false
+}
+
+// clearRefetched ends a lookup made on the coordinator's request.
+func (s *Source) clearRefetched(imageDigest string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.refetched, imageDigest)
 }
