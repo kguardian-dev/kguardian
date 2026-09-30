@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.8...frontend/v1.21.0) (2026-09-30)
+
+
+### Features
+
+* **frontend:** show node catalog provenance, coverage and not-assessable images ([#1861](https://github.com/kguardian-dev/kguardian/issues/1861)) ([b9d2032](https://github.com/kguardian-dev/kguardian/commit/b9d2032c93837e348553763b5d79f044dd27c9a4))
+
 ## [1.20.8](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.7...frontend/v1.20.8) (2026-09-29)
 
 
