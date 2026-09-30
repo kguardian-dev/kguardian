@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -363,7 +364,7 @@ func TestInterpretedRules(t *testing.T) {
 		{"/opt/app/app.jar", 0o644, true},
 		{"/usr/lib/x/Foo.class", 0o644, true},
 		{"/usr/share/emacs/foo.el", 0o644, true},
-		{"/usr/lib/locale/C.utf8/LC_CTYPE", 0o644, true},
+		{"/usr/lib/locale/C.utf8/LC_CTYPE", 0o644, false},
 		{"/usr/libexec/helper", 0o755, false},
 		{"/usr/lib/libz.so.1", 0o644, false},
 		{"/usr/share/doc/x/README", 0o644, false},
@@ -373,8 +374,114 @@ func TestInterpretedRules(t *testing.T) {
 		{"/usr/local/share/info/x.info", 0o644, false},
 		{"/etc/x.conf", 0o644, false},
 		{"/usr/bin/tool", 0o755, false},
-		{"/usr/share/zoneinfo/UTC", 0o644, true},
+		{"/usr/share/zoneinfo/UTC", 0o644, false},
 		{"/usr/libfoo/x", 0o644, false},
+		// Still loaded or interpreted.
+		{"/usr/lib/python3.11/os.py", 0o644, true},
+		{"/usr/share/bash-completion/completions/git", 0o644, true},
+		{"/usr/share/perl5/Foo.pm", 0o644, true},
+		{"/usr/lib/x86_64-linux-gnu/gconv/UTF-7.so", 0o644, false}, // exec-mapped, captured
+		// Interpreter and foreign-runtime extensions, wherever they are.
+		{"/opt/app/app.pyz", 0o644, true},
+		{"/usr/local/bin/tool.phar", 0o755, true},
+		{"/opt/erl/lib/x.beam", 0o644, true},
+		{"/usr/share/emacs/x.elc", 0o644, true},
+		{"/etc/profile.d/x.zsh", 0o644, true},
+		{"/opt/app/plugin.dll", 0o644, true},
+		{"/opt/app/mod.wasm", 0o644, true},
+		{"/srv/x.R", 0o644, true},
+		{"/usr/lib/x.pyo", 0o644, true}, {"/x.luac", 0o644, true}, {"/x.awk", 0o644, true},
+		{"/x.ksh", 0o644, true}, {"/x.csh", 0o644, true}, {"/x.fish", 0o644, true}, {"/x.ps1", 0o644, true},
+		// Debian packaging metadata.
+		{"/usr/share/lintian/overrides/libc6", 0o644, false},
+		{"/usr/share/bug/bash/presubj", 0o644, false},
+		{"/usr/share/bug/foo/control", 0o644, false},
+		{"/usr/share/bug/foo/script", 0o644, true}, // run by reportbug
+		{"/usr/share/doc-base/foo", 0o644, false},
+		{"/usr/share/common-licenses/GPL-3", 0o644, false},
+		{"/usr/share/menu/foo", 0o644, false},
+		// Pure data.
+		{"/usr/share/terminfo/x/xterm", 0o644, false},
+		{"/lib/terminfo/l/linux", 0o644, false},
+		{"/usr/share/mime/packages/freedesktop.org.xml", 0o644, false},
+		{"/usr/share/xml/iso-codes/iso_639.xml", 0o644, false},
+		{"/usr/share/icons/hicolor/index.theme", 0o644, false},
+		{"/usr/share/pixmaps/foo.png", 0o644, false},
+		{"/usr/share/applications/foo.desktop", 0o644, false},
+		{"/usr/share/metainfo/foo.xml", 0o644, false},
+		{"/usr/share/pkgconfig/foo.pc", 0o644, false},
+		{"/usr/share/polkit-1/actions/foo.policy", 0o644, false},
+		{"/usr/share/polkit-1/rules.d/50-default.rules", 0o644, true}, // JavaScript polkitd runs
+		{"/etc/polkit-1/rules.d/49-local.rules", 0o644, true},
+		{"/usr/lib/udev/rules.d/60-foo.rules", 0o644, false}, // udev's .rules are data
+		{"/usr/share/xml/docbook/stylesheet/html.xsl", 0o644, true},
+		{"/usr/share/xml/foo/t.xslt", 0o644, true},
+		{"/usr/share/debianutils/shells.d/bash", 0o644, false},
+		{"/usr/share/binfmts/python3.11", 0o644, false},
+		{"/usr/share/dbus-1/system.d/foo.conf", 0o644, false},
+		// Host configuration.
+		{"/usr/lib/tmpfiles.d/foo.conf", 0o644, false},
+		{"/usr/lib/sysctl.d/50-default.conf", 0o644, false},
+		{"/usr/lib/sysusers.d/foo.conf", 0o644, false},
+		{"/lib/modprobe.d/aliases.conf", 0o644, false},
+		{"/usr/lib/modules-load.d/foo.conf", 0o644, false},
+		{"/usr/lib/binfmt.d/python3.11.conf", 0o644, false},
+		{"/usr/lib/environment.d/99-foo.conf", 0o644, false},
+		{"/lib/udev/rules.d/60-foo.rules", 0o644, false},
+		{"/lib/udev/hwdb.d/20-foo.hwdb", 0o644, false},
+		{"/lib/udev/hwdb.bin", 0o644, false},
+		{"/lib/udev/hotplug.functions", 0o644, true}, // a shell library udev helpers source
+		{"/lib/systemd/system/foo.service", 0o644, false},
+		{"/usr/lib/systemd/user/foo.service", 0o644, false},
+		{"/usr/lib/systemd/network/99-default.link", 0o644, false},
+		{"/usr/lib/systemd/system-preset/90-systemd.preset", 0o644, false},
+		{"/usr/lib/systemd/user-preset/90-systemd.preset", 0o644, false},
+		{"/usr/lib/systemd/catalog/systemd.catalog", 0o644, false},
+		{"/usr/lib/systemd/system-generators/foo-generator", 0o644, true}, // a generator, not a unit
+		{"/usr/lib/kernel/install.conf", 0o644, false},
+		{"/usr/lib/kernel/install.d/50-foo.install", 0o644, true}, // an install plugin
+		{"/usr/lib/os-release", 0o644, false},
+		{"/usr/lib/mime/packages/foo", 0o644, false},
+		// gconv configuration (the modules themselves are *.so).
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.d/gconv-modules-extra.conf", 0o644, false},
+		// Build-time files.
+		{"/usr/lib/x86_64-linux-gnu/libfoo.a", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/libfoo.la", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/pkgconfig/foo.pc", 0o644, false},
+		{"/usr/lib/gcc/x86_64-linux-gnu/12/include/stddef.h", 0o644, false},
+		// The other lib roots.
+		{"/usr/lib64/guile/3.0/ccache/ice-9/boot-9.go", 0o644, true}, // Guile compiled
+		{"/lib64/security/pam_foo.conf", 0o644, true},
+		{"/usr/lib32/foo/data", 0o644, true},
+		{"/usr/libx32/foo/data", 0o644, true},
+		{"/lib32/terminfo/x/xterm", 0o644, false},
+		{"/opt/src/main.go", 0o644, false}, // Go source is not Guile
+		{"/usr/share/guile/3.0/ice-9/boot-9.scm", 0o644, true},
+		{"/opt/app/x.ts", 0o644, true}, {"/opt/app/x.groovy", 0o644, true}, {"/opt/app/x.ex", 0o644, true},
+		{"/opt/app/x.exs", 0o644, true}, {"/opt/app/x.ss", 0o644, true},
+		// Shell start-up snippets under /etc.
+		{"/etc/profile", 0o644, true},
+		{"/etc/profile.d/bash_completion.sh", 0o644, true},
+		{"/etc/profile.d/locale", 0o644, true},
+		{"/etc/bash.bashrc", 0o644, true},
+		{"/etc/skel/.bashrc", 0o644, true},
+		{"/etc/skel/.profile", 0o644, true},
+		{"/etc/skel/.bash_logout", 0o644, true},
+		{"/etc/zsh/zshrc.zshrc", 0o644, true},
+		{"/root/.profile", 0o644, true},
+		{"/etc/zsh/zshrc", 0o644, true}, {"/etc/zsh/zprofile", 0o644, true}, {"/etc/zsh/zshenv", 0o644, true},
+		{"/etc/zsh/zlogin", 0o644, true}, {"/etc/zsh/zlogout", 0o644, true},
+		{"/etc/bash_completion", 0o644, true},
+		{"/etc/bash_completion.d/git-prompt", 0o644, true},
+		{"/etc/X11/Xsession.d/90x11-common_ssh-agent", 0o644, true},
+		{"/etc/csh.cshrc", 0o644, true}, {"/etc/csh.login", 0o644, true},
+		{"/etc/default/locale", 0o644, true},
+		{"/etc/zsh/newuser.zshrc.recommended", 0o644, false}, // not sourced
+		{"/usr/local/libexec/foo/helper-lib", 0o644, true},
+		{"/usr/local/libexecx/foo", 0o644, false},
+		{"/etc/hostname", 0o644, false},
 	} {
 		if got := Interpreted(c.path, c.mode); got != c.want {
 			t.Errorf("Interpreted(%s, %o) = %v, want %v", c.path, c.mode, got, c.want)
@@ -456,6 +563,80 @@ func TestPathsWithControlCharactersAreDropped(t *testing.T) {
 	for _, s := range []string{"a\tb", "x\x7f", "\x00"} {
 		if validField(s, 100) {
 			t.Errorf("%q accepted", s)
+		}
+	}
+}
+
+// ownedList reads testdata/owned/<pkg>.txt: the regular files of a real
+// Debian or Ubuntu package (dpkg-deb -c), as "<mode string> <path>".
+func ownedList(t *testing.T, pkg string) ([]string, fakeFR) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "owned", pkg+".txt"))
+	must(t, err)
+	fr := fakeFR{}
+	var owned []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		perm, p, ok := strings.Cut(line, " ")
+		if !ok || len(perm) != 10 {
+			t.Fatalf("%s: bad line %q", pkg, line)
+		}
+		var mode uint32
+		for i, c := range perm[1:] {
+			if c != '-' {
+				mode |= 1 << (8 - i)
+			}
+		}
+		fr[p] = struct {
+			real    string
+			mode    uint32
+			regular bool
+		}{p, mode & 0o777, true}
+		owned = append(owned, p)
+	}
+	return owned, fr
+}
+
+// The interpreted_content rule on real packages' complete file lists.
+// libc6 and libssl3/libssl3t64 used to be flagged only by packaging
+// metadata (lintian overrides) and gconv configuration, so they could
+// never be installed_not_observed; interpreted code still flags.
+func TestInterpretedContentOnRealPackages(t *testing.T) {
+	// For a flagged package, a file that must be among the reasons: the
+	// flag must come from genuinely interpreted content, not incidental
+	// data.
+	for pkg, want := range map[string]struct {
+		flagged bool
+		because string
+	}{
+		"libc6":                 {false, ""}, // gconv config and a lintian override: not code
+		"libssl3":               {false, ""}, // .so files and docs
+		"libssl3t64":            {false, ""}, // Ubuntu: plus a lintian override
+		"python3.11-minimal":    {false, ""}, // the interpreter binary; binfmt entries are data
+		"libpython3.11-minimal": {true, "/usr/lib/python3.11/os.py"},
+		"bash-completion":       {true, "/usr/share/bash-completion/bash_completion"},
+		"bash":                  {true, "/etc/bash.bashrc"}, // and /etc/skel dotfiles
+	} {
+		owned, fr := ownedList(t, pkg)
+		_, _, got := PackageFiles(owned, fr, 0)
+		var why []string
+		for _, p := range owned {
+			if Interpreted(p, fr[p].mode) {
+				why = append(why, p)
+			}
+		}
+		if got != want.flagged {
+			t.Errorf("%s: interpreted_content %v, want %v (flagging files: %v)", pkg, got, want.flagged, why)
+		}
+		if want.because != "" && !slices.Contains(why, want.because) {
+			t.Errorf("%s: %s is not among the flagging files %v", pkg, want.because, why)
+		}
+		for _, p := range why {
+			if strings.Contains(p, "shells.d") || strings.Contains(p, "binfmts") {
+				t.Errorf("%s: flagged by the data file %s", pkg, p)
+			}
 		}
 	}
 }

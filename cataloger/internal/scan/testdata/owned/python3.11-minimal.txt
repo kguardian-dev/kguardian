@@ -1,0 +1,9 @@
+# python3.11-minimal 3.11.2-6+deb12u8 (debian bookworm, amd64): dpkg-deb -c, as '<mode> <path>' for regular files
+-rwxr-xr-x /usr/bin/python3.11
+-rw-r--r-- /usr/lib/binfmt.d/python3.11.conf
+-rw-r--r-- /usr/share/binfmts/python3.11
+-rw-r--r-- /usr/share/doc/python3.11-minimal/README.Debian.gz
+-rw-r--r-- /usr/share/doc/python3.11-minimal/changelog.Debian.gz
+-rw-r--r-- /usr/share/doc/python3.11-minimal/copyright
+-rw-r--r-- /usr/share/lintian/overrides/python3.11-minimal
+-rw-r--r-- /usr/share/man/man1/python3.11.1.gz
