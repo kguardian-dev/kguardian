@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -385,52 +386,207 @@ func TestGroupMoveRequeuesOnlyWithANodeSBOM(t *testing.T) {
 	}
 }
 
-// An evicted node SBOM: Holds says so, a partial re-offer (Trivy's alone)
-// waits for it instead of matching without it, and once it is offered
-// again the group is matched with both. After the grace the group is
-// matched without it.
-func TestEvictedNodeSBOMIsWaitedFor(t *testing.T) {
-	now := time.Unix(1000, 0)
+// evictAll drops every settled group's SBOMs, as a full budget would.
+func evictAll(c *Coordinator) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	limit := c.MaxHeldBytes
+	c.MaxHeldBytes = 1
+	c.evictLocked("", 0)
+	c.MaxHeldBytes = limit
+}
+
+func emissions(s *sink) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.es)
+}
+
+// The reviewer's case: Trivy (two platforms) and a node SBOM, evicted;
+// the node SBOM comes back first and alone. It must not be matched on its
+// own (pinned, without Trivy's findings); the broker keeps the complete
+// payload until Trivy's SBOM is back, and then both are matched unpinned.
+func TestEvictedGroupNodeBackFirstIsNotMatchedAlone(t *testing.T) {
 	m := &mockMatcher{built: time.Unix(100, 0)}
-	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet(), MaxDigests: 1}
-	c.now = func() time.Time { return now }
+	s := &sink{}
+	c := &Coordinator{Matcher: m, Sink: s, Log: quiet()}
+	tr := trivySBOM("sha256:d", "openssl")
+	tr.Image.PlatformManifests = map[string]string{"linux/amd64": "sha256:amd64", "linux/arm64": "sha256:arm64"}
+	c.Offer(tr)
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+	pass(c)
+	before := emissions(s)
+	evictAll(c)
+	if c.Held() != 0 {
+		t.Fatal("not evicted")
+	}
+
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+	pass(c)
+	if c.Wants("sha256:d") {
+		t.Error("node SBOM wanted while Trivy's is missing")
+	}
+	m.setBuilt(time.Unix(200, 0)) // a new database re-queues what is held
+	pass(c)
+	if emissions(s) != before || m.n("sha256:d") != 1 {
+		t.Fatalf("matched from the node SBOM alone: %d matches, input %v", m.n("sha256:d"), m.input("sha256:d"))
+	}
+
+	tr2 := trivySBOM("sha256:d", "openssl", "zlib") // Trivy re-offers only on change
+	tr2.Image.PlatformManifests = tr.Image.PlatformManifests
+	c.Offer(tr2)
+	pass(c)
+	e := emission(t, s, "sha256:d")
+	if names(m.input("sha256:d")) != "openssl,zlib,libc6" || e.PinPlatform ||
+		!reflect.DeepEqual(e.Vulns.SBOMSources, []string{"node", "trivy-operator"}) || len(e.Vulns.Image.PlatformManifests) != 2 {
+		t.Errorf("after Trivy's return: %v %+v", m.input("sha256:d"), e)
+	}
+}
+
+// Trivy's SBOM back first: the group waits for the node SBOM (Wants says
+// so) instead of dropping the node's findings; the node SBOM completes
+// it. Without the node SBOM it is matched once the grace is over.
+func TestEvictedGroupWaitsForItsNodeSBOM(t *testing.T) {
+	for _, nodeBack := range []bool{true, false} {
+		now := time.Unix(1000, 0)
+		m := &mockMatcher{built: time.Unix(100, 0)}
+		s := &sink{}
+		c := &Coordinator{Matcher: m, Sink: s, Log: quiet()}
+		c.now = func() time.Time { return now }
+		c.Offer(trivySBOM("sha256:d", "openssl"))
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+		pass(c)
+		evictAll(c)
+		c.Offer(trivySBOM("sha256:d", "openssl", "zlib"))
+		pass(c)
+		if m.n("sha256:d") != 1 || !c.Wants("sha256:d") {
+			t.Fatalf("back %v: %d matches, wants %v", nodeBack, m.n("sha256:d"), c.Wants("sha256:d"))
+		}
+		if nodeBack {
+			c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+			pass(c)
+			if names(m.input("sha256:d")) != "openssl,zlib,libc6" || c.Wants("sha256:d") {
+				t.Errorf("node back: %v, wants %v", m.input("sha256:d"), c.Wants("sha256:d"))
+			}
+			continue
+		}
+		now = now.Add(11 * time.Minute)
+		c.mu.Lock()
+		c.requeueLocked()
+		c.mu.Unlock()
+		pass(c)
+		if names(m.input("sha256:d")) != "openssl,zlib" || c.Wants("sha256:d") {
+			t.Errorf("after the grace: %v, wants %v", m.input("sha256:d"), c.Wants("sha256:d"))
+		}
+	}
+}
+
+// An empty node offer releases a held node SBOM, and is ignored for a
+// digest with none held (evicted or never offered): no empty payload.
+func TestEmptyNodeOfferOnlyReleasesAHeldOne(t *testing.T) {
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	s := &sink{}
+	c := &Coordinator{Matcher: m, Sink: s, Log: quiet()}
+	c.Offer(nodeSBOM("sha256:never", "linux/arm64"))
 	c.Offer(trivySBOM("sha256:d", "openssl"))
 	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
 	pass(c)
-	if !c.Holds("sha256:d", types.SourceNode) || m.n("sha256:d") != 1 {
-		t.Fatal("setup")
+	if c.Holds("sha256:never", types.SourceNode) || m.n("sha256:never") != 0 {
+		t.Fatal("empty offer for a digest never offered was taken")
 	}
-	c.Offer(registrySBOM("sha256:x", "", "p")) // evicts d's group
-	if c.Holds("sha256:d", types.SourceNode) {
-		t.Fatal("not evicted")
-	}
+	evictAll(c)
+	before := emissions(s)
+	c.Offer(nodeSBOM("sha256:d", "linux/arm64"))
 	pass(c)
-	c.Offer(trivySBOM("sha256:d", "openssl")) // Trivy's resync comes first
-	pass(c)
-	if m.n("sha256:d") != 1 {
-		t.Fatalf("matched without the evicted node SBOM (%d)", m.n("sha256:d"))
-	}
-	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
-	pass(c)
-	if m.n("sha256:d") != 2 || names(m.input("sha256:d")) != "openssl,libc6" {
-		t.Fatalf("after the node re-offer: %d matches, %v", m.n("sha256:d"), m.input("sha256:d"))
+	if c.Held() != 0 || emissions(s) != before {
+		t.Fatalf("empty offer after eviction: held %d, %d new emissions", c.Held(), emissions(s)-before)
 	}
 
-	// Evicted again, and this time it does not come back in time.
-	c.Offer(registrySBOM("sha256:y", "", "p"))
+	// Held: the release takes the node's packages out.
+	c.Offer(trivySBOM("sha256:e", "openssl"))
+	c.Offer(nodeSBOM("sha256:e", "linux/arm64", "libc6"))
 	pass(c)
-	c.Offer(trivySBOM("sha256:d", "openssl", "zlib"))
+	c.Offer(nodeSBOM("sha256:e", "linux/arm64"))
 	pass(c)
-	if m.n("sha256:d") != 2 {
-		t.Fatalf("did not wait: %d matches, %v", m.n("sha256:d"), m.input("sha256:d"))
+	if names(m.input("sha256:e")) != "openssl" {
+		t.Errorf("release: %v", m.input("sha256:e"))
 	}
-	now = now.Add(11 * time.Minute)
-	c.mu.Lock()
-	c.requeueLocked()
-	c.mu.Unlock()
-	pass(c)
-	if m.n("sha256:d") != 3 || names(m.input("sha256:d")) != "openssl,zlib" {
-		t.Errorf("after the grace: %d matches, %v", m.n("sha256:d"), m.input("sha256:d"))
+}
+
+// Invariant, over random orders of offers, evictions, database updates
+// and time: once a group with a node SBOM has been matched with Trivy's
+// or a registry SBOM, it is never matched without it again (none of them
+// is ever deleted here; changed content is re-offered, so still present).
+// Groups that never held a node SBOM are left as on main and not checked.
+func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
+	rng := rand.New(rand.NewSource(1851))
+	for round := 0; round < 300; round++ {
+		now := time.Unix(1000, 0)
+		m := &mockMatcher{built: time.Unix(100, 0)}
+		s := &sink{}
+		c := &Coordinator{Matcher: m, Sink: s, Log: quiet()}
+		c.now = func() time.Time { return now }
+		content := func(prefix string) []string {
+			n := rng.Intn(3)
+			out := []string{}
+			for i := 0; i < n; i++ {
+				out = append(out, fmt.Sprintf("%s%d", prefix, rng.Intn(4)))
+			}
+			return out
+		}
+		prev := map[string][]string{}
+		seen := 0
+		var ops []string
+		for step := 0; step < 40; step++ {
+			switch op := rng.Intn(8); op {
+			case 0:
+				c.Offer(trivySBOM("sha256:d", append([]string{"t"}, content("t")...)...))
+				ops = append(ops, "trivy")
+			case 1:
+				c.Offer(registrySBOM("sha256:p", "sha256:d", append([]string{"r"}, content("r")...)...))
+				ops = append(ops, "reg-p")
+			case 2:
+				c.Offer(nodeSBOM("sha256:d", "linux/arm64", content("n")...))
+				ops = append(ops, "node-d")
+			case 3:
+				c.Offer(nodeSBOM("sha256:p", "linux/arm64", content("m")...))
+				ops = append(ops, "node-p")
+			case 4, 5:
+				evictAll(c)
+				ops = append(ops, "evict")
+			case 6:
+				m.setBuilt(time.Unix(int64(200+step), 0))
+				ops = append(ops, "db")
+			case 7:
+				now = now.Add(time.Duration(rng.Intn(15)) * time.Minute)
+				c.mu.Lock()
+				c.requeueLocked()
+				c.mu.Unlock()
+				ops = append(ops, "tick")
+			}
+			pass(c)
+			s.mu.Lock()
+			fresh := s.es[seen:]
+			seen = len(s.es)
+			s.mu.Unlock()
+			for _, e := range fresh {
+				if e.Kind != trivy.KindVulnerabilities {
+					continue
+				}
+				cur := e.Vulns.SBOMSources
+				if p := prev[e.Digest]; slices.Contains(p, types.SourceNode) {
+					for _, src := range p {
+						if src != types.SourceNode && !slices.Contains(cur, src) {
+							t.Fatalf("round %d: %s matched without %s after %v (before %v, now %v)", round, e.Digest, src, ops, p, cur)
+						}
+					}
+				}
+				if e.PinPlatform && (slices.Contains(cur, types.SourceTrivyOperator) || slices.Contains(cur, types.SourceRegistry)) {
+					t.Fatalf("round %d: pinned payload with other sources %v after %v", round, cur, ops)
+				}
+				prev[e.Digest] = cur
+			}
+		}
 	}
 }
 

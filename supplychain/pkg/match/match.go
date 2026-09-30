@@ -140,6 +140,18 @@ type groupState struct {
 	quarantinedAt    time.Time
 	expires          bool
 	errorQuarantines int
+
+	// Set by a match that included a node SBOM: lastOthers lists the
+	// other SBOMs it matched (digest -> source), lastNode the digests whose
+	// node SBOM it matched. The group is not matched again while one of
+	// lastOthers is not held (evicted, and not offered again yet), so the
+	// broker keeps that payload rather than one without their findings;
+	// and while one of lastNode's node SBOMs is not held it waits for it up
+	// to NodeRefetchGrace, counted from nodeWaitSince. Nil after a match
+	// without a node SBOM: such a group is handled as it always was.
+	lastOthers    map[string]map[string]bool
+	lastNode      map[string]bool
+	nodeWaitSince time.Time
 }
 
 // maxErrorQuarantineTTL caps the doubling of ErrorQuarantineTTL.
@@ -194,8 +206,9 @@ type Coordinator struct {
 	// wait for an SBOM or database change instead. Default 1h.
 	ErrorQuarantineTTL time.Duration
 	// NodeRefetchGrace is how long a group whose node SBOM was evicted
-	// waits for it to be offered again before it is matched without it.
-	// Default 10m (twice the node source's default interval).
+	// waits for it, once its other SBOMs are all held again, before it is
+	// matched without it. Default 10m (twice the node source's default
+	// interval).
 	NodeRefetchGrace time.Duration
 	// CrashDir, when set, holds a marker for each match in flight
 	// (written before, removed after). A marker left behind means the
@@ -223,12 +236,17 @@ type Coordinator struct {
 	unavailableErr    error
 	notify            chan struct{}
 	dbSeen            time.Time
-	// nodeEvicted: digests whose node SBOM was dropped to stay within
-	// budget, and when. The node source offers it again within one of its
-	// intervals; until then (at most NodeRefetchGrace) the digest's group
-	// is not matched without it, so a partial re-offer (Trivy's alone)
-	// does not drop the node's findings in between.
-	nodeEvicted map[string]time.Time
+	// lastNodeIn maps a digest to the group whose last match included its
+	// node SBOM (groupState.lastNode), for Wants. Entries go when that
+	// group is matched without it, or with the group's state if
+	// pruneGroupsLocked drops it, so the map is bounded by the kept state.
+	lastNodeIn map[string]string
+	// nodeWait holds groups waiting for an evicted node SBOM; the ticker
+	// queues them again.
+	nodeWait map[string]struct{}
+	// nodeHeld counts the digests with a node SBOM held; 0 (node source
+	// off) short-cuts every node check.
+	nodeHeld int
 }
 
 func (c *Coordinator) init() {
@@ -256,8 +274,9 @@ func (c *Coordinator) init() {
 	if c.retry == nil {
 		c.retry = map[string]struct{}{}
 	}
-	if c.nodeEvicted == nil {
-		c.nodeEvicted = map[string]time.Time{}
+	if c.lastNodeIn == nil {
+		c.lastNodeIn = map[string]string{}
+		c.nodeWait = map[string]struct{}{}
 	}
 	if c.NodeRefetchGrace <= 0 {
 		c.NodeRefetchGrace = 10 * time.Minute
@@ -276,6 +295,14 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.mu.Lock()
 	c.init()
 	d := sbom.Image.Digest
+	_, hadNode := c.sboms[d][types.SourceNode]
+	if sbom.Source == types.SourceNode && len(sbom.Components) == 0 && !hadNode {
+		// An empty node SBOM releases one held; with none held (evicted,
+		// or never offered) there is nothing to release, and matching it
+		// would only produce an empty payload.
+		c.mu.Unlock()
+		return
+	}
 	h := &held{sbom: sbom, lastUsed: c.now(), bytes: heldBytes(sbom)}
 	// The digest may move groups (a registry SBOM re-offered under
 	// another index). When a node SBOM is involved, the group it leaves
@@ -296,8 +323,8 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	}
 	c.sboms[d][sbom.Source] = h
 	c.heldBytes += h.bytes
-	if sbom.Source == types.SourceNode {
-		delete(c.nodeEvicted, d) // back: its group need not wait for it
+	if sbom.Source == types.SourceNode && !hadNode {
+		c.nodeHeld++
 	}
 	k := c.groupKeyLocked(d)
 	c.queue[k] = struct{}{}
@@ -349,6 +376,9 @@ func (c *Coordinator) parentLocked(d string) string {
 // groupHoldsNodeLocked reports whether any SBOM matched under key is a
 // node SBOM.
 func (c *Coordinator) groupHoldsNodeLocked(key string) bool {
+	if c.nodeHeld == 0 {
+		return false
+	}
 	for d, bySrc := range c.sboms {
 		if _, ok := bySrc[types.SourceNode]; ok && c.groupKeyLocked(d) == key {
 			return true
@@ -357,13 +387,108 @@ func (c *Coordinator) groupHoldsNodeLocked(key string) bool {
 	return false
 }
 
-// Holds reports whether an SBOM from source is held for digest. A source
-// whose SBOM was dropped to stay within budget uses it to offer it again.
+// Holds reports whether an SBOM from source is held for digest.
 func (c *Coordinator) Holds(digest, source string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.sboms[digest][source]
 	return ok
+}
+
+// Wants reports whether digest's node SBOM is awaited: the last match of
+// its group included it, it is no longer held (evicted), and every other
+// SBOM of that match is held again, so the group is waiting for it (up to
+// NodeRefetchGrace) before it is matched. The node source then offers it
+// again. At any other time an evicted node SBOM is not wanted: offered
+// while the group's other SBOMs are missing, it would not be matched.
+func (c *Coordinator) Wants(digest string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	gs := c.groups[c.lastNodeIn[digest]]
+	if gs == nil || !gs.lastNode[digest] {
+		return false
+	}
+	_, held := c.sboms[digest][types.SourceNode]
+	return !held && c.othersHeldLocked(gs)
+}
+
+// othersHeldLocked reports whether every non-node SBOM of gs's last match
+// is held (in whatever group it is now: one that moved has changed).
+func (c *Coordinator) othersHeldLocked(gs *groupState) bool {
+	for d, srcs := range gs.lastOthers {
+		for src := range srcs {
+			if _, ok := c.sboms[d][src]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Why a group is not matched yet (waitLocked).
+const (
+	matchReady = iota
+	waitOthers
+	waitNode
+)
+
+// waitLocked decides whether group key may be matched now. After a match
+// that included a node SBOM, the group waits while any other SBOM of that
+// match is not held (for ever: until then the broker keeps that payload,
+// as it keeps any evicted group's), then for its node SBOMs up to
+// NodeRefetchGrace.
+func (c *Coordinator) waitLocked(key string) int {
+	gs := c.groups[key]
+	if gs == nil || (gs.lastOthers == nil && gs.lastNode == nil) {
+		return matchReady
+	}
+	if !c.othersHeldLocked(gs) {
+		return waitOthers
+	}
+	for d := range gs.lastNode {
+		if _, held := c.sboms[d][types.SourceNode]; held {
+			continue
+		}
+		now := c.now()
+		if gs.nodeWaitSince.IsZero() {
+			gs.nodeWaitSince = now
+		}
+		if now.Sub(gs.nodeWaitSince) < c.NodeRefetchGrace {
+			return waitNode
+		}
+		break // waited long enough: matched without it
+	}
+	gs.nodeWaitSince = time.Time{}
+	return matchReady
+}
+
+// recordMatchLocked notes what a successful match of group key included
+// (see groupState.lastOthers).
+func (c *Coordinator) recordMatchLocked(key string, gs *groupState, in *union) {
+	for d, k := range c.lastNodeIn {
+		if k == key && !in.nodes[d] {
+			delete(c.lastNodeIn, d)
+		}
+	}
+	gs.nodeWaitSince = time.Time{}
+	if len(in.nodes) == 0 {
+		gs.lastOthers, gs.lastNode = nil, nil
+		return
+	}
+	gs.lastOthers, gs.lastNode = in.others, in.nodes
+	for d := range in.nodes {
+		c.lastNodeIn[d] = key
+	}
+}
+
+// forgetGroupLocked drops what Wants knows of group gk.
+func (c *Coordinator) forgetGroupLocked(gk string) {
+	for d, k := range c.lastNodeIn {
+		if k == gk {
+			delete(c.lastNodeIn, d)
+		}
+	}
+	delete(c.nodeWait, gk)
 }
 
 // groupKeyLocked is the digest a digest's SBOMs are matched under: its
@@ -472,8 +597,8 @@ func (c *Coordinator) evictLocked(keep string, bytes int64) {
 		for _, d := range members[victim] {
 			for src, h := range c.sboms[d] {
 				c.heldBytes -= h.bytes
-				if src == types.SourceNode && len(c.nodeEvicted) < c.MaxDigests {
-					c.nodeEvicted[d] = c.now()
+				if src == types.SourceNode {
+					c.nodeHeld--
 				}
 			}
 			delete(c.sboms, d)
@@ -483,6 +608,12 @@ func (c *Coordinator) evictLocked(keep string, bytes int64) {
 		}
 	}
 }
+
+// maxWaitingGroupsFactor bounds the kept state of groups whose last match
+// included a node SBOM: past MaxDigests*maxWaitingGroupsFactor groups,
+// pruneGroupsLocked drops them too (oldest first), and such a group may
+// then be matched from a partial re-offer.
+const maxWaitingGroupsFactor = 4
 
 // pruneGroupsLocked keeps the match state of at most MaxDigests groups,
 // dropping first the least recently offered whose SBOMs are no longer
@@ -504,11 +635,27 @@ func (c *Coordinator) pruneGroupsLocked() {
 		}
 	}
 	sort.Slice(idle, func(i, j int) bool { return c.groups[idle[i]].touched.Before(c.groups[idle[j]].touched) })
-	for _, k := range idle {
-		if len(c.groups) <= c.MaxDigests {
-			return
+	// Groups whose last match included a node SBOM go last, and only far
+	// past the bound: dropping their state would let a partial re-offer
+	// through.
+	for _, waiting := range []bool{false, true} {
+		limit := c.MaxDigests
+		if waiting {
+			limit = c.MaxDigests * maxWaitingGroupsFactor
 		}
-		delete(c.groups, k)
+		for _, k := range idle {
+			if len(c.groups) <= limit {
+				break
+			}
+			gs := c.groups[k]
+			if gs == nil || (gs.lastOthers != nil || gs.lastNode != nil) != waiting {
+				continue
+			}
+			if waiting {
+				c.forgetGroupLocked(k)
+			}
+			delete(c.groups, k)
+		}
 	}
 }
 
@@ -573,6 +720,10 @@ func (c *Coordinator) requeueLocked() {
 		c.queue[k] = struct{}{}
 		delete(c.retry, k)
 	}
+	for k := range c.nodeWait {
+		c.queue[k] = struct{}{}
+		delete(c.nodeWait, k)
+	}
 	now := c.now()
 	for k, gs := range c.groups {
 		if gs.quarantined != "" && gs.expires && !now.Before(gs.quarantinedAt.Add(c.ttlLocked(gs))) {
@@ -624,13 +775,15 @@ func (c *Coordinator) drain(ctx context.Context) {
 			c.mu.Unlock()
 			continue // folded into its index's group
 		}
-		if c.awaitingNodeLocked(key) {
-			c.retry[key] = struct{}{} // looked at again next tick
+		switch c.waitLocked(key) {
+		case waitOthers:
+			c.mu.Unlock()
+			continue // matched when the missing SBOMs are offered again
+		case waitNode:
+			c.nodeWait[key] = struct{}{} // looked at again next tick
 			c.mu.Unlock()
 			continue
 		}
-		// Handled now; a failure below queues its own retry.
-		delete(c.retry, key)
 		in := c.unionLocked(key)
 		gs := c.groups[key]
 		if gs == nil {
@@ -686,26 +839,10 @@ type union struct {
 	// the node's platform (empty when the catalog did not record one).
 	pinned   bool
 	platform string
-}
-
-// awaitingNodeLocked reports whether group key had its node SBOM evicted
-// less than NodeRefetchGrace ago and not offered again, so matching now
-// (on a partial re-offer, say Trivy's alone) would drop the node's
-// findings until it is. Entries past the grace, or offered again, are
-// forgotten.
-func (c *Coordinator) awaitingNodeLocked(key string) bool {
-	now := c.now()
-	waiting := false
-	for d, at := range c.nodeEvicted {
-		if _, held := c.sboms[d][types.SourceNode]; held || now.Sub(at) >= c.NodeRefetchGrace {
-			delete(c.nodeEvicted, d)
-			continue
-		}
-		if d == key || (c.sboms[d] != nil && c.groupKeyLocked(d) == key) {
-			waiting = true
-		}
-	}
-	return waiting
+	// nodes: digests whose node SBOM is an input; others: the other
+	// inputs (digest -> sources). Recorded by a match (recordMatchLocked).
+	nodes  map[string]bool
+	others map[string]map[string]bool
 }
 
 func (c *Coordinator) unionLocked(key string) *union {
@@ -737,6 +874,20 @@ func (c *Coordinator) unionLocked(key string) *union {
 		}
 		if types.TrustRank(m.SBOMTrust) < types.TrustRank(u.trust) {
 			u.trust = m.SBOMTrust
+		}
+		if m.Source == types.SourceNode {
+			if u.nodes == nil {
+				u.nodes = map[string]bool{}
+			}
+			u.nodes[m.Image.Digest] = true
+		} else {
+			if u.others == nil {
+				u.others = map[string]map[string]bool{}
+			}
+			if u.others[m.Image.Digest] == nil {
+				u.others[m.Image.Digest] = map[string]bool{}
+			}
+			u.others[m.Image.Digest][m.Source] = true
 		}
 		switch m.Source {
 		case types.SourceTrivyOperator:
@@ -873,6 +1024,7 @@ func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db ti
 	c.count("ok")
 	c.mu.Lock()
 	if gs := c.groups[key]; gs != nil {
+		c.recordMatchLocked(key, gs, in)
 		gs.fingerprint, gs.matchedDB = in.fingerprint, db
 		gs.failFP, gs.failDB, gs.failures, gs.crashes, gs.quarantined = "", time.Time{}, 0, 0, ""
 		gs.errorQuarantines = 0
@@ -1241,12 +1393,13 @@ func pep503(name string) string {
 //     other sources is re-attributed. So a node SBOM, however partial,
 //     can only add packages to the union, never remove or change one.
 //
-// Two components collide when their PURLs name the same package (see
-// purlKey), or, failing that, when they share type, name and version (see
-// componentKey). The PURL match catches what the names miss (Trivy's
-// "org.example:lib" and Syft's "lib" for one Maven artifact); a PURL
-// mismatch never splits what the names merge, so a union without such
-// pairs merges exactly as before.
+// Components collide when they share type, name and version (see
+// componentKey). A node component also collides with an entry whose PURL
+// names the same package (see purlKey), which catches what the names miss
+// (Trivy's "org.example:lib" and Syft's "lib" for one Maven artifact).
+// The PURL match is used for node components only: Trivy and registry
+// components de-duplicate among themselves exactly as without a node SBOM,
+// so adding one never changes how the others merge.
 func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, int) {
 	if max <= 0 {
 		max = int(^uint(0) >> 1)
@@ -1264,9 +1417,13 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 	}
 	byKey := map[string]*types.Component{}  // componentKey -> entry
 	byPURL := map[string]*types.Component{} // purlKey -> entry
+	// PURL keys are indexed only with a node SBOM in the union, and looked
+	// up only for node components (viaPURL): without one the union
+	// de-duplicates exactly as it always has.
+	usePURL := len(nodeSBOMs) > 0
 	var osComp *types.Component
-	find := func(c types.Component) *types.Component {
-		if pk := purlKey(c.PURL); pk != "" {
+	find := func(c types.Component, viaPURL bool) *types.Component {
+		if pk := purlKey(c.PURL); viaPURL && pk != "" {
 			if cur := byPURL[pk]; cur != nil {
 				return cur
 			}
@@ -1274,6 +1431,9 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 		return byKey[componentKey(c)]
 	}
 	index := func(cur *types.Component) {
+		if !usePURL {
+			return
+		}
 		if pk := purlKey(cur.PURL); pk != "" && byPURL[pk] == nil {
 			byPURL[pk] = cur
 		}
@@ -1319,7 +1479,7 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 				}
 				continue
 			}
-			if cur := find(c); cur != nil {
+			if cur := find(c, false); cur != nil {
 				addOnly(cur, c, true)
 				continue
 			}
@@ -1335,9 +1495,6 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 	if room < 0 {
 		// Trivy alone exceeds the cap (not seen in practice).
 		dropped += -room
-		for _, k := range base[len(base)+room:] {
-			remove(k)
-		}
 		base = base[:len(base)+room]
 		room = 0
 	}
@@ -1366,7 +1523,7 @@ func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, in
 				}
 				continue
 			}
-			if cur := find(c); cur != nil {
+			if cur := find(c, node); cur != nil {
 				addOnly(cur, c, fillPURL)
 				continue
 			}
