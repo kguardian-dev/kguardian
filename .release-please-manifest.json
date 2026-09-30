@@ -8,5 +8,5 @@
   "evaluator": "0.5.1",
   "supplychain": "0.1.1",
   "supplychain-matcher": "0.1.1",
-  "cataloger": "0.0.0"
+  "cataloger": "0.1.0"
 }
