@@ -89,7 +89,7 @@ Every message, in both directions, is one frame:
 | Direction | Limit |
 |---|---|
 | Request (Controller -> worker) | 64 KiB |
-| Response (worker -> Controller) | `budgets.max_response_bytes` (default 32 MiB, never above 64 MiB) |
+| Response (worker -> Controller) | `budgets.max_response_bytes`, which the Controller sets (its default 16 MiB, at most 64 MiB) |
 
 ## 3. Request
 
@@ -139,7 +139,7 @@ The worker rejects:
     "max_depth": 4096,
     "scan_timeout_ms": 600000,
     "max_paths_per_package": 4096,
-    "max_response_bytes": 33554432
+    "max_response_bytes": 16777216
   }
 }
 ```
@@ -159,12 +159,12 @@ Budgets:
 
 | Field | Default | Ceiling | Meaning |
 |---|---|---|---|
-| `max_files` | 2 000 000 | 10 000 000 | Filesystem entries indexed. |
+| `max_files` | 2 000 000 | 10 000 000 | Directory entries read, of every kind (files, directories, links, and entries never indexed: devices, FIFOs, sockets, excluded or cross-mount names). One directory is also read in bounded chunks and at most 1 048 576 of its names (more: the rest is skipped, `file_budget`). |
 | `max_components` | 50 000 | 50 000 | Components returned (the broker's `MAX_SBOM_COMPONENTS`). |
 | `max_depth` | 4096 | 4096 | Directory depth. Deeper directories are not entered (`partial`). |
 | `scan_timeout_ms` | 600 000 | 1 800 000 | Wall-clock deadline for the whole request, including the `os_only` retry. |
 | `max_paths_per_package` | 4096 | 4096 | `file_paths` per component; more sets `files_truncated`. |
-| `max_response_bytes` | 32 MiB | 64 MiB | Encoded response payload size. |
+| `max_response_bytes` | 16 MiB | 64 MiB | Encoded response payload size. The Controller always sends it (16 MiB by default, configurable up to 64 MiB); the worker's default applies only if it is absent. |
 
 Memory and temp-space limits are **not** in the request: they belong to the
 worker container, so they are worker settings (`CATALOG_MEMORY_LIMIT`,
@@ -205,7 +205,7 @@ before claiming, and a readiness probe can use it.
     "max_rss_bytes": 58720256,
     "budgets": { "max_files": 2000000, "max_components": 50000, "max_depth": 4096,
                  "scan_timeout_ms": 600000, "max_paths_per_package": 4096,
-                 "max_response_bytes": 33554432 }
+                 "max_response_bytes": 16777216 }
   },
   "components": [
     {
@@ -237,11 +237,11 @@ Top level:
 | `status` | string | `ok` or `failed`. `failed` responses carry no components. |
 | `reason` | string | Empty when `ok`; otherwise one of §4.4. |
 | `message` | string | Human detail for logs, at most 1024 bytes. Not for display to users verbatim; may contain container paths. |
-| `completeness` | string | `full`, `partial` or `os_only` (§4.2). Empty when `failed`. |
+| `completeness` | string | `full`, `partial` or `os_only` (§4.2). Empty when `failed`, except for `no_packages_found`, which carries it (§4.4). |
 | `partial_reasons` | string[] | Why a successful scan is not `full` (§4.2). |
 | `retry_reason` | string | Set when the first attempt failed and the `os_only` retry produced this response: `oom`, `too_many_files` or `too_many_components`. |
 | `scanner` | object | Maps to `ImageSBOM.scanner`. |
-| `os` | object | `{family, name}`: os-release `ID` and `VERSION_ID` (or `PRETTY_NAME` without one). Maps to the broker's `WireOs`. Omitted when no os-release was found. |
+| `os` | object | `{family, name}`: os-release `ID` and `VERSION_ID` (or `PRETTY_NAME` without one). Maps to the broker's `WireOs`. Omitted when no os-release was found, or when either value is over 64 bytes (the broker's limit) or holds control characters. |
 | `stats` | object | Always present, also on failure (what was measured before it). |
 | `components` | object[] | §4.3. |
 
@@ -259,7 +259,8 @@ Top level:
 §4.3), `depth_limited`, `files_truncated` (some component has
 `files_truncated`), `response_trimmed` (file paths dropped to fit
 `max_response_bytes`), `components_dropped` (components that failed
-validation, §4.3), `file_budget` (`os_only` only: `max_files` reached).
+validation, §4.3), `file_budget` (entries skipped: `max_files` reached under
+`os_only`, or a directory with more than 1 048 576 names).
 
 ### 4.3 Components
 
@@ -272,11 +273,11 @@ per-package flags the Controller forwards to the catalog route (they end up in
 |---|---|---|
 | `name` | `name` | Package name. Non-empty, at most 256 bytes. |
 | `version` | `version` | At most 128 bytes. |
-| `purl` | `purl` | Syft's package URL (deb/rpm carry the `upstream` and `distro` qualifiers Grype matches on). |
+| `purl` | `purl` | Syft's package URL (deb/rpm carry the `upstream` and `distro` qualifiers Grype matches on). At most 1024 bytes. |
 | `type` | `type` | Syft package type (`apk`, `deb`, `rpm`, `go-module`, `rust-crate`, `java-archive`, `python`, `npm`, `binary`, ...), or `operating-system` for the distro entry (one per response, `name` = os-release `ID`, `version` = `VERSION_ID`; no other fields). |
 | `class` | `class` | `os-pkgs` for OS package-manager types (`apk`, `deb`, `rpm`, `alpm`, `portage`), `lang-pkgs` for everything else; absent on `operating-system`. |
-| `src_name`, `src_version` | same | Source package: dpkg `Source`, apk origin, rpm source RPM. Omitted when unknown. |
-| `licenses` | `licenses` | At most 8, each at most 256 bytes. |
+| `src_name`, `src_version` | same | Source package: dpkg `Source`, apk origin, rpm source RPM. At most 256 / 128 bytes. Omitted when unknown. |
+| `licenses` | `licenses` | At most 8, each at most 128 bytes. |
 | `file_paths` | `file_paths` | See below. |
 | `files_truncated` | (flags bit 1) | `true` if `file_paths` is not the package's complete executable-looking file list. |
 | `interpreted_content` | (flags bit 2) | `true` if the package owns interpreted or loadable non-executable content (below). |
@@ -290,14 +291,14 @@ per-package flags the Controller forwards to the catalog route (they end up in
 - "Owns": the package database's file list (dpkg, apk, rpm, Python RECORD,
   ...) plus the package's own evidence location for binaries (the Go or Rust
   executable itself).
-- Absolute, clean (`path.Clean`), valid UTF-8, at most 1024 bytes each,
-  sorted, unique. Each is the **real path inside the container root**, with
+- Absolute, clean (`path.Clean`), valid UTF-8 without control characters,
+  at most 1024 bytes each, sorted, unique. Each is the **real path inside the container root**, with
   symlinks resolved in-root (so `/bin/sh -> busybox` is sent as
   `/bin/busybox`, and a merged-`/usr` `/bin/bash` as `/usr/bin/bash`).
 - At most `max_paths_per_package`. More sets `files_truncated`.
-- A path whose file is runtime drift (non-directory `ctime` after
-  `container_start_unix_nanos`) is dropped and sets `files_truncated` on
-  every package that owns it; a runtime-created binary never becomes a
+- A path whose file, or any symlink on the way to it, is runtime drift
+  (non-directory `ctime` after `container_start_unix_nanos`) is dropped and
+  sets `files_truncated` on every package that owns it; a runtime-created binary never becomes a
   package of its own.
 - The broker's generic SBOM route keeps 16 paths per component
   (`MAX_FILE_PATHS`); the catalog route accepts 4096 (§4.5).
@@ -332,8 +333,8 @@ Unknown response fields must be ignored by the Controller.
 | `timeout` | `scan_timeout_ms` elapsed; the child was SIGKILLed. No `os_only` retry (no time left). | backoff (`timeout`) |
 | `oom` | Memory or temp space ran out (the child's heap watchdog, a Go runtime out-of-memory abort, a cgroup OOM kill, or `ENOSPC`/`EFBIG` in the capped temp dir) **and** the `os_only` retry also failed or had no time. | backoff (`oom`) |
 | `too_many_components` | More than `max_components` even with `os_only`. | backoff (`error`) |
-| `no_packages_found` | The root was readable and the scan completed, but found zero packages (the `operating-system` entry does not count). Shown as "not assessable", never "0 CVEs". | terminal for this digest |
-| `lsm_denied` | `EACCES`/`EPERM` opening the root for listing or reading an existing `/etc/os-release` / `/usr/lib/os-release`, or the fd was stripped in transit (`MSG_CTRUNC`). Never reported as `no_packages_found`. | per node, non-blocking |
+| `no_packages_found` | The scan completed and found zero packages (the `operating-system` entry does not count). **Terminal only when clean**: `completeness: "full"` and empty `partial_reasons`, meaning the whole tree was readable and nothing was skipped. Otherwise the response says why (`completeness: "partial"` with `partial_reasons` such as `eacces` + `no_dac_read_search` under model (ii), `ctime_dropped`, `depth_limited`, `file_budget`, `components_dropped`; or `completeness: "os_only"`), and the Controller treats it as a retryable `error`. Shown as "not assessable", never "0 CVEs". | terminal only when clean; else backoff (`error`) |
+| `lsm_denied` | `EACCES`/`EPERM` opening the root for listing or reading an existing `/etc/os-release` / `/usr/lib/os-release`; zero packages with unreadable entries under capability model (i) (DAC is bypassed there, so only an LSM refuses); or the fd was stripped in transit (`MSG_CTRUNC`). Under model (ii) unreadable entries are plain DAC refusals and give a partial `no_packages_found` instead. | per node, non-blocking |
 | `kernel_unsupported` | `openat2(2)` missing (< 5.6) or `statx` does not return `STATX_MNT_ID` (< 5.8). The worker never falls back to weaker resolution. | per node, non-blocking |
 | `caps_unavailable` | The scan child's capabilities are not what the startup probe established (e.g. `CAP_DAC_READ_SEARCH` missing under model (i), or any other capability present). | per node, non-blocking |
 | `error` | Anything else: a panic, an unexpected child exit, invalid child output. | backoff (`error`) |

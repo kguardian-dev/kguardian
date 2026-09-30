@@ -71,7 +71,10 @@ const (
 	PartialFileBudget        = "file_budget"
 )
 
-// Limits.
+// Limits. The component and OS limits are the broker's (its LEN_* and
+// MAX_* constants in broker/src/supplychain.rs; contract_test.go keeps
+// them equal): the worker drops what does not fit rather than letting the
+// broker cut it silently.
 const (
 	MaxRequestBytes       = 64 * 1024
 	MaxResponseCeiling    = 64 * 1024 * 1024
@@ -83,7 +86,9 @@ const (
 	MaxVersionLen         = 128
 	MaxPathLen            = 1024
 	MaxLicenses           = 8
-	MaxLicenseLen         = 256
+	MaxLicenseLen         = 128 // broker LEN_VERSION, as clean_list applies it
+	MaxShortLen           = 64  // broker LEN_SHORT: type, class, scanner fields
+	MaxOSLen              = 64  // broker LEN_SHORT: os family and name
 	MaxPURLLen            = 1024
 	MaxPathsPerPkgCeiling = 4096
 )
@@ -96,7 +101,9 @@ var (
 		MaxDepth:           4096,
 		ScanTimeoutMS:      600_000,
 		MaxPathsPerPackage: 4096,
-		MaxResponseBytes:   32 * 1024 * 1024,
+		// The Controller normally sends its own value (16 MiB by default);
+		// this applies only when it does not.
+		MaxResponseBytes: 16 * 1024 * 1024,
 	}
 	CeilingBudgets = Budgets{
 		MaxFiles:           10_000_000,
@@ -299,6 +306,25 @@ func truncate(s string, n int) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// HasControl reports ASCII control characters (and DEL), which no path,
+// name or version the broker stores may contain.
+func HasControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidPath is a file path as the Controller and broker accept it:
+// absolute, clean, at most MaxPathLen bytes, valid UTF-8, no control
+// characters.
+func ValidPath(p string) bool {
+	return len(p) > 0 && len(p) <= MaxPathLen && p[0] == '/' && path.Clean(p) == p &&
+		utf8.ValidString(p) && !HasControl(p)
 }
 
 // Truncate cuts s to at most n bytes on a rune boundary.

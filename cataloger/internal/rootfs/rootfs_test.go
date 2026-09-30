@@ -530,3 +530,69 @@ func TestKernelSupported(t *testing.T) {
 		t.Fatalf("this kernel should support openat2 and STATX_MNT_ID: %v", err)
 	}
 }
+
+// Entries that are never indexed (FIFOs, excluded or cross-mount names)
+// still cost budget: a directory of a million FIFOs is not free to walk.
+func TestEveryEntryCostsBudget(t *testing.T) {
+	root := t.TempDir()
+	for i := range 30 {
+		must(t, unix.Mkfifo(filepath.Join(root, "fifo"+strconv.Itoa(i)), 0o644))
+	}
+	r, err := OpenPath(root, Options{MaxFiles: 10})
+	must(t, err)
+	defer func() { _ = r.Close() }()
+	if _, err := NewResolver(r); !errors.Is(err, ErrTooManyFiles) {
+		t.Fatalf("30 FIFOs under a budget of 10: %v", err)
+	}
+}
+
+// One directory can hold more names than fit in memory; reading stops at
+// the per-directory cap and the scan is marked partial.
+func TestNamesPerDirectoryAreCapped(t *testing.T) {
+	old := maxNamesPerDir
+	maxNamesPerDir = 5
+	t.Cleanup(func() { maxNamesPerDir = old })
+	root := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(root, "big"), 0o755))
+	for i := range 20 {
+		must(t, os.WriteFile(filepath.Join(root, "big", "f"+strconv.Itoa(i)), nil, 0o644))
+	}
+	r, err := OpenPath(root, Options{})
+	must(t, err)
+	defer func() { _ = r.Close() }()
+	res, err := NewResolver(r)
+	must(t, err)
+	if !r.Stats.FileBudget.Load() {
+		t.Error("cap not reported")
+	}
+	n := 0
+	for i := range 20 {
+		if res.HasPath("/big/f" + strconv.Itoa(i)) {
+			n++
+		}
+	}
+	if n == 0 || n > 5 {
+		t.Errorf("indexed %d of 20 names under a cap of 5", n)
+	}
+}
+
+func TestReadDirNamesBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 3000 {
+		must(t, os.WriteFile(filepath.Join(dir, "a-fairly-long-file-name-"+strconv.Itoa(i)), nil, 0o644))
+	}
+	for _, c := range []struct {
+		max       int
+		want      int
+		truncated bool
+	}{{0, 3000, false}, {3000, 3000, false}, {2999, 2999, true}, {10, 10, true}, {3001, 3000, false}} {
+		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		must(t, err)
+		names, tr, err := readDirNames(fd, c.max)
+		_ = unix.Close(fd)
+		must(t, err)
+		if len(names) != c.want || tr != c.truncated {
+			t.Errorf("max %d: %d names, truncated %v; want %d, %v", c.max, len(names), tr, c.want, c.truncated)
+		}
+	}
+}

@@ -59,12 +59,15 @@ func ExecutableLooking(p string, mode uint32) bool {
 	return mode&0o111 != 0 || rootfs.IsSharedObjectName(p)
 }
 
-// validPath is what the broker and Controller accept.
+// validPath is what the broker and Controller accept: absolute, clean,
+// bounded, valid UTF-8, no control characters.
 func validPath(p string) bool {
-	return len(p) > 0 && len(p) <= protocol.MaxPathLen && p[0] == '/' && path.Clean(p) == p && utf8.ValidString(p)
+	return protocol.ValidPath(p)
 }
 
-func validField(s string, max int) bool { return len(s) <= max && utf8.ValidString(s) }
+func validField(s string, max int) bool {
+	return len(s) <= max && utf8.ValidString(s) && !protocol.HasControl(s)
+}
 
 // osTypes are package-manager types reported as class os-pkgs.
 var osTypes = map[pkg.Type]bool{pkg.ApkPkg: true, pkg.DebPkg: true, pkg.RpmPkg: true, pkg.AlpmPkg: true, pkg.PortagePkg: true}
@@ -107,11 +110,16 @@ func (a resolverAdapter) Lookup(p string) (string, uint32, bool, bool) {
 	return real, uint32(md.Mode().Perm()), md.Mode().IsRegular(), true
 }
 
-// Dropped: p itself, or p with its directory resolved (a file under a
-// symlinked directory is recorded by its real path).
+// Dropped: p, or any component on its way, was left out as runtime drift.
+// A symlink anywhere in the path counts (a /bin link replaced after start
+// takes every /bin/... file with it), and so does p with its directory
+// resolved (a file under a symlinked directory is recorded by its real
+// path).
 func (a resolverAdapter) Dropped(p string) bool {
-	if a.root.Dropped(p) {
-		return true
+	for q := p; q != "/" && q != "."; q = path.Dir(q) {
+		if a.root.Dropped(q) {
+			return true
+		}
 	}
 	if dir, _, _, ok := a.Lookup(path.Dir(p)); ok {
 		return a.root.Dropped(path.Join(dir, path.Base(p)))
@@ -209,8 +217,10 @@ func licensesOf(p pkg.Package) []string {
 		if v == "" {
 			v = l.Value
 		}
-		v = protocol.Truncate(strings.TrimSpace(v), protocol.MaxLicenseLen)
-		if v == "" || seen[v] {
+		v = strings.TrimSpace(v)
+		// Over-long licenses are dropped, never cut: the broker would
+		// otherwise truncate them silently.
+		if v == "" || seen[v] || !validField(v, protocol.MaxLicenseLen) {
 			continue
 		}
 		seen[v] = true
@@ -236,7 +246,8 @@ func Component(p pkg.Package, fr FileResolution, maxPaths int) (protocol.Compone
 	if osTypes[p.Type] {
 		c.Class = "os-pkgs"
 	}
-	if c.Name == "" || !validField(c.Name, protocol.MaxNameLen) || !validField(c.Version, protocol.MaxVersionLen) {
+	if c.Name == "" || !validField(c.Name, protocol.MaxNameLen) || !validField(c.Version, protocol.MaxVersionLen) ||
+		!validField(c.Type, protocol.MaxShortLen) {
 		return c, false
 	}
 	if !validField(c.PURL, protocol.MaxPURLLen) {

@@ -152,6 +152,81 @@ func TestEmptyReadableRootIsNoPackagesFound(t *testing.T) {
 	}
 }
 
+// no_packages_found is terminal at the Controller only with completeness
+// "full" and no partial reasons (PROTOCOL.md §4.4): a clean root gives
+// exactly that, and anything that could have hidden a package does not.
+func TestNoPackagesFoundIsCleanOnlyWhenComplete(t *testing.T) {
+	clean := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(clean, "etc"), 0o755))
+	must(t, os.WriteFile(filepath.Join(clean, "etc/os-release"), []byte("ID=alpine\n"), 0o644))
+	r := runDir(t, clean, opts())
+	if r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessFull || len(r.PartialReasons) != 0 {
+		t.Fatalf("clean root: reason %s completeness %q partial %v", r.Reason, r.Completeness, r.PartialReasons)
+	}
+	// Model (ii) on a fully readable root is still clean.
+	o := opts()
+	o.CapsModel = "ii"
+	if r := runDir(t, clean, o); r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessFull || len(r.PartialReasons) != 0 {
+		t.Errorf("model (ii), readable root: %q %v", r.Completeness, r.PartialReasons)
+	}
+
+	// The only binary changed after container start.
+	drift := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(drift, "usr/bin"), 0o755))
+	o = opts()
+	o.ContainerStartNanos = time.Now().UnixNano()
+	time.Sleep(20 * time.Millisecond)
+	must(t, os.WriteFile(filepath.Join(drift, "usr/bin/app"), []byte("\x7fELF"), 0o755))
+	if r := runDir(t, drift, o); r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessPartial ||
+		!has(r.PartialReasons, protocol.PartialCtimeDropped) {
+		t.Errorf("runtime drift: %s %v", r.Reason, r.PartialReasons)
+	}
+
+	// A tree deeper than the depth cap.
+	deep := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(deep, "a/b/c/d"), 0o755))
+	o = opts()
+	o.Budgets.MaxDepth = 2
+	if r := runDir(t, deep, o); r.Reason != protocol.ReasonNoPackagesFound || !has(r.PartialReasons, protocol.PartialDepthLimited) {
+		t.Errorf("depth cap: %s %v", r.Reason, r.PartialReasons)
+	}
+
+	// The os_only profile skips the language catalogers.
+	o = opts()
+	o.Profile = protocol.ProfileOSOnly
+	if r := runDir(t, clean, o); r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessOSOnly {
+		t.Errorf("os_only: %s %q", r.Reason, r.Completeness)
+	}
+}
+
+// Unreadable entries and zero packages: under model (i) (DAC bypassed)
+// only an LSM can have refused, so lsm_denied; under model (ii) it is a
+// plain DAC refusal and the scan is just incomplete, so a partial
+// no_packages_found the Controller retries.
+func TestZeroPackagesWithUnreadableEntries(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 directory")
+	}
+	root := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(root, "etc"), 0o755))
+	must(t, os.WriteFile(filepath.Join(root, "etc/os-release"), []byte("ID=alpine\n"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(root, "lib/apk/db"), 0o755))
+	must(t, os.Chmod(filepath.Join(root, "lib/apk"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "lib/apk"), 0o755) })
+
+	o := opts()
+	o.CapsModel = "ii"
+	r := runDir(t, root, o)
+	if r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessPartial ||
+		!has(r.PartialReasons, protocol.PartialEACCES) || !has(r.PartialReasons, protocol.PartialNoDACReadSearch) {
+		t.Errorf("model (ii): %s %q %v", r.Reason, r.Completeness, r.PartialReasons)
+	}
+	o.CapsModel = "i"
+	if r := runDir(t, root, o); r.Reason != protocol.ReasonLSMDenied {
+		t.Errorf("model (i): %s", r.Reason)
+	}
+}
+
 func TestUnreadableOSReleaseIsLSMDenied(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a 0000 file")
@@ -353,3 +428,34 @@ func TestPackageFiles(t *testing.T) {
 }
 
 func bad() string { return strings.Repeat("x", 1100) }
+
+// A package's file behind a symlinked directory that was replaced after
+// the container started (/bin -> usr/bin swapped at runtime) is drift too.
+func TestDriftOnAnIntermediateSymlink(t *testing.T) {
+	root := apkRoot(t, []apkPkg{
+		{"tool", "1.0", map[string]os.FileMode{"usr/bin/tool": 0o755, "bin/tool": 0}},
+	})
+	o := opts()
+	o.ContainerStartNanos = time.Now().UnixNano()
+	time.Sleep(20 * time.Millisecond)
+	must(t, os.Symlink("usr/bin", filepath.Join(root, "bin")))
+	r := runDir(t, root, o)
+	c := comp(t, r, "tool")
+	if !c.FilesTruncated {
+		t.Errorf("/bin/tool reached through a runtime-created /bin link: %+v", c)
+	}
+}
+
+func TestPathsWithControlCharactersAreDropped(t *testing.T) {
+	bad := "/usr/bin/evil\nname"
+	fr := fakeFR{bad: {bad, 0o755, true}, "/usr/bin/ok": {"/usr/bin/ok", 0o755, true}}
+	paths, trunc, _ := PackageFiles([]string{bad, "/usr/bin/ok"}, fr, 0)
+	if fmt.Sprint(paths) != "[/usr/bin/ok]" || !trunc {
+		t.Errorf("paths %q truncated %v", paths, trunc)
+	}
+	for _, s := range []string{"a\tb", "x\x7f", "\x00"} {
+		if validField(s, 100) {
+			t.Errorf("%q accepted", s)
+		}
+	}
+}

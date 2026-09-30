@@ -51,6 +51,9 @@ type Config struct {
 	Log      *logrus.Logger
 }
 
+// cleanTmpTimeout bounds the temp cleanup after a killed child.
+const cleanTmpTimeout = 5 * time.Second
+
 // Server is the worker parent.
 type Server struct {
 	cfg   Config
@@ -311,7 +314,7 @@ func (s *Server) Scan(ctx context.Context, req *protocol.Request, root *os.File)
 			// A killed child cannot remove its temp dir, and the parent
 			// (uid 0 without CAP_DAC_OVERRIDE) cannot either: a short
 			// child as the scan uid does.
-			s.cleanTmp(ctx)
+			s.cleanTmp(dctx)
 		}
 		s.logAttempt(req, profile, resp, r)
 		if attempts == 1 && profile == protocol.ProfileFull && retryable(resp.Reason) && dctx.Err() == nil {
@@ -342,8 +345,13 @@ func (s *Server) Scan(ctx context.Context, req *protocol.Request, root *os.File)
 	return resp
 }
 
-func (s *Server) cleanTmp(ctx context.Context) {
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+// cleanTmp removes a killed child's temp dir. It belongs to the scan
+// (dctx), but runs right after a timeout too, when dctx is already done:
+// so it keeps dctx's values, drops its cancellation, and gets its own short
+// bound. It is a directory removal on tmpfs; a few seconds is plenty, and
+// a response never waits longer for it.
+func (s *Server) cleanTmp(dctx context.Context) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(dctx), cleanTmpTimeout)
 	defer cancel()
 	if r := s.run(cctx, "clean-tmp", s.model, nil, nil, 64); r.startErr != nil {
 		s.log.WithError(r.startErr).Warn("temp cleanup")
@@ -425,9 +433,7 @@ var knownPartial = map[string]bool{
 	protocol.PartialComponentsDropped: true, protocol.PartialFileBudget: true,
 }
 
-func validPath(p string) bool {
-	return len(p) > 0 && len(p) <= protocol.MaxPathLen && p[0] == '/' && filepath.Clean(p) == p
-}
+func validPath(p string) bool { return protocol.ValidPath(p) }
 
 // Validate checks a child's response against the protocol's limits. A
 // compromised child can still lie within them; it cannot exceed them.
@@ -450,6 +456,17 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 		if !knownReasons[r.Reason] || r.Reason == "" {
 			return fmt.Errorf("reason %q", r.Reason)
 		}
+		// Only no_packages_found carries a completeness when failed
+		// (PROTOCOL.md §4.4), and only one of the known values.
+		switch r.Completeness {
+		case "":
+		case protocol.CompletenessFull, protocol.CompletenessPartial, protocol.CompletenessOSOnly:
+			if r.Reason != protocol.ReasonNoPackagesFound {
+				return fmt.Errorf("completeness on a %s failure", r.Reason)
+			}
+		default:
+			return fmt.Errorf("completeness %q", r.Completeness)
+		}
 	default:
 		return fmt.Errorf("status %q", r.Status)
 	}
@@ -467,7 +484,7 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 	if int64(len(r.Components)) > b.MaxComponents {
 		return fmt.Errorf("%d components over the budget", len(r.Components))
 	}
-	if r.OS != nil && (len(r.OS.Family) > protocol.MaxNameLen || len(r.OS.Name) > protocol.MaxVersionLen) {
+	if r.OS != nil && (len(r.OS.Family) > protocol.MaxOSLen || len(r.OS.Name) > protocol.MaxOSLen) {
 		return errors.New("os fields too long")
 	}
 	for i, c := range r.Components {
@@ -476,7 +493,8 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 			return fmt.Errorf("component %d: name", i)
 		case len(c.Version) > protocol.MaxVersionLen, len(c.SrcVersion) > protocol.MaxVersionLen:
 			return fmt.Errorf("component %d: version", i)
-		case len(c.PURL) > protocol.MaxPURLLen, len(c.Type) > 64, len(c.SrcName) > protocol.MaxNameLen:
+		case len(c.PURL) > protocol.MaxPURLLen, len(c.Type) > protocol.MaxShortLen, len(c.SrcName) > protocol.MaxNameLen,
+			protocol.HasControl(c.Name + c.Version + c.PURL + c.Type + c.SrcName + c.SrcVersion):
 			return fmt.Errorf("component %d: field too long", i)
 		case c.Class != "" && c.Class != "os-pkgs" && c.Class != "lang-pkgs":
 			return fmt.Errorf("component %d: class %q", i, c.Class)

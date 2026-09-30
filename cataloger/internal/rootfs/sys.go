@@ -97,24 +97,45 @@ func isAccessErr(err error) bool {
 	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
 }
 
-// readDirNames returns every name in the directory open at fd (not "."
-// or "..").
-func readDirNames(fd int) ([]string, error) {
+// readDirNames returns the names in the directory open at fd (not "."
+// or ".."), at most max of them (max <= 0: no limit), reading getdents
+// in fixed chunks so a huge directory never has to fit in memory at once.
+// truncated reports that more names were left unread.
+func readDirNames(fd int, max int) (names []string, truncated bool, err error) {
 	buf := make([]byte, 32*1024)
-	var names []string
 	for {
 		n, err := unix.ReadDirent(fd, buf)
 		if err == unix.EINTR {
 			continue
 		}
 		if err != nil {
-			return names, err
+			return names, false, err
 		}
 		if n <= 0 {
-			return names, nil
+			return names, false, nil
 		}
-		_, _, names = unix.ParseDirent(buf[:n], -1, names)
+		want := -1
+		if max > 0 {
+			want = max - len(names)
+		}
+		var consumed int
+		consumed, _, names = unix.ParseDirent(buf[:n], want, names)
+		if max > 0 && len(names) >= max {
+			// Anything left in this chunk, or in the next one, is unread.
+			if hasName(buf[consumed:n]) {
+				return names, true, nil
+			}
+			n2, err := unix.ReadDirent(fd, buf)
+			return names, err == nil && n2 > 0 && hasName(buf[:n2]), nil
+		}
 	}
+}
+
+// hasName reports whether a getdents chunk holds any name besides "."
+// and "..".
+func hasName(b []byte) bool {
+	_, count, _ := unix.ParseDirent(b, 1, nil)
+	return count > 0
 }
 
 // readlinkat reads a symlink's target relative to dirfd.

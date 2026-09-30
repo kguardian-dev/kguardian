@@ -17,6 +17,10 @@ var systemDirs = []string{"etc", "lib", "lib64", "lib32", "usr", "bin", "sbin", 
 
 var errStop = errors.New("stop walking")
 
+// maxNamesPerDir caps the names read from one directory. Past it the rest
+// of the directory is skipped and the scan is partial (Stats.FileBudget).
+var maxNamesPerDir = 1 << 20
+
 // beforeOpenDir, when set (tests only), runs between the stat of a
 // subdirectory and its open: the window a racing rename or symlink swap
 // would use.
@@ -77,7 +81,8 @@ func (ix *indexer) metadata(p string, st *unix.Statx_t, t stereofile.Type, link,
 	}
 }
 
-// budget counts one entry against MaxFiles.
+// budget counts one directory entry (of any kind, indexed or not)
+// against MaxFiles.
 func (ix *indexer) budget() error {
 	ix.count++
 	if max := ix.r.opts.MaxFiles; max > 0 && ix.count > max {
@@ -114,7 +119,16 @@ func (ix *indexer) orderNames(names []string, top bool) {
 // walkDir indexes the directory open at fd (which it closes).
 func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 	r := ix.r
-	names, err := readDirNames(fd)
+	// Read one name more than the file budget allows, so an overrun is
+	// seen by budget() below, and never more than maxNamesPerDir.
+	limit := maxNamesPerDir
+	if m := r.opts.MaxFiles; m > 0 {
+		limit = min(limit, max(m-ix.count+1, 1))
+	}
+	names, truncated, err := readDirNames(fd, limit)
+	if truncated && len(names) >= maxNamesPerDir {
+		r.Stats.FileBudget.Store(true)
+	}
 	if err != nil {
 		_ = unix.Close(fd)
 		if isAccessErr(err) {
@@ -135,6 +149,12 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 	}
 	var subs []sub
 	for _, name := range names {
+		// Every entry costs budget, whatever it turns out to be: a tree of
+		// FIFOs or excluded names must not be free to walk.
+		if err := ix.budget(); err != nil {
+			_ = unix.Close(fd)
+			return err
+		}
 		p := path.Join(dirPath, name)
 		if r.excluded(p) {
 			r.Stats.MountSkipped.Add(1)
@@ -153,10 +173,6 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 		}
 		switch st.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			if err := ix.budget(); err != nil {
-				_ = unix.Close(fd)
-				return err
-			}
 			ref, err := ix.tree.AddDir(stereofile.Path(p))
 			if err != nil {
 				continue
@@ -172,10 +188,6 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 			if r.late(&st) {
 				r.drop(p)
 				continue
-			}
-			if err := ix.budget(); err != nil {
-				_ = unix.Close(fd)
-				return err
 			}
 			mime := ""
 			if !r.opts.SniffExecutablesOnly || looksExecutable(name, uint32(st.Mode)) {
@@ -198,10 +210,6 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 					r.Stats.EACCES.Add(1)
 				}
 				continue
-			}
-			if err := ix.budget(); err != nil {
-				_ = unix.Close(fd)
-				return err
 			}
 			link := linkTarget(dirPath, target)
 			ref, err := ix.tree.AddSymLink(stereofile.Path(p), stereofile.Path(link))

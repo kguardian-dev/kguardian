@@ -52,15 +52,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 	}
 
 	osOnly := o.Profile == protocol.ProfileOSOnly
-	root, err := rootfs.Open(fd, rootfs.Options{
-		Submounts:            o.Submounts,
-		CtimeCutoffNanos:     o.ContainerStartNanos,
-		MaxFiles:             int(o.Budgets.MaxFiles),
-		MaxDepth:             int(o.Budgets.MaxDepth),
-		StopAtBudget:         osOnly,
-		SystemFirst:          osOnly,
-		SniffExecutablesOnly: osOnly,
-	})
+	root, err := rootfs.Open(fd, RootOptions(o.Profile, o.Budgets, o.Submounts, o.ContainerStartNanos))
 	if err != nil {
 		_ = unix.Close(fd)
 		switch {
@@ -136,14 +128,55 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 		if name == "" {
 			name = d.PrettyName
 		}
-		resp.OS = &protocol.OS{Family: d.ID, Name: name}
+		// The broker keeps os family/name up to LEN_SHORT: send nothing
+		// rather than something it would cut.
+		if validField(d.ID, protocol.MaxOSLen) && validField(name, protocol.MaxOSLen) {
+			resp.OS = &protocol.OS{Family: d.ID, Name: name}
+		}
 	}
 	if pkgs == 0 {
 		fillStats(resp, root)
-		if resp.Stats.EACCES > 0 {
+		// With CAP_DAC_READ_SEARCH (model (i)) only an LSM can refuse a
+		// read, so unreadable entries mean lsm_denied. Without it (model
+		// (ii)) they are ordinary DAC refusals: the scan is merely
+		// incomplete, reported below as a partial no_packages_found, which
+		// the Controller retries.
+		if resp.Stats.EACCES > 0 && o.CapsModel == "i" {
 			return fail(protocol.ReasonLSMDenied, fmt.Sprintf("no packages found and %d entries unreadable", resp.Stats.EACCES))
 		}
-		return fail(protocol.ReasonNoPackagesFound, "the root was readable but contained no packages")
+		// Terminal only for a genuinely clean scan: the Controller treats
+		// no_packages_found as terminal only with completeness "full" (or
+		// empty) and no partial reasons (PROTOCOL.md §4.4). Anything that
+		// could have hidden a package says so here.
+		r := fail(protocol.ReasonNoPackagesFound, "the root was readable but contained no packages")
+		r.Completeness = protocol.CompletenessFull
+		if resp.Stats.EACCES > 0 {
+			r.AddPartial(protocol.PartialEACCES)
+			r.AddPartial(protocol.PartialNoDACReadSearch)
+		}
+		if resp.Stats.DepthLimited > 0 {
+			r.AddPartial(protocol.PartialDepthLimited)
+		}
+		if resp.Stats.CtimeDropped > 0 {
+			r.AddPartial(protocol.PartialCtimeDropped)
+		}
+		if dropped > 0 {
+			r.AddPartial(protocol.PartialComponentsDropped)
+		}
+		if root.Stats.FileBudget.Load() {
+			r.AddPartial(protocol.PartialFileBudget)
+		}
+		switch {
+		case osOnly:
+			// Language catalogers did not run: zero packages proves nothing.
+			r.Completeness = protocol.CompletenessOSOnly
+		case len(r.PartialReasons) > 0:
+			r.Completeness = protocol.CompletenessPartial
+		}
+		if r.Completeness != protocol.CompletenessFull {
+			r.Message = "no packages found, but the scan was not complete"
+		}
+		return r
 	}
 
 	resp.Status, resp.Reason = protocol.StatusOK, ""
@@ -216,6 +249,21 @@ func IsNoSpace(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "no space left on device") || strings.Contains(s, "file too large") ||
 		strings.Contains(s, "disk quota exceeded") || strings.Contains(s, io.ErrShortWrite.Error())
+}
+
+// RootOptions is how a profile opens the root: shared by production scans
+// and the differential test, so the test exercises exactly what runs.
+func RootOptions(profile string, b protocol.Budgets, submounts []string, containerStartNanos int64) rootfs.Options {
+	osOnly := profile == protocol.ProfileOSOnly
+	return rootfs.Options{
+		Submounts:            submounts,
+		CtimeCutoffNanos:     containerStartNanos,
+		MaxFiles:             int(b.MaxFiles),
+		MaxDepth:             int(b.MaxDepth),
+		StopAtBudget:         osOnly,
+		SystemFirst:          osOnly,
+		SniffExecutablesOnly: osOnly,
+	}
 }
 
 // Components maps the SBOM (sorted, OS entry first) and counts packages
