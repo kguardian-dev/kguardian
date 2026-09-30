@@ -471,6 +471,16 @@ func TestInterpretedRules(t *testing.T) {
 		{"/etc/skel/.bash_logout", 0o644, true},
 		{"/etc/zsh/zshrc.zshrc", 0o644, true},
 		{"/root/.profile", 0o644, true},
+		{"/etc/zsh/zshrc", 0o644, true}, {"/etc/zsh/zprofile", 0o644, true}, {"/etc/zsh/zshenv", 0o644, true},
+		{"/etc/zsh/zlogin", 0o644, true}, {"/etc/zsh/zlogout", 0o644, true},
+		{"/etc/bash_completion", 0o644, true},
+		{"/etc/bash_completion.d/git-prompt", 0o644, true},
+		{"/etc/X11/Xsession.d/90x11-common_ssh-agent", 0o644, true},
+		{"/etc/csh.cshrc", 0o644, true}, {"/etc/csh.login", 0o644, true},
+		{"/etc/default/locale", 0o644, true},
+		{"/etc/zsh/newuser.zshrc.recommended", 0o644, false}, // not sourced
+		{"/usr/local/libexec/foo/helper-lib", 0o644, true},
+		{"/usr/local/libexecx/foo", 0o644, false},
 		{"/etc/hostname", 0o644, false},
 	} {
 		if got := Interpreted(c.path, c.mode); got != c.want {

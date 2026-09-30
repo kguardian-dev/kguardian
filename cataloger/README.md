@@ -220,9 +220,11 @@ contents, digests, or data files. Each package also carries:
   before any trimming (PROTOCOL.md §4.3 has the full rule): a file with an
   interpreter, bytecode or foreign-runtime extension (polkit `.rules` and
   Guile `.go` only under their own directories), a shell start-up snippet
-  under `/etc` (`/etc/profile`, `profile.d`, `bash.bashrc`, `/etc/skel`
-  dotfiles), or a non-executable, non-`*.so*` file under a lib or share
-  directory that is not known documentation, packaging metadata, data,
+  under `/etc` (`/etc/profile`, `profile.d`, `bash.bashrc`,
+  `bash_completion` and `bash_completion.d`, the `/etc/zsh` and csh
+  start-up files, `X11/Xsession.d`, `/etc/default`, `/etc/skel`
+  dotfiles), or a non-executable, non-`*.so*` file under a lib, libexec
+  (`/usr/libexec`, `/usr/local/libexec`) or share directory that is not known documentation, packaging metadata, data,
   host configuration, gconv configuration or a build-time file. The
   exclusions name known data subtrees, never whole trees that can also
   hold scripts. So libc6 and libssl3 (whose only such files are lintian

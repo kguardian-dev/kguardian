@@ -2,6 +2,7 @@ package scan
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -33,13 +34,29 @@ var interpretedExts = map[string]bool{
 // Go source): polkit's JavaScript rules, Guile's compiled objects.
 var scopedInterpreted = map[string]string{".rules": "polkit-1", ".go": "guile"}
 
+// shellSnippetFiles and shellSnippetDirs: what a shell (or an X session,
+// or an init script sourcing /etc/default) sources at login or start-up.
+var (
+	shellSnippetFiles = []string{
+		"/etc/profile", "/etc/bash.bashrc", "/etc/bash_completion",
+		"/etc/zsh/zshrc", "/etc/zsh/zprofile", "/etc/zsh/zshenv", "/etc/zsh/zlogin", "/etc/zsh/zlogout",
+		"/etc/csh.cshrc", "/etc/csh.login",
+	}
+	shellSnippetDirs = []string{"/etc/profile.d", "/etc/bash_completion.d", "/etc/X11/Xsession.d", "/etc/default"}
+)
+
 // shellSnippet: files a shell sources at login or start-up.
 func shellSnippet(p string) bool {
 	base := path.Base(p)
-	switch {
-	case p == "/etc/profile", p == "/etc/bash.bashrc", under(p, "/etc/profile.d") && p != "/etc/profile.d":
+	if slices.Contains(shellSnippetFiles, p) {
 		return true
-	case path.Dir(p) == "/etc/skel" && strings.HasPrefix(base, "."):
+	}
+	for _, d := range shellSnippetDirs {
+		if under(p, d) && p != d {
+			return true
+		}
+	}
+	if path.Dir(p) == "/etc/skel" && strings.HasPrefix(base, ".") {
 		return true
 	}
 	return strings.HasSuffix(base, ".bashrc") || strings.HasSuffix(base, ".profile") || strings.HasSuffix(base, ".zshrc")
@@ -54,7 +71,7 @@ var buildTimeExts = map[string]bool{".a": true, ".la": true, ".pc": true, ".h": 
 var (
 	libRoots     = []string{"/lib", "/lib64", "/lib32", "/usr/lib", "/usr/lib64", "/usr/lib32", "/usr/libx32", "/usr/local/lib"}
 	shareRoots   = []string{"/usr/share", "/usr/local/share"}
-	loadableDirs = append(append([]string{"/usr/libexec"}, libRoots...), shareRoots...)
+	loadableDirs = append(append([]string{"/usr/libexec", "/usr/local/libexec"}, libRoots...), shareRoots...)
 )
 
 // shareNotCode: subtrees of a share root that are documentation,
