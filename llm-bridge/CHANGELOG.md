@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.13.0...llm-bridge/v1.13.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **controller:** trim runtime images of packages that only carry CVEs ([#1892](https://github.com/kguardian-dev/kguardian/issues/1892)) ([c637532](https://github.com/kguardian-dev/kguardian/commit/c6375324637b2dfa5ac3734153c0779774292c2d))
+* **llm-bridge:** update vulnerable npm dependencies and restrict the default CORS origin ([#1885](https://github.com/kguardian-dev/kguardian/issues/1885)) ([b7a879e](https://github.com/kguardian-dev/kguardian/commit/b7a879e3880298a02a8b306ad5d93e602126ce90))
+
 ## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.5...llm-bridge/v1.13.0) (2026-09-30)
 
 
