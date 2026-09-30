@@ -66,6 +66,13 @@ func TestDifferential(t *testing.T) {
 				if len(so.Packages) == 0 && profile == protocol.ProfileFull {
 					t.Errorf("no packages: the fixture is not exercising anything")
 				}
+				want, ok := Sentinels[name][profile]
+				if !ok {
+					t.Errorf("fixture %s has no sentinel packages for %s: add them to difftest.Sentinels", name, profile)
+				}
+				for _, m := range MissingSentinels(o, want) {
+					t.Errorf("sentinel missing: %s", m)
+				}
 				d := Diff(so, ss, nil)
 				for i, l := range d {
 					if i == 50 {

@@ -85,10 +85,12 @@ func Summarise(s *sbom.SBOM) Summary {
 	return out
 }
 
-// Ours catalogs dir through rootfs (opened as an fd, as in production).
-// submounts are treated as mount points the resolver must not enter.
+// Ours catalogs dir through rootfs (opened as an fd, as in production),
+// with the root options production uses for the profile and the default
+// budgets (scan.RootOptions). submounts are treated as mount points the
+// resolver must not enter.
 func Ours(ctx context.Context, dir, profile string, submounts ...string) (*sbom.SBOM, error) {
-	root, err := rootfs.OpenPath(dir, rootfs.Options{MaxDepth: 4096, Submounts: submounts})
+	root, err := rootfs.OpenPath(dir, scan.RootOptions(profile, protocol.Budgets{}.Effective(), submounts, 0))
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +108,49 @@ func Stock(ctx context.Context, dir, profile string) (*sbom.SBOM, error) {
 	}
 	defer func() { _ = src.Close() }()
 	return syft.CreateSBOM(ctx, src, scan.SyftConfig(profile, "difftest"))
+}
+
+// Sentinel is a package a fixture must yield: it proves the fixture still
+// exercises the cataloger it is there for (an empty or broken fixture
+// would otherwise compare equal and pass).
+type Sentinel struct {
+	Type    string
+	Name    string // "" means any package of Type
+	Version string // "" means any version
+	Min     int    // at least this many matches
+}
+
+// Sentinels per fixture and profile. The os_only profile runs only the
+// OS database and binary catalogers.
+var Sentinels = map[string]map[string][]Sentinel{
+	"alpine":            {protocol.ProfileFull: {{Type: "apk", Min: 10}}, protocol.ProfileOSOnly: {{Type: "apk", Min: 10}}},
+	"debian":            {protocol.ProfileFull: {{Type: "deb", Min: 50}}, protocol.ProfileOSOnly: {{Type: "deb", Min: 50}}},
+	"ubi-minimal":       {protocol.ProfileFull: {{Type: "rpm", Min: 50}}, protocol.ProfileOSOnly: {{Type: "rpm", Min: 50}}},
+	"distroless":        {protocol.ProfileFull: {{Type: "deb", Min: 3}}, protocol.ProfileOSOnly: {{Type: "deb", Min: 3}}},
+	"static-go":         {protocol.ProfileFull: {{Type: "go-module", Name: "golang.org/x/text", Version: "v0.30.0", Min: 1}}, protocol.ProfileOSOnly: {{Type: "go-module", Name: "golang.org/x/text", Min: 1}}},
+	"rust-auditable":    {protocol.ProfileFull: {{Type: "rust-crate", Name: "itoa", Min: 1}, {Type: "deb", Min: 3}}, protocol.ProfileOSOnly: {{Type: "rust-crate", Name: "itoa", Min: 1}}},
+	"spring-boot":       {protocol.ProfileFull: {{Type: "java-archive", Name: "log4j-core", Version: "2.14.1", Min: 1}, {Type: "java-archive", Name: "spring-core", Min: 1}, {Type: "apk", Min: 10}}, protocol.ProfileOSOnly: {{Type: "apk", Min: 10}}},
+	"python":            {protocol.ProfileFull: {{Type: "python", Min: 1}, {Type: "deb", Min: 50}}, protocol.ProfileOSOnly: {{Type: "deb", Min: 50}}},
+	"node":              {protocol.ProfileFull: {{Type: "npm", Min: 100}, {Type: "apk", Min: 10}}, protocol.ProfileOSOnly: {{Type: "apk", Min: 10}}},
+	"symlinked-apk-db":  {protocol.ProfileFull: {{Type: "apk", Min: 10}}, protocol.ProfileOSOnly: {{Type: "apk", Min: 10}}},
+	"symlinked-dpkg-db": {protocol.ProfileFull: {{Type: "deb", Min: 50}}, protocol.ProfileOSOnly: {{Type: "deb", Min: 50}}},
+}
+
+// MissingSentinels lists the sentinels s does not satisfy.
+func MissingSentinels(s *sbom.SBOM, want []Sentinel) []string {
+	var missing []string
+	for _, w := range want {
+		n := 0
+		for _, p := range s.Artifacts.Packages.Sorted() {
+			if string(p.Type) == w.Type && (w.Name == "" || p.Name == w.Name) && (w.Version == "" || p.Version == w.Version) {
+				n++
+			}
+		}
+		if n < w.Min {
+			missing = append(missing, fmt.Sprintf("%s %s@%s: %d, want at least %d", w.Type, w.Name, w.Version, n, w.Min))
+		}
+	}
+	return missing
 }
 
 // Diff reports every difference between two summaries; excluded paths

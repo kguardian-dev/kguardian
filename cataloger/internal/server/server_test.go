@@ -372,18 +372,34 @@ func TestTempSpaceExhaustedRetriesOSOnly(t *testing.T) {
 		t.Fatalf("%s/%s completeness %s retry %q attempts %d: %s %v %+v", resp.Status, resp.Reason, resp.Completeness,
 			resp.RetryReason, resp.Stats.Attempts, resp.Message, resp.PartialReasons, resp.Components)
 	}
-	// Control: with room, the nested jar is found in one attempt.
-	e2 := newServer(t, nil)
-	resp, err = e2.controller(t, req("room"), rootFD(t, root))
+}
+
+// A Spring Boot layout fat jar end to end through the real sandboxed
+// child (hardening, seccomp, capped temp dir): the nested jar must be
+// unpacked in the child's temp dir and catalogued, in one attempt. This is
+// the case that decided resolver (a) over chroot.
+func TestFatJarThroughTheSandboxedChild(t *testing.T) {
+	root := alpineRoot(t, 2)
+	nestedJar(t, filepath.Join(root, "app/app.jar"))
+	e := newServer(t, nil)
+	resp, err := e.controller(t, req("fatjar"), rootFD(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, c := range resp.Components {
-		found = found || (c.Name == "big" && c.Version == "1.2.3")
+	var nested *protocol.Component
+	for i, c := range resp.Components {
+		if c.Name == "big" && c.Version == "1.2.3" {
+			nested = &resp.Components[i]
+		}
 	}
-	if !found || resp.Stats.Attempts != 1 {
-		t.Errorf("nested jar not catalogued with enough temp space: %+v", resp.Components)
+	if resp.Status != protocol.StatusOK || nested == nil || resp.Stats.Attempts != 1 {
+		t.Fatalf("%s/%s attempts %d: nested jar not catalogued: %+v", resp.Status, resp.Reason, resp.Stats.Attempts, resp.Components)
+	}
+	if nested.Type != "java-archive" || nested.Class != "lang-pkgs" || !nested.InterpretedContent {
+		t.Errorf("nested jar component %+v", nested)
+	}
+	if !strings.HasPrefix(nested.PURL, "pkg:maven/org.example/big@1.2.3") {
+		t.Errorf("purl %q", nested.PURL)
 	}
 }
 
