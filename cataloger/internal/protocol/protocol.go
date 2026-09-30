@@ -53,6 +53,9 @@ const (
 	ReasonBadRequest          = "bad_request"
 	ReasonUnsupportedProtocol = "unsupported_protocol"
 	ReasonOutputTooLarge      = "output_too_large"
+	// ReasonWorkerUnavailable: the worker started but its environment
+	// does not let it scan (it answers pings with this and refuses scans).
+	ReasonWorkerUnavailable = "worker_unavailable"
 
 	// ReasonTooManyFiles is only ever a retry_reason: the os_only retry
 	// indexes up to the budget instead of failing.

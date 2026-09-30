@@ -4,7 +4,6 @@
 package sandbox
 
 import (
-	"errors"
 	"fmt"
 	"unsafe"
 
@@ -152,12 +151,19 @@ func FaultFilter(faults map[uint32]unix.Errno) []unix.SockFilter {
 	return append(p, stmt(retK, retAllow))
 }
 
-// SelfCheckSeccomp confirms the filter is live: unshare(0) is a no-op the
-// kernel allows, so only the filter can make it fail with EPERM.
+// SelfCheckSeccomp confirms the worker's own filter is live, with calls
+// only that filter refuses. (unshare would not do: containerd's
+// RuntimeDefault profile already denies it without CAP_SYS_ADMIN, so it
+// would pass with no worker filter at all.) socket(AF_UNIX) is allowed by
+// RuntimeDefault and by the kernel; on amd64, so is fork. If a probe
+// unexpectedly succeeds, its result is cleaned up before reporting.
 func SelfCheckSeccomp() error {
-	_, _, errno := unix.Syscall(unix.SYS_UNSHARE, 0, 0, 0)
+	fd, _, errno := unix.RawSyscall(unix.SYS_SOCKET, unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if errno != unix.EPERM {
-		return errors.New("seccomp filter is not active")
+		if errno == 0 {
+			_ = unix.Close(int(fd))
+		}
+		return fmt.Errorf("seccomp filter is not active: socket(AF_UNIX) returned %v", errno)
 	}
-	return nil
+	return selfCheckFork()
 }

@@ -97,6 +97,32 @@ Both models are exercised by `hack/privileged-tests.sh` in containers set
 up as above (uid 0, `--cap-drop ALL`, the capabilities under test,
 no-new-privileges, Docker's default seccomp profile).
 
+## When the environment is wrong: degraded, not crashing
+
+The parent exits only for a broken configuration (an environment
+variable it cannot parse: a chart bug). Environment problems found at
+startup leave it running **degraded** instead of crash-looping, which
+would take the Controller's whole pod NotReady:
+
+- capabilities it cannot limit to the three it needs (it then starts no
+  child at all), or a capability probe that fails (no usable model);
+- descriptors it cannot mark close-on-exec;
+- a socket it cannot create (a directory owned by another uid, a regular
+  file at the path): it retries every 30 s.
+
+It logs the cause at once and warns again hourly. While degraded it
+answers every request, ping included, with `status: failed`, `reason:
+worker_unavailable` (PROTOCOL.md §3.3) and refuses scans; the Controller
+then reports the node as `worker_unavailable` and claims nothing.
+
+`kguardian-cataloger ping` (the chart's liveness probe) exits 0 as long
+as the process is alive, degraded or not, so the kubelet does not restart
+it into the same error: it accepts a `worker_unavailable` answer, and
+without a socket it accepts the heartbeat file a degraded parent keeps
+fresh in `CATALOG_TMP_DIR` (`kguardian-cataloger.degraded`, holding the
+cause). It exits 1 only when nothing answers and no fresh heartbeat
+exists.
+
 ## The scan child's sandbox
 
 In this order, before the first byte of the container is read:
@@ -116,8 +142,10 @@ In this order, before the first byte of the container is read:
    process of the scan uid can read its descriptors or memory).
 3. Verify uid and capabilities (above).
 4. `no_new_privs` and a pure-Go seccomp filter on every thread
-   (`SECCOMP_FILTER_FLAG_TSYNC`), then prove it is live (`unshare(0)` must
-   fail). Denied with `EPERM`: `open_by_handle_at`, `name_to_handle_at`,
+   (`SECCOMP_FILTER_FLAG_TSYNC`), then prove it is live with calls only
+   this filter refuses (`socket(AF_UNIX)` and, on amd64, `fork` must fail
+   with `EPERM`; `unshare` would not do, since containerd's RuntimeDefault
+   profile already denies it). A failed check fails the scan. Denied with `EPERM`: `open_by_handle_at`, `name_to_handle_at`,
    `ptrace`, `process_vm_readv`/`writev`, `pidfd_getfd`, `kcmp`, `mount`,
    `umount2`, `unshare`, `setns`, `chroot`, `pivot_root`, the new mount API,
    `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `add_key`,

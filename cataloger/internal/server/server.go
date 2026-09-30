@@ -60,14 +60,52 @@ type Server struct {
 	model Model
 	busy  atomic.Bool
 	log   *logrus.Logger
+	// unavailable is why this worker cannot scan (an environment problem
+	// found at startup), or "" when it can. See Unavailable.
+	unavailable string
 }
 
-// New probes the capability model and returns a server.
+// degradedWarnEvery is how often a degraded worker repeats its warning.
+const degradedWarnEvery = time.Hour
+
+func (c *Config) defaults() {
+	if c.ChildPath == "" {
+		c.ChildPath = "/proc/self/exe"
+	}
+	if c.Log == nil {
+		c.Log = logrus.New()
+		c.Log.SetOutput(io.Discard)
+	}
+	if c.TmpDir == "" {
+		c.TmpDir = os.TempDir()
+	}
+}
+
+// Unavailable returns a degraded server: it stays up and answers every
+// request, ping included, with status failed and reason
+// worker_unavailable (the Controller then reports the node as
+// worker_unavailable and claims nothing), instead of exiting into a crash
+// loop that would take the Controller's pod NotReady. why is logged now
+// and warned again hourly.
+func Unavailable(cfg Config, why error) *Server {
+	cfg.defaults()
+	s := &Server{cfg: cfg, log: cfg.Log, unavailable: why.Error()}
+	s.log.WithError(why).Error("worker unavailable: serving pings with worker_unavailable and refusing scans")
+	return s
+}
+
+// Why reports why the worker is unavailable ("" when it is not).
+func (s *Server) Why() string { return s.unavailable }
+
+// New probes the capability model and returns a server. An environment
+// problem (inherited descriptors that cannot be marked close-on-exec, a
+// capability probe that fails) yields a degraded server (Unavailable)
+// rather than an error: the worker stays up and says why.
 func New(ctx context.Context, cfg Config) (*Server, error) {
 	// Before any child is started: nothing this process inherited may
 	// reach one (children get stdio, their root fd and socketpair only).
 	if err := sandbox.CloexecInherited(); err != nil {
-		return nil, err
+		return Unavailable(cfg, err), nil
 	}
 	if cfg.ChildPath == "" {
 		cfg.ChildPath = "/proc/self/exe"
@@ -82,11 +120,25 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	s := &Server{cfg: cfg, log: cfg.Log}
 	m, err := s.probeModel(ctx)
 	if err != nil {
-		return nil, err
+		return Unavailable(cfg, fmt.Errorf("capability probe: %w", err)), nil
 	}
 	s.model = m
 	s.log.WithFields(logrus.Fields{"model": m.Name, "setuid": m.SetUID, "ambient": m.Ambient}).Info("capability model: " + m.Why)
 	return s, nil
+}
+
+// warnEvery logs msg at warning level every interval until ctx ends.
+func warnEvery(ctx context.Context, log *logrus.Logger, interval time.Duration, msg string) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			log.Warn(msg)
+		}
+	}
 }
 
 // Model returns the capability model in use.
@@ -163,6 +215,9 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 		<-ctx.Done()
 		_ = l.Close()
 	}()
+	if s.unavailable != "" {
+		go warnEvery(ctx, s.log, degradedWarnEvery, "worker still unavailable: "+s.unavailable)
+	}
 	for {
 		c, err := l.AcceptUnix()
 		if err != nil {
@@ -239,6 +294,14 @@ func (s *Server) Handle(ctx context.Context, c *net.UnixConn) {
 			reason = re.Reason
 		}
 		s.reply(c, protocol.Failed(req, reason, err.Error()))
+		return
+	}
+	if s.unavailable != "" {
+		resp := protocol.Failed(req, protocol.ReasonWorkerUnavailable, s.unavailable)
+		resp.Scanner = s.scanner()
+		resp.Stats.SyftVersion = scan.SyftVersion()
+		resp.Stats.WorkerVersion = s.cfg.Version
+		s.reply(c, resp)
 		return
 	}
 	if req.Op == protocol.OpPing {

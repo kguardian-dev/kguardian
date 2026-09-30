@@ -23,6 +23,8 @@ func TestMain(m *testing.M) {
 		os.Exit(hardenChild())
 	case "burst":
 		os.Exit(burstChild())
+	case "selfcheck-fooled":
+		os.Exit(selfCheckFooledChild())
 	}
 	os.Exit(m.Run())
 }
@@ -78,6 +80,11 @@ func seccompChild() int {
 	}
 	close(installed)
 	res := map[string]int{}
+	if err := SelfCheckSeccomp(); err != nil {
+		res["self-check"] = 1
+	} else {
+		res["self-check"] = 0
+	}
 	probe := func(name string, e unix.Errno) { res[name] = int(e) }
 	probe("pre-existing thread unshare(0)", <-pre)
 	probe("unshare(0)", sys(unix.SYS_UNSHARE, 0))
@@ -169,7 +176,7 @@ func TestSeccompDenials(t *testing.T) {
 		"socket(AF_PACKET)": eperm, "socketpair(AF_INET)": eperm,
 		"socket(AF_UNIX)": eperm, "socketpair(AF_UNIX)": eperm,
 		"clone(SIGCHLD)": eperm, "setsid": eperm, "clone(THREAD) passes the filter": int(unix.EINVAL),
-		"read file": 0, "no_new_privs": 1,
+		"read file": 0, "no_new_privs": 1, "self-check": 0,
 	} {
 		v, ok := got[name]
 		if !ok {
@@ -339,4 +346,26 @@ func forkProbe(nr uintptr) unix.Errno {
 		_, _, _ = unix.RawSyscall(unix.SYS_EXIT_GROUP, 0, 0, 0)
 	}
 	return e
+}
+
+// selfCheckFooledChild installs only what containerd's RuntimeDefault
+// profile already does for unshare (EPERM) and nothing of the worker's
+// own filter: the self-check must not mistake that for the worker filter.
+func selfCheckFooledChild() int {
+	if err := InstallFilter(FaultFilter(map[uint32]unix.Errno{unix.SYS_UNSHARE: unix.EPERM})); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := SelfCheckSeccomp(); err == nil {
+		fmt.Println("fooled")
+		return 0
+	}
+	fmt.Println("detected")
+	return 0
+}
+
+func TestSelfCheckIsNotFooledByRuntimeDefault(t *testing.T) {
+	if out := strings.TrimSpace(string(reexec(t, "selfcheck-fooled"))); out != "detected" {
+		t.Fatalf("self-check under an unshare-only profile: %q", out)
+	}
 }

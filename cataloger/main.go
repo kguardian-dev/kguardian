@@ -69,7 +69,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	case "clean-tmp":
 		return child.CleanTmp()
 	case "ping":
-		return ping(env(getenv, "CATALOG_SOCKET", defaultSocket), stderr)
+		return ping(env(getenv, "CATALOG_SOCKET", defaultSocket), env(getenv, "CATALOG_TMP_DIR", "/tmp"), stderr)
 	case "request":
 		if len(args) != 2 {
 			_, _ = fmt.Fprint(stderr, usage)
@@ -139,12 +139,18 @@ func loadConfig(getenv func(string) string) (server.Config, error) {
 	return c, nil
 }
 
+// serve runs the worker. Only a broken configuration (an unparseable
+// environment, a chart bug) exits with an error. Environment problems
+// found at startup (capabilities that cannot be dropped, a failing
+// capability probe, a socket that cannot be created) leave the worker up
+// and degraded: logged at once and hourly after, pings answered with
+// worker_unavailable, scans refused, so the Controller reports
+// worker_unavailable instead of its pod going NotReady on a crash loop.
 func serve(getenv func(string) string) error {
 	// Keep only what starting a scan child needs, before anything else.
+	var capsErr error
 	if os.Getuid() == 0 {
-		if err := sandbox.LimitCaps(sandbox.ParentAllowed, sandbox.ChildModelI); err != nil {
-			return fmt.Errorf("drop capabilities: %w", err)
-		}
+		capsErr = sandbox.LimitCaps(sandbox.ParentAllowed, sandbox.ChildModelI)
 	}
 	c, err := loadConfig(getenv)
 	if err != nil {
@@ -164,20 +170,66 @@ func serve(getenv func(string) string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	srv, err := server.New(ctx, c)
-	if err != nil {
+	var srv *server.Server
+	if capsErr != nil {
+		// Never start a child from a parent holding more than it should:
+		// the degraded server refuses every scan.
+		srv = server.Unavailable(c, fmt.Errorf("drop capabilities: %w", capsErr))
+	} else if srv, err = server.New(ctx, c); err != nil {
 		return err
 	}
-	l, err := server.Listen(c.Socket)
-	if err != nil {
-		return err
+	l := listenOrWait(ctx, c, log)
+	if l == nil {
+		return nil // shut down while waiting
 	}
 	return srv.Serve(ctx, l)
 }
 
-func ping(socket string, stderr io.Writer) int {
+// listenOrWait creates the socket, retrying every HeartbeatInterval while
+// it cannot (keeping the heartbeat the liveness probe reads), until ctx
+// ends (nil).
+func listenOrWait(ctx context.Context, c server.Config, log *logrus.Logger) *net.UnixListener {
+	lastWarn := time.Time{}
+	for {
+		l, err := server.Listen(c.Socket)
+		if err == nil {
+			server.RemoveHeartbeat(c.TmpDir)
+			if !lastWarn.IsZero() {
+				log.Info("socket created: worker serving")
+			}
+			return l
+		}
+		why := fmt.Sprintf("cannot create socket %s: %v", c.Socket, err)
+		if lastWarn.IsZero() {
+			log.Error("worker unavailable: " + why + " (retrying; ping stays alive)")
+			lastWarn = time.Now()
+		} else if time.Since(lastWarn) >= time.Hour {
+			log.Warn("worker still unavailable: " + why)
+			lastWarn = time.Now()
+		}
+		if herr := server.WriteHeartbeat(c.TmpDir, why); herr != nil {
+			log.WithError(herr).Warn("heartbeat")
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(server.HeartbeatInterval):
+		}
+	}
+}
+
+// ping is the chart's liveness probe. It exits 0 while the worker process
+// is alive, including when it is degraded (it then answers
+// worker_unavailable, or keeps a heartbeat because it has no socket): a
+// restart would not fix an environment problem, and the Controller sees
+// the degraded state through its own protocol-level ping.
+func ping(socket, tmpDir string, stderr io.Writer) int {
 	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
+		if why, ok := server.HeartbeatFresh(tmpDir, server.HeartbeatMaxAge); ok {
+			_, _ = fmt.Fprintln(stderr, "worker alive but unavailable:", why)
+			return 0
+		}
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -189,11 +241,19 @@ func ping(socket string, stderr io.Writer) int {
 		return 1
 	}
 	resp, err := protocol.ReadResponse(conn, protocol.MaxRequestBytes)
-	if err != nil || resp.Status != protocol.StatusOK {
-		_, _ = fmt.Fprintln(stderr, "ping failed:", err, resp)
+	switch {
+	case err != nil:
+		_, _ = fmt.Fprintln(stderr, "ping failed:", err)
+		return 1
+	case resp.Status == protocol.StatusOK:
+		return 0
+	case resp.Reason == protocol.ReasonWorkerUnavailable:
+		_, _ = fmt.Fprintln(stderr, "worker alive but unavailable:", resp.Message)
+		return 0
+	default:
+		_, _ = fmt.Fprintf(stderr, "ping failed: %s %s\n", resp.Reason, resp.Message)
 		return 1
 	}
-	return 0
 }
 
 // request sends dir to the worker the way the Controller does.

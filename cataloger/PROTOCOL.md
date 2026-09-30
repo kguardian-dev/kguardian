@@ -178,7 +178,14 @@ Unknown request fields are ignored (additive changes need no version bump).
 fd (an fd sent with a ping is closed). The response is `status: ok` with no
 components and `stats` holding `caps_model`, `syft_version` and
 `worker_version`. The Controller uses it to report `worker_unavailable`
-before claiming, and a readiness probe can use it.
+before claiming.
+
+A worker whose environment does not let it scan (capabilities it could
+not drop, a capability probe that failed) stays up **degraded**: it
+answers every request, ping included, with `status: failed`,
+`reason: worker_unavailable` and the cause in `message`, and refuses
+scans (the fd is closed unused). Any ping reply other than `status: ok`
+means the Controller does not claim.
 
 ## 4. Response
 
@@ -339,6 +346,7 @@ Unknown response fields must be ignored by the Controller.
 | `caps_unavailable` | The scan child's capabilities are not what the startup probe established (e.g. `CAP_DAC_READ_SEARCH` missing under model (i), or any other capability present). | per node, non-blocking |
 | `error` | Anything else: a panic, an unexpected child exit, invalid child output. | backoff (`error`) |
 | `busy` | Another scan is running. | retry soon, not a failure |
+| `worker_unavailable` | The worker is degraded (§3.3): up, but its environment does not let it scan. Also the answer to every ping while degraded. | per node, non-blocking |
 | `bad_request` | Malformed frame or JSON, invalid field, fd missing/extra/not a directory. | Controller bug |
 | `unsupported_protocol` | `protocol_version` is not supported. | Controller/worker version skew |
 | `output_too_large` | Even without file paths the response exceeds `max_response_bytes`. | backoff (`error`) |

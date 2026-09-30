@@ -10,3 +10,7 @@ const (
 )
 
 var deniedArch = []uint32{}
+
+// selfCheckFork: arm64 has no fork syscall (a process-creating clone is
+// refused by the filter and covered by its tests).
+func selfCheckFork() error { return nil }
