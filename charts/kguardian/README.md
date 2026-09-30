@@ -493,7 +493,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
 | supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |
 | supplychain.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| supplychain.image.tag | string | `"v0.2.0"` | Supplychain version tag |
+| supplychain.image.tag | string | `"v0.2.1"` | Supplychain version tag |
 | supplychain.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | supplychain.logLevel | string | `"info"` | Log level (panic|fatal|error|warn|info|debug|trace) |
 | supplychain.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator |
