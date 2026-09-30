@@ -25,7 +25,7 @@ for mod in github.com/anchore/syft github.com/anchore/stereoscope; do
     echo "::error::$mod missing from cataloger/go.mod ('$cat_v') or supplychain-matcher/go.mod ('$match_v')"
     status=1
   elif [ "$cat_v" != "$match_v" ]; then
-    echo "::error::$mod differs: cataloger $cat_v, supplychain-matcher (via grype) $match_v. Bump both together (Renovate group 'syft-grype')."
+    echo "::error::$mod differs: cataloger $cat_v, supplychain-matcher (via grype) $match_v. Run cataloger/hack/sync-syft.sh and commit the result (the cataloger follows the matcher; Renovate never bumps its syft alone)."
     status=1
   else
     echo "$mod $cat_v in both modules"

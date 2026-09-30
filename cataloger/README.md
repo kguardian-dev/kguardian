@@ -14,7 +14,7 @@ module is not deployed by the chart yet).
 - [PROTOCOL.md](PROTOCOL.md) is the Controller-worker contract.
 - Syft is pinned to the version Grype resolves in `supplychain-matcher`
   (v1.52.0 today). `hack/check-syft-version.sh` fails CI if the two
-  modules drift; Renovate bumps them together.
+  modules drift (see "Keeping Syft in step with Grype").
 
 ## Boundaries
 
@@ -298,6 +298,30 @@ memory-backed emptyDir on `/tmp` with `sizeLimit: CATALOG_TMP_LIMIT`,
 the shared socket emptyDir on
 `/run/kguardian/catalog`, and an empty emptyDir over
 `/var/run/secrets/kubernetes.io/serviceaccount`.
+
+## Keeping Syft in step with Grype
+
+The cataloger's SBOMs are matched by Grype, so the cataloger must use the
+Syft (and stereoscope) that Grype resolves in `supplychain-matcher`. Syft
+usually releases ahead of Grype, so the cataloger never takes a Syft bump
+on its own:
+
+1. Renovate ignores `syft` and `stereoscope` in `cataloger/go.mod`, and
+   bumps Grype in `supplychain-matcher` (group `syft-grype`, manual
+   review), which moves the matcher's Syft.
+2. That PR fails the cataloger's lock check
+   (`hack/check-syft-version.sh`) until someone runs
+   `cataloger/hack/sync-syft.sh` on the branch and commits the result: it
+   sets the cataloger's `syft` and `stereoscope` to the matcher's versions
+   and tidies.
+3. The sync changes `cataloger/go.mod`, which runs the differential test
+   (`cataloger-difftest.yaml`) against the new Syft.
+
+The differential test is path-filtered (it only runs when a Syft, Grype or
+resolver change could move its result), so it cannot be a required status
+check: a required check that never runs would block every other PR.
+Reviewers of a Syft or Grype bump must see it green before merging; the
+always-running `test-cataloger` job carries the lock check.
 
 ## Commands
 
