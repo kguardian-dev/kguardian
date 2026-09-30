@@ -314,7 +314,9 @@ ready to render; sizes in bytes. When enabled, a configuration that could
 not work or is unsafe fails here, at template time.
 
 Keep the defaults below in step with values.yaml `nodeCatalog`
-(test/helm-values-compat.sh section 17 renders both and compares).
+(test/helm-values-compat.sh section 17 renders both and compares). The
+cataloger tag is bumped by Renovate together with values.yaml's (the
+customManager in .github/renovate.json5 matches this exact line).
 */}}
 {{- define "kguardian.nodeCatalog" -}}
 {{- $u := .Values.nodeCatalog | default dict -}}
@@ -377,7 +379,7 @@ Keep the defaults below in step with values.yaml `nodeCatalog`
 {{- $limit := include "kguardian.quantityBytes" (dict "q" . "name" "nodeCatalog.worker.resources.limits.memory") | int64 -}}
 {{- $need := add ($mem | int64) ($tmp | int64) 134217728 -}}
 {{- if lt $limit $need -}}
-{{- fail (printf "nodeCatalog.worker.resources.limits.memory (%v) must hold memoryLimit (%v) + tmpLimit (%v) + 128Mi: the memory-backed /tmp counts against the limit, and a cgroup OOM kill takes the whole worker (memory.oom.group) instead of failing one scan. Raise the limit or lower memoryLimit/tmpLimit." . $w.memoryLimit $w.tmpLimit) -}}
+{{- fail (printf "nodeCatalog.worker.resources.limits.memory (%d bytes) must hold memoryLimit (%s bytes) + tmpLimit (%s bytes) + 128Mi, %d bytes in all: the memory-backed /tmp counts against the limit, and a cgroup OOM kill takes the whole worker (memory.oom.group) instead of failing one scan. Raise the limit or lower memoryLimit/tmpLimit." $limit $mem $tmp $need) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

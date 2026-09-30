@@ -560,7 +560,8 @@ nodeCatalog:
     # pod is the Controller's. Lowering it saves that reservation per node
     # but makes the Controller pod an earlier eviction candidate while a
     # large scan runs; raising it to the limit (1Gi) takes it off that list
-    # at the cost of 1Gi per node.
+    # at the cost of 1Gi per node. Override the keys you change; null
+    # restores this default rather than removing the resources.
     resources:
       requests:
         cpu: 50m
@@ -568,7 +569,9 @@ nodeCatalog:
       limits:
         cpu: 500m
         memory: 1Gi
-    # -- SELinux label of the worker. The default lets it read other
+    # -- SELinux label of the worker. Override its keys; setting it to
+    # null restores this default (the chart treats null as unset), and `{}`
+    # removes the label. The default lets it read other
     # containers' files through the handle it is given (the full category
     # range lifts MCS separation only; `container_t` stays confined). Never
     # use `super_t`, `spc_t` or `control_t`. Ignored on nodes without

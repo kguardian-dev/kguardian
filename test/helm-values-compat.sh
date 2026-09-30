@@ -1186,9 +1186,8 @@ render "node-catalog-custom" "${NC_ON[@]}" --set broker.auth.keys.catalog=node-s
 # block and no broker.auth.keys.catalog, then `--set nodeCatalog.enabled=true`.
 # Simulated with a copy of the chart whose values.yaml has both removed.
 # Every key must fall back to the value values.yaml ships, so the workloads
-# match a normal install byte for byte. The cataloger image line is left out
-# of the comparison: Renovate bumps the tag in values.yaml only, and the
-# built-in fallback in _helpers.tpl may trail it by a release.
+# match a normal install byte for byte, the cataloger image included (Renovate
+# bumps its tag in values.yaml and _helpers.tpl in one PR; checked below).
 PRE="$(mktemp -d)"
 trap 'rm -rf "$PRE"' EXIT
 cp -R "$CHART" "$PRE/kguardian"
@@ -1203,8 +1202,16 @@ nc_workloads() { # nc_workloads <chart>: the Controller and Broker docs, enabled
   out="$(helm template compat "$1" "${NC_ON[@]}" --set database.password=cmp 2>&1)" || { echo "RENDER FAILED: $out"; return; }
   OUT="$out"
   { workload DaemonSet kguardian-controller; workload Deployment kguardian-broker; } | \
-    grep -v 'image: "ghcr.io/kguardian-dev/kguardian/cataloger'
+    cat
 }
+helper_tag="$(sed -nE 's|.*"repository" "ghcr.io/kguardian-dev/kguardian/cataloger" "pullPolicy" "[^"]*" "tag" "([^"]+)".*|\1|p' \
+  "$CHART/templates/_helpers.tpl")"
+values_tag="$(awk '/^nodeCatalog:/ { nc = 1 } nc && /^[a-zA-Z]/ && !/^nodeCatalog:/ { nc = 0 }
+  nc && /repository: ghcr.io\/kguardian-dev\/kguardian\/cataloger/ { img = 1 }
+  nc && img && /^ *tag:/ { gsub(/[" ]|tag:/, ""); print; exit }' "$CHART/values.yaml")"
+if [ -z "$helper_tag" ] || [ "$helper_tag" != "$values_tag" ]; then
+  echo "FAIL [node-catalog-tag]: _helpers.tpl cataloger tag '$helper_tag' != values.yaml '$values_tag'"; fail=1
+fi
 want="$(nc_workloads "$CHART")"
 got="$(nc_workloads "$PRE/kguardian")"
 grep -q 'RENDER FAILED' <<<"$got" && { echo "FAIL [node-catalog-reuse-values]: ${got:0:300}"; fail=1; }

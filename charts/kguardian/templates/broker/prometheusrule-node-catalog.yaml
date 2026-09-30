@@ -72,18 +72,26 @@ spec:
               timeout: raise nodeCatalog.scanTimeoutSeconds.
             runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
 
-        # Grants went out but none completed in 6 hours. Keyed on grants
-        # rather than queue_depth: a digest no node can take (every node
-        # skipped it for a per-node reason) stays in the queue without
-        # anything being wrong, while a grant means a Controller took the
-        # work. A grant ends in cataloged_total (full, partial, os_only,
-        # no_packages_found, superseded), failed_total or skipped_total;
-        # only the first is progress. Silenced while the kill switch is off
-        # on every Broker replica (grants_enabled 0), when no grants are
-        # expected. Both counters are per replica, so they are summed.
+        # Grants that a node actually worked on, but none completed in 6
+        # hours. A grant ends in cataloged_total (full, partial, os_only,
+        # no_packages_found, superseded), failed_total, or skipped_total:
+        # a node that cannot catalog (sandboxed, lazy_snapshotter,
+        # unsupported_rootfs, kernel_unsupported, lsm_denied, ...) is
+        # granted first and then reports the skip. So skips are subtracted:
+        # a cluster whose node pools cannot catalog grants and skips all
+        # day with nothing broken. What remains are grants that ended in
+        # a scan (or are still running), and none of them completing is a
+        # stall. retry_cap skips follow a failed grant rather than end one,
+        # so they make the subtraction conservative (it can only
+        # under-count). Silenced while the kill switch is off on every
+        # replica (grants_enabled 0). Counters are per replica, so summed.
         - alert: KguardianNodeCatalogStalled
           expr: |
-            sum(increase(kguardian_node_catalog_granted_total[6h])) > 0
+            (
+              sum(increase(kguardian_node_catalog_granted_total[6h]))
+                -
+              (sum(increase(kguardian_node_catalog_skipped_total[6h])) or on () vector(0))
+            ) > 0
             and on ()
             (sum(increase(kguardian_node_catalog_cataloged_total[6h])) or on () vector(0)) == 0
             unless on ()
@@ -94,9 +102,35 @@ spec:
           annotations:
             summary: "Node catalog granted work but completed none in 6 hours"
             description: >-
-              {{`{{ $value | humanize }}`}} node catalog grants in the last 6 hours and no
-              completed SBOM. Check kguardian_node_catalog_failed_total and
+              {{`{{ $value | humanize }}`}} node catalog grants in the last 6 hours that no
+              node skipped, and no completed SBOM. Check kguardian_node_catalog_failed_total and
               skipped_total by reason, the cataloger container's logs, and
+              `GET /catalog/status?node=<name>`.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+
+        # Work is queued and no grant was made for over a day. Skipped
+        # nodes are retried after 24 h, so even a queue that only nodes
+        # which cannot catalog keep skipping produces a grant within 25 h;
+        # none at all means no Controller is claiming: the Broker refuses
+        # its epoch (422, NODE_CATALOG_MAX_EPOCH), its token is missing,
+        # or cataloging is off on the Controllers. queue_depth is reported
+        # by the leader only. Silenced while the kill switch is off.
+        - alert: KguardianNodeCatalogNotClaiming
+          expr: |
+            (sum(increase(kguardian_node_catalog_granted_total[25h])) or on () vector(0)) == 0
+            and on ()
+            max(kguardian_node_catalog_queue_depth) > 0
+            unless on ()
+            max(kguardian_node_catalog_grants_enabled) == 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node catalog work is queued but no node has claimed any in 25 hours"
+            description: >-
+              No node catalog grant in 25 hours while digests are queued. Check the
+              Controllers' logs for a refused epoch (nodeCatalog.epoch above
+              nodeCatalog.maxEpoch) or a missing BROKER_TOKEN_CATALOG, and
               `GET /catalog/status?node=<name>`.
             runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
 

@@ -31,8 +31,7 @@ helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian -n kguardian
 Upgrade with `-f <your values file>` or `--reset-then-reuse-values`
 (Helm 3.14 and later). Plain `--reuse-values` renders the new chart over the
 previous chart's defaults, so none of the `nodeCatalog` defaults below are
-in the values; the chart then falls back to the same defaults built in, but
-the cataloger image tag may trail the one in `values.yaml` by a release.
+in the values; the chart then falls back to the same defaults, built in.
 With `--set`, use `--set-string` for a value that looks like a number but
 must stay a string (an image tag such as `1.2`, a Secret key name such as
 `2026`), or `--set-json` for an object such as `nodeCatalog.worker.appArmorProfile`.
@@ -55,8 +54,8 @@ on the Broker (read scope). With `broker.metrics.prometheusRule.enabled`
 the chart also ships the `kguardian-broker-node-catalog` PrometheusRule:
 token missing, `lsm_denied` skips, scan failures (`timeout`, `oom`,
 `error`) above 20% of grants, grants with no completed SBOM in 6 hours
-(silenced while `grants=false`), and scans deferred by node pressure for 2
-hours.
+that no node skipped (silenced while `grants=false`), queued work with no
+grant for 25 hours, and scans deferred by node pressure for 2 hours.
 
 **Kill switch:** `--set nodeCatalog.grants=false` stops every new grant at
 the Broker (a Broker restart, no Controller restart). Uploads under a live
@@ -82,8 +81,8 @@ lease still complete.
 | `nodeCatalog.worker.image.*` | | `ghcr.io/kguardian-dev/kguardian/cataloger`, tag `v0.1.0` | The sidecar image; `sha` pins a digest. |
 | `nodeCatalog.worker.memoryLimit` | string or int | `640Mi` | Worker `CATALOG_MEMORY_LIMIT`, rendered in bytes. Whole bytes or a whole number of `Ki`, `Mi`, `Gi` or `Ti`. |
 | `nodeCatalog.worker.tmpLimit` | string or int | `192Mi` | Worker `CATALOG_TMP_LIMIT` and the `/tmp` emptyDir `sizeLimit`, in bytes. Same forms. |
-| `nodeCatalog.worker.resources` | object | requests 50m / 512Mi, limits 500m / 1Gi | Sidecar resources (below). |
-| `nodeCatalog.worker.seLinuxOptions` | object | `{type: container_t, level: "s0-s0:c0.c1023"}` | Sidecar SELinux label (below). |
+| `nodeCatalog.worker.resources` | object | requests 50m / 512Mi, limits 500m / 1Gi | Sidecar resources (below). Override, don't null: `null` restores the default. |
+| `nodeCatalog.worker.seLinuxOptions` | object | `{type: container_t, level: "s0-s0:c0.c1023"}` | Sidecar SELinux label (below). Override, don't null: `null` restores the default and `{}` removes the label. |
 | `nodeCatalog.worker.appArmorProfile` | object | `{}` | Sidecar AppArmor profile (Kubernetes 1.30+). |
 | `nodeCatalog.worker.logLevel` | string | `info` | Worker `LOG_LEVEL`. |
 | `broker.auth.keys.catalog` | string | `catalog` | Secret key holding the catalog token. |
