@@ -29,18 +29,39 @@ export const app = express();
 // example.com "). Same defensive-trim pattern from the controller /
 // evaluator / mcp-server env reads.
 const port = (process.env.PORT?.trim() || "8080");
-const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
 const mcpConfig = mcpConfigFromEnv(process.env);
+
+/**
+ * Browser origins on this machine: http(s) on localhost, 127.0.0.1 or [::1],
+ * any port. That covers the Vite dev server calling the bridge directly and a
+ * browser-based MCP client (the MCP Inspector, say) reaching a port-forwarded
+ * bridge.
+ */
+export const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/;
+
+/**
+ * The CORS `origin` option. ALLOWED_ORIGIN, when set, is used verbatim (an
+ * explicit `*` is still honoured). Unset, only loopback origins are allowed.
+ *
+ * The deployed UI never needs CORS: the browser calls its own origin
+ * (/llm-api) and vite proxies that to the bridge server-side. The old `*`
+ * default instead let any web page a user had open drive a port-forwarded
+ * bridge — spend the provider key on /api/chat and read back cluster
+ * telemetry from the tools or /mcp. Pure, so it is unit-testable.
+ */
+export function corsOriginFromEnv(value: string | undefined): string | RegExp {
+  return value?.trim() || LOOPBACK_ORIGIN;
+}
 
 // Middleware. `cors()` is deliberately first: with the default
 // `allowedHeaders` unset it reflects the browser's
 // Access-Control-Request-Headers back, which is what lets a browser-based
 // MCP client send `mcp-protocol-version` (and `authorization`) without the
-// preflight being rejected. Setting ALLOWED_ORIGIN to the UI's origin locks
-// that down and would block MCP clients from any other origin — the endpoint
-// is intended for non-browser clients reached over port-forward, so that is
-// the right default, but it is a real constraint to document.
-app.use(cors({ origin: allowedOrigin }));
+// preflight being rejected. Only allowed origins get CORS headers, so a
+// browser MCP client on another origin needs ALLOWED_ORIGIN set to it; the
+// endpoint is intended for non-browser clients reached over port-forward,
+// which CORS does not affect.
+app.use(cors({ origin: corsOriginFromEnv(process.env.ALLOWED_ORIGIN) }));
 app.use(express.json({ limit: '100kb' }));
 
 // Initialize the in-process assistant. Note: the class is named "McpClient"
