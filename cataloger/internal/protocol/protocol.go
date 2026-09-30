@@ -230,21 +230,24 @@ type OS struct {
 
 // Stats describe the scan (also on failure).
 type Stats struct {
-	Files             int64   `json:"files"`
-	Dirs              int64   `json:"dirs"`
-	Components        int64   `json:"components"`
-	DurationMS        int64   `json:"duration_ms"`
-	SyftVersion       string  `json:"syft_version"`
-	WorkerVersion     string  `json:"worker_version"`
-	EACCES            int64   `json:"eacces"`
-	CtimeDropped      int64   `json:"ctime_dropped"`
-	MountSkipped      int64   `json:"mount_skipped"`
-	DepthLimited      int64   `json:"depth_limited"`
-	ComponentsDropped int64   `json:"components_dropped"`
-	Attempts          int     `json:"attempts"`
-	CapsModel         string  `json:"caps_model"`
-	MaxRSSBytes       int64   `json:"max_rss_bytes,omitempty"`
-	Budgets           Budgets `json:"budgets"`
+	Files             int64  `json:"files"`
+	Dirs              int64  `json:"dirs"`
+	Components        int64  `json:"components"`
+	DurationMS        int64  `json:"duration_ms"`
+	SyftVersion       string `json:"syft_version"`
+	WorkerVersion     string `json:"worker_version"`
+	EACCES            int64  `json:"eacces"`
+	CtimeDropped      int64  `json:"ctime_dropped"`
+	MountSkipped      int64  `json:"mount_skipped"`
+	DepthLimited      int64  `json:"depth_limited"`
+	ComponentsDropped int64  `json:"components_dropped"`
+	Attempts          int    `json:"attempts"`
+	CapsModel         string `json:"caps_model"`
+	MaxRSSBytes       int64  `json:"max_rss_bytes,omitempty"`
+	// DegradedMS: how long a degraded worker has been unavailable
+	// (worker_unavailable answers only).
+	DegradedMS int64   `json:"degraded_ms,omitempty"`
+	Budgets    Budgets `json:"budgets"`
 }
 
 // Component maps 1:1 onto the broker's ImageSBOM v1 WireComponent plus

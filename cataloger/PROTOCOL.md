@@ -183,8 +183,10 @@ before claiming.
 A worker whose environment does not let it scan (capabilities it could
 not drop, a capability probe that failed) stays up **degraded**: it
 answers every request, ping included, with `status: failed`,
-`reason: worker_unavailable` and the cause in `message`, and refuses
-scans (the fd is closed unused). Any ping reply other than `status: ok`
+`reason: worker_unavailable`, the cause in `message` and
+`stats.degraded_ms` (how long it has been degraded), and refuses scans
+(the fd is closed unused). It retries the failed step on its own and
+answers `ok` again once it succeeds. Any ping reply other than `status: ok`
 means the Controller does not claim.
 
 ## 4. Response

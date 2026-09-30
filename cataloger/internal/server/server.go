@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -46,6 +47,10 @@ type Config struct {
 	// the test binary in tests. The child subcommand is appended.
 	ChildPath string
 	ChildArgs []string
+	// RetryInitial and RetryMax: the backoff on which a degraded worker
+	// retries its failed startup step (defaults 30 s doubling to 10 min).
+	RetryInitial time.Duration
+	RetryMax     time.Duration
 	// ChildEnv is appended to the child's environment (tests).
 	ChildEnv []string
 	Log      *logrus.Logger
@@ -60,13 +65,25 @@ type Server struct {
 	model Model
 	busy  atomic.Bool
 	log   *logrus.Logger
-	// unavailable is why this worker cannot scan (an environment problem
-	// found at startup), or "" when it can. See Unavailable.
-	unavailable string
+
+	mu sync.Mutex
+	// why is why this worker cannot scan (an environment problem found at
+	// startup), or "" when it can; since is when it became degraded.
+	why   string
+	since time.Time
+	// retry repeats the failed startup step; nil when nothing can be
+	// retried. See recoverLoop.
+	retry func(context.Context) (Model, error)
 }
 
 // degradedWarnEvery is how often a degraded worker repeats its warning.
 const degradedWarnEvery = time.Hour
+
+// Recovery backoff defaults (Config.RetryInitial, Config.RetryMax).
+const (
+	DefaultRetryInitial = 30 * time.Second
+	DefaultRetryMax     = 10 * time.Minute
+)
 
 func (c *Config) defaults() {
 	if c.ChildPath == "" {
@@ -79,6 +96,12 @@ func (c *Config) defaults() {
 	if c.TmpDir == "" {
 		c.TmpDir = os.TempDir()
 	}
+	if c.RetryInitial <= 0 {
+		c.RetryInitial = DefaultRetryInitial
+	}
+	if c.RetryMax <= 0 {
+		c.RetryMax = DefaultRetryMax
+	}
 }
 
 // Unavailable returns a degraded server: it stays up and answers every
@@ -89,60 +112,128 @@ func (c *Config) defaults() {
 // and warned again hourly.
 func Unavailable(cfg Config, why error) *Server {
 	cfg.defaults()
-	s := &Server{cfg: cfg, log: cfg.Log, unavailable: why.Error()}
+	s := &Server{cfg: cfg, log: cfg.Log, why: why.Error(), since: time.Now()}
 	s.log.WithError(why).Error("worker unavailable: serving pings with worker_unavailable and refusing scans")
 	return s
 }
 
 // Why reports why the worker is unavailable ("" when it is not).
-func (s *Server) Why() string { return s.unavailable }
+func (s *Server) Why() string {
+	why, _ := s.Degraded()
+	return why
+}
+
+// Degraded reports why the worker is unavailable and since when ("" and
+// the zero time when it is not).
+func (s *Server) Degraded() (string, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.why, s.since
+}
+
+// Model returns the capability model in use.
+func (s *Server) Model() Model {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.model
+}
+
+// RetryWith sets how a degraded server retries its failed startup step
+// (Serve runs the retries; see recoverLoop).
+func (s *Server) RetryWith(fn func(context.Context) (Model, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retry = fn
+}
+
+// Startup is the startup check: mark inherited descriptors close-on-exec
+// and probe the capability model.
+func (s *Server) Startup(ctx context.Context) (Model, error) {
+	if err := sandbox.CloexecInherited(); err != nil {
+		return Model{}, err
+	}
+	m, err := s.probeModel(ctx)
+	if err != nil {
+		return Model{}, fmt.Errorf("capability probe: %w", err)
+	}
+	return m, nil
+}
+
+// nextRetry doubles the delay up to max.
+func nextRetry(d, max time.Duration) time.Duration {
+	return min(2*d, max)
+}
+
+// recoverLoop retries the failed startup step on a backoff (RetryInitial,
+// doubling to RetryMax) until it succeeds, then leaves degraded mode.
+func (s *Server) recoverLoop(ctx context.Context) {
+	s.mu.Lock()
+	retry := s.retry
+	s.mu.Unlock()
+	if retry == nil {
+		return
+	}
+	delay := s.cfg.RetryInitial
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		m, err := retry(ctx)
+		if err == nil {
+			s.mu.Lock()
+			s.model, s.why, s.since = m, "", time.Time{}
+			s.mu.Unlock()
+			s.log.WithFields(logrus.Fields{"model": m.Name}).Info("worker recovered: capability model: " + m.Why)
+			return
+		}
+		s.mu.Lock()
+		s.why = err.Error()
+		s.mu.Unlock()
+		s.log.WithError(err).WithField("nextRetry", nextRetry(delay, s.cfg.RetryMax).String()).Debug("worker still unavailable")
+		delay = nextRetry(delay, s.cfg.RetryMax)
+	}
+}
 
 // New probes the capability model and returns a server. An environment
 // problem (inherited descriptors that cannot be marked close-on-exec, a
 // capability probe that fails) yields a degraded server (Unavailable)
 // rather than an error: the worker stays up and says why.
 func New(ctx context.Context, cfg Config) (*Server, error) {
+	cfg.defaults()
+	s := &Server{cfg: cfg, log: cfg.Log}
 	// Before any child is started: nothing this process inherited may
 	// reach one (children get stdio, their root fd and socketpair only).
-	if err := sandbox.CloexecInherited(); err != nil {
-		return Unavailable(cfg, err), nil
-	}
-	if cfg.ChildPath == "" {
-		cfg.ChildPath = "/proc/self/exe"
-	}
-	if cfg.Log == nil {
-		cfg.Log = logrus.New()
-		cfg.Log.SetOutput(io.Discard)
-	}
-	if cfg.TmpDir == "" {
-		cfg.TmpDir = os.TempDir()
-	}
-	s := &Server{cfg: cfg, log: cfg.Log}
-	m, err := s.probeModel(ctx)
+	m, err := s.Startup(ctx)
 	if err != nil {
-		return Unavailable(cfg, fmt.Errorf("capability probe: %w", err)), nil
+		d := Unavailable(cfg, err)
+		d.RetryWith(d.Startup)
+		return d, nil
 	}
 	s.model = m
 	s.log.WithFields(logrus.Fields{"model": m.Name, "setuid": m.SetUID, "ambient": m.Ambient}).Info("capability model: " + m.Why)
 	return s, nil
 }
 
-// warnEvery logs msg at warning level every interval until ctx ends.
-func warnEvery(ctx context.Context, log *logrus.Logger, interval time.Duration, msg string) {
-	t := time.NewTicker(interval)
+// warnWhileDegraded repeats the degraded warning hourly until the worker
+// recovers or ctx ends.
+func (s *Server) warnWhileDegraded(ctx context.Context) {
+	t := time.NewTicker(degradedWarnEvery)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			log.Warn(msg)
+			why, since := s.Degraded()
+			if why == "" {
+				return
+			}
+			s.log.WithField("degradedFor", time.Since(since).Round(time.Second).String()).Warn("worker still unavailable: " + why)
 		}
 	}
 }
-
-// Model returns the capability model in use.
-func (s *Server) Model() Model { return s.model }
 
 // Listen creates the socket the Controller verifies before connecting
 // (PROTOCOL.md §1): its directory owned by us (uid 0 in the pod) with mode
@@ -215,8 +306,9 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 		<-ctx.Done()
 		_ = l.Close()
 	}()
-	if s.unavailable != "" {
-		go warnEvery(ctx, s.log, degradedWarnEvery, "worker still unavailable: "+s.unavailable)
+	if why, _ := s.Degraded(); why != "" {
+		go s.warnWhileDegraded(ctx)
+		go s.recoverLoop(ctx)
 	}
 	for {
 		c, err := l.AcceptUnix()
@@ -296,8 +388,9 @@ func (s *Server) Handle(ctx context.Context, c *net.UnixConn) {
 		s.reply(c, protocol.Failed(req, reason, err.Error()))
 		return
 	}
-	if s.unavailable != "" {
-		resp := protocol.Failed(req, protocol.ReasonWorkerUnavailable, s.unavailable)
+	if why, since := s.Degraded(); why != "" {
+		resp := protocol.Failed(req, protocol.ReasonWorkerUnavailable, why)
+		resp.Stats.DegradedMS = time.Since(since).Milliseconds()
 		resp.Scanner = s.scanner()
 		resp.Stats.SyftVersion = scan.SyftVersion()
 		resp.Stats.WorkerVersion = s.cfg.Version
@@ -308,7 +401,7 @@ func (s *Server) Handle(ctx context.Context, c *net.UnixConn) {
 		resp := protocol.Failed(req, "", "")
 		resp.Status = protocol.StatusOK
 		resp.Scanner = s.scanner()
-		resp.Stats.CapsModel = s.model.Name
+		resp.Stats.CapsModel = s.Model().Name
 		resp.Stats.SyftVersion = scan.SyftVersion()
 		resp.Stats.WorkerVersion = s.cfg.Version
 		s.reply(c, resp)
@@ -375,7 +468,7 @@ func (s *Server) Scan(ctx context.Context, req *protocol.Request, root *os.File)
 		creq := *req
 		creq.Profile = profile
 		creq.Budgets = b
-		r := s.run(dctx, "scan-child", s.model, root, &creq, int(b.MaxResponseBytes))
+		r := s.run(dctx, "scan-child", s.Model(), root, &creq, int(b.MaxResponseBytes))
 		rss = max(rss, maxRSS(r.state))
 		resp = s.interpret(req, r, b)
 		if r.payload == nil {
@@ -398,7 +491,7 @@ func (s *Server) Scan(ctx context.Context, req *protocol.Request, root *os.File)
 	resp.RetryReason = retryReason
 	resp.Scanner = s.scanner()
 	resp.Stats.Attempts = attempts
-	resp.Stats.CapsModel = s.model.Name
+	resp.Stats.CapsModel = s.Model().Name
 	resp.Stats.Budgets = b
 	resp.Stats.DurationMS = time.Since(start).Milliseconds()
 	resp.Stats.MaxRSSBytes = rss
@@ -421,7 +514,7 @@ func (s *Server) Scan(ctx context.Context, req *protocol.Request, root *os.File)
 func (s *Server) cleanTmp(dctx context.Context) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(dctx), cleanTmpTimeout)
 	defer cancel()
-	if r := s.run(cctx, "clean-tmp", s.model, nil, nil, 64); r.startErr != nil {
+	if r := s.run(cctx, "clean-tmp", s.Model(), nil, nil, 64); r.startErr != nil {
 		s.log.WithError(r.startErr).Warn("temp cleanup")
 	}
 }

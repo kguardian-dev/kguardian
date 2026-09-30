@@ -1,9 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -22,14 +25,14 @@ const (
 	HeartbeatMaxAge   = 4 * HeartbeatInterval
 )
 
-// WriteHeartbeat records why the worker is degraded, refreshing the
-// file's mtime.
-func WriteHeartbeat(dir, why string) error {
+// WriteHeartbeat records since when and why the worker is degraded,
+// refreshing the file's mtime.
+func WriteHeartbeat(dir, why string, since time.Time) error {
 	tmp, err := os.CreateTemp(dir, heartbeatName+".tmp-*")
 	if err != nil {
 		return err
 	}
-	_, werr := tmp.WriteString(why + "\n")
+	_, werr := fmt.Fprintf(tmp, "%d\n%s\n", since.Unix(), why)
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil {
 		_ = os.Remove(tmp.Name())
@@ -45,16 +48,28 @@ func WriteHeartbeat(dir, why string) error {
 func RemoveHeartbeat(dir string) { _ = os.Remove(filepath.Join(dir, heartbeatName)) }
 
 // HeartbeatFresh reports whether a degraded parent refreshed the file
-// within maxAge, and why it is degraded.
-func HeartbeatFresh(dir string, maxAge time.Duration) (string, bool) {
+// within maxAge, why it is degraded and since when. The file must be a
+// regular file owned by this process's effective uid: the temp dir is
+// shared with the scan children (another uid), which must not be able to
+// fake a live worker.
+func HeartbeatFresh(dir string, maxAge time.Duration) (why string, since time.Time, ok bool) {
 	p := filepath.Join(dir, heartbeatName)
 	fi, err := os.Lstat(p)
 	if err != nil || !fi.Mode().IsRegular() || time.Since(fi.ModTime()) > maxAge {
-		return "", false
+		return "", time.Time{}, false
+	}
+	st, isStat := fi.Sys().(*syscall.Stat_t)
+	if !isStat || int(st.Uid) != os.Geteuid() {
+		return "", time.Time{}, false
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return strings.TrimSpace(string(b)), true
+	first, rest, _ := strings.Cut(string(b), "\n")
+	secs, err := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return strings.TrimSpace(rest), time.Unix(secs, 0), true
 }

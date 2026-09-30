@@ -69,7 +69,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	case "clean-tmp":
 		return child.CleanTmp()
 	case "ping":
-		return ping(env(getenv, "CATALOG_SOCKET", defaultSocket), env(getenv, "CATALOG_TMP_DIR", "/tmp"), stderr)
+		maxDegraded, err := time.ParseDuration(env(getenv, "CATALOG_MAX_DEGRADED", defaultMaxDegraded.String()))
+		if err != nil || maxDegraded <= 0 {
+			_, _ = fmt.Fprintln(stderr, "CATALOG_MAX_DEGRADED must be a positive duration")
+			return 2
+		}
+		return ping(env(getenv, "CATALOG_SOCKET", defaultSocket), env(getenv, "CATALOG_TMP_DIR", "/tmp"), maxDegraded, stderr)
 	case "request":
 		if len(args) != 2 {
 			_, _ = fmt.Fprint(stderr, usage)
@@ -173,8 +178,15 @@ func serve(getenv func(string) string) error {
 	var srv *server.Server
 	if capsErr != nil {
 		// Never start a child from a parent holding more than it should:
-		// the degraded server refuses every scan.
+		// the degraded server refuses every scan, and retries dropping the
+		// capabilities, then the startup check, on its backoff.
 		srv = server.Unavailable(c, fmt.Errorf("drop capabilities: %w", capsErr))
+		srv.RetryWith(func(ctx context.Context) (server.Model, error) {
+			if err := sandbox.LimitCaps(sandbox.ParentAllowed, sandbox.ChildModelI); err != nil {
+				return server.Model{}, fmt.Errorf("drop capabilities: %w", err)
+			}
+			return srv.Startup(ctx)
+		})
 	} else if srv, err = server.New(ctx, c); err != nil {
 		return err
 	}
@@ -190,6 +202,7 @@ func serve(getenv func(string) string) error {
 // ends (nil).
 func listenOrWait(ctx context.Context, c server.Config, log *logrus.Logger) *net.UnixListener {
 	lastWarn := time.Time{}
+	var since time.Time
 	for {
 		l, err := server.Listen(c.Socket)
 		if err == nil {
@@ -200,6 +213,9 @@ func listenOrWait(ctx context.Context, c server.Config, log *logrus.Logger) *net
 			return l
 		}
 		why := fmt.Sprintf("cannot create socket %s: %v", c.Socket, err)
+		if since.IsZero() {
+			since = time.Now()
+		}
 		if lastWarn.IsZero() {
 			log.Error("worker unavailable: " + why + " (retrying; ping stays alive)")
 			lastWarn = time.Now()
@@ -207,7 +223,7 @@ func listenOrWait(ctx context.Context, c server.Config, log *logrus.Logger) *net
 			log.Warn("worker still unavailable: " + why)
 			lastWarn = time.Now()
 		}
-		if herr := server.WriteHeartbeat(c.TmpDir, why); herr != nil {
+		if herr := server.WriteHeartbeat(c.TmpDir, why, since); herr != nil {
 			log.WithError(herr).Warn("heartbeat")
 		}
 		select {
@@ -218,17 +234,31 @@ func listenOrWait(ctx context.Context, c server.Config, log *logrus.Logger) *net
 	}
 }
 
+// defaultMaxDegraded is how long ping tolerates a degraded worker
+// (CATALOG_MAX_DEGRADED).
+const defaultMaxDegraded = 6 * time.Hour
+
 // ping is the chart's liveness probe. It exits 0 while the worker process
 // is alive, including when it is degraded (it then answers
 // worker_unavailable, or keeps a heartbeat because it has no socket): a
-// restart would not fix an environment problem, and the Controller sees
-// the degraded state through its own protocol-level ping.
-func ping(socket, tmpDir string, stderr io.Writer) int {
+// restart would not fix an environment problem, the worker retries the
+// failed step itself, and the Controller sees the degraded state through
+// its own protocol-level ping. Only after maxDegraded of continuous
+// degradation does it fail, so the kubelet restarts the container once in
+// a while rather than never.
+func ping(socket, tmpDir string, maxDegraded time.Duration, stderr io.Writer) int {
+	degradedTooLong := func(why string, since time.Duration) int {
+		if since > maxDegraded {
+			_, _ = fmt.Fprintf(stderr, "worker unavailable for %s (over %s): %s\n", since.Round(time.Second), maxDegraded, why)
+			return 1
+		}
+		_, _ = fmt.Fprintln(stderr, "worker alive but unavailable:", why)
+		return 0
+	}
 	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
-		if why, ok := server.HeartbeatFresh(tmpDir, server.HeartbeatMaxAge); ok {
-			_, _ = fmt.Fprintln(stderr, "worker alive but unavailable:", why)
-			return 0
+		if why, since, ok := server.HeartbeatFresh(tmpDir, server.HeartbeatMaxAge); ok {
+			return degradedTooLong(why, time.Since(since))
 		}
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
@@ -248,8 +278,7 @@ func ping(socket, tmpDir string, stderr io.Writer) int {
 	case resp.Status == protocol.StatusOK:
 		return 0
 	case resp.Reason == protocol.ReasonWorkerUnavailable:
-		_, _ = fmt.Fprintln(stderr, "worker alive but unavailable:", resp.Message)
-		return 0
+		return degradedTooLong(resp.Message, time.Duration(resp.Stats.DegradedMS)*time.Millisecond)
 	default:
 		_, _ = fmt.Fprintf(stderr, "ping failed: %s %s\n", resp.Reason, resp.Message)
 		return 1

@@ -110,7 +110,11 @@ would take the Controller's whole pod NotReady:
 - a socket it cannot create (a directory owned by another uid, a regular
   file at the path): it retries every 30 s.
 
-It logs the cause at once and warns again hourly. While degraded it
+It logs the cause at once and warns again hourly, and it **recovers by
+itself**: the failed step (the capability drop, the close-on-exec sweep
+and capability probe, or the socket) is retried on a backoff of 30 s
+doubling to 10 min, and the worker leaves degraded mode as soon as it
+succeeds. While degraded it
 answers every request, ping included, with `status: failed`, `reason:
 worker_unavailable` (PROTOCOL.md §3.3) and refuses scans; the Controller
 then reports the node as `worker_unavailable` and claims nothing.
@@ -120,8 +124,12 @@ as the process is alive, degraded or not, so the kubelet does not restart
 it into the same error: it accepts a `worker_unavailable` answer, and
 without a socket it accepts the heartbeat file a degraded parent keeps
 fresh in `CATALOG_TMP_DIR` (`kguardian-cataloger.degraded`, holding the
-cause). It exits 1 only when nothing answers and no fresh heartbeat
-exists.
+cause). The heartbeat only counts if it is a regular file owned by the worker's
+uid (the temp dir is shared with the scan children). It exits 1 when
+nothing answers and no fresh heartbeat exists, and also once the worker
+has been degraded continuously for longer than `CATALOG_MAX_DEGRADED`
+(default `6h`), so the kubelet does restart a worker that cannot recover
+on its own, just not in a tight loop.
 
 ## The scan child's sandbox
 
@@ -297,6 +305,7 @@ contents never leave it, only package metadata does).
 | `CATALOG_MEMORY_LIMIT` | `640Mi` | Scan child heap cap; `GOMEMLIMIT` is 85 % of it. |
 | `CATALOG_TMP_LIMIT` | `192Mi` | Scan child temp space (archive extraction). |
 | `CATALOG_TMP_DIR` | `/tmp` | Where scan temp dirs go (a memory-backed emptyDir). |
+| `CATALOG_MAX_DEGRADED` | `6h` | How long `ping` (the liveness probe) tolerates a degraded worker before failing. |
 | `LOG_LEVEL` | `info` | `debug` also forwards Syft's debug logs from children. |
 
 `CATALOG_MEMORY_LIMIT` plus `CATALOG_TMP_LIMIT` plus the parent must fit
