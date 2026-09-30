@@ -312,16 +312,11 @@ pub fn start(config: Config, node: String, broker_url: String) -> Option<JoinHan
     }
     let inventory = Arc::new(Mutex::new(Inventory::default()));
     let broker = Arc::new(HttpBroker::new(broker_url, &token));
-    let env = Arc::new(NodeEnv {
-        policy: Arc::new(PeerPolicy {
-            mode,
-            allowed_uids: config.peer_uids.clone(),
-            socket_owner: 0,
-            host_proc: config.host_proc.clone(),
-        }),
-        runtime: Arc::new(scan::Containerd),
-        platform: platform.clone(),
-        config: config.clone(),
+    let policy = Arc::new(PeerPolicy {
+        mode,
+        allowed_uids: config.peer_uids.clone(),
+        socket_owner: 0,
+        host_proc: config.host_proc.clone(),
     });
     let ctx = Arc::new(LoopCtx {
         config,
@@ -329,14 +324,32 @@ pub fn start(config: Config, node: String, broker_url: String) -> Option<JoinHan
         platform,
     });
     Some(tokio::spawn(async move {
-        // Procfs reads off the runtime (L5).
+        // Procfs reads off the runtime (L5): the own pod, and whether
+        // trusted.* xattrs are readable (N3), both once.
         let cfg = ctx.config.clone();
-        let own = tokio::task::spawn_blocking(move || own_pod(&cfg))
-            .await
-            .ok()
-            .flatten();
+        let (own, trusted_xattrs) = tokio::task::spawn_blocking(move || {
+            let status = std::fs::read_to_string(cfg.host_proc.join("self/status"));
+            (own_pod(&cfg), status.is_ok_and(|s| root::cap_sys_admin(&s)))
+        })
+        .await
+        .unwrap_or((None, false));
+        if !trusted_xattrs {
+            warn!(
+                "node catalog: no CAP_SYS_ADMIN in the Controller's effective set, so \
+                 trusted.overlay.* xattrs cannot be read and an opaque directory in a \
+                 container's upperdir would go unseen; every SBOM from this node is partial \
+                 (drift_unknown)"
+            );
+        }
         lock(&inventory).set_own_pod(own);
         tokio::spawn(drain_feed(rx, Arc::clone(&inventory)));
+        let env = Arc::new(NodeEnv {
+            policy,
+            runtime: Arc::new(scan::Containerd),
+            platform: ctx.platform.clone(),
+            config: ctx.config.clone(),
+            trusted_xattrs,
+        });
         supervise(
             move || {
                 claim_loop(
@@ -489,6 +502,8 @@ pub struct NodeEnv {
     pub platform: String,
     pub policy: Arc<PeerPolicy>,
     pub runtime: Arc<scan::Containerd>,
+    /// CAP_SYS_ADMIN is effective (see `scan::ScanConfig`).
+    pub trusted_xattrs: bool,
 }
 
 impl LoopEnv for NodeEnv {
@@ -545,6 +560,7 @@ impl LoopEnv for NodeEnv {
                 budgets: self.config.budgets(),
                 read_timeout: self.config.scan_timeout + worker::READ_GRACE,
                 platform: self.platform.clone(),
+                trusted_xattrs: self.trusted_xattrs,
             },
             policy: Arc::clone(&self.policy),
             runtime: Arc::clone(&self.runtime),
@@ -588,24 +604,35 @@ impl RateLimit {
 /// How often degraded mode repeats its warning.
 const DEGRADED_WARN_EVERY: Duration = Duration::from_secs(3600);
 
+/// How often degraded mode asks again under the real epoch.
+const DEGRADED_PROBE_EVERY: Duration = Duration::from_secs(3600);
+
 /// Claiming cannot work on this node (the Broker refuses this
 /// Controller's claims as a contract violation, 422, e.g. an epoch above
-/// its `NODE_CATALOG_MAX_EPOCH`). Stop claiming, visibly:
+/// its `NODE_CATALOG_MAX_EPOCH`). Stop claiming, visibly, until the
+/// Broker accepts the real epoch again:
 ///
 /// * one `error` line naming the cause (logged by the caller);
 /// * an empty offer every `every`, under epoch 0 (an empty offer can be
 ///   granted nothing, and 0 is valid on any Broker): the Broker records
 ///   the node and its platform, with no claims;
+/// * once an hour, an empty offer under the configured epoch instead: a
+///   200 means the Broker takes it now (its limit was raised), and the
+///   caller resumes claiming;
 /// * a `warn` at most once an hour.
 ///
-/// Never returns and never retries hot.
+/// Returns only on that 200; never retries hot.
 async fn degraded<B: Broker>(ctx: &LoopCtx, broker: &B, why: &str, every: Duration) {
-    let mut warn_limit = RateLimit::starting(DEGRADED_WARN_EVERY, Instant::now());
+    let now = Instant::now();
+    let mut warn_limit = RateLimit::starting(DEGRADED_WARN_EVERY, now);
+    let mut probe = RateLimit::starting(DEGRADED_PROBE_EVERY, now);
     loop {
+        tokio::time::sleep(every).await;
+        let real = probe.allow(Instant::now());
         let req = ClaimRequest {
             node: ctx.node.clone(),
             platform: ctx.platform.clone(),
-            epoch: 0,
+            epoch: if real { ctx.config.epoch } else { 0 },
             offer: Vec::new(),
         };
         let answer = broker.claim(&req).await;
@@ -616,10 +643,16 @@ async fn degraded<B: Broker>(ctx: &LoopCtx, broker: &B, why: &str, every: Durati
                 "node catalog: ignoring a grant in degraded mode"
             );
         }
+        if real && matches!(answer, Answer::Ok(_)) {
+            info!(
+                epoch = ctx.config.epoch,
+                "node catalog: the Broker accepts this epoch again; resuming claims"
+            );
+            return;
+        }
         if warn_limit.allow(Instant::now()) {
             warn!(cause = why, "node catalog: still not claiming on this node");
         }
-        tokio::time::sleep(every).await;
     }
 }
 
@@ -764,10 +797,12 @@ async fn claim_loop<B: Broker + 'static, E: LoopEnv>(
                     body,
                     "node catalog: the Broker refuses this node's claims (422). Check \
                      NODE_CATALOG_EPOCH on the Controller against the Broker's \
-                     NODE_CATALOG_MAX_EPOCH. Not claiming until the Controller restarts"
+                     NODE_CATALOG_MAX_EPOCH. Not claiming; asking again under this \
+                     epoch once an hour"
                 );
                 degraded(&ctx, broker.as_ref(), &body, cfg.idle).await;
-                return;
+                pacer = Pacer::new(cfg.min_scan_interval, cfg.idle);
+                continue;
             }
             other => {
                 warn!(answer = ?other, "node catalog: claim refused");

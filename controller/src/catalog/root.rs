@@ -433,10 +433,22 @@ fn drift_in(upfd: RawFd) -> Drift {
 
 /// Entries read from any one directory by [`lang_whiteout`].
 const LANG_SCAN_ENTRIES: usize = 4096;
+/// Entries read by one [`lang_whiteout`] call across all directories.
+pub const LANG_SCAN_BUDGET: usize = 64 * 1024;
+
+/// Directory entries [`lang_whiteout`] may still read.
+struct Budget {
+    left: usize,
+}
 
 /// Up to `cap` entry names of the directory `fd` (not `.`/`..`), with
-/// their `d_type`.
-fn list_dir(fd: RawFd, cap: usize) -> io::Result<Vec<(std::ffi::CString, u8)>> {
+/// their `d_type`, charged to `budget`. `.1` is true when the listing
+/// stopped before the end (per-directory cap or budget).
+fn list_dir(
+    fd: RawFd,
+    cap: usize,
+    budget: &mut Budget,
+) -> io::Result<(Vec<(std::ffi::CString, u8)>, bool)> {
     // SAFETY: dup of a valid fd; fdopendir takes ownership of the copy.
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
@@ -451,7 +463,8 @@ fn list_dir(fd: RawFd, cap: usize) -> io::Result<Vec<(std::ffi::CString, u8)>> {
         return Err(e);
     }
     let mut out = Vec::new();
-    while out.len() < cap {
+    let mut cut = false;
+    loop {
         // SAFETY: d is a valid DIR*.
         let ent = unsafe { libc::readdir(d) };
         if ent.is_null() {
@@ -464,13 +477,19 @@ fn list_dir(fd: RawFd, cap: usize) -> io::Result<Vec<(std::ffi::CString, u8)>> {
                 (*ent).d_type,
             )
         };
-        if name.as_bytes() != b"." && name.as_bytes() != b".." {
-            out.push((name, ty));
+        if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            continue;
         }
+        if out.len() >= cap || budget.left == 0 {
+            cut = true;
+            break;
+        }
+        budget.left -= 1;
+        out.push((name, ty));
     }
     // SAFETY: closes the DIR* and its fd.
     unsafe { libc::closedir(d) };
-    Ok(out)
+    Ok((out, cut))
 }
 
 /// Open `rel` as a directory below `dir`, name by name, no symlinks.
@@ -490,12 +509,24 @@ fn open_dir_path(dir: RawFd, rel: &str) -> Option<OwnedFd> {
     held
 }
 
+/// What [`lang_whiteout`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LangCheck {
+    Clean,
+    /// A language package was deleted at runtime (`lang_whiteout`).
+    Found(String),
+    /// The directories were not read completely (a per-directory cap or
+    /// the [`LANG_SCAN_BUDGET`] ran out): `lang_whiteout_unknown`.
+    Unknown(String),
+}
+
 /// Did the container delete a language package at runtime? The package
 /// databases do not cover Python, Node or Ruby packages, whose metadata
 /// lives in their own directories; deleting one leaves a whiteout (or an
 /// opaque directory) in the upperdir. This checks the well-known
 /// system-wide locations only, each read at most [`LANG_SCAN_ENTRIES`]
-/// entries deep and one level down:
+/// entries deep and one level down, with at most [`LANG_SCAN_BUDGET`]
+/// entries read in all:
 ///
 /// * `usr/lib/python*/{site,dist}-packages`,
 ///   `usr/local/lib/python*/{site,dist}-packages`;
@@ -504,9 +535,20 @@ fn open_dir_path(dir: RawFd, rel: &str) -> Option<OwnedFd> {
 ///   `usr/local/lib/ruby/gems/*/gems`.
 ///
 /// Application-local trees (`/app/node_modules`, a virtualenv) are not
-/// looked at. Best effort: an unreadable directory counts as clean. A hit
-/// makes the SBOM `partial` (`lang_whiteout`), not drift.
-pub fn lang_whiteout(upfd: RawFd) -> Option<String> {
+/// looked at. A directory that cannot be opened counts as absent.
+pub fn lang_whiteout(upfd: RawFd) -> LangCheck {
+    lang_whiteout_within(upfd, LANG_SCAN_BUDGET)
+}
+
+/// [`lang_whiteout`] with an explicit entry budget.
+pub fn lang_whiteout_within(upfd: RawFd, budget: usize) -> LangCheck {
+    let mut budget = Budget { left: budget };
+    let mut incomplete: Option<String> = None;
+    fn note_cut(cut: bool, what: &str, inc: &mut Option<String>) {
+        if cut && inc.is_none() {
+            *inc = Some(format!("{what} not read completely"));
+        }
+    }
     let mut dirs: Vec<String> = vec![
         "usr/lib/node_modules".into(),
         "usr/local/lib/node_modules".into(),
@@ -516,7 +558,10 @@ pub fn lang_whiteout(upfd: RawFd) -> Option<String> {
         let Some(fd) = open_dir_path(upfd, base) else {
             continue;
         };
-        for (name, _) in list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES).unwrap_or_default() {
+        let (names, cut) =
+            list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES, &mut budget).unwrap_or_default();
+        note_cut(cut, base, &mut incomplete);
+        for (name, _) in names {
             let n = name.to_string_lossy();
             if n.starts_with("python") {
                 dirs.push(format!("{base}/{n}/site-packages"));
@@ -528,7 +573,9 @@ pub fn lang_whiteout(upfd: RawFd) -> Option<String> {
         let Some(fd) = open_dir_path(upfd, base) else {
             continue;
         };
-        for (name, _) in list_dir(fd.as_raw_fd(), 64).unwrap_or_default() {
+        let (names, cut) = list_dir(fd.as_raw_fd(), 64, &mut budget).unwrap_or_default();
+        note_cut(cut, base, &mut incomplete);
+        for (name, _) in names {
             dirs.push(format!("{base}/{}/gems", name.to_string_lossy()));
         }
     }
@@ -537,47 +584,64 @@ pub fn lang_whiteout(upfd: RawFd) -> Option<String> {
             continue;
         };
         if opaque(fd.as_raw_fd()).unwrap_or(false) {
-            return Some(format!("{d} opaque"));
+            return LangCheck::Found(format!("{d} opaque"));
         }
-        for (name, ty) in list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES).unwrap_or_default() {
+        let (names, cut) =
+            list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES, &mut budget).unwrap_or_default();
+        note_cut(cut, &d, &mut incomplete);
+        for (name, ty) in names {
             if ty != libc::DT_CHR && ty != libc::DT_UNKNOWN {
                 continue;
             }
             if let Ok(Some(st)) = lstat_at(fd.as_raw_fd(), &name) {
                 if is_whiteout(&st) {
-                    return Some(format!("{d}/{} deleted", name.to_string_lossy()));
+                    return LangCheck::Found(format!("{d}/{} deleted", name.to_string_lossy()));
                 }
             }
         }
     }
-    None
+    match incomplete {
+        Some(why) => LangCheck::Unknown(why),
+        None => LangCheck::Clean,
+    }
 }
 
 /// Both upperdir checks, through one open of the upperdir.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpperCheck {
     pub drift: Drift,
-    /// A language package was deleted at runtime ([`lang_whiteout`]).
-    pub lang_whiteout: Option<String>,
+    /// Language-package deletions ([`lang_whiteout`]).
+    pub lang: LangCheck,
 }
 
 pub fn check_upper(host_root: RawFd, upper: &Upperdir) -> UpperCheck {
     let Upperdir::Path(path) = upper else {
         return UpperCheck {
             drift: drift_check(host_root, upper),
-            lang_whiteout: None,
+            lang: LangCheck::Clean,
         };
     };
     match open_upper(host_root, path) {
         Ok(fd) => UpperCheck {
             drift: drift_in(fd.as_raw_fd()),
-            lang_whiteout: lang_whiteout(fd.as_raw_fd()),
+            lang: lang_whiteout(fd.as_raw_fd()),
         },
         Err(e) => UpperCheck {
             drift: Drift::Unknown(format!("open upperdir: {e}")),
-            lang_whiteout: None,
+            lang: LangCheck::Clean,
         },
     }
+}
+
+/// `CAP_SYS_ADMIN` (bit 21) in a `/proc/<pid>/status` body's `CapEff`.
+/// Without it `trusted.*` xattrs read as absent (ENODATA), so an
+/// overlay opaque mark could not be seen.
+pub fn cap_sys_admin(status: &str) -> bool {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+        .is_some_and(|caps| caps & (1 << 21) != 0)
 }
 
 // ---- Mount identity -----------------------------------------------------------
@@ -1304,13 +1368,17 @@ mod tests {
     #[test]
     #[ignore = "needs CAP_SYS_ADMIN (run with --ignored as root)"]
     fn real_overlay_whiteouts_and_opaque_dirs_are_drift() {
+        if let Some(why) = skip_without_overlay_or_tmpfs_xattrs() {
+            eprintln!("{why}; the catalog overlay drift test is skipped");
+            return;
+        }
         // Untouched: clean.
         let o = Overlay::new("ovl-clean");
         assert_eq!(
             o.check(),
             UpperCheck {
                 drift: Drift::Clean,
-                lang_whiteout: None
+                lang: LangCheck::Clean
             }
         );
         drop(o);
@@ -1351,9 +1419,97 @@ mod tests {
         .unwrap();
         let c = o.check();
         assert_eq!(c.drift, Drift::Clean);
-        let hit = c.lang_whiteout.expect("a deleted dist-info is seen");
+        let LangCheck::Found(hit) = c.lang else {
+            panic!("a deleted dist-info is seen: {:?}", c.lang)
+        };
         assert!(hit.contains("requests-2.32.0.dist-info"), "{hit}");
         drop(o);
+    }
+
+    /// Is overlayfs registered with this kernel?
+    fn overlay_registered() -> bool {
+        std::fs::read_to_string("/proc/filesystems")
+            .map(|s| {
+                s.lines()
+                    .any(|l| l.split_whitespace().last() == Some("overlay"))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Why a tmpfs here cannot carry `trusted.*` xattrs, if it cannot
+    /// (a kernel without CONFIG_TMPFS_XATTR answers EOPNOTSUPP).
+    fn skip_without_tmpfs_trusted_xattrs() -> Option<String> {
+        let base = tmp("xattr-probe");
+        if let Err(e) = mount("tmpfs", &base, "tmpfs", "size=1m") {
+            let _ = std::fs::remove_dir_all(&base);
+            return Some(format!("cannot mount a tmpfs ({e})"));
+        }
+        let p = std::ffi::CString::new(base.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: valid path, name and value buffers.
+        let rc = unsafe {
+            libc::setxattr(
+                p.as_ptr(),
+                c"trusted.kg-probe".as_ptr(),
+                b"y".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        let e = io::Error::last_os_error();
+        umount(&base);
+        let _ = std::fs::remove_dir_all(&base);
+        match (rc, e.raw_os_error()) {
+            (0, _) => None,
+            (_, Some(libc::EOPNOTSUPP)) => Some(format!("tmpfs has no trusted xattrs here ({e})")),
+            _ => panic!("setxattr on tmpfs: {e}"),
+        }
+    }
+
+    fn skip_without_overlay_or_tmpfs_xattrs() -> Option<String> {
+        if !overlay_registered() {
+            return Some("overlayfs not available here (not in /proc/filesystems)".into());
+        }
+        skip_without_tmpfs_trusted_xattrs()
+    }
+
+    #[test]
+    fn cap_sys_admin_is_read_from_cap_eff() {
+        let status = |eff: &str| {
+            format!(
+                "Name:\tx\nCapInh:\t0000000000000000\nCapPrm:\t000001ffffffffff\nCapEff:\t{eff}\n"
+            )
+        };
+        assert!(cap_sys_admin(&status("000001ffffffffff")));
+        assert!(cap_sys_admin(&status("0000000000200000")));
+        assert!(
+            !cap_sys_admin(&status("00000000a80425fb")),
+            "docker's default set lacks it"
+        );
+        assert!(!cap_sys_admin(&status("0000000000000000")));
+        assert!(!cap_sys_admin("garbage"));
+    }
+
+    /// N5: a site-packages directory larger than the budget makes the
+    /// check unknown rather than silently clean.
+    #[test]
+    fn the_language_scan_budget_makes_the_check_unknown() {
+        let up = tmp("lang-budget");
+        let sp = up.join("usr/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&sp).unwrap();
+        for i in 0..50 {
+            std::fs::create_dir(sp.join(format!("pkg{i}.dist-info"))).unwrap();
+        }
+        let fd = std::fs::File::open(&up).unwrap();
+        assert_eq!(
+            lang_whiteout_within(fd.as_raw_fd(), 10_000),
+            LangCheck::Clean
+        );
+        assert!(matches!(
+            lang_whiteout_within(fd.as_raw_fd(), 20),
+            LangCheck::Unknown(_)
+        ));
+        assert_eq!(lang_whiteout(fd.as_raw_fd()), LangCheck::Clean);
+        std::fs::remove_dir_all(&up).unwrap();
     }
 
     /// `trusted.overlay.opaque=x` (kernel >= 6.7 "has whiteouts") is drift
@@ -1361,6 +1517,10 @@ mod tests {
     #[test]
     #[ignore = "needs CAP_SYS_ADMIN (run with --ignored as root)"]
     fn a_trusted_opaque_x_parent_is_drift() {
+        if let Some(why) = skip_without_tmpfs_trusted_xattrs() {
+            eprintln!("{why}; the catalog opaque=x test is skipped");
+            return;
+        }
         let base = tmp("topaque");
         mount("tmpfs", &base, "tmpfs", "size=1m").expect("mount tmpfs");
         std::fs::create_dir_all(base.join("var/lib/dpkg")).unwrap();
@@ -1402,7 +1562,14 @@ mod tests {
     fn readonly_clone_of_our_own_root_is_read_only_and_has_no_submounts() {
         // SAFETY: getpid has no preconditions.
         let dir = ProcDir::open(Path::new("/proc"), unsafe { libc::getpid() } as u32).unwrap();
-        let fd = readonly_clone(&dir).expect("clone");
+        let fd = match readonly_clone(&dir) {
+            Ok(fd) => fd,
+            Err(e) if matches!(e.errno, libc::ENOSYS | libc::EOPNOTSUPP) => {
+                eprintln!("open_tree/mount_setattr not available here ({e}); the catalog read-only clone test is skipped");
+                return;
+            }
+            Err(e) => panic!("clone: {e}"),
+        };
         // Writing anything through the clone is refused.
         let name = c"kguardian-ro-probe";
         // SAFETY: valid dirfd and name.

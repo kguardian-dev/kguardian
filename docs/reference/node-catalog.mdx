@@ -77,7 +77,9 @@ For a granted digest, the Controller picks a running container with it and:
   on that mount (`statx` `STATX_MNT_ID`), and requires the upperdir to be
   the one containerd reports for the container's snapshot. Anything else is
   `unsupported_rootfs`; lazily pulled roots (stargz, SOCI, nydus, FUSE) are
-  `lazy_snapshotter`.
+  `lazy_snapshotter`. If containerd cannot answer (unreachable, an error, a
+  timeout), that is a fact about the node, not the image: the next replica
+  is tried, and if none works the grant ends `pid_gone`.
 
 Only containerd is supported, so every root is checked against its snapshot.
 
@@ -96,7 +98,10 @@ next replica is tried:
   `user.overlay.opaque` set to `y` or `x`).
 
 If the upperdir cannot be read or an xattr read fails, drift is unknown
-and the SBOM is `partial` (`drift_unknown`).
+and the SBOM is `partial` (`drift_unknown`). The same applies when the
+Controller lacks `CAP_SYS_ADMIN` (it is privileged by default): without it
+`trusted.overlay.*` reads as absent, so it logs once at startup and every
+SBOM from the node is `partial`.
 
 **Language packages.** Deleting a Python, Node or Ruby package does not
 touch those databases. The Controller also looks for whiteouts or opaque
@@ -106,8 +111,10 @@ directories in the system-wide locations only:
 - `usr/lib/node_modules` and `usr/local/lib/node_modules`;
 - `usr/local/bundle/gems`, `var/lib/gems/*/gems` and `usr/local/lib/ruby/gems/*/gems`.
 
-Each directory is read at most 4096 entries deep. A hit makes the SBOM
-`partial` (`lang_whiteout`). Deletions in application-local trees
+Each directory is read at most 4096 entries deep, and at most 65 536
+entries are read in all. A hit makes the SBOM `partial` (`lang_whiteout`);
+a directory that could not be read completely makes it `partial` too
+(`lang_whiteout_unknown`). Deletions in application-local trees
 (`/app/node_modules`, a virtualenv) are **not** detected.
 
 ## Kernel requirements
@@ -135,10 +142,12 @@ memory limit for that before raising it.
 
 If the Broker answers a claim with 422 (for example `NODE_CATALOG_EPOCH`
 above the Broker's `NODE_CATALOG_MAX_EPOCH`), the Controller logs one
-`error` naming both settings and stops claiming until it restarts. It keeps
-sending an empty offer (epoch 0) every `NODE_CATALOG_IDLE_SECS`, so the
-Broker still records the node and its platform with no claims, and repeats
-a `warn` at most once an hour. `GET /catalog/status?node=<name>` shows such
+`error` naming both settings and stops claiming. It keeps sending an empty
+offer (epoch 0) every `NODE_CATALOG_IDLE_SECS`, so the Broker still records
+the node and its platform with no claims, and repeats a `warn` at most once
+an hour. Once an hour it sends the empty offer under its real epoch
+instead; when the Broker accepts that (its limit was raised), claiming
+resumes without a restart. `GET /catalog/status?node=<name>` shows such
 a node as seen recently, with no claims.
 
 A 503 from the claim route (catalog not configured on the Broker) backs off

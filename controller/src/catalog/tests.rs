@@ -232,6 +232,15 @@ impl Broker for ScriptBroker {
                 epoch: r.epoch,
             },
         ));
+        let none = Answer::Ok(ClaimResponse {
+            grants_enabled: true,
+            grant: None,
+        });
+        // Degraded mode's epoch-0 keepalives are always accepted and do not
+        // consume the script.
+        if r.epoch == 0 {
+            return none;
+        }
         self.claims
             .lock()
             .unwrap()
@@ -502,17 +511,23 @@ async fn claim_503s_back_off_exponentially_to_thirty_minutes() {
     assert!(t.len() < 15, "{} claims in 4 h", t.len());
 }
 
-/// L1: a 422 stops claiming; empty offers under epoch 0 follow at the
-/// idle cadence.
+/// L1/N6: a 422 stops claiming; empty offers under epoch 0 follow at
+/// the idle cadence, and once an hour an empty offer under the real
+/// epoch. When the Broker takes that (200), claiming resumes.
 #[tokio::test(start_paused = true)]
-async fn a_422_switches_to_empty_offers() {
-    let b = Arc::new(ScriptBroker::with(vec![Answer::Refused(
-        422,
-        "epoch 7 is above this broker's NODE_CATALOG_MAX_EPOCH (5)".into(),
-    )]));
+async fn a_422_switches_to_empty_offers_until_the_epoch_is_accepted() {
+    let refused = || {
+        Answer::Refused(
+            422,
+            "epoch 1 is above this broker's NODE_CATALOG_MAX_EPOCH (0)".into(),
+        )
+    };
+    // The real claim, then the first hourly probe, are refused; the
+    // second probe is accepted.
+    let b = Arc::new(ScriptBroker::with(vec![refused(), refused()]));
     let env = Arc::new(FakeEnv::new(stored()));
     run_for(
-        Duration::from_secs(1300),
+        Duration::from_secs(7300),
         ctx(),
         Arc::clone(&b),
         env,
@@ -520,20 +535,32 @@ async fn a_422_switches_to_empty_offers() {
     )
     .await;
     let calls = b.calls();
+    let real_offer = Call::Claim {
+        offer: vec![digest('a')],
+        epoch: 1,
+    };
+    let probe = Call::Claim {
+        offer: vec![],
+        epoch: 1,
+    };
+    let keepalive = Call::Claim {
+        offer: vec![],
+        epoch: 0,
+    };
+    assert_eq!(calls[0], real_offer);
     assert_eq!(
-        calls[0],
-        Call::Claim {
-            offer: vec![digest('a')],
-            epoch: 1
-        }
+        calls.iter().filter(|c| **c == probe).count(),
+        2,
+        "{calls:?}"
     );
-    let rest: Vec<&Call> = calls[1..].iter().collect();
-    assert_eq!(rest.len(), 3, "t+0, +600, +1200: {rest:?}");
-    assert!(rest.iter().all(|c| **c
-        == Call::Claim {
-            offer: vec![],
-            epoch: 0
-        }));
+    let keepalives = calls.iter().filter(|c| **c == keepalive).count();
+    assert!(
+        (9..=12).contains(&keepalives),
+        "about one per 600 s: {keepalives}"
+    );
+    assert_eq!(*calls.last().unwrap(), real_offer, "claiming resumed");
+    let t = b.claim_times();
+    assert!(t.windows(2).all(|w| w[1] - w[0] >= Duration::from_secs(10)));
 }
 
 #[tokio::test(start_paused = true)]
