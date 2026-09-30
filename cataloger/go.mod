@@ -5,7 +5,7 @@ go 1.26.8
 toolchain go1.27.1
 
 require (
-	github.com/anchore/go-logger v0.1.1
+	github.com/anchore/go-logger v0.2.0
 	github.com/anchore/stereoscope v0.3.2
 	github.com/anchore/syft v1.52.0
 	github.com/bmatcuk/doublestar/v4 v4.10.2
