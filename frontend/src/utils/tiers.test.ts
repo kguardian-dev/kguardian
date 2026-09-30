@@ -111,6 +111,26 @@ test('in-use states are the Broker\'s: executed, loaded, not observed, and unkno
   expect(inuse('CVE-2099-0002').title).toMatch(/language/i);
 });
 
+test('the node catalog and capture-mode unknown reasons each have their own copy; an unrecognised one is shown as sent', () => {
+  const why = (reason: string) => inUseFactor('unknown', { state: 'unknown', reason, observedSince: null, windowHours: 24, containers: 1, coverage: 'file' });
+  const expected: Record<string, RegExp> = {
+    probes_missing: /capture probes are not running/,
+    libraries_not_tracked: /exec-only mode/,
+    sbom_incomplete: /node SBOM is partial/,
+    platform_mismatch: /another platform/,
+    interpreted_content: /scripts or data files/,
+  };
+  for (const [reason, copy] of Object.entries(expected)) {
+    const f = why(reason);
+    expect(f.label).toBe('Loaded: unknown');
+    expect(f.tone).toBe('unknown');
+    expect(f.title, reason).toMatch(copy);
+    // Unknown stays ranked as if loaded, whatever the reason.
+    expect(f.title).toMatch(/Ranked as if loaded\.$/);
+  }
+  expect(why('some_future_reason').title).toBe('Unknown: some_future_reason. Ranked as if loaded.');
+});
+
 test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', () => {
   expect(factChips({ kev: null })[0]).toMatchObject({ key: 'kev', tone: 'unknown', label: 'KEV: not reported' });
   expect(factChips({ kev: false })).toEqual([]);

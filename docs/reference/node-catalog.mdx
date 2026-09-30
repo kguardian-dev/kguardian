@@ -309,3 +309,131 @@ a node as seen recently, with no claims.
 
 A 503 from the claim route (catalog not configured on the Broker) backs off
 from 60 s, doubling, to at most 30 minutes, and is logged once.
+
+## SBOM sources and trust
+
+The worker itself (its sandbox, protocol and Syft pin) is described in
+[`cataloger/README.md`](https://github.com/kguardian-dev/kguardian/blob/main/cataloger/README.md).
+Its SBOM is one source among several. The Broker keeps each source's SBOM
+separately, keyed `(digest, source)`, and one never replaces another:
+
+| Rank | Source (`source`) | `sbomTrust` | What it contributes |
+|---|---|---|---|
+| 1, authoritative | Trivy Operator (`trivy-operator`) | `scanned` | Its packages win every collision on (type, name, version): PURL, source package, version and the single OS component are Trivy's. Its own vulnerability reports stand beside anything matched. |
+| 2 | Node catalog (`node`) | `scanned` | Packages Trivy lacks (or every package where Trivy is not installed), and each package's executable file paths, which feed the in-use verdicts. It only adds: it never removes or changes a Trivy entry. The supplychain matcher matches it with Grype. |
+| 3, unverified | Registry SBOM (`registry`) | `attached-unbound` or `unverified` | Packages and file paths neither of the others has, and a PURL Trivy left empty. It only adds, and fills only the capacity left over under the 50 000-component cap. |
+
+`scanned` means a scanner read the running image in the cluster. Only
+`verified` may be presented as signed, and nothing produces it yet. The
+default SBOM a read returns is Trivy's if there is one, else the node's,
+else a registry one. The merge rules are in the
+[supplychain README](https://github.com/kguardian-dev/kguardian/blob/main/supplychain/README.md#sbom-trust-and-the-union).
+
+A node SBOM supports `installed_not_observed` (the Background tier) only
+when it is `full`, every node that ran the container reports the SBOM's
+platform, and the package's file list was neither cut nor included
+interpreted content. Otherwise the package stays `unknown`, with reason
+`sbom_incomplete`, `platform_mismatch` or `interpreted_content`, and is
+ranked as if loaded.
+
+In the UI, `#/images` shows a node SBOM as "Cataloged on node
+(linux/arm64)", with "partial" or "OS packages only" when it is not full.
+An image with no SBOM from any source and no vulnerability report, whose
+catalog found no packages (`no_packages_found`) or failed (backing off),
+reads "Not assessable" with the reason. It never reads as zero CVEs. A
+pending image whose last node could not catalog it (a per-node reason such
+as `lsm_denied`) reads "Node catalog: pending · last node: LSM denied":
+that reason skips one node for 24 hours, and other nodes may still catalog
+it. The coverage banner is cluster-wide, and shows only while the Broker
+has a catalog token.
+
+## Reading `/catalog/coverage` and `/catalog/status`
+
+Both need the Broker's `read` scope. A Broker without the node catalog
+answers `404`; the UI then hides its coverage banner.
+
+`GET /catalog/coverage` is cluster-wide:
+
+```json
+{
+  "grantsEnabled": true,
+  "tokenConfigured": true,
+  "runningImages": 120,
+  "trivy": 70,
+  "node": 64,
+  "trusted": 98,
+  "coverageRatio": 0.8167,
+  "byState": {"pending": 9, "claimed": 2, "done": 101, "failed": 3},
+  "byCompleteness": {"full": 88, "partial": 9, "os_only": 3},
+  "byReason": {"lsm_denied": 4, "oom": 2, "pid_gone": 1},
+  "platforms": {"linux/amd64": 6, "linux/arm64": 3}
+}
+```
+
+- `runningImages` counts the digests running now. `trivy` counts those
+  with an SBOM or report from Trivy Operator, `node` those with a node
+  SBOM; they overlap, and `trusted` is the union. `coverageRatio` is `trusted / runningImages`.
+- `grantsEnabled: false` means the kill switch is on; `tokenConfigured:
+  false` means the Broker has no `BROKER_TOKEN_CATALOG`, so no node SBOM
+  can be stored.
+- `byState` counts claim rows. `pending` includes rows released by a
+  node that could not catalog them (they wait for another node), and
+  `failed` rows back off before they are granted again.
+- `byReason` counts rows that are not done, by the reason their last
+  attempt ended. It says where to look: an LSM, a kernel, memory.
+- `platforms` counts the nodes that have offered, by platform. A node
+  missing here has never claimed: its Controller is off, idle, or refused.
+
+`GET /catalog/status?node=<name>` is one node:
+
+```json
+{
+  "node": "ip-10-0-3-17.eu-west-1.compute.internal",
+  "platform": "linux/arm64",
+  "seenAt": "2026-09-30T09:12:44Z",
+  "claims": [{"digest": "sha256:…", "leaseExpiresAt": "2026-09-30T09:27:44Z", "attempts": 1}],
+  "cataloged": 41,
+  "byReason": {"lsm_denied": 3},
+  "skipped": 3
+}
+```
+
+`platform` and `seenAt` are `null` for a node that never offered. `claims`
+are the leases it holds now (at most 64 listed), `cataloged` the digests it
+completed, `byReason` the digests it last released and why, and `skipped`
+the digests it is skipped for over the next 24 hours.
+
+## Runbook
+
+**Kill switch.** `nodeCatalog.grants=false`, as in [Enable it](#enable-it).
+Stored SBOMs stay, and the Controllers need no restart: they keep offering
+and get nothing back. `grantsEnabled` in `/catalog/coverage` reads
+`false`, and the stalled and not-claiming alerts are silenced. Set it back
+to `true` to resume.
+
+**Rotating the catalog token.** Write the new value under the Secret's
+`catalog` key, as in [Enable it](#enable-it), then restart both the Broker
+and the Controller DaemonSet; both read the token only at startup. Between
+the two restarts, a Controller on the old token is refused and retries;
+nothing is lost, since a lease that runs out is granted again.
+
+**Alerts** (the `kguardian-broker-node-catalog` PrometheusRule):
+
+| Alert | Means | Do |
+|---|---|---|
+| `KguardianNodeCatalogTokenMissing` | The Broker has no `BROKER_TOKEN_CATALOG`: the Secret lacks the `catalog` key. Uploads answer `503`. | Add the key, then restart the Broker and the Controller DaemonSet. |
+| `KguardianNodeCatalogLsmDenied` | SELinux or AppArmor denied the worker the container root on some node (`lsm_denied`). | Check `nodeCatalog.worker.seLinuxOptions` is the default `container_t` with `s0-s0:c0.c1023`, and `appArmorProfile`. `/catalog/status?node=` names the nodes (`byReason`). |
+| `KguardianNodeCatalogFailureRate` | Over 20% of grants in the last hour failed with `timeout`, `oom` or `error`. | `oom`: raise `nodeCatalog.worker.memoryLimit` (and the container limit with it). `timeout`: raise `nodeCatalog.scanTimeoutSeconds`. `error`: read the `cataloger` container's logs. |
+| `KguardianNodeCatalogStalled` | Grants that no node skipped, and no completed SBOM, in 6 hours. | Check `kguardian_node_catalog_failed_total` and `skipped_total` by reason, the `cataloger` logs, and `/catalog/status?node=` for leases that never finish. |
+| `KguardianNodeCatalogNotClaiming` | Work is queued and no node has claimed any in 25 hours. | Look for a Controller log naming a refused epoch (`nodeCatalog.epoch` above `nodeCatalog.maxEpoch`), a missing catalog token, or cataloging off. A node missing from `platforms` never offered. |
+| `KguardianNodeCatalogDeferredPressure` | Scans kept waiting for node pressure (host PSI) to drop for 2 hours. | If those nodes are always this busy, raise `nodeCatalog.pressureThreshold` or `nodeCatalog.maxPressureDeferSeconds`. Otherwise it clears once load drops. |
+
+Other reasons in `byReason` that are normal churn, not faults: `pid_gone`,
+`drift` and `exited_before_catalog` (the container went away or changed;
+another instance is tried). Per-node reasons (`sandboxed`,
+`lazy_snapshotter`, `unsupported_rootfs`, `kernel_unsupported`,
+`caps_unavailable`, `worker_unavailable`, `no_cataloger`) skip that node
+for 24 hours while others try; the image stays pending, and is retried on
+that node after the 24 hours.
+`no_packages_found` is final: the image has nothing the cataloger
+recognises.

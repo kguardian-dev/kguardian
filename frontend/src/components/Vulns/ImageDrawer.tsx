@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bug, FileBox, SearchX } from 'lucide-react';
 import { useImageVulns } from '../../hooks/useVulns';
 import { vulnApi, vulnErrorKind, vulnErrorMessage, type VulnApi } from '../../services/vulnApi';
-import type { ImageDetail, Report } from '../../types/vulns';
+import type { ImageDetail, ImageSummary, Report } from '../../types/vulns';
 import { shortDigest } from '../../utils/posture';
 import { sbomFromMatcher, sourceLabel } from '../../utils/vulnView';
 import { EmptyState } from '../ui/EmptyState';
@@ -10,9 +10,15 @@ import { Modal } from '../ui/Modal';
 import { SectionSkeleton } from '../Profile/parts';
 import { FindingsTable, ReportList } from './FindingsTable';
 import { TrustBadge, VulnErrorState } from './parts';
+import { CatalogPendingChip, NotAssessableState } from './NodeCatalogParts';
+import { catalogPending, completenessNote, notAssessable, provenanceLabel } from '../../utils/nodeCatalog';
 
 interface ImageDrawerProps {
   digest: string;
+  /** The inventory row it was opened from, when there was one: its SBOM sources and node catalog state. */
+  summary?: ImageSummary;
+  /** The node catalog is on (a catalog token): without it, rows left from when it was on show no pending or "not assessable" state. */
+  catalogOn?: boolean;
   onClose: () => void;
   onOpenCve: (id: string) => void;
   onOpenWorkload: (ns: string, kind: string, name: string) => void;
@@ -25,7 +31,7 @@ interface ImageDrawerProps {
  * data: unknown, never clean. The image and SBOM reads settle on their own,
  * so one failing does not blank the other.
  */
-export function ImageDrawer({ digest, onClose, onOpenCve, onOpenWorkload, api = vulnApi }: ImageDrawerProps) {
+export function ImageDrawer({ digest, summary, catalogOn = false, onClose, onOpenCve, onOpenWorkload, api = vulnApi }: ImageDrawerProps) {
   const [detail, setDetail] = useState<ImageDetail | null>(null);
   const [detailError, setDetailError] = useState<unknown>(null);
   const [sbomReports, setSbomReports] = useState<Report[] | null>(null);
@@ -58,6 +64,14 @@ export function ImageDrawer({ digest, onClose, onOpenCve, onOpenWorkload, api = 
   const badDigest = detailError != null && (detailKind === 'not_found' || detailKind === 'bad_request');
   const ref = detail ? `${detail.repository ?? 'unknown repository'}${detail.tags.length ? `:${detail.tags.join(', ')}` : ''}` : shortDigest(digest);
   const matched = sbomFromMatcher(vulns.reports);
+  // Opened by deep link (a pasted #/images?digest=), there is no inventory row: no platform, completeness,
+  // pending or "not assessable" state is shown. That is safe: the SBOM list still comes from the read (a node
+  // SBOM still reads "Cataloged on node"), and with no SBOM it says "No SBOM from any source", which claims nothing.
+  const nc = summary?.nodeCatalog;
+  // A scanner's vulnerability report is an assessment even without an SBOM; a failed or pending read says nothing either way.
+  const na = catalogOn && summary && Array.isArray(vulns.reports) && vulns.reports.length === 0 ? notAssessable(summary) : null;
+  const pending = catalogOn && summary ? catalogPending(summary) : null;
+  const partial = completenessNote(nc);
 
   return (
     <Modal isOpen onClose={onClose} align="right" className="w-full max-w-3xl" title={<span className="font-mono">{ref}</span>} subtitle={<span className="font-mono" title={digest}>{digest}</span>}>
@@ -107,14 +121,22 @@ export function ImageDrawer({ digest, onClose, onOpenCve, onOpenWorkload, api = 
                   </li>
                 ))}
               </ul>
+            ) : sbomReports.length === 0 && na ? (
+              <NotAssessableState na={na} />
             ) : sbomReports.length === 0 ? (
-              <p className="text-xs text-tertiary">No SBOM from any source.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs text-tertiary">No SBOM from any source.</p>
+                {pending && <CatalogPendingChip {...pending} />}
+              </div>
             ) : (
               <ul className="space-y-1.5 text-xs">
                 {sbomReports.map((r) => (
                   <li key={`${r.source}-${r.reportDigest}`} className="flex flex-wrap items-center gap-2" data-testid="sbom-report">
-                    <span className="font-medium text-primary">{sourceLabel(r.source)}</span>
-                    <TrustBadge trust={r.sbomTrust} />
+                    <span className="font-medium text-primary" data-source={r.source}>{provenanceLabel(r.source, nc)}</span>
+                    {r.source === 'node' && partial && (
+                      <span data-testid="provenance-completeness" className="rounded-full border px-2 py-0.5 text-[11px] font-medium bg-severity-medium/10 text-severity-medium border-severity-medium/30" title={partial.title}>{partial.label}</span>
+                    )}
+                    <TrustBadge trust={r.sbomTrust} source={r.source} />
                     <span className="text-tertiary">{r.itemCount} components{r.sbomFormat ? ` · ${r.sbomFormat}` : ''}</span>
                     {r.attestation && (
                       <span className="text-tertiary">

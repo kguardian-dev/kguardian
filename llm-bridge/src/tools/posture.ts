@@ -89,8 +89,10 @@ export function fitToBudget(result: Rec, key: string, maxChars = MAX_RESPONSE_CH
 // --- image inventory (GET /images, broker/src/image_inventory.rs) -----------
 
 const IMAGE_SUMMARY_KEYS = [
-  "digest", "repository", "tags", "digestKind", "firstSeen", "lastSeen", "runningContainers",
+  "digest", "repository", "tags", "digestKind", "firstSeen", "lastSeen", "runningContainers", "sbomSources",
 ] as const;
+/** `nodeCatalog` on an item (node catalog brokers only; absent otherwise). */
+const NODE_CATALOG_KEYS = ["state", "reason", "platform", "completeness", "catalogedAt"] as const;
 /** Tags per image the assistant sees; the broker keeps up to 32. */
 export const MAX_TAGS_PER_IMAGE = 8;
 
@@ -103,6 +105,7 @@ export function trimImagePage(page: unknown, filters: { namespace?: string; repo
   const items = isRecord(page) && Array.isArray(page.items) ? page.items : [];
   const out = items.map((raw) => {
     const img = pick(raw, IMAGE_SUMMARY_KEYS);
+    if (isRecord(raw) && isRecord(raw.nodeCatalog)) img.nodeCatalog = pick(raw.nodeCatalog, NODE_CATALOG_KEYS);
     if (Array.isArray(img.tags) && img.tags.length > MAX_TAGS_PER_IMAGE) {
       const extra = img.tags.length - MAX_TAGS_PER_IMAGE;
       img.tags = img.tags.slice(0, MAX_TAGS_PER_IMAGE);
@@ -116,7 +119,7 @@ export function trimImagePage(page: unknown, filters: { namespace?: string; repo
     images: out,
     truncated: nextAfter !== null,
     note:
-      `Inventory only: which image digests workloads run. It carries no vulnerability, SBOM or signature data. runningContainers 0 means no longer running, not safe. ${UNTRUSTED_NOTE}`,
+      `Inventory only: which image digests workloads run. It carries no vulnerability or signature data. sbomSources (when present) only names the sources holding an SBOM for the digest (trivy-operator, registry, node = kguardian's node catalog); get_image_sbom reads them. nodeCatalog (when present) is the node catalog's state for the digest: pending, claimed, done or failed, with reason, platform and completeness (full, partial, os_only); done with reason no_packages_found, or failed, with no sbomSources and no vulnerability report (check get_image_vulnerabilities) means the image cannot be assessed, never that it has no vulnerabilities; pending with a reason only means the last node could not catalog it. A missing sbomSources is unknown, not 'no SBOM'. runningContainers 0 means no longer running, not safe. ${UNTRUSTED_NOTE}`,
   };
   if (filters.namespace) result.namespace = filters.namespace;
   if (filters.repository) result.repository = filters.repository;

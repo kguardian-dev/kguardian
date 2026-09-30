@@ -13,7 +13,8 @@
  */
 
 export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE' | 'UNKNOWN';
-export type VulnSource = 'trivy-operator' | 'grype' | 'registry';
+/** `node`: kguardian's node catalog (in-house cataloger, trust `scanned`). */
+export type VulnSource = 'trivy-operator' | 'grype' | 'registry' | 'node';
 /** How a report was matched to what runs, strongest first. */
 export type JoinKind = 'image_id' | 'platform_manifest' | 'workload_tag' | 'report_digest';
 /** Weakest first. Only `verified` may be shown as signed. */
@@ -27,7 +28,12 @@ export type InUseState = 'executed' | 'loaded' | 'unknown' | 'installed_not_obse
  */
 export interface InUseDetail {
   state: InUseState;
-  /** Why the state is unknown (language_package, no_runtime_data, capture_gap, host_network, no_package_files). */
+  /**
+   * Why the state is unknown: language_package, no_runtime_data, capture_gap,
+   * host_network, no_package_files, probes_missing, libraries_not_tracked;
+   * and, when the only file list is a node catalog SBOM, sbom_incomplete,
+   * platform_mismatch, interpreted_content. Shown as sent when unrecognised.
+   */
   reason: string | null;
   observedSince: string | null;
   windowHours: number;
@@ -223,7 +229,10 @@ export interface SbomComponent {
   srcName: string | null;
   srcVersion: string | null;
   layerDigest: string | null;
+  /** At most 16 paths. */
   filePaths: string[];
+  /** How many paths the component has when `filePaths` was cut to 16; absent otherwise (and from an older Broker). */
+  filePathsTotal?: number;
 }
 
 export interface SbomPage {
@@ -246,6 +255,47 @@ export interface ImageSummary {
   firstSeen: string;
   lastSeen: string;
   runningContainers: number;
+  /** Sources with an SBOM linked to this digest (`trivy-operator`, `registry`, `node`, ...). Absent when none, and from an older Broker. */
+  sbomSources?: string[];
+  /** The node catalog's state for this digest. Absent when no node offered it, and from an older Broker. */
+  nodeCatalog?: NodeCatalogState;
+}
+
+// ── Node catalog (docs/design/node-catalog.md) ───────────────────────────
+/** `nodeCatalog` on a `GET /images` item. */
+export interface NodeCatalogState {
+  /** pending | claimed | done | failed; shown as sent when unrecognised. */
+  state: string;
+  /** Why the last attempt ended (a claim failure reason, `no_packages_found`, `superseded`); null when none. */
+  reason: string | null;
+  /** The platform the SBOM was cataloged for, e.g. `linux/arm64`. */
+  platform: string | null;
+  /** full | partial | os_only; null until done. */
+  completeness: string | null;
+  catalogedAt: string | null;
+}
+
+/** `GET /catalog/coverage` (read scope). 404 on an older Broker. */
+export interface CatalogCoverage {
+  grantsEnabled: boolean;
+  tokenConfigured: boolean;
+  /** Image digests running now. */
+  runningImages: number;
+  /** Of those, with an SBOM or report from Trivy Operator. */
+  trivy: number;
+  /** Of those, with a node SBOM. */
+  node: number;
+  /** Of those, with either. */
+  trusted: number;
+  coverageRatio: number;
+  /** Claim rows by state (pending, claimed, done, failed). */
+  byState: Record<string, number>;
+  /** Done rows by completeness. */
+  byCompleteness: Record<string, number>;
+  /** Rows not done that carry a reason, by reason. */
+  byReason: Record<string, number>;
+  /** Nodes that offered, by platform. */
+  platforms: Record<string, number>;
 }
 
 export interface ImagePage {

@@ -116,6 +116,10 @@ test("every vulnerability tool forbids inventing ids and says unknown is not saf
     assert.match(d, /P0, P1, P2, Background/, `${name}: names the tiers`);
   }
   assert.match(TOOL_DEFS.find((t) => t.name === "get_image_sbom")!.description, /ONLY 'verified' may be called signed/);
+  assert.match(TOOL_DEFS.find((t) => t.name === "get_image_sbom")!.description, /trivy-operator, grype, registry or node/);
+  // The newer unknown reasons are named, and unknown is still never unused.
+  assert.match(IN_USE_NOTE, /sbom_incomplete, platform_mismatch or interpreted_content/);
+  assert.match(IN_USE_NOTE, /probes_missing or libraries_not_tracked/);
 });
 
 // --- argument validation (no broker call on bad input) --------------------------
@@ -394,6 +398,24 @@ test("get_image_sbom: every source with its trust; components from one; attestat
   assert.match(got.note, /Only 'verified' may be described as signed/);
 });
 
+test("get_image_sbom: a node catalog SBOM is a source like any other, with filePathsTotal kept", async () => {
+  const c = serve("sbom-storefront-node");
+  const r = await executeInProcessTool("get_image_sbom", { digest: STOREFRONT, source: "Node" });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(seen[0].query.get("source"), "node");
+  const got = JSON.parse(r.text);
+  assert.equal(got.report.source, "node");
+  assert.equal(got.report.sbomTrust, "scanned");
+  assertItemsFromBroker(got.components, c.body.items, "components");
+  const busybox = got.components.find((x: any) => x.name === "busybox");
+  assert.equal(busybox.filePathsTotal, 402);
+  // One base: the listed paths plus the omitted ones make the total.
+  assert.equal(busybox.filePaths.length + busybox.filePathsOmitted, 402);
+  assert.equal("filePathsTotal" in got.components.find((x: any) => x.name === "musl"), false);
+  assert.match(got.note, /kguardian's node catalog/);
+  assert.match(got.note, /Trivy Operator is authoritative/);
+});
+
 test("get_image_sbom: no SBOM is unknown", async () => {
   serve("sbom-unscanned");
   const got = JSON.parse((await executeInProcessTool("get_image_sbom", { digest: UNSCANNED })).text);
@@ -415,6 +437,7 @@ const REPLAYS: [string, string, Record<string, unknown>][] = [
   ["exposure-critical", "explain_cve_exposure", { id: "CVE-2099-10001" }],
   ["sbom-storefront", "get_image_sbom", { digest: STOREFRONT }],
   ["sbom-storefront-registry", "get_image_sbom", { digest: STOREFRONT, source: "registry" }],
+  ["sbom-storefront-node", "get_image_sbom", { digest: STOREFRONT, source: "node" }],
 ];
 
 for (const [name, tool, args] of REPLAYS) {
