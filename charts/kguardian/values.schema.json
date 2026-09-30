@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Partial schema: it constrains only the keys listed here and leaves every other value unchecked (no additionalProperties at the top level). Extend it block by block.",
+  "type": "object",
+  "properties": {
+    "broker": {
+      "type": "object",
+      "properties": {
+        "auth": {
+          "type": "object",
+          "properties": {
+            "keys": {
+              "type": "object",
+              "properties": {
+                "catalog": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[-._a-zA-Z0-9]+$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "nodeCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "epoch": { "type": "integer", "minimum": 1 },
+        "grants": { "type": "boolean" },
+        "retentionDays": { "type": "integer", "minimum": 0 },
+        "maxEpoch": { "type": "integer", "minimum": 1 },
+        "maxHoldSeconds": { "type": "integer", "minimum": 900 },
+        "scanTimeoutSeconds": { "type": "integer", "minimum": 10, "maximum": 1800 },
+        "maxFiles": { "type": "integer", "minimum": 1 },
+        "maxComponents": { "type": "integer", "minimum": 1, "maximum": 50000 },
+        "minScanIntervalSeconds": { "type": "integer", "minimum": 30 },
+        "pressureThreshold": { "type": "number", "minimum": 0, "maximum": 100 },
+        "maxPressureDeferSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
+        "readOnlyClone": { "type": "boolean" },
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "repository": { "type": "string", "minLength": 1 },
+                "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+                "tag": { "type": "string" },
+                "sha": { "type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$" }
+              }
+            },
+            "memoryLimit": { "type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi)?$" },
+            "tmpLimit": { "type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi)?$" },
+            "resources": { "type": "object" },
+            "seLinuxOptions": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "user": { "type": "string" },
+                "role": { "type": "string" },
+                "type": { "type": "string", "not": { "enum": ["super_t", "spc_t", "control_t", "unconfined_t"] } },
+                "level": { "type": "string" }
+              }
+            },
+            "appArmorProfile": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": { "type": "string", "enum": ["RuntimeDefault", "Localhost", "Unconfined"] },
+                "localhostProfile": { "type": "string" }
+              }
+            },
+            "logLevel": { "type": "string", "enum": ["debug", "info", "warn", "error"] }
+          }
+        }
+      }
+    }
+  }
+}

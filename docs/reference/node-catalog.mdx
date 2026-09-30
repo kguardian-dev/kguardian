@@ -1,14 +1,128 @@
 ---
 title: "Node catalog"
-description: "The Controller's NODE_CATALOG_* env vars, how it verifies the worker and the container root, its kernel needs and its limits"
+description: "The nodeCatalog Helm values, the Controller's NODE_CATALOG_* env vars, how it verifies the worker and the container root, its kernel needs and its limits"
 icon: "box-archive"
 ---
 
 Reference for node SBOM cataloging: the Controller opens each running
 container's root filesystem and hands it to the `cataloger` sidecar, which
-returns the image's packages. The feature is off by default. The Helm values
-that render these variables arrive with the chart change; until then, set
-them on the Controller DaemonSet directly.
+returns the image's packages. The feature is off by default; with
+`nodeCatalog.enabled=false` the chart renders exactly what it rendered
+before the feature existed.
+
+## Enable it
+
+It needs scoped [Broker authentication](/installation) and a `catalog` key
+in the same Secret. The key is optional to the pods: without it the Broker
+answers the catalog routes `503` and the Controller idles, nothing crash
+loops.
+
+```bash
+kubectl -n kguardian patch secret kguardian-broker-auth \
+  -p "{\"stringData\":{\"catalog\":\"$(openssl rand -hex 32)\"}}"
+
+helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian -n kguardian \
+  --reuse-values \
+  --set broker.auth.enabled=true \
+  --set broker.auth.existingSecret=kguardian-broker-auth \
+  --set nodeCatalog.enabled=true
+```
+
+Enabling restarts the Controller DaemonSet and the Broker once (new env
+vars and the sidecar). Rotating the `catalog` key needs both restarted
+again. It also needs Broker and Controller releases that include the node
+catalog (the releases after Broker 1.19.7 and Controller 1.16.2) and the
+`cataloger` image; an older Broker answers `404` and the Controller idles.
+
+The chart refuses to render when `nodeCatalog.enabled=true` and
+`broker.auth` is off or in `shared` mode, when `nodeCatalog.epoch` is above
+`nodeCatalog.maxEpoch`, when `nodeCatalog.maxHoldSeconds` does not outlast
+`nodeCatalog.scanTimeoutSeconds`, and when the worker's memory limit cannot
+hold `memoryLimit` + `tmpLimit` + 128Mi. `values.schema.json` checks the
+types and ranges below.
+
+Check progress with `GET /catalog/coverage` and `GET /catalog/status?node=<name>`
+on the Broker (read scope). With `broker.metrics.prometheusRule.enabled`
+the chart also ships the `kguardian-broker-node-catalog` PrometheusRule:
+token missing, `lsm_denied`, failure rate by reason, no progress in 6 hours
+with a non-empty queue, and scans deferred by node pressure for 2 hours.
+
+**Kill switch:** `--set nodeCatalog.grants=false` stops every new grant at
+the Broker (a Broker restart, no Controller restart). Uploads under a live
+lease still complete.
+
+## Helm values
+
+| Key | Type | Default | Renders |
+|---|---|---|---|
+| `nodeCatalog.enabled` | bool | `false` | The sidecar, the Controller's `NODE_CATALOG=on` and the env below, `BROKER_TOKEN_CATALOG` on both pods. |
+| `nodeCatalog.epoch` | int | `1` | Controller `NODE_CATALOG_EPOCH`. 1 to `maxEpoch`. |
+| `nodeCatalog.grants` | bool | `true` | Broker `NODE_CATALOG_GRANTS` (the kill switch). |
+| `nodeCatalog.retentionDays` | int | `14` | Broker `NODE_CATALOG_RETENTION_DAYS`; `0` keeps rows. |
+| `nodeCatalog.maxEpoch` | int | `1000` | Broker `NODE_CATALOG_MAX_EPOCH`. |
+| `nodeCatalog.maxHoldSeconds` | int | `7200` | Broker `NODE_CATALOG_MAX_HOLD_SECS`. At least 900, above `scanTimeoutSeconds`. |
+| `nodeCatalog.scanTimeoutSeconds` | int | `600` | Controller `NODE_CATALOG_SCAN_TIMEOUT_SECS`, 10 to 1800. |
+| `nodeCatalog.maxFiles` | int | `2000000` | Controller `NODE_CATALOG_MAX_FILES`. |
+| `nodeCatalog.maxComponents` | int | `50000` | Controller `NODE_CATALOG_MAX_COMPONENTS`, at most 50 000. |
+| `nodeCatalog.minScanIntervalSeconds` | int | `30` | Controller `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS`, at least 30. |
+| `nodeCatalog.pressureThreshold` | int | `40` | Controller `NODE_CATALOG_PRESSURE_THRESHOLD`. |
+| `nodeCatalog.maxPressureDeferSeconds` | int | `1800` | Controller `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS`, at most 86 400. |
+| `nodeCatalog.readOnlyClone` | bool | `false` | Controller `NODE_CATALOG_RO_CLONE`. |
+| `nodeCatalog.worker.image.*` | | `ghcr.io/kguardian-dev/kguardian/cataloger`, tag `v0.1.0` | The sidecar image; `sha` pins a digest. |
+| `nodeCatalog.worker.memoryLimit` | string | `640Mi` | Worker `CATALOG_MEMORY_LIMIT` (bytes, `Ki`, `Mi` or `Gi`). |
+| `nodeCatalog.worker.tmpLimit` | string | `192Mi` | Worker `CATALOG_TMP_LIMIT` and the `/tmp` emptyDir `sizeLimit`. |
+| `nodeCatalog.worker.resources` | object | requests 50m / 128Mi, limits 500m / 1Gi | Sidecar resources. |
+| `nodeCatalog.worker.seLinuxOptions` | object | `{type: container_t, level: "s0-s0:c0.c1023"}` | Sidecar SELinux label (below). |
+| `nodeCatalog.worker.appArmorProfile` | object | `{}` | Sidecar AppArmor profile (Kubernetes 1.30+). |
+| `nodeCatalog.worker.logLevel` | string | `info` | Worker `LOG_LEVEL`. |
+| `broker.auth.keys.catalog` | string | `catalog` | Secret key holding the catalog token. |
+
+The Controller's other `NODE_CATALOG_*` variables (below) keep their
+defaults; the chart pins `NODE_CATALOG_SOCKET` to
+`/run/kguardian/catalog/worker.sock` and sets `POD_UID` from the downward
+API.
+
+## The sidecar
+
+The `cataloger` container in the Controller pod runs capability model (i)
+from `cataloger/README.md`:
+
+- `runAsUser: 0`, `runAsNonRoot: false`, `allowPrivilegeEscalation: false`,
+  `readOnlyRootFilesystem: true`, `seccompProfile: RuntimeDefault`;
+  capabilities `drop: [ALL]`, `add: [DAC_READ_SEARCH, SETUID, SETGID]`. The
+  uid-0 parent parses nothing; every scan runs in a fresh child as uid
+  2000000000 with `DAC_READ_SEARCH` alone, under seccomp.
+- No token: the pod mounts the service-account token for the Controller,
+  and the sidecar gets an empty directory over
+  `/var/run/secrets/kubernetes.io/serviceaccount` instead. No Broker token,
+  no host mounts.
+- `/run/kguardian/catalog`: an emptyDir shared with the Controller. The
+  worker makes it `0700` and the socket `0600`, both owned by uid 0, and the
+  Controller refuses anything else. An emptyDir is created owned by uid 0,
+  and `fsGroup` on `controller.podSecurityContext` changes only its group
+  and mode, never the owner, so the check holds with or without it (the
+  worker's `fchmod` to `0700` also clears the set-group-ID bit kubelet adds).
+- `/tmp`: a memory-backed emptyDir with `sizeLimit` equal to `tmpLimit`.
+  Its pages count against the sidecar's memory limit, which is why the
+  limit must hold `memoryLimit` + `tmpLimit` + 128Mi: the worker's own
+  limits then trip before a cgroup OOM kill, which on cgroup v2 takes the
+  whole container (kubelet sets `memory.oom.group`). Nodes with kubelet's
+  `singleProcessOOMKill: true` (Kubernetes 1.32 and later) kill only the
+  scan child.
+- Readiness and liveness run `kguardian-cataloger ping`, which the worker
+  answers even while a scan runs.
+
+**SELinux.** The default `container_t` with `s0-s0:c0.c1023` lets the
+worker read another container's files through the handle it is given: the
+category range lifts MCS separation only, and `container_t` stays the
+confined container domain. With the default per-pod label every read is
+denied (`lsm_denied`). Never use `super_t`, `spc_t` or `control_t`; the
+schema refuses them. Nodes without SELinux ignore the setting.
+
+**Pod Security.** The Controller pod is already privileged, so its
+namespace must allow the `privileged` Pod Security level; the sidecar asks
+for less than the Controller container does. The chart ships no
+NetworkPolicy or admission policy that selects the Controller pod.
 
 ## Environment variables
 

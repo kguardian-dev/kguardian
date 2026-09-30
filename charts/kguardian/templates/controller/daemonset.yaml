@@ -139,6 +139,40 @@ spec:
           - name: COMPUTE_ENABLED
             value: "false"
           {{- end }}
+          {{- include "kguardian.nodeCatalogGuard" . }}
+          {{- $nodeCatalog := include "kguardian.nodeCatalogEnabled" . }}
+          {{- if $nodeCatalog }}
+          {{- $nc := .Values.nodeCatalog }}
+          # Node SBOM cataloging (values.yaml `nodeCatalog`): this container
+          # opens each running container's root and hands it to the
+          # cataloger sidecar over the socket on the shared emptyDir.
+          - name: NODE_CATALOG
+            value: "on"
+          {{- include "kguardian.catalogTokenEnv" . | nindent 10 }}
+          - name: NODE_CATALOG_SOCKET
+            value: /run/kguardian/catalog/worker.sock
+          - name: NODE_CATALOG_EPOCH
+            value: {{ hasKey $nc "epoch" | ternary $nc.epoch 1 | int64 | quote }}
+          - name: NODE_CATALOG_SCAN_TIMEOUT_SECS
+            value: {{ $nc.scanTimeoutSeconds | int64 | quote }}
+          - name: NODE_CATALOG_MAX_FILES
+            value: {{ $nc.maxFiles | int64 | quote }}
+          - name: NODE_CATALOG_MAX_COMPONENTS
+            value: {{ $nc.maxComponents | int64 | quote }}
+          - name: NODE_CATALOG_MIN_SCAN_INTERVAL_SECS
+            value: {{ $nc.minScanIntervalSeconds | int64 | quote }}
+          - name: NODE_CATALOG_PRESSURE_THRESHOLD
+            value: {{ $nc.pressureThreshold | quote }}
+          - name: NODE_CATALOG_MAX_PRESSURE_DEFER_SECS
+            value: {{ $nc.maxPressureDeferSeconds | int64 | quote }}
+          - name: NODE_CATALOG_RO_CLONE
+            value: {{ if $nc.readOnlyClone }}"on"{{ else }}"off"{{ end }}
+          # The Controller never offers its own pod's images.
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          {{- end }}
           volumeMounts:
           {{- if .Values.seccomp.distribute }}
           - name: seccomp-profiles
@@ -167,10 +201,95 @@ spec:
           - mountPath: /proc
             name: hostproc
             readOnly: true
+          {{- if $nodeCatalog }}
+          - name: catalog-socket
+            mountPath: /run/kguardian/catalog
+          {{- end }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if $nodeCatalog }}
+        {{- $w := .Values.nodeCatalog.worker }}
+        # Node SBOM worker (cataloger/README.md). It parses untrusted image
+        # content, so it holds nothing worth stealing: no Broker or
+        # service-account token, no network use (AF_UNIX only), no host
+        # mounts. The uid-0 parent parses nothing: it keeps DAC_READ_SEARCH,
+        # SETUID and SETGID only, and runs each scan in a fresh child as uid
+        # 2000000000 with DAC_READ_SEARCH alone, under seccomp.
+        - name: cataloger
+          {{- if $w.image.sha }}
+          image: "{{ $w.image.repository }}@{{ $w.image.sha }}"
+          {{- else }}
+          image: "{{ $w.image.repository }}:{{ include "kguardian.imageTag" $w.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ $w.image.pullPolicy }}
+          args: ["serve"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - DAC_READ_SEARCH
+                - SETUID
+                - SETGID
+            seccompProfile:
+              type: RuntimeDefault
+            {{- with $w.seLinuxOptions }}
+            seLinuxOptions:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            {{- with $w.appArmorProfile }}
+            appArmorProfile:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          env:
+            - name: CATALOG_SOCKET
+              value: /run/kguardian/catalog/worker.sock
+            - name: CATALOG_TMP_DIR
+              value: /tmp
+            - name: CATALOG_MEMORY_LIMIT
+              value: {{ $w.memoryLimit | quote }}
+            - name: CATALOG_TMP_LIMIT
+              value: {{ $w.tmpLimit | quote }}
+            - name: LOG_LEVEL
+              value: {{ $w.logLevel | default "info" | quote }}
+          # `ping` is answered even while a scan runs (PROTOCOL.md 3.3).
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/kguardian-cataloger", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/kguardian-cataloger", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 3
+          {{- with $w.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # The worker makes this directory 0700 and the socket 0600, both
+            # owned by uid 0, and the Controller refuses anything else.
+            - name: catalog-socket
+              mountPath: /run/kguardian/catalog
+            - name: catalog-tmp
+              mountPath: /tmp
+            # Shadows the service-account token the pod mounts for the
+            # Controller: the worker gets an empty directory instead.
+            - name: catalog-no-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        {{- end }}
       serviceAccountName: {{ default "controller" .Values.controller.serviceAccount.name }}
       securityContext:
         {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
@@ -235,6 +354,22 @@ spec:
         hostPath:
           path: /sys/fs/cgroup
           type: Directory
+      {{- end }}
+      {{- if $nodeCatalog }}
+      # Shared by the Controller and the cataloger; holds only the socket.
+      - name: catalog-socket
+        emptyDir:
+          sizeLimit: 1Mi
+      # Scan temp space (archive extraction). Memory-backed, so its pages
+      # count against the cataloger's memory limit; sizeLimit equals
+      # CATALOG_TMP_LIMIT, which the worker's watchdog enforces too.
+      - name: catalog-tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: {{ .Values.nodeCatalog.worker.tmpLimit }}
+      - name: catalog-no-token
+        emptyDir:
+          sizeLimit: 1Ki
       {{- end }}
       nodeSelector:
         {{- if .Values.controller.nodeSelector }}

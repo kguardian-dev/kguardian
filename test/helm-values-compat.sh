@@ -1090,6 +1090,110 @@ else
   echo "FAIL [db-conns-external-notes]: dry-run install failed"; fail=1
 fi
 
+# 17. Node catalog (nodeCatalog). Off by default, and off must be byte-for-
+# byte what the chart rendered before the block existed: no knob under
+# nodeCatalog, and not broker.auth.keys.catalog, may reach the output while
+# it is off. A values file without the block (nodeCatalog=null) is the
+# pre-feature values. The DB password is fixed so the renders can be
+# compared (it is random otherwise).
+nc_cmp() { # nc_cmp <label> <helm-args...>: every variant renders the same bytes
+  local label="$1"; shift
+  local base variant
+  base="$(helm template compat "$CHART" --set database.password=cmp "$@" 2>&1)" || \
+    { echo "FAIL [$label]: base did not render"; fail=1; return; }
+  grep -qE 'NODE_CATALOG|BROKER_TOKEN_CATALOG|cataloger|catalog-(socket|tmp|no-token)|node-catalog' <<<"$base" && \
+    { echo "FAIL [$label]: node catalog output while nodeCatalog is off"; fail=1; }
+  for v in "--set nodeCatalog=null" \
+           "--set nodeCatalog.enabled=false --set nodeCatalog.epoch=5 --set nodeCatalog.maxEpoch=9 --set nodeCatalog.grants=false --set nodeCatalog.retentionDays=0 --set nodeCatalog.worker.image.tag=v9.9.9 --set nodeCatalog.worker.tmpLimit=64Mi --set nodeCatalog.readOnlyClone=true" \
+           "--set broker.auth.keys.catalog=node-sbom"; do
+    # shellcheck disable=SC2086 # $v is a list of flags
+    variant="$(helm template compat "$CHART" --set database.password=cmp "$@" $v 2>&1)" || \
+      { echo "FAIL [$label]: did not render with $v"; fail=1; continue; }
+    [ "$variant" = "$base" ] || { echo "FAIL [$label]: output changed with $v while nodeCatalog is off"; fail=1; }
+  done
+}
+nc_cmp "node-catalog-off-defaults"
+nc_cmp "node-catalog-off-auth" --set broker.auth.enabled=true --set broker.auth.existingSecret=kg \
+  --set broker.metrics.prometheusRule.enabled=true --set supplychain.enabled=true
+
+NC_ON=(--set broker.auth.enabled=true --set broker.auth.existingSecret=kg --set nodeCatalog.enabled=true)
+# container <name> — the named container's spec from the Controller DaemonSet.
+container() {
+  workload DaemonSet kguardian-controller | awk -v c="        - name: $1" '
+    $0 == c { on = 1; print; next }
+    on && (/^        - name: / || /^      [a-z]/) { exit }
+    on { print }'
+}
+render "node-catalog-on" "${NC_ON[@]}" && {
+  ctl="$(container controller)"
+  cat_c="$(container cataloger)"
+  broker_doc="$(workload Deployment kguardian-broker)"
+  [ -n "$cat_c" ] || { echo "FAIL [node-catalog-on]: no cataloger container"; fail=1; }
+  grep -A1 'name: NODE_CATALOG$' <<<"$ctl" | grep -q 'value: "on"' || \
+    { echo "FAIL [node-catalog-on]: controller lacks NODE_CATALOG=on"; fail=1; }
+  grep -A5 'name: BROKER_TOKEN_CATALOG' <<<"$ctl" | tr -d ' ' | tr '\n' ' ' | \
+    grep -q 'name:kg key:catalog optional:true' || \
+    { echo "FAIL [node-catalog-on]: controller BROKER_TOKEN_CATALOG must be optional key catalog"; fail=1; }
+  grep -A1 'name: NODE_CATALOG_EPOCH' <<<"$ctl" | grep -q 'value: "1"' || \
+    { echo "FAIL [node-catalog-on]: controller NODE_CATALOG_EPOCH must default to 1"; fail=1; }
+  grep -A3 'name: POD_UID' <<<"$ctl" | grep -q 'fieldPath: metadata.uid' || \
+    { echo "FAIL [node-catalog-on]: controller POD_UID must come from metadata.uid"; fail=1; }
+  grep -q 'name: catalog-socket' <<<"$ctl" || \
+    { echo "FAIL [node-catalog-on]: controller must mount the socket emptyDir"; fail=1; }
+  # The token shadow is the worker's alone: the Controller needs its token.
+  grep -q 'catalog-no-token' <<<"$ctl" && \
+    { echo "FAIL [node-catalog-on]: the controller must keep its service-account token"; fail=1; }
+  for want in 'runAsUser: 0' 'runAsNonRoot: false' 'allowPrivilegeEscalation: false' \
+              'readOnlyRootFilesystem: true' '- DAC_READ_SEARCH' '- SETUID' '- SETGID' \
+              'type: RuntimeDefault' 'type: container_t' 'level: s0-s0:c0.c1023' \
+              'image: "ghcr.io/kguardian-dev/kguardian/cataloger:v' 'name: CATALOG_MEMORY_LIMIT' \
+              'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' 'mountPath: /tmp' \
+              'mountPath: /run/kguardian/catalog' 'memory: 1Gi' 'kguardian-cataloger", "ping"'; do
+    grep -qF -- "$want" <<<"$cat_c" || { echo "FAIL [node-catalog-on]: cataloger lacks '$want'"; fail=1; }
+  done
+  [ "$(grep -A3 'add:' <<<"$cat_c" | grep -c '^ *- ')" = "3" ] || \
+    { echo "FAIL [node-catalog-on]: cataloger must add exactly three capabilities"; fail=1; }
+  grep -qE 'BROKER_|privileged|hostPath|name: hostproc' <<<"$cat_c" && \
+    { echo "FAIL [node-catalog-on]: cataloger must get no token, privilege or host mount"; fail=1; }
+  grep -A3 '^      - name: catalog-tmp' <<<"$OUT" | tr -d ' ' | tr '\n' ' ' | \
+    grep -q 'medium:Memory sizeLimit:192Mi' || \
+    { echo "FAIL [node-catalog-on]: /tmp must be a memory emptyDir sized to tmpLimit"; fail=1; }
+  grep -A5 'name: BROKER_TOKEN_CATALOG' <<<"$broker_doc" | grep -q 'optional: true' || \
+    { echo "FAIL [node-catalog-on]: broker BROKER_TOKEN_CATALOG must be optional"; fail=1; }
+  for v in 'NODE_CATALOG_GRANTS' 'NODE_CATALOG_RETENTION_DAYS' 'NODE_CATALOG_MAX_EPOCH' 'NODE_CATALOG_MAX_HOLD_SECS'; do
+    grep -q "name: $v" <<<"$broker_doc" || { echo "FAIL [node-catalog-on]: broker lacks $v"; fail=1; }
+  done
+  assert_absent "node-catalog-on" "kguardian-broker-node-catalog"
+}
+render "node-catalog-custom" "${NC_ON[@]}" --set broker.auth.keys.catalog=node-sbom \
+  --set nodeCatalog.epoch=7 --set nodeCatalog.maxEpoch=7 --set nodeCatalog.grants=false \
+  --set broker.metrics.prometheusRule.enabled=true && {
+  [ "$(grep -A4 'name: BROKER_TOKEN_CATALOG' <<<"$OUT" | grep -c 'key: node-sbom')" = "2" ] || \
+    { echo "FAIL [node-catalog-custom]: broker and controller must both read key node-sbom"; fail=1; }
+  grep -A1 'name: NODE_CATALOG_GRANTS' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [node-catalog-custom]: grants=false must reach the broker"; fail=1; }
+  assert_has "node-catalog-custom" "kguardian-broker-node-catalog"
+}
+# Guards, at template time and in values.schema.json.
+assert_render_fails "node-catalog-needs-auth" "nodeCatalog.enabled=true requires broker.auth.enabled=true" \
+  --set nodeCatalog.enabled=true
+assert_render_fails "node-catalog-needs-scoped" "requires broker.auth.mode=scoped" \
+  "${NC_ON[@]}" --set broker.auth.mode=shared
+assert_render_fails "node-catalog-epoch-above-max" "nodeCatalog.epoch must be between 1 and" \
+  "${NC_ON[@]}" --set nodeCatalog.epoch=11 --set nodeCatalog.maxEpoch=10
+assert_render_fails "node-catalog-hold-below-timeout" "nodeCatalog.maxHoldSeconds must be" \
+  "${NC_ON[@]}" --set nodeCatalog.scanTimeoutSeconds=1800 --set nodeCatalog.maxHoldSeconds=1200
+assert_render_fails "node-catalog-memory" "must hold memoryLimit" \
+  "${NC_ON[@]}" --set nodeCatalog.worker.resources.limits.memory=768Mi
+assert_render_fails "node-catalog-schema-epoch" "nodeCatalog/epoch" \
+  "${NC_ON[@]}" --set nodeCatalog.epoch=0
+assert_render_fails "node-catalog-schema-quantity" "nodeCatalog/worker/memoryLimit" \
+  "${NC_ON[@]}" --set nodeCatalog.worker.memoryLimit=1G
+assert_render_fails "node-catalog-schema-selinux" "nodeCatalog/worker/seLinuxOptions/type" \
+  "${NC_ON[@]}" --set nodeCatalog.worker.seLinuxOptions.type=spc_t
+assert_render_fails "node-catalog-schema-unknown-key" "nodeCatalog" \
+  --set nodeCatalog.enable=true
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

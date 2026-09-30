@@ -1,0 +1,105 @@
+{{- if and .Values.broker.metrics.prometheusRule.enabled (include "kguardian.nodeCatalogEnabled" .) }}
+# Alerts over the Broker's kguardian_node_catalog_* metrics (values.yaml
+# `nodeCatalog`; broker/README.md lists them). Same preconditions as the
+# seccomp rules in prometheusrule.yaml: something must scrape the Broker,
+# and a Broker NetworkPolicy must let it. The counters live on whichever
+# Broker replica served the request, so every rule sums across replicas;
+# queue_depth and coverage_ratio are reported by the leader only.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kguardian.name" . }}-broker-node-catalog
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.broker.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: kguardian.node-catalog
+      rules:
+        # The chart renders the catalog key as optional, so a Secret
+        # without it starts fine and catalogs nothing.
+        - alert: KguardianNodeCatalogTokenMissing
+          expr: max(kguardian_node_catalog_token_missing) == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "The Broker has no node catalog token"
+            description: >-
+              nodeCatalog is enabled but the Broker has no BROKER_TOKEN_CATALOG:
+              the auth Secret lacks the key named by broker.auth.keys.catalog.
+              Catalog uploads answer 503 and no node SBOM is stored. Add the key
+              and restart the Broker and the Controller DaemonSet.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+
+        # SELinux or AppArmor refused the worker the container root. On
+        # SELinux nodes this means the worker's label is not the default
+        # container_t:s0-s0:c0.c1023 (nodeCatalog.worker.seLinuxOptions).
+        - alert: KguardianNodeCatalogLsmDenied
+          expr: sum(increase(kguardian_node_catalog_skipped_total{reason="lsm_denied"}[1h])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "An LSM denies the cataloger access to container roots"
+            description: >-
+              {{`{{ $value | humanize }}`}} node(s) were skipped with lsm_denied in the
+              last hour. Check nodeCatalog.worker.seLinuxOptions and
+              appArmorProfile; `GET /catalog/status?node=<name>` names the nodes.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+
+        - alert: KguardianNodeCatalogFailureRate
+          expr: |
+            sum by (reason) (increase(kguardian_node_catalog_failed_total[1h]))
+              / on () group_left
+            sum(increase(kguardian_node_catalog_granted_total[1h])) > 0.2
+            and on ()
+            sum(increase(kguardian_node_catalog_granted_total[1h])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node catalog scans failing with {{`{{ $labels.reason }}`}}"
+            description: >-
+              {{`{{ $value | humanizePercentage }}`}} of node catalog grants in the last
+              hour failed with {{`{{ $labels.reason }}`}}. oom: raise
+              nodeCatalog.worker.memoryLimit (and the memory limit with it);
+              timeout: raise nodeCatalog.scanTimeoutSeconds.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+
+        # Work is queued but nothing completes: every node deferred,
+        # refused or idle, or the kill switch is off.
+        - alert: KguardianNodeCatalogStalled
+          expr: |
+            max(kguardian_node_catalog_queue_depth) > 0
+            and on ()
+            (sum(increase(kguardian_node_catalog_cataloged_total[6h])) or on () vector(0)) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node catalog made no progress in 6 hours"
+            description: >-
+              {{`{{ $value }}`}} digests are waiting and none was cataloged in 6 hours.
+              Check kguardian_node_catalog_grants_enabled (the nodeCatalog.grants
+              kill switch), the skipped/failed counters by reason, and the
+              cataloger container's logs.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+
+        # Nodes too busy to scan for hours: scans wait while host PSI is
+        # above nodeCatalog.pressureThreshold.
+        - alert: KguardianNodeCatalogDeferredPressure
+          expr: sum(increase(kguardian_node_catalog_skipped_total{reason="deferred_pressure"}[30m])) > 0
+          for: 2h
+          labels:
+            severity: info
+          annotations:
+            summary: "Node catalog scans keep waiting for node pressure to drop"
+            description: >-
+              Nodes have skipped claims for deferred_pressure for 2 hours. Raise
+              nodeCatalog.pressureThreshold or nodeCatalog.maxPressureDeferSeconds
+              if these nodes are always this busy.
+            runbook_url: "https://docs.kguardian.dev/reference/node-catalog"
+{{- end }}
