@@ -7,20 +7,47 @@
 # on the same release when either moves.
 FROM rust:1-trixie AS build
 
-COPY Cargo.lock /app/
-
-RUN cargo new /app/broker
-
-COPY Cargo.toml /app/broker/
-
 RUN apt update && apt-get install protobuf-compiler -y
 
 WORKDIR /app/broker
 
-COPY src /app/broker/src
-COPY db  /app/broker/db
+# Compile dependencies against the real manifest but placeholder sources, so
+# this layer is keyed on Cargo.toml + Cargo.lock alone and survives every
+# change that does not touch them.
+#
+# Previously src/ was copied in before the only cargo build, which put the
+# sources and the dependency compile in the same layer: every source edit
+# recompiled all ~300 dependency crates, and the buildx cache exported by CI
+# had no dependency layer to restore. Cargo.lock also landed in /app/ rather
+# than the crate root, so the pinned versions were never actually used.
+#
+# Both targets declared in Cargo.toml need a file to exist, or this build
+# fails before it reaches the dependencies.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src \
+    && echo 'fn main() {}' > src/main.rs \
+    && : > src/lib.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry  cargo build --release
+# Discard the placeholders' own artifacts and fingerprints so the real sources
+# are compiled rather than judged up to date. Dependencies stay in target/.
+#
+# Both crate names need both spellings: the library is emitted as
+# deps/libapi-<hash>.rlib, so a deps/api-* glob alone leaves it in place and
+# the real bin then compiles against the empty placeholder lib, failing with
+# "cannot find <module> in `api`".
+RUN rm -rf src \
+    target/release/broker \
+    target/release/deps/broker* \
+    target/release/deps/api* \
+    target/release/deps/libapi* \
+    target/release/.fingerprint/broker-* \
+    target/release/.fingerprint/api-*
+
+COPY src ./src
+COPY db  ./db
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release
 
 FROM debian:13.7-slim AS app
 
