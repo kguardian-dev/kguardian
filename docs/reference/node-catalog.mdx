@@ -339,8 +339,13 @@ ranked as if loaded.
 In the UI, `#/images` shows a node SBOM as "Cataloged on node
 (linux/arm64)", with "partial" or "OS packages only" when it is not full.
 An image with no SBOM from any source and no vulnerability report, whose
-catalog found no packages, failed, or was skipped by every node so far,
-reads "Not assessable" with the reason. It never reads as zero CVEs.
+catalog found no packages (`no_packages_found`) or failed (backing off),
+reads "Not assessable" with the reason. It never reads as zero CVEs. A
+pending image whose last node could not catalog it (a per-node reason such
+as `lsm_denied`) reads "Node catalog: pending · last node: LSM denied":
+that reason skips one node for 24 hours, and other nodes may still catalog
+it. The coverage banner is cluster-wide, and shows only while the Broker
+has a catalog token.
 
 ## Reading `/catalog/coverage` and `/catalog/status`
 
@@ -365,9 +370,9 @@ answers `404`; the UI then hides its coverage banner.
 }
 ```
 
-- `runningImages` counts the digests running now. `trivy` and `node` count
-  those with an SBOM from each source; they overlap, and `trusted` is the
-  union. `coverageRatio` is `trusted / runningImages`.
+- `runningImages` counts the digests running now. `trivy` counts those
+  with an SBOM or report from Trivy Operator, `node` those with a node
+  SBOM; they overlap, and `trusted` is the union. `coverageRatio` is `trusted / runningImages`.
 - `grantsEnabled: false` means the kill switch is on; `tokenConfigured:
   false` means the Broker has no `BROKER_TOKEN_CATALOG`, so no node SBOM
   can be stored.
@@ -400,21 +405,17 @@ the digests it is skipped for over the next 24 hours.
 
 ## Runbook
 
-**Kill switch.** Set `nodeCatalog.grants=false` (Broker
-`NODE_CATALOG_GRANTS=false`) and roll the Broker. No new grant is made;
-uploads under a live lease still complete, and stored SBOMs stay. The
-Controllers keep offering and get nothing back, so they need no restart.
-`grantsEnabled` in `/catalog/coverage` reads `false`, and the stalled and
-not-claiming alerts are silenced. Set it back to `true` to resume.
+**Kill switch.** `nodeCatalog.grants=false`, as in [Enable it](#enable-it).
+Stored SBOMs stay, and the Controllers need no restart: they keep offering
+and get nothing back. `grantsEnabled` in `/catalog/coverage` reads
+`false`, and the stalled and not-claiming alerts are silenced. Set it back
+to `true` to resume.
 
 **Rotating the catalog token.** Write the new value under the Secret's
-`catalog` key (`broker.auth.keys.catalog`), then restart both the Broker
-(`kubectl -n kguardian rollout restart deployment/kguardian-broker`) and
-the Controller DaemonSet
-(`kubectl -n kguardian rollout restart daemonset/kguardian-controller`).
-Both read the token only at startup. Between the two restarts, a
-Controller on the old token is refused and retries; nothing is lost, since
-a lease that runs out is granted again.
+`catalog` key, as in [Enable it](#enable-it), then restart both the Broker
+and the Controller DaemonSet; both read the token only at startup. Between
+the two restarts, a Controller on the old token is refused and retries;
+nothing is lost, since a lease that runs out is granted again.
 
 **Alerts** (the `kguardian-broker-node-catalog` PrometheusRule):
 
@@ -432,7 +433,7 @@ Other reasons in `byReason` that are normal churn, not faults: `pid_gone`,
 another instance is tried). Per-node reasons (`sandboxed`,
 `lazy_snapshotter`, `unsupported_rootfs`, `kernel_unsupported`,
 `caps_unavailable`, `worker_unavailable`, `no_cataloger`) skip that node
-for 24 hours while others try; when every node running an image reports
-one, the image stays not assessable until something changes on a node.
+for 24 hours while others try; the image stays pending, and is retried on
+that node after the 24 hours.
 `no_packages_found` is final: the image has nothing the cataloger
 recognises.
