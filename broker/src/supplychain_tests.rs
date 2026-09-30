@@ -3869,6 +3869,10 @@ const NODE_GUARD_PER_CALL: &str = include_str!("../test/fixtures/node_guard_per_
 /// After an in-use refresh: kg_pkg_in_use equals the per-call reference
 /// for every workload container of this test's namespace, every package
 /// any of its SBOMs lists (plus one no SBOM lists), observable or not.
+/// Then again after each change that can land between a refresh and a
+/// read (each rolled back): the SBOM re-cataloged partial with the same
+/// content, the stored SBOM replaced (content hash no longer the claim's),
+/// a node reporting another platform, the claim's platform changing.
 fn node_guard_same_as_per_call(conn: &mut PgConnection) {
     #[derive(QueryableByName, Debug)]
     struct Pair {
@@ -3879,34 +3883,204 @@ fn node_guard_same_as_per_call(conn: &mut PgConnection) {
         #[diesel(sql_type = Text)]
         per_call: String,
     }
+    #[derive(QueryableByName)]
+    struct N {
+        #[diesel(sql_type = Text)]
+        node_name: String,
+    }
+    fn compare(conn: &mut PgConnection, what: &str) {
+        let rows: Vec<Pair> = sql_query(format!(
+            "WITH p AS ( \
+                 SELECT wc.*, n.name, o.obs FROM workload_containers wc \
+                 CROSS JOIN LATERAL (SELECT sc.name FROM supplychain_image_links l \
+                     JOIN image_sbom_components sc ON sc.digest = l.digest \
+                         AND sc.source = l.source \
+                     WHERE l.image_digest = wc.image_digest \
+                     UNION SELECT 'absent') n \
+                 CROSS JOIN (VALUES (true), (false)) o(obs) \
+                 WHERE wc.pod_namespace = '{NS}') \
+             SELECT p.name AS pkg, \
+                 kg_pkg_in_use(p.cluster_id, p.pod_namespace, p.workload_kind, p.workload_name, \
+                     p.container_name, p.image_digest, p.name, p.obs) AS shipped, \
+                 kg_pkg_in_use_per_call(p.cluster_id, p.pod_namespace, p.workload_kind, \
+                     p.workload_name, p.container_name, p.image_digest, p.name, p.obs) \
+                     AS per_call \
+             FROM p"
+        ))
+        .load(conn)
+        .unwrap();
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert_eq!(r.shipped, r.per_call, "{what}: {}", r.pkg);
+        }
+    }
     exec(conn, NODE_GUARD_PER_CALL);
-    let rows: Vec<Pair> = sql_query(format!(
-        "WITH p AS ( \
-             SELECT wc.*, n.name, o.obs FROM workload_containers wc \
-             CROSS JOIN LATERAL (SELECT sc.name FROM supplychain_image_links l \
-                 JOIN image_sbom_components sc ON sc.digest = l.digest AND sc.source = l.source \
-                 WHERE l.image_digest = wc.image_digest \
-                 UNION SELECT 'absent') n \
-             CROSS JOIN (VALUES (true), (false)) o(obs) \
-             WHERE wc.pod_namespace = '{NS}') \
-         SELECT p.name AS pkg, \
-             kg_pkg_in_use(p.cluster_id, p.pod_namespace, p.workload_kind, p.workload_name, \
-                 p.container_name, p.image_digest, p.name, p.obs) AS shipped, \
-             kg_pkg_in_use_per_call(p.cluster_id, p.pod_namespace, p.workload_kind, \
-                 p.workload_name, p.container_name, p.image_digest, p.name, p.obs) AS per_call \
-         FROM p"
+    compare(conn, "after the refresh");
+    let nodes: Vec<String> = sql_query(format!(
+        "SELECT DISTINCT node_name FROM runtime_coverage WHERE pod_namespace = '{NS}'"
     ))
-    .load(conn)
-    .unwrap();
+    .load::<N>(conn)
+    .unwrap()
+    .into_iter()
+    .map(|n| n.node_name)
+    .collect();
+    let rolled_back = |conn: &mut PgConnection, what: &str, f: &dyn Fn(&mut PgConnection)| {
+        let r = conn.transaction::<(), diesel::result::Error, _>(|c| {
+            f(c);
+            compare(c, what);
+            Err(diesel::result::Error::RollbackTransaction)
+        });
+        assert!(matches!(r, Err(diesel::result::Error::RollbackTransaction)));
+    };
+    rolled_back(conn, "re-cataloged partial", &|c| {
+        exec(c, "UPDATE node_catalog_claims SET completeness = 'partial'")
+    });
+    rolled_back(conn, "SBOM replaced", &|c| {
+        exec(
+            c,
+            "UPDATE vuln_sources SET content_hash = 'md5:replaced' \
+             WHERE source = 'node' AND kind = 'sbom'",
+        )
+    });
+    rolled_back(conn, "node platform changed", &|c| {
+        for n in &nodes {
+            crate::node_catalog::record_platform(c, n, "linux/s390x").unwrap();
+        }
+    });
+    rolled_back(conn, "claim platform changed", &|c| {
+        exec(c, "UPDATE node_catalog_claims SET platform = 'linux/s390x'")
+    });
     exec(
         conn,
         "DROP FUNCTION kg_pkg_in_use_per_call(text, text, text, text, text, text, text, boolean); \
          DROP FUNCTION kg_node_pkg_guard_per_call(text, text, text, text, text, text, text, integer);",
     );
-    assert!(!rows.is_empty());
-    for r in &rows {
-        assert_eq!(r.shipped, r.per_call, "{}", r.pkg);
+}
+
+/// One nullable text column `t` of `sql`.
+fn guard_text(conn: &mut PgConnection, sql: &str) -> Option<String> {
+    #[derive(QueryableByName)]
+    struct T {
+        #[diesel(sql_type = Nullable<Text>)]
+        t: Option<String>,
     }
+    sql_query(sql).get_result::<T>(conn).expect(sql).t
+}
+
+/// Between two in-use refreshes, what the stored guard row was judged on
+/// can change; each change fails closed at once, with no refresh: (a) the
+/// SBOM re-cataloged partial with unchanged content, (b) the SBOM replaced
+/// (content hash no longer the one the claim describes), (c) a node that
+/// ran the container reporting another platform (its offer marks the row;
+/// reporting the old platform again does not clear it, only a refresh
+/// does), and the claim's platform changing.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_stale_guard_row_fails_closed_between_refreshes() {
+    let mut conn = live_conn();
+    let img = d(84);
+    seed_node_guard(&mut conn, &img);
+    node_guard_refresh(&mut conn);
+    let ino = ("installed_not_observed", None, "Background");
+    let unknown = |r: &'static str| ("unknown", Some(r), "P1");
+    assert_eq!(node_guard_bar(&mut conn, &img), ino);
+
+    // (a) Re-cataloged partial, same content.
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'partial'",
+    );
+    assert_eq!(node_guard_bar(&mut conn, &img), unknown("sbom_incomplete"));
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'full'",
+    );
+    assert_eq!(node_guard_bar(&mut conn, &img), ino);
+
+    // (b) Replaced: a new node SBOM is stored; until its claim describes
+    // it (FINALIZE, same transaction in the catalog path), it fails.
+    let mut s = sbom_json(&img, "2026-09-21T08:00:00Z", &[], None);
+    s["source"] = json!(NODE_SOURCE);
+    let mut comps = node_guard_components();
+    comps
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "extra", "version": "1",
+        "type": "deb", "class": "os-pkgs", "file_paths": ["/usr/bin/extra"]}));
+    s["components"] = comps;
+    let p = normalise_sbom_from(
+        &img,
+        serde_json::from_value(s).unwrap(),
+        Utc::now(),
+        |s| s == NODE_SOURCE,
+        NODE_SOURCE,
+        crate::node_catalog::MAX_CATALOG_PATHS,
+    )
+    .unwrap();
+    store_sbom(&mut conn, p).unwrap();
+    assert_ne!(
+        guard_text(
+            &mut conn,
+            "SELECT content_hash AS t FROM vuln_sources WHERE source = 'node' AND kind = 'sbom'"
+        ),
+        guard_text(
+            &mut conn,
+            "SELECT content_hash AS t FROM node_catalog_claims"
+        )
+    );
+    assert_eq!(node_guard_bar(&mut conn, &img), unknown("sbom_incomplete"));
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims c SET content_hash = vs.content_hash FROM vuln_sources vs \
+         WHERE vs.digest = c.inventory_digest AND vs.source = 'node' AND vs.kind = 'sbom'",
+    );
+    assert_eq!(node_guard_bar(&mut conn, &img), ino);
+
+    // (c) The node that runs it now reports arm64, through the offer path.
+    let offer = |node: &str, platform: &str| crate::node_catalog::Offer {
+        node: node.into(),
+        platform: platform.into(),
+        epoch: 1,
+        digests: vec![],
+    };
+    crate::node_catalog::claim(&mut conn, &offer("n1", "linux/arm64"), true, 900).unwrap();
+    assert_eq!(
+        guard_text(&mut conn, "SELECT reason AS t FROM runtime_node_sbom_guard").as_deref(),
+        Some("platform_mismatch")
+    );
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    crate::node_catalog::claim(&mut conn, &offer("n1", "linux/amd64"), true, 900).unwrap();
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch"),
+        "stays failed until a refresh judges it again"
+    );
+    // An offer with the same platform marks nothing.
+    node_guard_refresh(&mut conn);
+    crate::node_catalog::claim(&mut conn, &offer("n1", "linux/amd64"), true, 900).unwrap();
+    assert_eq!(node_guard_bar(&mut conn, &img), ino);
+
+    // The claim's platform changes (a re-catalog for another platform).
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET platform = 'linux/arm64'",
+    );
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET platform = 'linux/amd64'",
+    );
+    assert_eq!(node_guard_bar(&mut conn, &img), ino);
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+    );
 }
 
 /// One instance of `api`/`app` on `node`, heartbeating now, captured from

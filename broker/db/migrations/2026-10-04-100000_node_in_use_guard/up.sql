@@ -18,6 +18,12 @@
 -- reason changes; on the maintenance VACUUM list), so kg_pkg_in_use evaluates it
 -- once per container rather than once per package. reason NULL = passes.
 -- A container with no row here fails closed (sbom_incomplete).
+-- sbom_platform is the claim's platform the row was judged against. What
+-- can change between two refreshes is re-checked when the row is read
+-- (kg_pkg_in_use): the SBOM's completeness and content hash, and the
+-- claim's platform against sbom_platform. A node whose platform changes
+-- marks its containers' passing rows platform_mismatch in the offer's
+-- transaction (node_catalog::claim).
 CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard (
     cluster_id     VARCHAR NOT NULL,
     pod_namespace  VARCHAR NOT NULL,
@@ -26,6 +32,7 @@ CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard (
     container_name VARCHAR NOT NULL,
     image_digest   VARCHAR NOT NULL,
     reason         VARCHAR NULL,
+    sbom_platform  VARCHAR NULL,
     PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name,
                  image_digest)
 );
@@ -107,10 +114,13 @@ $fn$;
 --   * a non-node SBOM lists the package's files: installed_not_observed,
 --     exactly as before (Trivy Operator and registry SBOMs unchanged);
 --   * no SBOM lists them: unknown:no_package_files, as before;
---   * only a node SBOM lists them: installed_not_observed only when the
---     container's kg_node_sbom_guard (runtime_node_sbom_guard, fail
---     closed without a row) and then the package's kg_node_pkg_flags both
---     pass, else unknown:<the first reason>.
+--   * only a node SBOM lists them: installed_not_observed only when all
+--     pass, else unknown:<the first failing>: the stored node SBOM is,
+--     now, complete and described by its claim (sbom_incomplete); the
+--     container's runtime_node_sbom_guard row exists (sbom_incomplete) and
+--     passed (its reason); the claim's platform is, now, the one the row
+--     was judged against (platform_mismatch); the package's
+--     kg_node_pkg_flags.
 CREATE OR REPLACE FUNCTION kg_pkg_in_use(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text,
     p_image text, p_pkg text, p_observable boolean
@@ -140,16 +150,28 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
                 WHERE l.image_digest = p_image AND l.source = 'node'
                   AND cardinality(sc.file_paths) > 0)
                 THEN 'unknown:no_package_files'
-            ELSE COALESCE('unknown:' || COALESCE(
-                              NULLIF(COALESCE(
-                                  (SELECT COALESCE(ng.reason, '') FROM runtime_node_sbom_guard ng
-                                   WHERE ng.cluster_id = p_cluster AND ng.pod_namespace = p_ns
-                                     AND ng.workload_kind = p_kind AND ng.workload_name = p_name
-                                     AND ng.container_name = p_container
-                                     AND ng.image_digest = p_image),
-                                  'sbom_incomplete'), ''),
-                              kg_node_pkg_flags(p_image, p_pkg)),
-                          'installed_not_observed')
+            ELSE COALESCE('unknown:' || (
+                SELECT CASE
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM vuln_sources vs
+                        JOIN node_catalog_claims cl ON cl.inventory_digest = vs.digest
+                        WHERE vs.digest = p_image AND vs.source = 'node' AND vs.kind = 'sbom'
+                          AND cl.completeness = 'full' AND cl.content_hash = vs.content_hash)
+                        THEN 'sbom_incomplete'
+                    WHEN ng.image_digest IS NULL THEN 'sbom_incomplete'
+                    WHEN ng.reason IS NOT NULL THEN ng.reason
+                    WHEN ng.sbom_platform IS NULL OR ng.sbom_platform IS DISTINCT FROM (
+                        SELECT cl.platform FROM node_catalog_claims cl
+                        WHERE cl.inventory_digest = p_image)
+                        THEN 'platform_mismatch'
+                    ELSE kg_node_pkg_flags(p_image, p_pkg)
+                END
+                FROM (SELECT 1) one
+                LEFT JOIN runtime_node_sbom_guard ng
+                  ON ng.cluster_id = p_cluster AND ng.pod_namespace = p_ns
+                 AND ng.workload_kind = p_kind AND ng.workload_name = p_name
+                 AND ng.container_name = p_container AND ng.image_digest = p_image),
+                'installed_not_observed')
          END
          FROM (SELECT (SELECT covered FROM runtime_in_use_coverage cv
                        WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns

@@ -184,7 +184,14 @@ existing altered; its down restores the PR 1 `kg_pkg_in_use` byte for byte):
   with a node SBOM, refreshed in place by `refresh_coverage` (a row written only when its reason
   changes, deleted when its container no longer qualifies; on the maintenance VACUUM list) in the
   same transaction and window as `runtime_in_use_coverage`, so `kg_pkg_in_use` does not re-evaluate it per package. A container
-  without a row fails closed (`sbom_incomplete`). A live reference (the first, per-call version,
+  without a row fails closed (`sbom_incomplete`). What can change between two refreshes is not
+  trusted to the row: at read time `kg_pkg_in_use` re-checks that the stored node SBOM is `full` and
+  described by its claim (same `content_hash`), else `sbom_incomplete`, and that the claim's
+  platform is still the row's `sbom_platform`, else `platform_mismatch`. A node whose recorded
+  platform changes marks the passing rows of containers with an instance on it `platform_mismatch`
+  in its offer's transaction (`node_catalog::record_platform`); only the next refresh clears that.
+  Residual: an instance starting on a node of another platform between two refreshes is judged at
+  the next refresh (at most one refresh interval). A live reference (the first, per-call version,
   `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh in the tests.
 - **`kg_node_pkg_flags(image, pkg)`**: the package's flags over every version the SBOM lists:
   bit 2 → `interpreted_content`, bit 1 → `sbom_incomplete`.

@@ -354,6 +354,7 @@ fn the_claim_sql_uses_only_the_database_clock_and_skips_locked_rows() {
         GRANT_SQL,
         OFFER_INSERT_SQL,
         UPSERT_PLATFORM_SQL,
+        INVALIDATE_GUARD_SQL,
         FINALIZE_SQL,
     ] {
         assert!(!sql.contains("$now"), "{sql}");

@@ -567,7 +567,9 @@ pub fn refresh_coverage(
                  SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                      wc.container_name, wc.image_digest, \
                      kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
-                         wc.workload_name, wc.container_name, wc.image_digest, $1) AS reason \
+                         wc.workload_name, wc.container_name, wc.image_digest, $1) AS reason, \
+                     (SELECT c.platform FROM node_catalog_claims c \
+                      WHERE c.inventory_digest = wc.image_digest) AS sbom_platform \
                  FROM workload_containers wc \
                  WHERE EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
                      ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
@@ -581,12 +583,14 @@ pub fn refresh_coverage(
                        AND w.container_name = g.container_name \
                        AND w.image_digest = g.image_digest)) \
              INSERT INTO runtime_node_sbom_guard AS g (cluster_id, pod_namespace, \
-                 workload_kind, workload_name, container_name, image_digest, reason) \
+                 workload_kind, workload_name, container_name, image_digest, reason, \
+                 sbom_platform) \
              SELECT * FROM want \
              ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, \
                  container_name, image_digest) \
-             DO UPDATE SET reason = EXCLUDED.reason \
-             WHERE g.reason IS DISTINCT FROM EXCLUDED.reason",
+             DO UPDATE SET reason = EXCLUDED.reason, sbom_platform = EXCLUDED.sbom_platform \
+             WHERE g.reason IS DISTINCT FROM EXCLUDED.reason \
+                OR g.sbom_platform IS DISTINCT FROM EXCLUDED.sbom_platform",
         )
         .bind::<Integer, _>(s.min_window_hours as i32)
         .execute(conn)?;
