@@ -69,8 +69,33 @@ pub const MAX_PATHS: usize = 4096;
 pub const MAX_PATH_LEN: usize = 1024;
 /// `partial_reasons` kept from a response.
 pub const MAX_REASONS: usize = 16;
-/// `stats` entries kept (scalars only).
+/// Scalar `stats` entries kept.
 pub const MAX_STATS_ENTRIES: usize = 64;
+/// The one list-valued stats key kept (PROTOCOL.md 4.2); every other
+/// list is skipped unparsed.
+pub const STATS_SAMPLE_KEY: &str = "ctime_dropped_sample";
+/// Paths kept in [`STATS_SAMPLE_KEY`].
+pub const MAX_STATS_SAMPLE: usize = 20;
+/// Longest path kept in [`STATS_SAMPLE_KEY`].
+pub const MAX_STATS_SAMPLE_LEN: usize = 256;
+/// The Broker stores `stats` whole only up to this many serialized bytes
+/// (node_catalog.rs `MAX_STATS_BYTES`); past it the sample is lost.
+pub const MAX_STATS_BYTES: usize = 16 * 1024;
+/// Room kept for `retry_reason`, which the Controller adds to the stats
+/// after parsing (a 64-byte value, at most 6 bytes each once escaped).
+pub const STATS_RETRY_RESERVE: usize = 512;
+/// Serialized bytes of the largest possible sample entry, separator
+/// included: its paths carry no control characters, so escaping at most
+/// doubles them (`"` and `\`).
+pub const STATS_SAMPLE_MAX_BYTES: usize = STATS_SAMPLE_KEY.len()
+    + 4 // key quotes, colon, comma
+    + 2 // brackets
+    + MAX_STATS_SAMPLE * (2 * MAX_STATS_SAMPLE_LEN + 3); // quotes, comma
+/// Serialized bytes the scalar entries may take, so the whole object
+/// (braces, sample and `retry_reason` included) stays within
+/// [`MAX_STATS_BYTES`] whatever the worker sends.
+pub const STATS_SCALAR_BUDGET: usize =
+    MAX_STATS_BYTES - 2 - STATS_SAMPLE_MAX_BYTES - STATS_RETRY_RESERVE;
 
 /// Budgets sent with a scan (PROTOCOL.md 3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -227,8 +252,10 @@ impl<'de> Deserialize<'de> for PathList {
 
 /// `stats`, kept lean: at most [`MAX_STATS_ENTRIES`] scalar entries
 /// (numbers, booleans, strings up to 128 bytes) with keys up to 64
-/// bytes. Nested objects (`budgets`) and everything else are skipped
-/// unparsed.
+/// bytes, taking at most [`STATS_SCALAR_BUDGET`] serialized bytes, plus
+/// the one allowlisted list, [`STATS_SAMPLE_KEY`] (see [`StatsSample`]).
+/// Nested objects (`budgets`), other lists and everything else are
+/// skipped unparsed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LeanStats(pub serde_json::Map<String, serde_json::Value>);
 
@@ -274,6 +301,116 @@ impl<'de> Deserialize<'de> for StatValue {
     }
 }
 
+/// Serialized length of a key or scalar.
+fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
+    serde_json::to_string(v).map_or(usize::MAX / 4, |s| s.len())
+}
+
+/// [`STATS_SAMPLE_KEY`]: up to [`MAX_STATS_SAMPLE`] paths of at most
+/// [`MAX_STATS_SAMPLE_LEN`] bytes, each passing the checks a component's
+/// file path does (absolute, no control characters, no empty, `.` or
+/// `..` segment). Anything else (a non-string, an over-long or invalid
+/// path, entries past the cap, a value that is not a list) is skipped.
+struct StatsSample(Vec<String>);
+
+impl<'de> Deserialize<'de> for StatsSample {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = StatsSample;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a list of paths")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                loop {
+                    if out.len() < MAX_STATS_SAMPLE {
+                        match seq.next_element::<SampleEntry>()? {
+                            Some(SampleEntry(Some(p))) if super::post::valid_path(&p) => {
+                                out.push(p)
+                            }
+                            Some(_) => {}
+                            None => break,
+                        }
+                    } else if seq.next_element::<IgnoredAny>()?.is_none() {
+                        break;
+                    }
+                }
+                Ok(StatsSample(out))
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(StatsSample(Vec::new()))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(StatsSample(Vec::new()))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// One sample entry: a string of at most [`MAX_STATS_SAMPLE_LEN`] bytes,
+/// or `None` for anything else (a longer string is not kept, a nested
+/// value is skipped unparsed).
+struct SampleEntry(Option<String>);
+
+impl<'de> Deserialize<'de> for SampleEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = SampleEntry;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a path")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(SampleEntry(
+                    (v.len() <= MAX_STATS_SAMPLE_LEN).then(|| v.to_string()),
+                ))
+            }
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(SampleEntry(None))
+            }
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(SampleEntry(None))
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(SampleEntry(None))
+            }
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(SampleEntry(None))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(SampleEntry(None))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(SampleEntry(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(SampleEntry(None))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 impl<'de> Deserialize<'de> for LeanStats {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
@@ -284,12 +421,31 @@ impl<'de> Deserialize<'de> for LeanStats {
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut out = serde_json::Map::new();
+                let mut scalars = 0usize;
+                let mut scalar_bytes = 0usize;
                 while let Some(k) = map.next_key::<Capped<64>>()? {
-                    let v = map.next_value::<StatValue>()?;
-                    if let (Some(k), Some(v)) = (k.value, v.0) {
-                        if out.len() < MAX_STATS_ENTRIES {
-                            out.insert(k, v);
+                    let Some(k) = k.value else {
+                        map.next_value::<IgnoredAny>()?;
+                        continue;
+                    };
+                    if k == STATS_SAMPLE_KEY {
+                        let sample = map.next_value::<StatsSample>()?.0;
+                        if sample.is_empty() {
+                            out.remove(STATS_SAMPLE_KEY);
+                        } else {
+                            out.insert(k, sample.into());
                         }
+                        continue;
+                    }
+                    let Some(v) = map.next_value::<StatValue>()?.0 else {
+                        continue;
+                    };
+                    // Key and value as serialized, plus colon and comma.
+                    let bytes = json_len(&k) + json_len(&v) + 2;
+                    if scalars < MAX_STATS_ENTRIES && scalar_bytes + bytes <= STATS_SCALAR_BUDGET {
+                        scalars += 1;
+                        scalar_bytes += bytes;
+                        out.insert(k, v);
                     }
                 }
                 Ok(LeanStats(out))
@@ -1292,6 +1448,110 @@ pub(crate) mod tests {
         // Lean stats: scalars kept, the nested object skipped.
         assert_eq!(resp.stats.0["files"], 3);
         assert!(resp.stats.0.get("budgets").is_none());
+    }
+
+    fn stats_of(stats: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let body = serde_json::json!({"protocol_version": 1, "status": "ok", "stats": stats});
+        parse_response(serde_json::to_vec(&body).unwrap())
+            .unwrap()
+            .stats
+            .0
+    }
+
+    #[test]
+    fn the_ctime_dropped_sample_is_kept() {
+        let s = stats_of(serde_json::json!({
+            "files": 7, "ctime_dropped": 2, "ctime_dropped_evidence": 1,
+            "ctime_dropped_data": 1,
+            "ctime_dropped_sample": ["/usr/bin/app", "/run/app.pid"],
+            "budgets": {"max_files": 1}
+        }));
+        assert_eq!(
+            s[STATS_SAMPLE_KEY],
+            serde_json::json!(["/usr/bin/app", "/run/app.pid"])
+        );
+        assert_eq!(s["ctime_dropped_evidence"], 1);
+        assert_eq!(s["ctime_dropped_data"], 1);
+        assert!(s.get("budgets").is_none());
+    }
+
+    #[test]
+    fn the_sample_is_bounded_in_count_and_length() {
+        let many: Vec<String> = (0..50).map(|i| format!("/var/log/f{i:02}")).collect();
+        let s = stats_of(serde_json::json!({ "ctime_dropped_sample": many }));
+        let kept = s[STATS_SAMPLE_KEY].as_array().unwrap();
+        assert_eq!(kept.len(), MAX_STATS_SAMPLE);
+        assert_eq!(kept[0], "/var/log/f00");
+        assert_eq!(kept[19], "/var/log/f19");
+
+        let at_cap = format!("/{}", "a".repeat(MAX_STATS_SAMPLE_LEN - 1));
+        let over = format!("/{}", "b".repeat(MAX_STATS_SAMPLE_LEN));
+        let s = stats_of(serde_json::json!({
+            "ctime_dropped_sample": [over, 7, null, true, {"p": "/x"}, ["/y"], at_cap, "/ok"]
+        }));
+        assert_eq!(s[STATS_SAMPLE_KEY], serde_json::json!([at_cap, "/ok"]));
+
+        // Nothing valid (or not a list at all): the key is left out.
+        for v in [
+            serde_json::json!([1, 2]),
+            serde_json::json!([]),
+            serde_json::json!("/a"),
+            serde_json::json!({"a": "/a"}),
+        ] {
+            let s = stats_of(serde_json::json!({ "ctime_dropped_sample": v, "files": 1 }));
+            assert!(s.get(STATS_SAMPLE_KEY).is_none(), "{v}");
+            assert_eq!(s["files"], 1);
+        }
+    }
+
+    #[test]
+    fn sample_paths_follow_the_path_rules() {
+        let s = stats_of(serde_json::json!({
+            "ctime_dropped_sample": [
+                "/a\nb", "/a\u{0}b", "/a\u{1b}b", "/a\u{85}b", "rel/path", "/x/../y",
+                "/x//y", "", "/tmp/ok?name", "/usr/lib/naïve.so"
+            ]
+        }));
+        assert_eq!(
+            s[STATS_SAMPLE_KEY],
+            serde_json::json!(["/tmp/ok?name", "/usr/lib/naïve.so"])
+        );
+    }
+
+    #[test]
+    fn other_lists_are_still_dropped() {
+        let s = stats_of(serde_json::json!({
+            "files": 1,
+            "ctime_dropped_samples": ["/a"],
+            "sample": ["/a"],
+            "partial_reasons": ["x"],
+            "nested": {"ctime_dropped_sample": ["/a"]}
+        }));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s["files"], 1);
+    }
+
+    #[test]
+    fn stats_without_the_sample_are_unchanged() {
+        let s = stats_of(serde_json::json!({
+            "files": 10, "eacces": 0, "ctime_dropped": 0, "caps_model": "i",
+            "ratio": 0.5, "ok": true, "none": null, "long": "x".repeat(129),
+            "budgets": {"max_files": 1}, "list": [1, 2]
+        }));
+        assert_eq!(
+            serde_json::Value::Object(s),
+            serde_json::json!({
+                "files": 10, "eacces": 0, "ctime_dropped": 0, "caps_model": "i",
+                "ratio": 0.5, "ok": true
+            })
+        );
+        // Still at most 64 scalar entries.
+        let many: serde_json::Map<String, serde_json::Value> =
+            (0..100).map(|i| (format!("k{i:03}"), i.into())).collect();
+        assert_eq!(
+            stats_of(serde_json::Value::Object(many)).len(),
+            MAX_STATS_ENTRIES
+        );
     }
 
     /// The lean types never keep what they would drop: over-long strings,

@@ -620,6 +620,48 @@ mod tests {
         assert!(s.stats.get("nested").is_none());
     }
 
+    /// Whatever the worker sends, the forwarded stats fit the Broker's
+    /// 16 KiB (node_catalog.rs `MAX_STATS_BYTES`), so it stores them whole
+    /// and the ctime sample is not lost: 64 scalars with 64-byte keys and
+    /// 128-byte values that all escape to `\u0001`, the largest sample
+    /// (20 paths of 256 bytes that escape to twice that), and the longest
+    /// `retry_reason`, also all escapes.
+    #[test]
+    fn worst_case_stats_stay_under_the_broker_cap() {
+        use super::super::worker::{
+            MAX_STATS_BYTES, MAX_STATS_ENTRIES, MAX_STATS_SAMPLE, MAX_STATS_SAMPLE_LEN,
+            STATS_SAMPLE_KEY,
+        };
+        let ctl = |n: usize, tag: usize| {
+            let t = format!("{tag:03}");
+            format!("{t}{}", "\u{1}".repeat(n - t.len()))
+        };
+        let mut stats = serde_json::Map::new();
+        // The sample arrives last, after the scalars fill their budget.
+        for i in 0..(MAX_STATS_ENTRIES + 16) {
+            stats.insert(ctl(64, i), ctl(128, i).into());
+        }
+        let sample: Vec<String> = (0..MAX_STATS_SAMPLE + 5)
+            .map(|i| format!("/{i:02}{}", "\"".repeat(MAX_STATS_SAMPLE_LEN - 3)))
+            .collect();
+        stats.insert(STATS_SAMPLE_KEY.into(), sample.into());
+        let mut v = resp_json(vec![comp_json("a", vec![])]);
+        v["stats"] = serde_json::Value::Object(stats);
+        v["retry_reason"] = "\u{1}".repeat(64).into();
+        let s = sbom(validate(parse(v), "s", 2, &[]).unwrap());
+
+        let size = s.stats.to_string().len();
+        assert!(size <= MAX_STATS_BYTES, "{size} bytes");
+        let kept = s.stats[STATS_SAMPLE_KEY].as_array().unwrap();
+        assert_eq!(kept.len(), MAX_STATS_SAMPLE);
+        assert!(kept
+            .iter()
+            .all(|p| p.as_str().unwrap().len() == MAX_STATS_SAMPLE_LEN));
+        assert_eq!(s.stats["retry_reason"], "\u{1}".repeat(64));
+        // Some scalars still made it.
+        assert!(s.stats.as_object().unwrap().len() > 2);
+    }
+
     /// The Broker keeps a partial reason only when it is 1..=64 bytes of
     /// `[A-Za-z0-9_.-]` (node_catalog.rs `clean_short`, no closed set).
     /// Every reason the Controller adds must pass.
