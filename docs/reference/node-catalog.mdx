@@ -22,11 +22,20 @@ kubectl -n kguardian patch secret kguardian-broker-auth \
   -p "{\"stringData\":{\"catalog\":\"$(openssl rand -hex 32)\"}}"
 
 helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian -n kguardian \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set broker.auth.enabled=true \
   --set broker.auth.existingSecret=kguardian-broker-auth \
   --set nodeCatalog.enabled=true
 ```
+
+Upgrade with `-f <your values file>` or `--reset-then-reuse-values`
+(Helm 3.14 and later). Plain `--reuse-values` renders the new chart over the
+previous chart's defaults, so none of the `nodeCatalog` defaults below are
+in the values; the chart then falls back to the same defaults built in, but
+the cataloger image tag may trail the one in `values.yaml` by a release.
+With `--set`, use `--set-string` for a value that looks like a number but
+must stay a string (an image tag such as `1.2`, a Secret key name such as
+`2026`), or `--set-json` for an object such as `nodeCatalog.worker.appArmorProfile`.
 
 Enabling restarts the Controller DaemonSet and the Broker once (new env
 vars and the sidecar). Rotating the `catalog` key needs both restarted
@@ -44,8 +53,10 @@ types and ranges below.
 Check progress with `GET /catalog/coverage` and `GET /catalog/status?node=<name>`
 on the Broker (read scope). With `broker.metrics.prometheusRule.enabled`
 the chart also ships the `kguardian-broker-node-catalog` PrometheusRule:
-token missing, `lsm_denied`, failure rate by reason, no progress in 6 hours
-with a non-empty queue, and scans deferred by node pressure for 2 hours.
+token missing, `lsm_denied` skips, scan failures (`timeout`, `oom`,
+`error`) above 20% of grants, grants with no completed SBOM in 6 hours
+(silenced while `grants=false`), and scans deferred by node pressure for 2
+hours.
 
 **Kill switch:** `--set nodeCatalog.grants=false` stops every new grant at
 the Broker (a Broker restart, no Controller restart). Uploads under a live
@@ -62,16 +73,16 @@ lease still complete.
 | `nodeCatalog.maxEpoch` | int | `1000` | Broker `NODE_CATALOG_MAX_EPOCH`. |
 | `nodeCatalog.maxHoldSeconds` | int | `7200` | Broker `NODE_CATALOG_MAX_HOLD_SECS`. At least 900, above `scanTimeoutSeconds`. |
 | `nodeCatalog.scanTimeoutSeconds` | int | `600` | Controller `NODE_CATALOG_SCAN_TIMEOUT_SECS`, 10 to 1800. |
-| `nodeCatalog.maxFiles` | int | `2000000` | Controller `NODE_CATALOG_MAX_FILES`. |
+| `nodeCatalog.maxFiles` | int | `2000000` | Controller `NODE_CATALOG_MAX_FILES`, at most 10 000 000 (the worker's ceiling). |
 | `nodeCatalog.maxComponents` | int | `50000` | Controller `NODE_CATALOG_MAX_COMPONENTS`, at most 50 000. |
 | `nodeCatalog.minScanIntervalSeconds` | int | `30` | Controller `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS`, at least 30. |
-| `nodeCatalog.pressureThreshold` | int | `40` | Controller `NODE_CATALOG_PRESSURE_THRESHOLD`. |
+| `nodeCatalog.pressureThreshold` | int | `40` | Controller `NODE_CATALOG_PRESSURE_THRESHOLD`, 0 to 100. |
 | `nodeCatalog.maxPressureDeferSeconds` | int | `1800` | Controller `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS`, at most 86 400. |
 | `nodeCatalog.readOnlyClone` | bool | `false` | Controller `NODE_CATALOG_RO_CLONE`. |
 | `nodeCatalog.worker.image.*` | | `ghcr.io/kguardian-dev/kguardian/cataloger`, tag `v0.1.0` | The sidecar image; `sha` pins a digest. |
-| `nodeCatalog.worker.memoryLimit` | string | `640Mi` | Worker `CATALOG_MEMORY_LIMIT` (bytes, `Ki`, `Mi` or `Gi`). |
-| `nodeCatalog.worker.tmpLimit` | string | `192Mi` | Worker `CATALOG_TMP_LIMIT` and the `/tmp` emptyDir `sizeLimit`. |
-| `nodeCatalog.worker.resources` | object | requests 50m / 128Mi, limits 500m / 1Gi | Sidecar resources. |
+| `nodeCatalog.worker.memoryLimit` | string or int | `640Mi` | Worker `CATALOG_MEMORY_LIMIT`, rendered in bytes. Whole bytes or a whole number of `Ki`, `Mi`, `Gi` or `Ti`. |
+| `nodeCatalog.worker.tmpLimit` | string or int | `192Mi` | Worker `CATALOG_TMP_LIMIT` and the `/tmp` emptyDir `sizeLimit`, in bytes. Same forms. |
+| `nodeCatalog.worker.resources` | object | requests 50m / 512Mi, limits 500m / 1Gi | Sidecar resources (below). |
 | `nodeCatalog.worker.seLinuxOptions` | object | `{type: container_t, level: "s0-s0:c0.c1023"}` | Sidecar SELinux label (below). |
 | `nodeCatalog.worker.appArmorProfile` | object | `{}` | Sidecar AppArmor profile (Kubernetes 1.30+). |
 | `nodeCatalog.worker.logLevel` | string | `info` | Worker `LOG_LEVEL`. |
@@ -92,6 +103,11 @@ from `cataloger/README.md`:
   capabilities `drop: [ALL]`, `add: [DAC_READ_SEARCH, SETUID, SETGID]`. The
   uid-0 parent parses nothing; every scan runs in a fresh child as uid
   2000000000 with `DAC_READ_SEARCH` alone, under seccomp.
+- Network: the Controller pod is `hostNetwork`, so the sidecar shares the
+  node's network namespace. The uid-0 parent opens only its Unix socket,
+  but nothing but its own code stops it opening others. The scan child,
+  the only process that parses image content, has a seccomp filter that
+  denies `socket` and `socketpair` of every family.
 - No token: the pod mounts the service-account token for the Controller,
   and the sidecar gets an empty directory over
   `/var/run/secrets/kubernetes.io/serviceaccount` instead. No Broker token,
@@ -109,8 +125,21 @@ from `cataloger/README.md`:
   whole container (kubelet sets `memory.oom.group`). Nodes with kubelet's
   `singleProcessOOMKill: true` (Kubernetes 1.32 and later) kill only the
   scan child.
-- Readiness and liveness run `kguardian-cataloger ping`, which the worker
-  answers even while a scan runs.
+- Liveness runs `kguardian-cataloger ping`, which the worker answers even
+  while a scan runs; there is no readiness probe. The worker exits instead
+  of idling when it cannot run safely (a bad `CATALOG_*` setting, a
+  capability set it cannot reduce, a uid-0 parent without `SETUID`/`SETGID`,
+  a scan child that fails to start, a socket directory not owned by uid 0).
+  Kubernetes then restarts it, and while it is not running the Controller
+  pod reports NotReady, which also holds a DaemonSet rollout on that node.
+  The Controller itself keeps capturing; cataloging on that node reports
+  `worker_unavailable`.
+- Memory: requests 512Mi, limits 1Gi. The request is reserved on every
+  node. Under node memory pressure the kubelet evicts pods using more than
+  their request first, and this is the Controller's pod: a lower request
+  saves memory per node but makes the pod an earlier eviction candidate
+  while a large scan runs; a request equal to the limit avoids that at 1Gi
+  per node.
 
 **SELinux.** The default `container_t` with `s0-s0:c0.c1023` lets the
 worker read another container's files through the handle it is given: the
@@ -118,6 +147,21 @@ category range lifts MCS separation only, and `container_t` stays the
 confined container domain. With the default per-pod label every read is
 denied (`lsm_denied`). Never use `super_t`, `spc_t` or `control_t`; the
 schema refuses them. Nodes without SELinux ignore the setting.
+
+**Cloud credentials.** Workload-identity webhooks inject credentials into
+every container of a pod whose service account carries an identity. If the
+Controller's service account is given one, the chart keeps it out of the
+sidecar with pod annotations the webhooks honour:
+`eks.amazonaws.com/skip-containers: cataloger` (the Amazon EKS pod identity
+webhook, which serves IRSA) and `azure.workload.identity/skip-containers:
+cataloger` (Azure Workload Identity). Check your EKS Pod Identity add-on
+version honours the same annotation before relying on it. GKE Workload
+Identity injects nothing, but it does not apply to `hostNetwork` pods: they
+use the node's service account through the metadata server. The same holds
+on every cloud: from the node's network namespace the sidecar's parent can
+reach the instance metadata service (EC2, Azure, GCE) and the node's
+credentials, exactly as the Controller already can. The scan child cannot
+(no sockets). Where that matters, restrict metadata access at the node.
 
 **Pod Security.** The Controller pod is already privileged, so its
 namespace must allow the `privileged` Pod Security level; the sidecar asks
