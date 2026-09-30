@@ -305,7 +305,12 @@ counts them). After cataloging, each is classified:
   records every query the configured catalogers of the pinned Syft make
   during the scan, and the dropped entries are matched against them with
   the same stereoscope search the resolver uses (so the `os_only` profile
-  is judged by its own, narrower catalogers).
+  is judged by its own, narrower catalogers). The search runs over the
+  dropped entries, their parent directories and every symlink of the
+  image, following links as the resolver does, so a dropped file is
+  matched under every path a cataloger could reach it by: a rewritten
+  `/var/lib/apk-store/db/installed` also as `/lib/apk/db/installed` when
+  `lib/apk/db` links there at image time.
 - **Data** (`stats.ctime_dropped_data`): everything else. Logs, caches,
   Python bytecode caches (`__pycache__/*.pyc`), pid and lock files, temp
   files, migrations or config written at start, compiled templates.

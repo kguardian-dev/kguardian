@@ -133,7 +133,7 @@ func (r *Resolver) ClassifyDropped(sampleMax int) DriftSummary {
 		}
 	}
 	r.pathEvidence(q.paths, names, evidence)
-	globEvidence(q.globs, names, evidence)
+	r.globEvidence(q.globs, names, evidence)
 
 	var s DriftSummary
 	var ev, data []string
@@ -211,13 +211,15 @@ func (r *Resolver) pathEvidence(paths map[string]struct{}, names map[string][]st
 	}
 }
 
-// globEvidence runs every recorded glob over a tree of just the candidate
-// names (and their ancestor directories, which stereoscope's
-// subdirectory search looks up in the index), with the search the
-// resolver itself uses, so a name matches exactly when it would have been
-// found. A glob ending in "/*" is also matched directly with doublestar,
-// as a second line.
-func globEvidence(globs map[string]struct{}, names map[string][]string, evidence map[string]bool) {
+// globEvidence runs every recorded glob over a tree of the candidate
+// names, their ancestor directories (stereoscope's subdirectory search
+// looks the parent up in the index) and every symlink of the image with
+// its target, with the search the resolver itself uses and the same link
+// following. A name is found under every path the live resolver reaches
+// it by: /var/lib/apk-store/db/installed also as /lib/apk/db/installed
+// when lib/apk/db links there. A glob ending in "/*" is also matched
+// directly against the real names with doublestar, as a second line.
+func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]string, evidence map[string]bool) {
 	if len(globs) == 0 || len(names) == 0 {
 		return
 	}
@@ -228,11 +230,24 @@ func globEvidence(globs map[string]struct{}, names map[string][]string, evidence
 	}
 	tree := filetree.New()
 	index := filetree.NewIndex()
+	type link struct{ at, to string }
+	var links []link
+	for _, ref := range r.tree.AllFiles(stereofile.TypeSymLink) {
+		if e, err := r.index.Get(ref); err == nil && e.LinkDestination != "" {
+			links = append(links, link{string(ref.RealPath), e.LinkDestination})
+		}
+	}
 	dirs := map[string]bool{"/": true}
-	for n := range names {
-		for d := path.Dir(n); !dirs[d]; d = path.Dir(d) {
+	addAncestors := func(p string) {
+		for d := path.Dir(p); !dirs[d]; d = path.Dir(d) {
 			dirs[d] = true
 		}
+	}
+	for n := range names {
+		addAncestors(n)
+	}
+	for _, l := range links {
+		addAncestors(l.at)
 	}
 	sorted := make([]string, 0, len(dirs))
 	for d := range dirs {
@@ -244,9 +259,17 @@ func globEvidence(globs map[string]struct{}, names map[string][]string, evidence
 			index.Add(*ref, stereofile.Metadata{Path: d, Type: stereofile.TypeDirectory})
 		}
 	}
+	for _, l := range links {
+		if dirs[l.at] {
+			continue // never: an indexed symlink is not also a directory
+		}
+		if ref, err := tree.AddSymLink(stereofile.Path(l.at), stereofile.Path(l.to)); err == nil && ref != nil {
+			index.Add(*ref, stereofile.Metadata{Path: l.at, Type: stereofile.TypeSymLink, LinkDestination: l.to})
+		}
+	}
 	for n := range names {
 		// Every name as a regular file: only the name has to match, and a
-		// symlink's target is not in this tree to follow.
+		// dropped symlink's target was resolved into names already.
 		ref, err := tree.AddFile(stereofile.Path(n))
 		if err != nil || ref == nil {
 			mark(n) // cannot test it: count it
@@ -256,7 +279,7 @@ func globEvidence(globs map[string]struct{}, names map[string][]string, evidence
 	}
 	search := filetree.NewSearchContext(tree, index)
 	for g := range globs {
-		if res, err := search.SearchByGlob(g); err == nil {
+		if res, err := search.SearchByGlob(g, filetree.FollowBasenameLinks); err == nil {
 			for _, rv := range res {
 				mark(string(rv.RealPath))
 			}

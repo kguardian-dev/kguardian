@@ -563,6 +563,43 @@ func TestRuntimeSymlinks(t *testing.T) {
 	}
 }
 
+// A database reached through an image-time directory symlink (the
+// layout of the symlinked-apk-db and symlinked-dpkg-db fixtures) and
+// changed at runtime is evidence: the dropped file is matched under
+// every path the live resolver reaches it by, not only its real path
+// (review probes).
+func TestDatabaseBehindImageSymlinkRewritten(t *testing.T) {
+	// apk: lib/apk/db -> ../../var/lib/apk-store/db, installed rewritten.
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	must(t, os.MkdirAll(filepath.Join(root, "var/lib/apk-store"), 0o755))
+	must(t, os.Rename(filepath.Join(root, "lib/apk/db"), filepath.Join(root, "var/lib/apk-store/db")))
+	must(t, os.Symlink("../../var/lib/apk-store/db", filepath.Join(root, "lib/apk/db")))
+	if r := runDir(t, root, opts()); r.Status != protocol.StatusOK || r.Completeness != protocol.CompletenessFull {
+		t.Fatalf("baseline: %s %s %v", r.Status, r.Completeness, r.PartialReasons)
+	}
+	db, err := os.ReadFile(filepath.Join(root, "var/lib/apk-store/db/installed"))
+	must(t, err)
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"var/lib/apk-store/db/installed": {string(db), 0o644}})
+	r := runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("apk behind a link: %s %s %s %v %+v", r.Status, r.Reason, r.Completeness, r.PartialReasons, r.Stats)
+	}
+
+	// dpkg: var/lib/dpkg -> /opt/dpkg-store, status.d/libssl3 written.
+	root = apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	must(t, os.MkdirAll(filepath.Join(root, "opt/dpkg-store/status.d"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(root, "var/lib"), 0o755))
+	must(t, os.Symlink("/opt/dpkg-store", filepath.Join(root, "var/lib/dpkg")))
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{
+		"opt/dpkg-store/status.d/libssl3": {"Package: libssl3\nStatus: install ok installed\nVersion: 3\nArchitecture: amd64\n", 0o644},
+	})
+	r = runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("status.d behind a link: %s %v %+v", r.Completeness, r.PartialReasons, r.Stats)
+	}
+}
+
 func TestDriftSafetyNet(t *testing.T) {
 	r := &protocol.Response{Completeness: protocol.CompletenessFull}
 	r.Stats.CtimeDropped, r.Stats.CtimeDroppedData = 3, 2
