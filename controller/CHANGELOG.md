@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.17.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.17.0...controller/v1.17.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **controller:** forward the cataloger's ctime_dropped_sample in the stats ([2215d77](https://github.com/kguardian-dev/kguardian/commit/2215d771cfaa0e06fa14a26841b7087b2f80c248))
+* **controller:** forward the cataloger's sample of runtime-changed paths ([#1878](https://github.com/kguardian-dev/kguardian/issues/1878)) ([2215d77](https://github.com/kguardian-dev/kguardian/commit/2215d771cfaa0e06fa14a26841b7087b2f80c248))
+
 ## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.2...controller/v1.17.0) (2026-09-30)
 
 
