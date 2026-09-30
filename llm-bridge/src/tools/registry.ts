@@ -199,7 +199,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: "get_image_inventory",
     description:
-      "List the image digests workloads run, from the broker's image inventory: digest, repository, tags, digestKind, firstSeen/lastSeen and runningContainers (containers running it now; 0 = no longer running, which says nothing about safety). A null field is unknown, never safe. Inventory only — it has NO vulnerability, SBOM or signature data, so never describe an image as vulnerable, clean, signed or unsigned from this tool. Filters optional: namespace (images some workload in that namespace runs), repository (exact normalised name, e.g. docker.io/library/nginx), limit (default 25, max 100). truncated=true means more images exist than were returned; narrow by namespace or repository. Use for 'what images run in X', 'which digest of nginx is deployed', 'is image Y still running'. kguardian only reports: it never applies or changes anything.",
+      "List the image digests workloads run, from the broker's image inventory: digest, repository, tags, digestKind, firstSeen/lastSeen and runningContainers (containers running it now; 0 = no longer running, which says nothing about safety), and on brokers with the node catalog sbomSources (which sources hold an SBOM) and nodeCatalog (the node catalog's state, reason, platform, completeness). A null or missing field is unknown, never safe. Inventory only — it has NO vulnerability or signature data and no SBOM contents, so never describe an image as vulnerable, clean, signed or unsigned from this tool; an image the node catalog could not assess is unknown, not clean. Filters optional: namespace (images some workload in that namespace runs), repository (exact normalised name, e.g. docker.io/library/nginx), limit (default 25, max 100). truncated=true means more images exist than were returned; narrow by namespace or repository. Use for 'what images run in X', 'which digest of nginx is deployed', 'is image Y still running'. kguardian only reports: it never applies or changes anything.",
     parameters: {
       type: "object",
       properties: {
@@ -266,12 +266,12 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: "get_image_sbom",
     description:
-      "Get an image's software bill of materials: every source's SBOM (reports, each with sbomTrust and, for registry SBOMs, the attestation it came through) and the components of one of them (report): name, version, purl, type, licenses. sbomTrust, weakest first: attached-unbound, unverified, scanned (Trivy Operator in-cluster scan), verified; ONLY 'verified' may be called signed. report null = no SBOM: contents UNKNOWN. A component being listed says nothing about whether it is loaded at runtime. kguardian reports; it never applies anything. NEVER invent vulnerability ids or packages: cite only what the tools return. Requires digest (sha256:...). Optional source (trivy-operator, grype or registry; default: the broker's choice, Trivy Operator first) and limit (default 25, max 100) — use the CLI or the UI for the full SBOM.",
+      "Get an image's software bill of materials: every source's SBOM (reports, each with sbomTrust and, for registry SBOMs, the attestation it came through) and the components of one of them (report): name, version, purl, type, licenses. sbomTrust, weakest first: attached-unbound, unverified, scanned (an in-cluster scan: Trivy Operator, or source node from kguardian's node catalog), verified; ONLY 'verified' may be called signed. report null = no SBOM: contents UNKNOWN. A component being listed says nothing about whether it is loaded at runtime. kguardian reports; it never applies anything. NEVER invent vulnerability ids or packages: cite only what the tools return. Requires digest (sha256:...). Optional source (trivy-operator, grype, registry or node; default: the broker's choice, Trivy Operator first, then node) and limit (default 25, max 100) — use the CLI or the UI for the full SBOM.",
     parameters: {
       type: "object",
       properties: {
         digest: str("Image digest, sha256:<64 hex>"),
-        source: str("Optional SBOM source: trivy-operator, grype or registry"),
+        source: str("Optional SBOM source: trivy-operator, grype, registry or node"),
         limit: { type: "integer", description: "Max components to return (default 25, max 100)." },
       },
       required: ["digest"],
