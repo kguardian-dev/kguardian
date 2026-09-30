@@ -94,6 +94,18 @@ spec:
               value: {{ .Values.supplychain.sources.registry.enabled | default false | quote }}
             - name: REGISTRY_SBOM_INTERVAL
               value: {{ .Values.supplychain.sources.registry.interval | quote }}
+            {{- /* Follows nodeCatalog.enabled unless set. Takes effect only
+                 with the Grype matcher (GRYPE_MATCHER_URL below). */}}
+            {{- if include "kguardian.supplychainNodeSource" . }}
+            - name: NODE_SBOM_ENABLED
+              value: "true"
+            - name: NODE_SBOM_INTERVAL
+              value: {{ dig "sources" "node" "interval" "" .Values.supplychain | default "5m" | quote }}
+            {{- if .Values.supplychain.grype.enabled }}
+            - name: GRYPE_NODE_GROUP_MAX_WAIT
+              value: {{ .Values.supplychain.grype.nodeGroupMaxWait | default "30m" | quote }}
+            {{- end }}
+            {{- end }}
             {{- $sd := .Values.supplychain.signatureDiscovery | default dict }}
             {{- if $sd.enabled }}
             {{- if not .Values.supplychain.brokerIngest.enabled }}

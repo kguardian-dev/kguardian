@@ -23,6 +23,36 @@
         }
       }
     },
+    "supplychain": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "oneOf": [
+                    { "type": "boolean" },
+                    { "type": "null" },
+                    { "type": "string", "enum": ["", "true", "false"] }
+                  ]
+                },
+                "interval": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$" }
+              }
+            }
+          }
+        },
+        "grype": {
+          "type": "object",
+          "properties": {
+            "nodeGroupMaxWait": { "type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$" }
+          }
+        }
+      }
+    },
     "nodeCatalog": {
       "type": "object",
       "additionalProperties": false,

@@ -304,6 +304,20 @@ Usage: include "kguardian.workerBytes" (dict "q" "640Mi" "name" "nodeCatalog.wor
 {{- end -}}
 
 {{/*
+"true" when the supplychain node SBOM source is on:
+supplychain.sources.node.enabled when set to true or false, otherwise
+(null, "", or absent, as after `helm upgrade --reuse-values` from an older
+release) nodeCatalog.enabled.
+*/}}
+{{- define "kguardian.supplychainNodeSource" -}}
+{{- $v := dig "sources" "node" "enabled" nil (.Values.supplychain | default dict) -}}
+{{- if or (kindIs "invalid" $v) (eq (toString $v) "") -}}
+{{- include "kguardian.nodeCatalogEnabled" . -}}
+{{- else if eq (toString $v | lower) "true" -}}true
+{{- end -}}
+{{- end -}}
+
+{{/*
 kguardian.nodeCatalog: the nodeCatalog values, resolved and validated, as
 JSON (callers use `include "kguardian.nodeCatalog" . | fromJson`). Every
 key falls back to the same default as values.yaml, so a partial block
