@@ -335,6 +335,22 @@ contents never leave it, only package metadata does).
 `CATALOG_MEMORY_LIMIT` plus `CATALOG_TMP_LIMIT` plus the parent must fit
 the container's memory limit: the tmpfs counts against it.
 
+**What sets the peak.** Large binaries, not file counts. Syft's .NET
+cataloger looks for single-file bundles in every ELF executable and
+shared library by reading the whole file into one buffer (up to 512 MiB),
+and the Go and GraalVM native-image catalogers read symbol tables; one
+cataloger after another, the previous buffer was often still uncollected
+when the next arrived. On dev, images with 250 MiB Go binaries or CUDA
+libraries up to 690 MiB ran the 640 MiB child out of memory and fell back
+to `os_only`. The resolver now gives the .NET bundle search only ELF files
+that carry the bundle marker (streamed, 1 MiB at a time; without the
+marker Syft's search finds nothing, so no result changes), and collects
+the heap and returns it to the kernel before a cataloger opens any file
+of 32 MiB or more. A root with two 240 MiB Go binaries peaks at about
+175 MiB RSS instead of 585 MiB, one with a 600 MiB shared library at
+about 180 MiB instead of 600 MiB; a scan of an ordinary image stays
+around 200 MiB, most of it Syft's license scanner.
+
 **Memory, for the chart (PR 4).** The child fails on its own before the
 container limit: its heap watchdog reports `oom` at `CATALOG_MEMORY_LIMIT`,
 and `RLIMIT_DATA` stops a single burst just above it. Two things only the

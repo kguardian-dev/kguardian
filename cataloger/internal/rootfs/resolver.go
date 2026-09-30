@@ -133,11 +133,15 @@ func (r *Resolver) FilesByMIMEType(types ...string) ([]file.Location, error) {
 	if err != nil {
 		return nil, err
 	}
+	bundleSearch := bundleFilter && strings.HasPrefix(catalogerCaller(), dotnetCataloger)
 	for _, rv := range refVias {
 		if !rv.HasReference() || seen.Contains(*rv.Reference) {
 			continue
 		}
 		seen.Add(*rv.Reference)
+		if bundleSearch && !r.mayBeDotnetBundle(string(rv.RealPath)) {
+			continue
+		}
 		out = append(out, file.NewVirtualLocationFromDirectory(string(rv.RealPath), string(rv.RequestPath), *rv.Reference))
 	}
 	return out, nil
@@ -164,6 +168,9 @@ func (r *Resolver) FileContentsByLocation(loc file.Location) (io.ReadCloser, err
 	}
 	if entry.Type == stereofile.TypeDirectory {
 		return nil, fmt.Errorf("cannot read contents of non-file %q", loc.RealPath)
+	}
+	if entry.FileInfo != nil && entry.Size() >= LargeFileBytes {
+		reclaim()
 	}
 	return r.root.OpenFile(loc.RealPath)
 }

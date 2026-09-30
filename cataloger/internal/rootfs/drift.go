@@ -2,7 +2,6 @@ package rootfs
 
 import (
 	"path"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -37,37 +36,11 @@ func (q *queries) add(m map[string]struct{}, vals ...string) {
 	q.mu.Unlock()
 }
 
-// nixCataloger is the one package cataloger at the pinned Syft that lists
-// every file (the file catalogers, which also do, are off). It keeps only
-// paths in a Nix store, so its listing is recorded as the store globs; a
-// listing by anything else counts every dropped entry as evidence.
-const nixCataloger = "github.com/anchore/syft/syft/pkg/cataloger/nix."
-
-var nixStoreGlobs = []string{"**/nix/store/*", "**/nix/store/*/**"}
-
-// listedAll records an AllLocations call by its caller: the first frame
-// outside this package and Syft's resolver wrappers.
+// listedAll records an AllLocations call by its caller.
 func (q *queries) listedAll() {
-	pcs := make([]uintptr, 32)
-	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
-	for {
-		f, more := frames.Next()
-		fn := f.Function
-		switch {
-		case strings.HasPrefix(fn, "github.com/kguardian-dev/kguardian/cataloger/internal/rootfs."),
-			strings.HasPrefix(fn, "github.com/anchore/syft/syft/internal/fileresolver."):
-		case strings.HasPrefix(fn, nixCataloger):
-			q.add(q.globs, nixStoreGlobs...)
-			return
-		default:
-			q.mu.Lock()
-			q.all = true
-			q.mu.Unlock()
-			return
-		}
-		if !more {
-			break
-		}
+	if strings.HasPrefix(catalogerCaller(), nixCataloger) {
+		q.add(q.globs, nixStoreGlobs...)
+		return
 	}
 	q.mu.Lock()
 	q.all = true
