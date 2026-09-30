@@ -10,12 +10,14 @@
 // Every Interval it lists the broker's image inventory (GET /images, read
 // scope) and fetches, components only, the node SBOM of each running
 // digest whose sbomSources include "node" when it is new, when its
-// nodeCatalog.catalogedAt changed, when the coordinator no longer holds
-// it (dropped to stay within budget), or once every RecheckAfter. A node
-// SBOM that goes away (deleted, stored empty, or its digest no longer
-// running) is replaced by an empty one, so its packages are released.
-// Node SBOMs are never sent to the broker again: they go to the
-// coordinator only, not through the dispatch queue.
+// nodeCatalog.catalogedAt changed, or once every RecheckAfter; and when
+// the coordinator Wants it (its group, evicted, is waiting for it), at
+// most once per backoff window. A node SBOM the coordinator holds is
+// replaced by an empty one when it is deleted (the digest is still in the
+// inventory but no longer lists "node") or stored empty, so its packages
+// are released. A digest that merely stops running (a CronJob between
+// runs) is left alone. Node SBOMs are never sent to the broker again:
+// they go to the coordinator only, not through the dispatch queue.
 //
 // Against a broker without the node catalog (GET /catalog/status answers
 // 404) the source idles: it logs once, lists nothing, and asks again only
@@ -46,7 +48,7 @@ const scannerName = "kguardian-cataloger"
 // Broker is the part of broker.ReadClient this source uses.
 type Broker interface {
 	NodeCatalogAvailable(ctx context.Context) error
-	RunningImages(ctx context.Context) ([]broker.Image, error)
+	Images(ctx context.Context) ([]broker.Image, error)
 	NodeSBOM(ctx context.Context, digest string, maxComponents int) (*broker.NodeSBOM, error)
 }
 
@@ -55,6 +57,8 @@ type Offerer interface {
 	Offer(sbom *types.ImageSBOM)
 	// Holds reports whether an SBOM from source is held for digest.
 	Holds(digest, source string) bool
+	// Wants reports whether the coordinator waits for digest's node SBOM.
+	Wants(digest string) bool
 }
 
 // Source polls the inventory and offers changed node SBOMs.
@@ -92,8 +96,11 @@ type Source struct {
 type fetchState struct {
 	version string // nodeCatalog.catalogedAt when fetched
 	at      time.Time
-	offered bool         // a non-empty SBOM was offered and not replaced
-	image   broker.Image // for the empty replacement
+	// While the coordinator Wants the SBOM: when it may be offered again,
+	// and the current backoff (doubling from Interval, at most
+	// RecheckAfter). Reset once it is no longer wanted.
+	wantNext    time.Time
+	wantBackoff time.Duration
 }
 
 func (s *Source) defaults() {
@@ -165,18 +172,16 @@ func (s *Source) Pass(ctx context.Context) {
 		s.setReady()
 		return
 	}
-	images, err := s.Broker.RunningImages(ctx)
+	images, err := s.Broker.Images(ctx)
 	s.setReady()
 	if err != nil {
-		s.Log.WithError(err).Warn("node sbom source: listing running images failed")
+		s.Log.WithError(err).Warn("node sbom source: listing images failed")
 		s.count("list_error")
 		return
 	}
-	due, gone := s.due(images)
-	for _, im := range gone {
-		// Deleted, or no longer running: release what was offered.
-		s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
-		s.count("released")
+	due, deleted := s.due(images)
+	for _, im := range deleted {
+		s.release(im)
 	}
 	work := make(chan broker.Image)
 	var wg sync.WaitGroup
@@ -258,40 +263,75 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 	}
 }
 
-// due returns the running images whose node SBOM is new, changed, no
-// longer held by the coordinator, or due for its recheck; and, for the
-// digests no longer listed with a node SBOM whose SBOM was offered, the
-// images to release. Digests no longer listed are forgotten.
-func (s *Source) due(images []broker.Image) (due, gone []broker.Image) {
+// due returns the running images whose node SBOM is new, changed, due for
+// its recheck, or wanted by the coordinator (bounded by the backoff); and
+// the images whose node SBOM was deleted while the digest is still in the
+// inventory. State is kept for digests that are not running (a CronJob
+// between runs), so they are not fetched again when they run again
+// unchanged, and forgotten for digests that left the inventory.
+func (s *Source) due(images []broker.Image) (due, deleted []broker.Image) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	listed := make(map[string]bool, len(images))
+	inInventory := make(map[string]bool, len(images))
+	withNode := 0
 	for _, im := range images {
-		if !strings.HasPrefix(im.Digest, "sha256:") || !im.HasSBOM(types.SourceNode) {
+		if !strings.HasPrefix(im.Digest, "sha256:") {
 			continue
 		}
-		listed[im.Digest] = true
+		inInventory[im.Digest] = true
+		if !im.HasSBOM(types.SourceNode) {
+			if _, ok := s.fetched[im.Digest]; ok {
+				delete(s.fetched, im.Digest)
+				deleted = append(deleted, im)
+			}
+			continue
+		}
+		withNode++
+		if im.RunningContainers <= 0 {
+			continue
+		}
 		f, ok := s.fetched[im.Digest]
-		if ok && f.version == version(im) && now.Sub(f.at) < s.RecheckAfter &&
-			(!f.offered || s.Matcher.Holds(im.Digest, types.SourceNode)) {
+		if !ok || f.version != version(im) || now.Sub(f.at) >= s.RecheckAfter {
+			due = append(due, im)
 			continue
 		}
+		if !s.Matcher.Wants(im.Digest) {
+			if f.wantBackoff != 0 {
+				f.wantNext, f.wantBackoff = time.Time{}, 0
+				s.fetched[im.Digest] = f
+			}
+			continue
+		}
+		if now.Before(f.wantNext) {
+			continue
+		}
+		f.wantBackoff = min(max(f.wantBackoff*2, s.Interval), s.RecheckAfter)
+		f.wantNext = now.Add(f.wantBackoff)
+		s.fetched[im.Digest] = f
+		s.count("wanted")
 		due = append(due, im)
 	}
-	for d, f := range s.fetched {
-		if listed[d] {
-			continue
+	for d := range s.fetched {
+		if !inInventory[d] {
+			delete(s.fetched, d)
 		}
-		if f.offered {
-			gone = append(gone, f.image)
-		}
-		delete(s.fetched, d)
 	}
 	if s.Metrics != nil {
-		s.Metrics.TrackedDigests.WithLabelValues(SourceName, "sbom").Set(float64(len(listed)))
+		s.Metrics.TrackedDigests.WithLabelValues(SourceName, "sbom").Set(float64(withNode))
 	}
-	return due, gone
+	return due, deleted
+}
+
+// release replaces the node SBOM the coordinator holds for im with an
+// empty one, so its packages stop being matched. With none held
+// (evicted, or never offered) there is nothing to release.
+func (s *Source) release(im broker.Image) {
+	if !s.Matcher.Holds(im.Digest, types.SourceNode) {
+		return
+	}
+	s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
+	s.count("released")
 }
 
 func version(im broker.Image) string {
@@ -306,13 +346,12 @@ func (s *Source) fetch(ctx context.Context, im broker.Image) {
 	switch {
 	case errors.Is(err, broker.ErrNodeSBOMTooLarge):
 		// Fails the same way until it changes: not fetched again before.
-		// A smaller version offered before is replaced by an empty one:
-		// it no longer describes the image.
+		// A smaller version held is released: it no longer describes the
+		// image.
 		s.count("too_large")
 		s.Log.WithError(err).WithField("digest", im.Digest).Warn("node sbom source: node SBOM too large to match; skipped")
-		if s.mark(im, nil) {
-			s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
-		}
+		s.mark(im)
+		s.release(im)
 		return
 	case errors.Is(err, broker.ErrNodeSBOMChanged):
 		s.count("changed")
@@ -324,37 +363,24 @@ func (s *Source) fetch(ctx context.Context, im broker.Image) {
 		}
 		return
 	}
+	s.mark(im)
 	if doc == nil || len(doc.Components) == 0 {
-		// Gone since the listing, or stored empty (no_packages_found). If
-		// an earlier version was offered, replace it with an empty one so
-		// its packages are not matched (and reported) any more.
+		// Gone since the listing, or stored empty (no_packages_found).
 		s.count("none")
-		offered := false
-		if s.mark(im, &offered) {
-			s.Matcher.Offer(toSBOM(im, &broker.NodeSBOM{Digest: im.Digest}))
-		}
+		s.release(im)
 		return
 	}
 	s.count("fetched")
-	offered := true
-	s.mark(im, &offered)
 	s.Matcher.Offer(toSBOM(im, doc))
 }
 
-// mark records a fetch of im and reports whether a non-empty SBOM had
-// been offered for it before. offered sets the new state; nil keeps it
-// (a too-large SBOM is replaced by an empty one, but a later empty one
-// may still be offered on top, harmlessly).
-func (s *Source) mark(im broker.Image, offered *bool) bool {
+// mark records a fetch of im, keeping its want backoff.
+func (s *Source) mark(im broker.Image) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	was := s.fetched[im.Digest].offered
-	now := was
-	if offered != nil {
-		now = *offered
-	}
-	s.fetched[im.Digest] = fetchState{version: version(im), at: s.now(), offered: now, image: im}
-	return was
+	f := s.fetched[im.Digest]
+	f.version, f.at = version(im), s.now()
+	s.fetched[im.Digest] = f
 }
 
 func (s *Source) count(result string) {

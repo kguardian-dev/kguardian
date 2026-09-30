@@ -83,6 +83,16 @@ func NewReadClient(baseURL, token string) (*ReadClient, error) {
 // RunningImages lists every image the inventory says is running now,
 // following the cursor.
 func (c *ReadClient) RunningImages(ctx context.Context) ([]Image, error) {
+	return c.listImages(ctx, func(im Image) bool { return im.RunningContainers > 0 })
+}
+
+// Images lists every image of the inventory, running or not (kept until
+// retention prunes it), following the cursor.
+func (c *ReadClient) Images(ctx context.Context) ([]Image, error) {
+	return c.listImages(ctx, func(Image) bool { return true })
+}
+
+func (c *ReadClient) listImages(ctx context.Context, keep func(Image) bool) ([]Image, error) {
 	var out []Image
 	after := ""
 	for page := 0; page < maxInventoryPages; page++ {
@@ -117,7 +127,7 @@ func (c *ReadClient) RunningImages(ctx context.Context) ([]Image, error) {
 			return nil, fmt.Errorf("GET /images: %w", err)
 		}
 		for _, im := range p.Items {
-			if im.RunningContainers > 0 {
+			if keep(im) {
 				out = append(out, im)
 			}
 		}

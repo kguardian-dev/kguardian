@@ -249,14 +249,15 @@ back and hands them to the Grype matcher. It is **off by default**:
 `NODE_SBOM_ENABLED=true`, and it only runs when the matcher is configured
 (`GRYPE_MATCHER_URL`).
 
-1. Every `NODE_SBOM_INTERVAL` (5 min) it lists running digests
-   (`GET /images`, read scope, paged) and picks those whose `sbomSources`
-   include `node`. The source counts as ready for `/readyz` once that
+1. Every `NODE_SBOM_INTERVAL` (5 min) it lists the image inventory
+   (`GET /images`, read scope, paged) and picks the running digests whose
+   `sbomSources` include `node`. The source counts as ready for `/readyz` once that
    listing has returned (or failed); it does not wait for the fetches.
 2. It fetches a node SBOM (`GET /images/{digest}/sbom?source=node`, pages
    of 500, components only) when it is new, when its
-   `nodeCatalog.catalogedAt` changed, when the coordinator no longer holds
-   it (dropped to stay within its budget), or once a day otherwise. Steady
+   `nodeCatalog.catalogedAt` changed, or once a day otherwise; and when the
+   coordinator wants it back (below), at most once per backoff window
+   (5 min, doubling, at most a day; counted as `wanted`). Steady
    state is one listing per interval and no fetches. File paths are not
    kept: this route cuts them to 16, and matching does not use them. A page
    answered 503 is asked again after its `Retry-After` (at most 30 s, three
@@ -266,11 +267,15 @@ back and hands them to the Grype matcher. It is **off by default**:
    not accept `source: "node"`. Findings come back as `source: "grype"`
    with `node` in `sbom_sources`.
 
-When a node SBOM goes away (deleted, stored again with no packages
-(`no_packages_found`), grown past the matcher's 50 000-component limit, or
-its digest no longer running), the one offered before is replaced by an
-empty one, so its packages stop being matched. A too-large SBOM is not read
-again until it changes.
+When a node SBOM goes away (deleted: the digest is still in the inventory
+but `sbomSources` no longer lists `node`; stored again with no packages,
+`no_packages_found`; or grown past the matcher's 50 000-component limit),
+the one the coordinator holds is replaced by an empty one, so its packages
+stop being matched. Nothing is offered when the coordinator holds none. A
+digest that only stops running (a CronJob between runs) is left alone: its
+SBOM ages out of the coordinator like any other, and it is not fetched
+again when it runs again unchanged. A too-large SBOM is not read again
+until it changes.
 
 **Paging.** Every page repeats the report header; a page whose
 `scannedAt`/`receivedAt` differs from the first ends the read, which is
@@ -291,7 +296,7 @@ next interval. A 404 on the SBOM route itself is an ordinary fetch error.
 
 Counted in `kguardian_supplychain_node_sbom_fetches_total{result}`
 (`fetched`, `none`, `changed`, `too_large`, `error`, `released`,
-`list_error`, `probe_error`, `probe_denied`);
+`wanted`, `list_error`, `probe_error`, `probe_denied`);
 `kguardian_supplychain_source_available{source="node"}` is 0 while idling
 on an old broker.
 
@@ -315,14 +320,15 @@ held for it: Trivy's SbomReport, any registry SBOM and the node catalog's
 SBOM, merged. Trivy's entries are authoritative, registry SBOMs only add to
 them, and the node SBOM only adds to both (see below).
 
-- Packages de-duplicate within the image when their PURLs name the same
-  package (type, namespace, name and version, qualifiers ignored), or else
-  on (type, name, version); type maps Trivy's distro names onto PURL types
-  (`debian` → `deb`). The PURL match catches one package under two names
-  (Trivy's Maven `group:artifact` and Syft's `artifact`), a Debian or RPM
-  epoch given as a qualifier by Trivy and in the version by Syft, and Go's
-  `stdlib` as `v1.22.1` or `go1.22.1`. A PURL mismatch never splits what
-  the names merge.
+- Packages de-duplicate within the image on (type, name, version); type
+  maps Trivy's distro names onto PURL types (`debian` → `deb`). A node
+  SBOM's package also matches an entry whose PURL names the same package
+  (type, namespace, name and version, qualifiers ignored), which catches
+  one package under two names (Trivy's Maven `group:artifact` and Syft's
+  `artifact`), a Debian or RPM epoch given as a qualifier by Trivy and in
+  the version by Syft, and Go's `stdlib` as `v1.22.1` or `go1.22.1`. That
+  PURL match is used for node packages only: Trivy's and registry packages
+  de-duplicate exactly as without a node SBOM.
 - **Trivy's entries are authoritative.** On a collision a registry entry
   may only add file paths and licences, and fill a PURL Trivy left empty.
   It never changes Trivy's PURL (distro, arch, upstream), source package
@@ -377,11 +383,17 @@ pinned: it keeps exactly the links those sources give, and the node SBOM
 only adds packages to it. Registry SBOMs of the index's other platforms
 keep their own groups and links.
 
-A node SBOM the coordinator drops to stay within budget is offered again
-by the node source within one interval. Until then (at most 10 min) a
-group that gets only part of its SBOMs back, say Trivy's on its resync,
-waits for it instead of being matched without it, so the node's findings
-do not drop in between.
+**Eviction.** A group whose last match included a node SBOM is never
+matched again without one of the other SBOMs of that match (Trivy's, a
+registry one) while that SBOM is not held: after the budget drops the
+group, a partial re-offer (the node SBOM alone, or Trivy's without a
+registry SBOM) is held but not matched, and the broker keeps the last
+complete payload, as for any dropped group. Trivy re-offers only a changed
+SBOM and the registry source rechecks daily, so such a group can wait that
+long. Once the other SBOMs are all back, the coordinator `Wants` the
+node SBOM, the node source offers it again, and the group waits for it up
+to 10 min before it is matched without it. Groups that never had a node
+SBOM are dropped and re-matched exactly as before.
 
 ### Source rules (contract for the broker)
 

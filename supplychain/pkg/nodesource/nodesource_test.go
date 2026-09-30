@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
@@ -40,7 +41,7 @@ func (f *fakeBroker) NodeCatalogAvailable(context.Context) error {
 	return f.probeErr
 }
 
-func (f *fakeBroker) RunningImages(context.Context) ([]broker.Image, error) {
+func (f *fakeBroker) Images(context.Context) ([]broker.Image, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listings++
@@ -78,6 +79,22 @@ type offers struct {
 	mu      sync.Mutex
 	s       []*types.ImageSBOM
 	evicted map[string]bool
+	wants   map[string]bool
+}
+
+func (o *offers) Wants(digest string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.wants[digest]
+}
+
+func (o *offers) setWants(digest string, v bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.wants == nil {
+		o.wants = map[string]bool{}
+	}
+	o.wants[digest] = v
 }
 
 func (o *offers) Offer(s *types.ImageSBOM) {
@@ -237,13 +254,14 @@ func TestEmptyNodeSBOMReplacesAnOfferedOne(t *testing.T) {
 	if len(o.s) != 2 || len(o.s[1].Components) != 0 || o.s[1].Source != types.SourceNode {
 		t.Fatalf("offers %+v", o.s)
 	}
-	// Never offered before: nothing to replace.
+	// Never held: nothing to release, so nothing is offered.
 	fb.mu.Lock()
-	fb.images = []broker.Image{img("sha256:aa", "t3", "node")}
+	fb.images = append(fb.images, img("sha256:bb", "t1", "node"))
+	fb.docs["sha256:bb"] = doc()
 	fb.mu.Unlock()
 	s.Pass(context.Background())
 	if len(o.s) != 2 {
-		t.Errorf("empty re-offered: %d offers", len(o.s))
+		t.Errorf("empty offered for a digest never held: %d offers", len(o.s))
 	}
 }
 
@@ -424,23 +442,47 @@ func TestReadyBeforeFetchesFinish(t *testing.T) {
 	<-done
 }
 
-// A node SBOM the coordinator dropped to stay within budget is fetched
-// and offered again on the next pass, not a day later.
-func TestReoffersWhatTheCoordinatorEvicted(t *testing.T) {
+// An evicted node SBOM is offered again only while the coordinator Wants
+// it (its group waits for it), and then at most once per backoff window,
+// doubling from Interval up to RecheckAfter; the backoff resets once it
+// is no longer wanted.
+func TestReoffersOnlyWhatTheCoordinatorWants(t *testing.T) {
 	fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t", "node")},
 		docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
 	o := &offers{}
 	log, _ := test.NewNullLogger()
-	s := newSource(fb, o, log, nil, &clock{t: time.Unix(1, 0)})
+	m := metrics.New()
+	c := &clock{t: time.Unix(1, 0)}
+	s := newSource(fb, o, log, m, c)
 	s.Pass(context.Background())
-	s.Pass(context.Background())
-	if fb.fetched()["sha256:aa"] != 1 {
-		t.Fatalf("held and unchanged, yet fetched %d times", fb.fetched()["sha256:aa"])
-	}
 	o.evict("sha256:aa")
 	s.Pass(context.Background())
-	if fb.fetched()["sha256:aa"] != 2 || o.n() != 2 || len(o.last().Components) != 1 {
-		t.Errorf("after eviction: %d fetches, %d offers", fb.fetched()["sha256:aa"], o.n())
+	if fb.fetched()["sha256:aa"] != 1 {
+		t.Fatal("evicted but not wanted, yet fetched again")
+	}
+	o.setWants("sha256:aa", true)
+	var at []int // passes (a minute apart) that fetched
+	for minute := 0; minute < 40; minute++ {
+		before := fb.fetched()["sha256:aa"]
+		s.Pass(context.Background())
+		if fb.fetched()["sha256:aa"] > before {
+			at = append(at, minute)
+		}
+		c.t = c.t.Add(time.Minute)
+	}
+	if !reflect.DeepEqual(at, []int{0, 5, 15, 35}) {
+		t.Errorf("wanted re-offers at minutes %v, want 0, 5, 15, 35 (backoff 5m doubling)", at)
+	}
+	if got := testutil.ToFloat64(m.NodeSBOMFetches.WithLabelValues("wanted")); got != 4 {
+		t.Errorf("wanted counter %v", got)
+	}
+	o.setWants("sha256:aa", false)
+	s.Pass(context.Background())
+	o.setWants("sha256:aa", true)
+	before := fb.fetched()["sha256:aa"]
+	s.Pass(context.Background())
+	if fb.fetched()["sha256:aa"] != before+1 {
+		t.Error("backoff not reset after the SBOM stopped being wanted")
 	}
 }
 
@@ -472,31 +514,64 @@ func TestTooLargeAfterAnOfferReleasesIt(t *testing.T) {
 	}
 }
 
-// A digest that stops running, or whose node SBOM is deleted, has what
-// was offered for it replaced by an empty SBOM.
-func TestReleasesWhenNoLongerListed(t *testing.T) {
-	for _, next := range [][]broker.Image{
-		{},                                   // no longer running
-		{img("sha256:aa", "t1", "registry")}, // node SBOM deleted
+// A node SBOM deleted while the digest is still in the inventory is
+// released (only if the coordinator holds one). A digest that merely stops
+// running, like a CronJob between runs, is left alone: no release, and no
+// new fetch when it runs again unchanged. One that leaves the inventory is
+// forgotten without a release.
+func TestReleasesOnlyOnDeletion(t *testing.T) {
+	running := img("sha256:aa", "t1", "node")
+	stopped := running
+	stopped.RunningContainers = 0
+	deleted := img("sha256:aa", "t1", "registry")
+	deleted.NodeCatalog = nil
+	for _, tc := range []struct {
+		name     string
+		steps    [][]broker.Image
+		releases int
+		fetches  int
+	}{
+		{"cronjob", [][]broker.Image{{stopped}, {stopped}, {running}}, 0, 1},
+		{"deleted", [][]broker.Image{{deleted}, {deleted}}, 1, 1},
+		{"deleted while stopped", [][]broker.Image{{stopped}, {func() broker.Image { d := deleted; d.RunningContainers = 0; return d }()}}, 1, 1},
+		{"left the inventory", [][]broker.Image{{}}, 0, 1},
 	} {
-		fb := &fakeBroker{images: []broker.Image{img("sha256:aa", "t1", "node")},
-			docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
+		fb := &fakeBroker{images: []broker.Image{running}, docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
 		o := &offers{}
 		log, _ := test.NewNullLogger()
 		m := metrics.New()
 		s := newSource(fb, o, log, m, &clock{t: time.Unix(1, 0)})
 		s.Pass(context.Background())
-		fb.mu.Lock()
-		fb.images = next
-		fb.mu.Unlock()
-		s.Pass(context.Background())
-		if o.n() != 2 || o.last().Image.Digest != "sha256:aa" || len(o.last().Components) != 0 || o.last().Source != types.SourceNode {
-			t.Fatalf("%v: offers %d, last %+v", next, o.n(), o.last())
+		for _, step := range tc.steps {
+			fb.mu.Lock()
+			fb.images = step
+			fb.mu.Unlock()
+			s.Pass(context.Background())
 		}
-		s.Pass(context.Background())
-		if o.n() != 2 || testutil.ToFloat64(m.NodeSBOMFetches.WithLabelValues("released")) != 1 {
-			t.Errorf("%v: released more than once", next)
+		releases := 0
+		for _, sb := range o.s {
+			if len(sb.Components) == 0 {
+				releases++
+			}
 		}
+		if releases != tc.releases || fb.fetched()["sha256:aa"] != tc.fetches ||
+			testutil.ToFloat64(m.NodeSBOMFetches.WithLabelValues("released")) != float64(tc.releases) {
+			t.Errorf("%s: %d releases, %d fetches; want %d, %d", tc.name, releases, fb.fetched()["sha256:aa"], tc.releases, tc.fetches)
+		}
+	}
+	// Deleted, but the coordinator holds none (evicted): nothing offered.
+	fb := &fakeBroker{images: []broker.Image{running}, docs: map[string]*broker.NodeSBOM{"sha256:aa": doc("libc6")}}
+	o := &offers{}
+	log, _ := test.NewNullLogger()
+	s := newSource(fb, o, log, nil, &clock{t: time.Unix(1, 0)})
+	s.Pass(context.Background())
+	o.evict("sha256:aa")
+	fb.mu.Lock()
+	fb.images = []broker.Image{deleted}
+	fb.mu.Unlock()
+	s.Pass(context.Background())
+	if o.n() != 1 {
+		t.Errorf("released an evicted SBOM: %d offers", o.n())
 	}
 }
 

@@ -40,8 +40,8 @@ type Metrics struct {
 	// result (found, none, error, skipped_<reason>, list_error).
 	RegistrySBOMLookups *prometheus.CounterVec
 	// NodeSBOMFetches counts node catalog SBOM reads by result (fetched,
-	// none, changed, too_large, error, released, list_error, probe_error,
-	// probe_denied).
+	// none, changed, too_large, error, released, wanted, list_error,
+	// probe_error, probe_denied).
 	NodeSBOMFetches *prometheus.CounterVec
 	// Grype matching (vulnerability source B).
 	GrypeDBBuilt      prometheus.Gauge
