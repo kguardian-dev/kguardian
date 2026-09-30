@@ -170,6 +170,7 @@ func TestNodeSBOMIsOptIn(t *testing.T) {
 	for _, bad := range []map[string]string{
 		{"NODE_SBOM_ENABLED": "on"},
 		{"NODE_SBOM_INTERVAL": "0s"},
+		{"NODE_SBOM_INTERVAL": "500ms"},
 		{"NODE_SBOM_INTERVAL": "often"},
 		{"GRYPE_NODE_GROUP_MAX_WAIT": "30s"},
 		{"GRYPE_NODE_GROUP_MAX_WAIT": "later"},
