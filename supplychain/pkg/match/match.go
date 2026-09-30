@@ -220,6 +220,11 @@ type Coordinator struct {
 	// kguardian_supplychain_grype_node_group_wait_expired_total.
 	// Default 30m.
 	NodeGroupMaxWait time.Duration
+	// RefetchMinInterval and RefetchMaxInterval bound how often one SBOM
+	// is asked of its source again (see allowRefetchLocked). Defaults 10m
+	// (Trivy's resync period) and 24h (the registry recheck).
+	RefetchMinInterval time.Duration
+	RefetchMaxInterval time.Duration
 	// CrashDir, when set, holds a marker for each match in flight
 	// (written before, removed after). A marker left behind means the
 	// process died mid-match (e.g. OOMKilled); after
@@ -262,6 +267,7 @@ type Coordinator struct {
 	// after it is released (a source's lock may be held while it offers).
 	refetchers   map[string]Refetcher
 	refetchQueue []refetchRequest
+	refetchState map[refetchRequest]refetchBackoff
 	// nodeHeld counts the digests with a node SBOM held; 0 (node source
 	// off) short-cuts every node check. nodeSeen: a node SBOM was ever
 	// offered; until then no match keeps groupState.lastOthers.
@@ -304,6 +310,15 @@ func (c *Coordinator) init() {
 	}
 	if c.NodeGroupMaxWait <= 0 {
 		c.NodeGroupMaxWait = 30 * time.Minute
+	}
+	if c.RefetchMinInterval <= 0 {
+		c.RefetchMinInterval = 10 * time.Minute
+	}
+	if c.RefetchMaxInterval < c.RefetchMinInterval {
+		c.RefetchMaxInterval = max(24*time.Hour, c.RefetchMinInterval)
+	}
+	if c.refetchState == nil {
+		c.refetchState = map[refetchRequest]refetchBackoff{}
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -372,12 +387,17 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.wake()
 }
 
-// Refetcher is a source that can emit an SBOM again on request (Trivy's
-// tracker, the registry source).
+// Refetcher is a source that can supply an SBOM again on request (Trivy's
+// tracker, the registry source). Refetch must not block or call back into
+// the coordinator: it is called outside the coordinator's lock, but from
+// Offer and the match loop.
 type Refetcher interface {
-	// Refetch makes the source emit digest's SBOM again on its next pass,
-	// even if it has not changed.
-	Refetch(digest string)
+	// Refetch returns digest's SBOM when the source holds it (the
+	// coordinator offers it directly: it never reaches the broker), or nil
+	// after arranging to emit it again on the source's next pass, marked
+	// match-only when it has not changed (trivy.Emission.MatchOnly), so
+	// the broker never sees a re-upload caused by a refetch.
+	Refetch(digest string) *types.ImageSBOM
 }
 
 type refetchRequest struct {
@@ -405,8 +425,48 @@ func (c *Coordinator) flushRefetches() {
 	c.mu.Unlock()
 	for _, r := range reqs {
 		if f := rs[r.source]; f != nil {
-			f.Refetch(r.digest)
+			if sb := f.Refetch(r.digest); sb != nil {
+				c.Offer(sb)
+			}
 		}
+	}
+}
+
+// refetchBackoff rate-limits refetches of one (source, digest).
+type refetchBackoff struct {
+	next    time.Time
+	backoff time.Duration
+}
+
+// allowRefetchLocked reports whether (source, digest) may be refetched now,
+// at most once per window, doubling from RefetchMinInterval up to
+// RefetchMaxInterval, so a group that keeps being dropped and waiting does
+// not keep its sources busy. Counted by result (requested, limited).
+func (c *Coordinator) allowRefetchLocked(r refetchRequest) bool {
+	now := c.now()
+	b := c.refetchState[r]
+	if now.Before(b.next) {
+		c.countRefetch(r.source, "limited")
+		return false
+	}
+	if len(c.refetchState) >= c.MaxDigests*maxWaitingGroupsFactor {
+		// Forget entries whose window has long closed.
+		for k, v := range c.refetchState {
+			if now.Sub(v.next) >= c.RefetchMaxInterval {
+				delete(c.refetchState, k)
+			}
+		}
+	}
+	b.backoff = min(max(b.backoff*2, c.RefetchMinInterval), c.RefetchMaxInterval)
+	b.next = now.Add(b.backoff)
+	c.refetchState[r] = b
+	c.countRefetch(r.source, "requested")
+	return true
+}
+
+func (c *Coordinator) countRefetch(source, result string) {
+	if c.Metrics != nil {
+		c.Metrics.GrypeRefetches.WithLabelValues(source, result).Inc()
 	}
 }
 
@@ -543,8 +603,10 @@ func (c *Coordinator) waitLocked(key string) int {
 			// changed SBOM, and the registry source rechecks daily.
 			for d, srcs := range gs.lastOthers {
 				for src := range srcs {
-					if _, held := c.sboms[d][src]; !held {
-						c.refetchQueue = append(c.refetchQueue, refetchRequest{src, d})
+					if _, held := c.sboms[d][src]; !held && c.refetchers[src] != nil {
+						if r := (refetchRequest{src, d}); c.allowRefetchLocked(r) {
+							c.refetchQueue = append(c.refetchQueue, r)
+						}
 					}
 				}
 			}
@@ -730,7 +792,6 @@ func (c *Coordinator) evictLocked(keep string, bytes int64) {
 		if tooBig {
 			reason = "bytes"
 		}
-		c.requestRefetchLocked(victim, members[victim])
 		for _, d := range members[victim] {
 			for src, h := range c.sboms[d] {
 				c.heldBytes -= h.bytes
@@ -743,34 +804,6 @@ func (c *Coordinator) evictLocked(keep string, bytes int64) {
 				c.Metrics.GrypeSBOMsEvicted.WithLabelValues(reason).Inc()
 			}
 		}
-	}
-}
-
-// requestRefetchLocked asks the sources of a group about to be evicted to
-// emit its SBOMs again, if its last match included a node SBOM: Trivy
-// re-offers only a changed SBOM and the registry source rechecks a digest
-// only daily, so without this the group would wait for them until
-// NodeGroupMaxWait. Other groups are evicted as they always were.
-func (c *Coordinator) requestRefetchLocked(key string, digests []string) {
-	gs := c.groups[key]
-	if gs == nil || gs.lastNode == nil || len(c.refetchers) == 0 {
-		return
-	}
-	want := map[refetchRequest]bool{}
-	for _, d := range digests {
-		for src := range c.sboms[d] {
-			if src != types.SourceNode {
-				want[refetchRequest{src, d}] = true
-			}
-		}
-	}
-	for d, srcs := range gs.lastOthers {
-		for src := range srcs {
-			want[refetchRequest{src, d}] = true
-		}
-	}
-	for r := range want {
-		c.refetchQueue = append(c.refetchQueue, r)
 	}
 }
 

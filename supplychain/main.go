@@ -259,7 +259,8 @@ func serve() error {
 		// container restart (an OOMKill) but not the pod.
 		coord = &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
 			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL,
-			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20, NodeGroupMaxWait: c.GrypeNodeGroupMaxWait}
+			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20, NodeGroupMaxWait: c.GrypeNodeGroupMaxWait,
+			RefetchMinInterval: c.TrivyResync}
 		sink = coord.Tee(disp)
 		wg.Add(1)
 		go func() {
@@ -298,6 +299,7 @@ func serve() error {
 		tracker := trivy.NewTracker(nil) // broker inventory resolver lands with #1533 P1-3
 		if nodeSBOM {
 			tracker.OnSBOMGone = func(d string) { coord.Gone(d, types.SourceTrivyOperator) }
+			tracker.GoneDelay = c.TrivyResync
 			coord.SetRefetcher(types.SourceTrivyOperator, tracker)
 		}
 		w := &trivy.Watcher{

@@ -388,22 +388,35 @@ included one, or its union now does), a group is not matched without one
 of the other SBOMs of its last match (Trivy's, a registry one) while that
 SBOM is not held. After the budget drops such a group, a partial re-offer
 (the node SBOM alone, or Trivy's without a registry SBOM) is held but not
-matched, and the broker keeps the last complete payload. To bring the
-rest back, the coordinator asks their sources to emit them again: Trivy's
-tracker forgets what it sent, so the next informer resync
-(`TRIVY_RESYNC_PERIOD`) re-emits the SBOM, and the registry source looks
-the image up again on its next pass. A source can also declare an SBOM
-gone for good (a deleted SbomReport, a registry lookup that no longer
-finds it), which ends the wait for it. The wait is capped at
-`GRYPE_NODE_GROUP_MAX_WAIT` (30 min): then the group is matched with what
-it holds, under the union rules above, and counted in
-`kguardian_supplychain_grype_node_group_wait_expired_total`. A waiting
-group's SBOMs can be dropped again under memory pressure: what it waits
-for is kept in its match state, not in held SBOMs. Once the other SBOMs
-are back, the coordinator `Wants` the node SBOM, the node source offers it
-again, and the group waits for it up to 10 min before it is matched
-without it. Without the node source none of this happens: groups are
-dropped and re-matched exactly as before.
+matched, and the broker keeps the last complete payload.
+
+When such a group starts waiting, the coordinator asks the sources of the
+missing SBOMs for them, at most once per SBOM per window (10 min,
+Trivy's resync period, doubling up to a day; counted in
+`kguardian_supplychain_grype_refetches_total{source,result}`). Dropping a
+group asks nothing, so memory pressure cannot turn into a loop of drops
+and re-fetches. Trivy's tracker hands back the SBOM it holds, which goes
+straight to the matcher; a registry SBOM is looked up again on the
+source's next pass and, if unchanged, emitted match-only. Neither reaches
+the broker again.
+
+A source can declare an SBOM gone for good, which ends the wait for it:
+Trivy when a digest's last SbomReport has stayed deleted for a resync
+period (a report deleted and recreated does not count), the registry
+source when two consecutive complete lookups no longer find it (an error,
+a 429 or a partial answer never counts).
+
+The wait is capped at `GRYPE_NODE_GROUP_MAX_WAIT` (30 min), counted in
+`kguardian_supplychain_grype_node_group_wait_expired_total`. At the cap
+the group is matched with what it holds, under the union rules above: a
+group without its Trivy SBOM then carries no Trivy-derived findings until
+Trivy's SBOM is back (and likewise for a registry SBOM). A waiting group's
+SBOMs can be dropped again under memory pressure: what it waits for is
+kept in its match state, not in held SBOMs. Once the other SBOMs are back,
+the coordinator `Wants` the node SBOM, the node source offers it again,
+and the group waits for it up to 10 min before it is matched without it.
+Without the node source none of this happens: groups are dropped and
+re-matched exactly as before.
 
 ### Source rules (contract for the broker)
 

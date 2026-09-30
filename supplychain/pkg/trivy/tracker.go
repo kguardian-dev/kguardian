@@ -43,6 +43,10 @@ type Emission struct {
 	// the index. Set for matches that include a node SBOM.
 	PinPlatform bool
 	Platform    string
+	// MatchOnly: an SBOM re-emitted only because the match coordinator
+	// asked for it again, unchanged since it was last sent. The dispatch
+	// queue drops it (the broker has it); the coordinator still takes it.
+	MatchOnly bool
 }
 
 // objEntry is what the tracker remembers about one Kubernetes report
@@ -91,9 +95,16 @@ type Tracker struct {
 	sent        map[sentKey]sentState
 
 	// OnSBOMGone, when set, is called (outside the lock) with a digest
-	// whose last SbomReport went away: deleted, or moved to another
-	// digest. The match coordinator uses it to stop waiting for that SBOM.
+	// whose last SbomReport went away (deleted, or moved to another
+	// digest) and did not come back within GoneDelay. The match
+	// coordinator uses it to stop waiting for that SBOM. The delay keeps a
+	// report deleted and recreated (a rescan) from flapping: it is checked
+	// on later report events, which the informer resync delivers.
 	OnSBOMGone func(digest string)
+	// GoneDelay: default 10m (the default resync period).
+	GoneDelay time.Duration
+	goneAt    map[string]time.Time
+	now       func() time.Time
 }
 
 // NewTracker returns an empty tracker. resolver may be nil.
@@ -179,6 +190,7 @@ func (t *Tracker) UpsertVulnerabilityReport(ctx context.Context, r *Vulnerabilit
 // the join, and its digest can resolve tag-only vulnerability reports for
 // the same workload container.
 func (t *Tracker) UpsertSbomReport(ctx context.Context, r *SbomReport) []Emission {
+	t.flushGone()
 	key := objectKey(r.Metadata)
 	w := workloadOf(r.Metadata)
 	ref := imageRefOf(r.Report.Registry, r.Report.Artifact, "").Ref
@@ -247,6 +259,7 @@ func (t *Tracker) DeleteVulnerabilityReport(r *VulnerabilityReport) []Emission {
 // last SBOM for a digest goes, that digest's vulnerability payload loses
 // the joined file paths and is re-emitted.
 func (t *Tracker) DeleteSbomReport(r *SbomReport) []Emission {
+	t.flushGone()
 	key := objectKey(r.Metadata)
 	t.mu.Lock()
 	prev, ok := t.sbomObjs[key]
@@ -267,19 +280,72 @@ func (t *Tracker) DeleteSbomReport(r *SbomReport) []Emission {
 	return out
 }
 
-// Refetch makes the next report event (the informer's resync) for
-// digest's SBOM emit it again even if it has not changed. The match
-// coordinator asks for it when it drops the SBOM to stay within budget.
-func (t *Tracker) Refetch(digest string) {
+// Refetch returns the SBOM held for digest (as last emitted, with its
+// workloads), or nil if none is held. The match coordinator asks for it
+// when a group waits for it and offers it directly: nothing is emitted,
+// so the broker never sees it again. It does not block and does not call
+// out.
+func (t *Tracker) Refetch(digest string) *types.ImageSBOM {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.sent, sentKey{KindSBOM, digest})
+	ds := t.sbomDigests[digest]
+	if ds == nil || ds.sbom == nil {
+		return nil
+	}
+	p := *ds.sbom
+	p.Components = append([]types.Component(nil), ds.sbom.Components...)
+	p.ObservedIn = workloadsOf(ds.refs)
+	return &p
 }
 
+// sbomGone notes that digest's last SbomReport went away; OnSBOMGone is
+// called once it has stayed away for GoneDelay (see flushGone).
 func (t *Tracker) sbomGone(digest string) {
-	if t.OnSBOMGone != nil {
-		t.OnSBOMGone(digest)
+	if t.OnSBOMGone == nil {
+		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.goneAt == nil {
+		t.goneAt = map[string]time.Time{}
+	}
+	t.goneAt[digest] = t.clock()
+}
+
+// flushGone calls OnSBOMGone for digests gone for GoneDelay and still
+// without an SbomReport.
+func (t *Tracker) flushGone() {
+	if t.OnSBOMGone == nil {
+		return
+	}
+	t.mu.Lock()
+	delay := t.GoneDelay
+	if delay <= 0 {
+		delay = 10 * time.Minute
+	}
+	now := t.clock()
+	var fire []string
+	for d, at := range t.goneAt {
+		if _, back := t.sbomDigests[d]; back {
+			delete(t.goneAt, d)
+			continue
+		}
+		if now.Sub(at) >= delay {
+			fire = append(fire, d)
+			delete(t.goneAt, d)
+		}
+	}
+	t.mu.Unlock()
+	for _, d := range fire {
+		t.OnSBOMGone(d)
+	}
+}
+
+func (t *Tracker) clock() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 // detachLocked removes object key's reference from the digest it pointed

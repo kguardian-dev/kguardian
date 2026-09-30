@@ -65,6 +65,9 @@ type Metrics struct {
 	// SBOM) matched with what they held after waiting NodeGroupMaxWait for
 	// the other SBOMs of that match.
 	GrypeNodeGroupWaitExpired prometheus.Counter
+	// GrypeRefetches counts requests to a source to supply an SBOM again
+	// for a waiting group, by source and result (requested, limited).
+	GrypeRefetches *prometheus.CounterVec
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -156,6 +159,10 @@ func New() *Metrics {
 			Name: "kguardian_supplychain_grype_node_group_wait_expired_total",
 			Help: "Groups last matched with a node SBOM that were matched with what they held after waiting GRYPE_NODE_GROUP_MAX_WAIT for the other SBOMs of that match.",
 		}),
+		GrypeRefetches: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_grype_refetches_total",
+			Help: "Requests to a source to supply an SBOM again for a group waiting for it, by source and result (requested, limited by the per-SBOM backoff).",
+		}, []string{"source", "result"}),
 		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_source_healthy",
 			Help: "0 while a source's list/watch is failing repeatedly, else 1.",
@@ -170,7 +177,7 @@ func New() *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
 		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups, m.NodeSBOMFetches,
-		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeSBOMBytesHeld, m.GrypeSBOMsEvicted, m.GrypeQuarantined, m.GrypeComponentsClamped, m.GrypeNodeGroupWaitExpired, m.PendingEmissions,
+		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeSBOMBytesHeld, m.GrypeSBOMsEvicted, m.GrypeQuarantined, m.GrypeComponentsClamped, m.GrypeNodeGroupWaitExpired, m.GrypeRefetches, m.PendingEmissions,
 	)
 	return m
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -255,41 +256,106 @@ func firstPassLogs(h *logtest.Hook) int {
 	return n
 }
 
-// Refetch (by image digest or by a subject found for it) makes the next
-// pass look the image up again; a definite lookup that no longer finds a
-// subject found before reports it gone, an error does not.
-func TestRefetchAndGone(t *testing.T) {
-	idx, plat := "sha256:"+rep("a"), "sha256:"+rep("b")
+// completeFetcher is fetcher that also reports completeness.
+type completeFetcher struct {
+	*fetcher
+	incomplete map[string]bool
+}
+
+func (f *completeFetcher) FetchSBOMsComplete(ctx context.Context, reg, repo, digest string) ([]registry.FoundSBOM, []string, bool, error) {
+	found, rej, err := f.FetchSBOMs(ctx, reg, repo, digest)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return found, rej, err == nil && !f.incomplete[digest], err
+}
+
+// Gone fires only for a subject missing from two consecutive complete
+// lookups: never on an error, a partial answer (a 429 on the referrers
+// step while another SBOM was found), or a single empty answer.
+func TestGoneNeedsTwoCompleteMisses(t *testing.T) {
+	idx, plat, other := "sha256:"+rep("a"), "sha256:"+rep("b"), "sha256:"+rep("c")
 	l := lister{images: []broker.Image{{Digest: idx, Repository: "docker.io/library/alpine", RunningContainers: 1}}}
-	f := &fetcher{res: map[string][]registry.FoundSBOM{idx: {{Subject: plat, IndexDigest: idx, Doc: doc(), Trust: types.SBOMTrustUnverified}}},
-		errs: map[string]error{}}
+	sbom := func(subject string) registry.FoundSBOM {
+		return registry.FoundSBOM{Subject: subject, IndexDigest: idx, Doc: doc(), Trust: types.SBOMTrustUnverified}
+	}
+	f := &completeFetcher{fetcher: &fetcher{res: map[string][]registry.FoundSBOM{idx: {sbom(plat)}}, errs: map[string]error{}},
+		incomplete: map[string]bool{}}
 	var gone []string
 	src := &Source{Lister: l, Fetcher: f, Sink: &sink{}, Log: quiet(), OnGone: func(d string) { gone = append(gone, d) }}
-	src.Pass(context.Background())
-	src.Pass(context.Background())
-	if f.calls[idx] != 1 {
-		t.Fatalf("calls %d", f.calls[idx])
+	look := func(res []registry.FoundSBOM, incomplete bool, err error) {
+		f.mu.Lock()
+		f.res[idx], f.incomplete[idx] = res, incomplete
+		if err != nil {
+			f.errs[idx] = err
+		} else {
+			delete(f.errs, idx)
+		}
+		f.mu.Unlock()
+		src.Refetch(idx)
+		src.Pass(context.Background())
 	}
-	src.Refetch(plat) // the coordinator names the subject it held
 	src.Pass(context.Background())
-	if f.calls[idx] != 2 {
-		t.Fatalf("Refetch by subject: calls %d", f.calls[idx])
-	}
-	f.mu.Lock()
-	f.errs[idx] = errors.New("registry down")
-	f.mu.Unlock()
-	src.Refetch(idx)
-	src.Pass(context.Background())
+	look(nil, false, errors.New("503"))                // an error
+	look([]registry.FoundSBOM{sbom(other)}, true, nil) // partial: 429 on referrers, another SBOM found
+	look(nil, false, nil)                              // one empty, complete answer
 	if len(gone) != 0 {
-		t.Fatalf("an error reported gone: %v", gone)
+		t.Fatalf("gone after an error, a partial and one empty answer: %v", gone)
 	}
+	look([]registry.FoundSBOM{sbom(plat)}, false, nil) // back: the count starts over
+	// (other, seen only in the partial answer, is now missing from two
+	// complete answers: it goes, correctly.)
+	if !reflect.DeepEqual(gone, []string{other}) {
+		t.Fatalf("gone %v, want only %s", gone, other)
+	}
+	look(nil, false, nil)
+	if len(gone) != 1 {
+		t.Fatalf("gone after one miss following a find: %v", gone)
+	}
+	look(nil, false, nil) // second consecutive complete miss
+	if !reflect.DeepEqual(gone, []string{other, plat}) {
+		t.Errorf("gone %v, want %s then %s", gone, other, plat)
+	}
+}
+
+// Refetch (by image digest or found subject) makes the next pass look the
+// image up again; an unchanged SBOM found then is emitted match-only (the
+// broker has it), a changed one normally.
+func TestRefetchedUnchangedSBOMIsMatchOnly(t *testing.T) {
+	idx, plat := "sha256:"+rep("a"), "sha256:"+rep("b")
+	l := lister{images: []broker.Image{{Digest: idx, Repository: "docker.io/library/alpine", RunningContainers: 1}}}
+	f := &completeFetcher{fetcher: &fetcher{res: map[string][]registry.FoundSBOM{idx: {{Subject: plat, IndexDigest: idx, Doc: doc(), Trust: types.SBOMTrustUnverified}}},
+		errs: map[string]error{}}, incomplete: map[string]bool{}}
+	s := &sink{}
+	now := time.Unix(1_000_000, 0)
+	src := &Source{Lister: l, Fetcher: f, Sink: s, Log: quiet(), OnGone: func(string) {}, now: func() time.Time { return now }}
+	src.Pass(context.Background())
+	if sb := src.Refetch(plat); sb != nil {
+		t.Fatal("the registry source holds no SBOMs")
+	}
+	now = now.Add(time.Minute)
+	src.Pass(context.Background())
+	if f.calls[idx] != 2 || len(s.es) != 2 || s.es[0].MatchOnly || !s.es[1].MatchOnly {
+		t.Fatalf("calls %d, emissions %+v", f.calls[idx], s.es)
+	}
+	changed := doc()
+	changed.Components = append(changed.Components, types.Component{Name: "zlib", Version: "1", Type: "apk"})
 	f.mu.Lock()
-	delete(f.errs, idx)
-	delete(f.res, idx)
+	f.res[idx] = []registry.FoundSBOM{{Subject: plat, IndexDigest: idx, Doc: changed, Trust: types.SBOMTrustUnverified}}
 	f.mu.Unlock()
 	src.Refetch(idx)
 	src.Pass(context.Background())
-	if len(gone) != 1 || gone[0] != plat {
-		t.Errorf("gone %v, want %s", gone, plat)
+	if len(s.es) != 3 || s.es[2].MatchOnly {
+		t.Errorf("a changed SBOM was not sent: %+v", s.es[2])
+	}
+	// Without the coordinator hooks (node source off) nothing is match-only.
+	s2 := &sink{}
+	plain := &Source{Lister: l, Fetcher: f, Sink: s2, Log: quiet()}
+	plain.Pass(context.Background())
+	plain.Refetch(idx)
+	plain.Pass(context.Background())
+	for _, e := range s2.es {
+		if e.MatchOnly {
+			t.Error("match-only emission with the node source off")
+		}
 	}
 }
