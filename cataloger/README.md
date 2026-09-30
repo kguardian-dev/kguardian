@@ -218,12 +218,16 @@ contents, digests, or data files. Each package also carries:
 - `interpreted_content`: the package owns interpreted or loadable
   non-executable content, computed from the complete owned-file list
   before any trimming (PROTOCOL.md §4.3 has the full rule): a file with an
-  interpreter, bytecode or foreign-runtime extension anywhere, or a
-  non-executable, non-`*.so*` file under a lib or share directory that is
-  not documentation, packaging metadata, pure data, host configuration,
-  gconv configuration or a build-time file. So libc6 and libssl3 (whose
-  only such files are lintian overrides and gconv configuration) are not
-  flagged, while Python's stdlib and bash-completion scripts are.
+  interpreter, bytecode or foreign-runtime extension (polkit `.rules` and
+  Guile `.go` only under their own directories), a shell start-up snippet
+  under `/etc` (`/etc/profile`, `profile.d`, `bash.bashrc`, `/etc/skel`
+  dotfiles), or a non-executable, non-`*.so*` file under a lib or share
+  directory that is not known documentation, packaging metadata, data,
+  host configuration, gconv configuration or a build-time file. The
+  exclusions name known data subtrees, never whole trees that can also
+  hold scripts. So libc6 and libssl3 (whose only such files are lintian
+  overrides and gconv configuration) are not flagged, while Python's
+  stdlib, bash-completion and bash's start-up files are.
 
 ## SELinux
 

@@ -317,20 +317,22 @@ before the executable filter and the cap. It is `true` if any owned regular
 file:
 
 - has an interpreter, bytecode or foreign-runtime extension, wherever it
-  is: `.py .pyc .pyo .pyz .pl .pm .rb .js .mjs .cjs .wasm .php .phar .lua
-  .luac .tcl .r .sh .bash .zsh .ksh .csh .fish .awk .ps1 .jar .class .beam
-  .el .elc .dll`; or
-- is non-executable, does not match `*.so*`, and is under `/lib`, `/usr/lib`,
-  `/usr/local/lib`, `/usr/libexec`, `/usr/share` or `/usr/local/share`,
-  unless it is one of these, which are never loaded as code:
-  - documentation and Debian packaging metadata: `share/{doc,man,info,locale,licenses,lintian,bug,doc-base,common-licenses,menu}`;
-  - pure data: `share/{zoneinfo,terminfo,mime,xml,icons,pixmaps,applications,metainfo,pkgconfig,polkit-1,dbus-1}`, `lib/terminfo`, `lib/locale`;
-  - host configuration: `lib/{tmpfiles.d,sysctl.d,sysusers.d,modprobe.d,modules-load.d,binfmt.d,environment.d,udev,systemd,kernel,mime/packages}`, `lib/os-release`;
-  - glibc gconv configuration: `gconv/gconv-modules`, `gconv/gconv-modules.cache`, `gconv-modules.d/*.conf` (the gconv modules are `*.so`, exec-mapped and captured);
-  - build-time files: `*.a *.la *.pc *.h`.
+  is: `.py .pyc .pyo .pyz .pl .pm .rb .js .mjs .cjs .ts .wasm .php .phar .lua .luac .tcl .r .sh .bash .zsh .ksh .csh .fish .awk .ps1 .jar .class .groovy .beam .ex .exs .el .elc .scm .ss .xsl .xslt .dll`; or `.rules` under a `polkit-1/` path (polkitd's
+  JavaScript; udev's `.rules` elsewhere are data) or `.go` under a `guile/`
+  path (Guile objects; Go source elsewhere is not); or
+- is a shell start-up snippet: `/etc/profile`, `/etc/profile.d/*`,
+  `/etc/bash.bashrc`, `/etc/skel/.*`, or any `*.bashrc`, `*.profile` or
+  `*.zshrc`; or
+- is non-executable, does not match `*.so*`, and is under `/lib`,
+  `/lib64`, `/lib32`, `/usr/lib`, `/usr/lib64`, `/usr/lib32`,
+  `/usr/libx32`, `/usr/local/lib` (the lib roots), `/usr/libexec`,
+  `/usr/share` or `/usr/local/share` (the share roots), unless it is known
+  data that is never loaded as code: documentation and Debian packaging metadata (`share/{doc,man,info,locale,licenses,lintian,doc-base,common-licenses,menu}`, `share/bug/*/{control,presubj}`); pure data (`share/{zoneinfo,terminfo,mime,xml,icons,pixmaps,applications,metainfo,pkgconfig,dbus-1,binfmts}`, `share/polkit-1/actions`, `share/debianutils/shells.d`, `lib/terminfo`, `lib/locale`); host configuration (`lib/{tmpfiles.d,sysctl.d,sysusers.d,modprobe.d,modules-load.d,binfmt.d,environment.d,mime/packages}`, `lib/udev/{rules.d,hwdb.d,hwdb.bin}`, `lib/systemd/{system,user,network,*-preset,catalog}`, `lib/kernel/install.conf`, `lib/os-release`); glibc gconv configuration (`gconv/gconv-modules`, `gconv/gconv-modules.cache`, `gconv-modules.d/*.conf`; the `.so` modules are exec-mapped and captured); and build-time files (`*.a *.la *.pc *.h`). Exclusions list known data,
+  never whole trees that can also hold scripts (udev's shell libraries,
+  systemd generators and kernel install plugins still flag).
 
-  (`share` and `lib` mean each of the share and lib roots above.) Python's
-  stdlib `.py` files and `share/bash-completion` still flag their packages.
+  Python's stdlib, bash-completion and bash's `/etc/bash.bashrc` and
+  `/etc/skel` files flag their packages; libc6 and libssl3 do not.
 
 Validation the worker applies before answering (so the Controller's own
 checks should never fire, but it must still apply them): a component with an
