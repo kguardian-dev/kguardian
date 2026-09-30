@@ -67,7 +67,11 @@ component matches them with Grype. That needs `supplychain.enabled`,
 `supplychain.sources.node.enabled`, which follows `nodeCatalog.enabled`
 unless set to `true` or `false`. With the source on and the matcher off,
 the component ignores it with a warning and NOTES says so. Findings come
-back as source `grype` with `node` among their SBOM sources.
+back as source `grype` with `node` among their SBOM sources. It needs a
+supplychain release after 0.1.1; older ones ignore the setting. A name set
+in `supplychain.env` (for example `NODE_SBOM_INTERVAL`) replaces the
+chart's own, and the chart refuses an interval of zero or a
+`nodeGroupMaxWait` under `1m`, which the component would not start with.
 
 ## Helm values
 

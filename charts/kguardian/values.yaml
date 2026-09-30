@@ -2211,11 +2211,12 @@ supplychain:
       # true or false overrides it. Needs `grype.enabled`: without the
       # matcher the component ignores it (with a warning). Reads the
       # broker's image inventory and node SBOMs with this component's own
-      # token (the supplychain scope includes read).
+      # token (the supplychain scope includes read). Needs a supplychain
+      # release after 0.1.1; older ones ignore it.
       enabled: null
       # -- How often to list running images for new or changed node SBOMs
-      # (`NODE_SBOM_INTERVAL`, a Go duration). Rendered only when the node
-      # source is on.
+      # (`NODE_SBOM_INTERVAL`, a Go duration above zero; the chart refuses
+      # anything else). Rendered only when the node source is on.
       interval: 5m
 
   grype:
@@ -2259,7 +2260,8 @@ supplychain:
     # -- With the node source on: how long a group last matched with a node
     # SBOM waits, after its SBOMs were dropped, for the other SBOMs of
     # that match before it is matched with what it holds
-    # (`GRYPE_NODE_GROUP_MAX_WAIT`, at least 1m). Frequent expiries
+    # (`GRYPE_NODE_GROUP_MAX_WAIT`, at least 1m; the chart refuses less).
+    # Frequent expiries
     # (`kguardian_supplychain_grype_node_group_wait_expired_total`) mean
     # the SBOM budget is too small: raise it with `GRYPE_SBOM_BUDGET_MIB`
     # in `supplychain.env` (default 96, at least 16) and the memory limit

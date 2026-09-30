@@ -313,7 +313,32 @@ release) nodeCatalog.enabled.
 {{- $v := dig "sources" "node" "enabled" nil (.Values.supplychain | default dict) -}}
 {{- if or (kindIs "invalid" $v) (eq (toString $v) "") -}}
 {{- include "kguardian.nodeCatalogEnabled" . -}}
-{{- else if eq (toString $v | lower) "true" -}}true
+{{- else if eq (toString $v) "true" -}}true
+{{- end -}}
+{{- end -}}
+
+{{/*
+kguardian.durationSeconds: a Go duration ("5m", "1h30m", "90s", "250ms")
+in seconds, as Go's time.ParseDuration reads it (ns, us, µs, ms, s, m, h;
+fractions allowed; plain "0" is zero). Fails naming the value otherwise.
+Usage: include "kguardian.durationSeconds" (dict "d" "5m" "name" "supplychain.sources.node.interval") | float64
+*/}}
+{{- define "kguardian.durationSeconds" -}}
+{{- $d := toString .d | trim -}}
+{{- if eq $d "0" -}}
+0
+{{- else -}}
+{{- $re := "([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h)" -}}
+{{- $parts := regexFindAll $re $d -1 -}}
+{{- if or (not $parts) (ne (join "" $parts) $d) -}}
+{{- fail (printf "%s: %q is not a duration (for example 5m, 1h30m or 90s)" .name $d) -}}
+{{- end -}}
+{{- $units := dict "ns" 0.000000001 "us" 0.000001 "µs" 0.000001 "ms" 0.001 "s" 1.0 "m" 60.0 "h" 3600.0 -}}
+{{- $total := 0.0 -}}
+{{- range $parts -}}
+{{- $total = addf $total (mulf (regexReplaceAll $re . "${1}" | float64) (get $units (regexReplaceAll $re . "${3}"))) -}}
+{{- end -}}
+{{- $total -}}
 {{- end -}}
 {{- end -}}
 

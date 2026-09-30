@@ -1274,6 +1274,34 @@ else
 fi
 assert_render_fails "node-source-schema-interval" "supplychain/sources/node/interval" \
   "${SC_ON[@]}" --set-string supplychain.sources.node.interval=5
+# Durations the component refuses at startup (a crash loop would also stop
+# Trivy ingest) are refused at template time instead.
+assert_render_fails "node-source-interval-zero" "supplychain.sources.node.interval must be a positive duration" \
+  "${SC_ON[@]}" --set supplychain.sources.node.enabled=true --set supplychain.sources.node.interval=0s
+assert_render_fails "node-source-max-wait-short" "supplychain.grype.nodeGroupMaxWait must be at least 1m" \
+  "${SC_ON[@]}" --set supplychain.sources.node.enabled=true --set supplychain.grype.enabled=true \
+  --set supplychain.grype.nodeGroupMaxWait=59s
+render "node-source-durations-ok" "${SC_ON[@]}" --set supplychain.sources.node.enabled=true \
+  --set supplychain.grype.enabled=true --set supplychain.sources.node.interval=1h30m \
+  --set supplychain.grype.nodeGroupMaxWait=90000ms && {
+  grep -A1 'name: GRYPE_NODE_GROUP_MAX_WAIT' <<<"$OUT" | grep -q 'value: "90000ms"' || \
+    { echo "FAIL [node-source-durations-ok]: 90000ms is 1m30s and must render"; fail=1; }
+}
+# A name already in supplychain.env wins: the chart does not add its own
+# (a duplicate env name is rejected by server-side apply).
+render "node-source-env-override" "${SC_ON[@]}" --set supplychain.sources.node.enabled=true \
+  --set supplychain.grype.enabled=true \
+  --set 'supplychain.env[0].name=NODE_SBOM_INTERVAL' --set 'supplychain.env[0].value=10m' \
+  --set 'supplychain.env[1].name=GRYPE_NODE_GROUP_MAX_WAIT' --set 'supplychain.env[1].value=45m' \
+  --set 'supplychain.env[2].name=NODE_SBOM_ENABLED' --set-string 'supplychain.env[2].value=true' && {
+  sc="$(workload Deployment kguardian-supplychain)"
+  for v in NODE_SBOM_ENABLED NODE_SBOM_INTERVAL GRYPE_NODE_GROUP_MAX_WAIT; do
+    [ "$(grep -c "name: $v\$" <<<"$sc")" = "1" ] || \
+      { echo "FAIL [node-source-env-override]: $v must appear once (from supplychain.env)"; fail=1; }
+  done
+  grep -A1 'name: NODE_SBOM_INTERVAL' <<<"$sc" | grep -q 'value: 10m' || \
+    { echo "FAIL [node-source-env-override]: supplychain.env's NODE_SBOM_INTERVAL must win"; fail=1; }
+}
 
 # Guards, at template time and in values.schema.json.
 assert_render_fails "node-catalog-needs-auth" "nodeCatalog.enabled=true requires broker.auth.enabled=true" \
