@@ -1,0 +1,74 @@
+# Example workload that references a kguardian-distributed seccomp profile:
+# the nginx Deployment that web-service-audit.yaml / web-service.yaml cover.
+#
+# kguardian never edits workloads. Adding the Localhost reference is a
+# one-time change you make to the pod template. The path is
+#   kguardian/<SeccompProfile namespace>/<SeccompProfile name>.json
+# relative to the kubelet's seccomp root (<kubeletRoot>/seccomp, by default
+# /var/lib/kubelet/seccomp). The CR name stays fixed when the CR contents
+# change, so the reference never has to change after that.
+#
+# Before you apply this (the prod namespace must exist):
+#   1. Apply the audit-mode SeccompProfile, web-service-audit.yaml.
+#   2. Wait until READY counts every node:
+#        kubectl -n prod get seccompprofile deployment-web
+#        NAME             ACTION         READY   DRIFT   DENIALS   AGE
+#        deployment-web   SCMP_ACT_LOG   12/12   False   0         40s
+#      A pod scheduled onto a node that does not have the file yet fails with
+#      CreateContainerError until that node's Controller writes it.
+#
+# The kubelet loads the profile when a container starts. Changing the CR (for
+# example promoting SCMP_ACT_LOG to SCMP_ACT_ERRNO with web-service.yaml)
+# rewrites the file on every node but affects each pod only after its next
+# restart:
+#   kubectl -n prod rollout restart deployment/web
+#
+# runtime-default.yaml shows the same Deployment on RuntimeDefault, which is
+# the baseline for comparison and the profile to go back to.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: prod
+  labels:
+    app: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      securityContext:
+        # Pod-level: applies to every container in the pod. kguardian records
+        # syscalls per pod, not per container, so the profile covers sidecars
+        # too.
+        seccompProfile:
+          type: Localhost
+          localhostProfile: kguardian/prod/deployment-web.json
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          # A container-level seccompProfile would override the pod-level one
+          # for this container only:
+          #   securityContext:
+          #     seccompProfile:
+          #       type: Localhost
+          #       localhostProfile: kguardian/prod/deployment-web.json
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
