@@ -96,6 +96,10 @@ The endpoint is then at `http://localhost:8080/mcp`.
 For a longer-lived setup, expose the LLM Bridge through your ingress and use the public URL instead. Keep the bearer token — outside a port-forward it is the only thing standing between the internet and your cluster's telemetry.
 </Tip>
 
+<Note>
+LLM Bridge allows only loopback browser origins (`localhost`, `127.0.0.1`, `[::1]`) by default. A browser-based MCP client served from any other origin must set `ALLOWED_ORIGIN` to that origin, through the chart's `llmBridge.env` value (for example `llmBridge.env: [{name: ALLOWED_ORIGIN, value: "https://mcp-client.example.com"}]`). CLI clients such as Claude Code are not affected.
+</Note>
+
 ---
 
 ## Step 3: Add the server to your client
