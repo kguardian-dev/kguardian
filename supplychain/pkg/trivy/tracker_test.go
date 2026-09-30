@@ -365,3 +365,43 @@ func TestWithFilePathsCapsEachFinding(t *testing.T) {
 		t.Error("input modified")
 	}
 }
+
+// Refetch makes the next resync emit an unchanged SBOM again (once).
+func TestTrackerRefetchReemitsOnResync(t *testing.T) {
+	tr := NewTracker(nil)
+	es := tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-api-digest.yaml"))
+	if len(es) != 1 {
+		t.Fatalf("first: %v", kinds(es))
+	}
+	d := es[0].Digest
+	tr.Refetch(d)
+	es = tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-api-digest.yaml"))
+	if len(es) != 1 || es[0].Kind != KindSBOM || es[0].Digest != d {
+		t.Fatalf("after Refetch: %v", kinds(es))
+	}
+	if es := tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-api-digest.yaml")); len(es) != 0 {
+		t.Errorf("re-emitted again: %v", kinds(es))
+	}
+}
+
+// OnSBOMGone fires when a digest's last SbomReport is deleted or moves
+// to another digest, and not while another report still points at it.
+func TestTrackerOnSBOMGone(t *testing.T) {
+	var gone []string
+	tr := NewTracker(nil)
+	tr.OnSBOMGone = func(d string) { gone = append(gone, d) }
+	r := loadSBOM(t, "sbomreport-api-digest.yaml")
+	es := tr.UpsertSbomReport(ctx, r)
+	d := es[0].Digest
+	tr.DeleteSbomReport(r)
+	if len(gone) != 1 || gone[0] != d {
+		t.Fatalf("deleted: %v", gone)
+	}
+	tr.UpsertSbomReport(ctx, r)
+	r2 := loadSBOM(t, "sbomreport-api-digest.yaml")
+	r2.Report.Artifact.Digest = apiserverDigest
+	tr.UpsertSbomReport(ctx, r2) // the same report, now another digest
+	if len(gone) != 2 || gone[1] != d {
+		t.Errorf("moved: %v", gone)
+	}
+}

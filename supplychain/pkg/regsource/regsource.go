@@ -12,6 +12,7 @@ package regsource
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,12 +55,21 @@ type Source struct {
 	Workers int
 	// MaxTracked bounds the per-digest bookkeeping. Default 20000.
 	MaxTracked int
+	// OnGone, when set, is called with the subject digest of an SBOM
+	// found before that a later lookup of the same image no longer finds
+	// (a definite answer, not an error). The match coordinator uses it to
+	// stop waiting for that SBOM.
+	OnGone func(digest string)
 
 	now     func() time.Time
 	mu      sync.Mutex
 	checked map[string]time.Time
-	ready   bool
-	passed  bool // the first full pass has finished and been logged
+	// found: the subject digests found for an image digest at its last
+	// lookup, and back (subject -> image digest), for OnGone and Refetch.
+	found     map[string][]string
+	subjectOf map[string]string
+	ready     bool
+	passed    bool // the first full pass has finished and been logged
 }
 
 func (s *Source) defaults() {
@@ -80,6 +90,8 @@ func (s *Source) defaults() {
 	}
 	if s.checked == nil {
 		s.checked = map[string]time.Time{}
+		s.found = map[string][]string{}
+		s.subjectOf = map[string]string{}
 	}
 }
 
@@ -185,18 +197,76 @@ func (s *Source) markChecked(digest string) {
 		for d, t := range s.checked {
 			if now.Sub(t) >= s.RecheckAfter {
 				delete(s.checked, d)
+				s.forgetFoundLocked(d)
 			}
 		}
 		if len(s.checked) >= s.MaxTracked {
 			s.checked = map[string]time.Time{}
+			s.found, s.subjectOf = map[string][]string{}, map[string]string{}
 		}
 	}
 	s.checked[digest] = s.now()
 }
 
+// Refetch makes the next pass look digest up again (digest is an image
+// digest or a subject found for one), even within RecheckAfter. The match
+// coordinator asks for it when it drops the SBOM to stay within budget.
+func (s *Source) Refetch(digest string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checked == nil {
+		return
+	}
+	if im, ok := s.subjectOf[digest]; ok {
+		digest = im
+	}
+	delete(s.checked, digest)
+}
+
+func (s *Source) forgetFoundLocked(imageDigest string) {
+	for _, sub := range s.found[imageDigest] {
+		if s.subjectOf[sub] == imageDigest {
+			delete(s.subjectOf, sub)
+		}
+	}
+	delete(s.found, imageDigest)
+}
+
+// recordFound notes the subjects a definite lookup of imageDigest found
+// and returns those found last time and not now.
+func (s *Source) recordFound(imageDigest string, subjects []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var gone []string
+	for _, prev := range s.found[imageDigest] {
+		if !slices.Contains(subjects, prev) {
+			gone = append(gone, prev)
+		}
+	}
+	s.forgetFoundLocked(imageDigest)
+	if len(subjects) > 0 {
+		s.found[imageDigest] = subjects
+		for _, sub := range subjects {
+			s.subjectOf[sub] = imageDigest
+		}
+	}
+	return gone
+}
+
 func (s *Source) lookup(ctx context.Context, im broker.Image) {
 	found, rejected, err := s.Fetcher.FetchSBOMs(ctx, "", im.Repository, im.Digest)
 	s.markChecked(im.Digest)
+	if err == nil {
+		subjects := make([]string, 0, len(found))
+		for _, f := range found {
+			subjects = append(subjects, f.Subject)
+		}
+		for _, d := range s.recordFound(im.Digest, subjects) {
+			if s.OnGone != nil {
+				s.OnGone(d)
+			}
+		}
+	}
 	for _, r := range rejected {
 		s.count("rejected_" + r)
 	}

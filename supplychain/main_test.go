@@ -171,6 +171,8 @@ func TestNodeSBOMIsOptIn(t *testing.T) {
 		{"NODE_SBOM_ENABLED": "on"},
 		{"NODE_SBOM_INTERVAL": "0s"},
 		{"NODE_SBOM_INTERVAL": "often"},
+		{"GRYPE_NODE_GROUP_MAX_WAIT": "30s"},
+		{"GRYPE_NODE_GROUP_MAX_WAIT": "later"},
 	} {
 		if _, err := loadConfig(envMap(bad)); err == nil {
 			t.Errorf("accepted %v", bad)
@@ -179,5 +181,8 @@ func TestNodeSBOMIsOptIn(t *testing.T) {
 	c, err := loadConfig(envMap(map[string]string{"NODE_SBOM_INTERVAL": "90s"}))
 	if err != nil || c.NodeSBOMInterval != 90*time.Second {
 		t.Errorf("interval: %v %v", c.NodeSBOMInterval, err)
+	}
+	if c.GrypeNodeGroupMaxWait != 30*time.Minute {
+		t.Errorf("node group max wait default %v", c.GrypeNodeGroupMaxWait)
 	}
 }

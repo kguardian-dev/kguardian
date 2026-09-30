@@ -280,6 +280,10 @@ func (s *Source) due(images []broker.Image) (due, deleted []broker.Image) {
 			continue
 		}
 		inInventory[im.Digest] = true
+		// Deletion is read from sbomSources, which the broker derives from
+		// supplychain_image_links: a node SBOM whose link is briefly
+		// missing (relinking) looks deleted and is released, then fetched
+		// and offered again once the link is back (its state is gone).
 		if !im.HasSBOM(types.SourceNode) {
 			if _, ok := s.fetched[im.Digest]; ok {
 				delete(s.fetched, im.Digest)

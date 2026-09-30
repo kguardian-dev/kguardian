@@ -383,17 +383,27 @@ pinned: it keeps exactly the links those sources give, and the node SBOM
 only adds packages to it. Registry SBOMs of the index's other platforms
 keep their own groups and links.
 
-**Eviction.** A group whose last match included a node SBOM is never
-matched again without one of the other SBOMs of that match (Trivy's, a
-registry one) while that SBOM is not held: after the budget drops the
-group, a partial re-offer (the node SBOM alone, or Trivy's without a
-registry SBOM) is held but not matched, and the broker keeps the last
-complete payload, as for any dropped group. Trivy re-offers only a changed
-SBOM and the registry source rechecks daily, so such a group can wait that
-long. Once the other SBOMs are all back, the coordinator `Wants` the
-node SBOM, the node source offers it again, and the group waits for it up
-to 10 min before it is matched without it. Groups that never had a node
-SBOM are dropped and re-matched exactly as before.
+**Eviction.** Once a node SBOM is in play (its group's last match
+included one, or its union now does), a group is not matched without one
+of the other SBOMs of its last match (Trivy's, a registry one) while that
+SBOM is not held. After the budget drops such a group, a partial re-offer
+(the node SBOM alone, or Trivy's without a registry SBOM) is held but not
+matched, and the broker keeps the last complete payload. To bring the
+rest back, the coordinator asks their sources to emit them again: Trivy's
+tracker forgets what it sent, so the next informer resync
+(`TRIVY_RESYNC_PERIOD`) re-emits the SBOM, and the registry source looks
+the image up again on its next pass. A source can also declare an SBOM
+gone for good (a deleted SbomReport, a registry lookup that no longer
+finds it), which ends the wait for it. The wait is capped at
+`GRYPE_NODE_GROUP_MAX_WAIT` (30 min): then the group is matched with what
+it holds, under the union rules above, and counted in
+`kguardian_supplychain_grype_node_group_wait_expired_total`. A waiting
+group's SBOMs can be dropped again under memory pressure: what it waits
+for is kept in its match state, not in held SBOMs. Once the other SBOMs
+are back, the coordinator `Wants` the node SBOM, the node source offers it
+again, and the group waits for it up to 10 min before it is matched
+without it. Without the node source none of this happens: groups are
+dropped and re-matched exactly as before.
 
 ### Source rules (contract for the broker)
 
@@ -529,6 +539,7 @@ and no identity.
 | `NODE_SBOM_INTERVAL` | `5m` | How often to list running images for new or changed node SBOMs. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `GRYPE_ERROR_QUARANTINE_TTL` | `1h` | How long a digest whose match keeps failing waits before one more try; doubles per repeat, at most 24h. At least `5m`. |
+| `GRYPE_NODE_GROUP_MAX_WAIT` | `30m` | With the node source on: how long a group last matched with a node SBOM waits, after its SBOMs were dropped, for the other SBOMs of that match before it is matched with what it holds. At least `1m`. |
 | `GRYPE_SBOM_BUDGET_MIB` | `96` | Estimated heap, in MiB, for the SBOMs held so everything can be re-matched when the Grype DB changes. Past it the least recently offered digests are dropped (matched again when a source offers them again). At least `16`. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |

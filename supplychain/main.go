@@ -33,6 +33,7 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/regsource"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/server"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/trivy"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -110,8 +111,11 @@ type config struct {
 	// GrypeSBOMBudgetMiB bounds the estimated heap of the SBOMs held for
 	// re-matching.
 	GrypeSBOMBudgetMiB int
-	BrokerURL          string
-	BrokerToken        string
+	// GrypeNodeGroupMaxWait caps how long a group last matched with a node
+	// SBOM waits for the other SBOMs of that match after an eviction.
+	GrypeNodeGroupMaxWait time.Duration
+	BrokerURL             string
+	BrokerToken           string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -172,6 +176,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.GrypeSBOMBudgetMiB, err = strconv.Atoi(env("GRYPE_SBOM_BUDGET_MIB", "96")); err != nil || c.GrypeSBOMBudgetMiB < 16 {
 		return c, fmt.Errorf("GRYPE_SBOM_BUDGET_MIB must be an integer of at least 16")
+	}
+	if c.GrypeNodeGroupMaxWait, err = time.ParseDuration(env("GRYPE_NODE_GROUP_MAX_WAIT", "30m")); err != nil || c.GrypeNodeGroupMaxWait < time.Minute {
+		return c, fmt.Errorf("GRYPE_NODE_GROUP_MAX_WAIT must be a duration of at least 1m")
 	}
 	return c, nil
 }
@@ -239,6 +246,10 @@ func serve() error {
 	// Every source emits through sink; matching (when enabled) taps it.
 	var sink trivy.Sink = disp
 	var coord *match.Coordinator
+	// The node source runs only beside the matcher. Only then do the other
+	// sources get the refetch and gone hooks: without it they behave as
+	// they always have.
+	nodeSBOM := c.NodeSBOM && c.GrypeMatcherURL != ""
 	if c.GrypeMatcherURL != "" {
 		hm, err := match.NewHTTPMatcher(c.GrypeMatcherURL)
 		if err != nil {
@@ -248,7 +259,7 @@ func serve() error {
 		// container restart (an OOMKill) but not the pod.
 		coord = &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
 			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL,
-			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20}
+			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20, NodeGroupMaxWait: c.GrypeNodeGroupMaxWait}
 		sink = coord.Tee(disp)
 		wg.Add(1)
 		go func() {
@@ -284,10 +295,15 @@ func serve() error {
 		if err != nil {
 			return fmt.Errorf("discovery client: %w", err)
 		}
+		tracker := trivy.NewTracker(nil) // broker inventory resolver lands with #1533 P1-3
+		if nodeSBOM {
+			tracker.OnSBOMGone = func(d string) { coord.Gone(d, types.SourceTrivyOperator) }
+			coord.SetRefetcher(types.SourceTrivyOperator, tracker)
+		}
 		w := &trivy.Watcher{
 			Dynamic:       dyn,
 			Discovery:     disc,
-			Tracker:       trivy.NewTracker(nil), // broker inventory resolver lands with #1533 P1-3
+			Tracker:       tracker,
 			Sink:          sink,
 			Log:           log,
 			Metrics:       m,
@@ -317,6 +333,10 @@ func serve() error {
 			Metrics:  m,
 			Interval: c.RegistrySBOMInterval,
 		}
+		if nodeSBOM {
+			src.OnGone = func(d string) { coord.Gone(d, types.SourceRegistry) }
+			coord.SetRefetcher(types.SourceRegistry, src)
+		}
 		readiness = append(readiness, src.Ready)
 		wg.Add(1)
 		go func() {
@@ -324,7 +344,6 @@ func serve() error {
 			src.Run(ctx)
 		}()
 	}
-	nodeSBOM := c.NodeSBOM && coord != nil
 	if c.NodeSBOM && coord == nil {
 		log.Warn("NODE_SBOM_ENABLED has no effect without the Grype matcher (GRYPE_MATCHER_URL); node SBOM source not started")
 	}

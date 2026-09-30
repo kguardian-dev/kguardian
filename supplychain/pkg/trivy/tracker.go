@@ -89,6 +89,11 @@ type Tracker struct {
 	vulnDigests map[string]*digestState
 	sbomDigests map[string]*digestState
 	sent        map[sentKey]sentState
+
+	// OnSBOMGone, when set, is called (outside the lock) with a digest
+	// whose last SbomReport went away: deleted, or moved to another
+	// digest. The match coordinator uses it to stop waiting for that SBOM.
+	OnSBOMGone func(digest string)
 }
 
 // NewTracker returns an empty tracker. resolver may be nil.
@@ -182,7 +187,13 @@ func (t *Tracker) UpsertSbomReport(ctx context.Context, r *SbomReport) []Emissio
 	payload.ObservedIn = nil
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	var goneDigest string
+	defer func() {
+		t.mu.Unlock()
+		if goneDigest != "" {
+			t.sbomGone(goneDigest)
+		}
+	}()
 	if digest == "" {
 		// Re-check under the lock: a report for the same container may have
 		// been recorded between resolve() and here, and it would have missed
@@ -191,7 +202,9 @@ func (t *Tracker) UpsertSbomReport(ctx context.Context, r *SbomReport) []Emissio
 			payload.Image.Digest = digest
 		}
 	}
-	t.detachLocked(KindSBOM, key, digest)
+	if prev, ok := t.sbomObjs[key]; ok && t.detachLocked(KindSBOM, key, digest) {
+		goneDigest = prev.digest
+	}
 	e := &objEntry{workload: w, ref: ref, digest: digest}
 	t.sbomObjs[key] = e
 	if digest == "" {
@@ -236,17 +249,37 @@ func (t *Tracker) DeleteVulnerabilityReport(r *VulnerabilityReport) []Emission {
 func (t *Tracker) DeleteSbomReport(r *SbomReport) []Emission {
 	key := objectKey(r.Metadata)
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	prev, ok := t.sbomObjs[key]
 	if !ok {
+		t.mu.Unlock()
 		return nil
 	}
 	gone := t.detachLocked(KindSBOM, key, "")
 	delete(t.sbomObjs, key)
+	var out []Emission
 	if gone && prev.digest != "" {
-		return appendEmission(nil, t.evaluateVulnsLocked(prev.digest))
+		out = appendEmission(nil, t.evaluateVulnsLocked(prev.digest))
 	}
-	return nil
+	t.mu.Unlock()
+	if gone && prev.digest != "" {
+		t.sbomGone(prev.digest)
+	}
+	return out
+}
+
+// Refetch makes the next report event (the informer's resync) for
+// digest's SBOM emit it again even if it has not changed. The match
+// coordinator asks for it when it drops the SBOM to stay within budget.
+func (t *Tracker) Refetch(digest string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.sent, sentKey{KindSBOM, digest})
+}
+
+func (t *Tracker) sbomGone(digest string) {
+	if t.OnSBOMGone != nil {
+		t.OnSBOMGone(digest)
+	}
 }
 
 // detachLocked removes object key's reference from the digest it pointed

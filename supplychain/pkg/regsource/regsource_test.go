@@ -254,3 +254,42 @@ func firstPassLogs(h *logtest.Hook) int {
 	}
 	return n
 }
+
+// Refetch (by image digest or by a subject found for it) makes the next
+// pass look the image up again; a definite lookup that no longer finds a
+// subject found before reports it gone, an error does not.
+func TestRefetchAndGone(t *testing.T) {
+	idx, plat := "sha256:"+rep("a"), "sha256:"+rep("b")
+	l := lister{images: []broker.Image{{Digest: idx, Repository: "docker.io/library/alpine", RunningContainers: 1}}}
+	f := &fetcher{res: map[string][]registry.FoundSBOM{idx: {{Subject: plat, IndexDigest: idx, Doc: doc(), Trust: types.SBOMTrustUnverified}}},
+		errs: map[string]error{}}
+	var gone []string
+	src := &Source{Lister: l, Fetcher: f, Sink: &sink{}, Log: quiet(), OnGone: func(d string) { gone = append(gone, d) }}
+	src.Pass(context.Background())
+	src.Pass(context.Background())
+	if f.calls[idx] != 1 {
+		t.Fatalf("calls %d", f.calls[idx])
+	}
+	src.Refetch(plat) // the coordinator names the subject it held
+	src.Pass(context.Background())
+	if f.calls[idx] != 2 {
+		t.Fatalf("Refetch by subject: calls %d", f.calls[idx])
+	}
+	f.mu.Lock()
+	f.errs[idx] = errors.New("registry down")
+	f.mu.Unlock()
+	src.Refetch(idx)
+	src.Pass(context.Background())
+	if len(gone) != 0 {
+		t.Fatalf("an error reported gone: %v", gone)
+	}
+	f.mu.Lock()
+	delete(f.errs, idx)
+	delete(f.res, idx)
+	f.mu.Unlock()
+	src.Refetch(idx)
+	src.Pass(context.Background())
+	if len(gone) != 1 || gone[0] != plat {
+		t.Errorf("gone %v, want %s", gone, plat)
+	}
+}
