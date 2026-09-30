@@ -1483,6 +1483,22 @@ fn write_flags(conn: &mut PgConnection, digest: &str, a: Assembled<'_>) -> Resul
     Ok(())
 }
 
+/// Whether a node SBOM is stored for `digest`.
+fn node_sbom_stored(conn: &mut PgConnection, digest: &str) -> QueryResult<bool> {
+    #[derive(QueryableByName)]
+    struct E {
+        #[diesel(sql_type = Bool)]
+        e: bool,
+    }
+    sql_query(
+        "SELECT EXISTS (SELECT 1 FROM vuln_sources \
+             WHERE digest = $1 AND source = 'node' AND kind = 'sbom') AS e",
+    )
+    .bind::<Text, _>(digest)
+    .get_result::<E>(conn)
+    .map(|r| r.e)
+}
+
 /// The result of one upload page.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Uploaded {
@@ -1521,8 +1537,13 @@ pub fn store_upload(
             ))));
         }
         // A higher epoch than the stored SBOM's replaces it whatever the
-        // two scan times say (a node clock behind the last one's).
-        let supersedes = meta.epoch > row.epoch;
+        // two scan times say (a node clock behind the last one's). So does
+        // any upload while no node SBOM is stored (first catalog, or after
+        // the supply-chain GC): nothing is there to protect, and an
+        // orphaned staged set from an expired holder, with a later scan
+        // time, must not turn this holder's pages Stale and the claim
+        // into a superseded / sbom_missing re-grant loop.
+        let supersedes = meta.epoch > row.epoch || !node_sbom_stored(conn, digest)?;
         let outcome = store_sbom_with(conn, payload, supersedes, &mut |conn, a| {
             write_flags(conn, digest, a)
         })?;

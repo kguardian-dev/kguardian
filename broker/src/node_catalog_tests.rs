@@ -1797,3 +1797,63 @@ fn live_database_node_pages_have_half_the_staging_ceiling() {
         Outcome::Staged { .. }
     ));
 }
+
+/// After the supply-chain GC removed a done digest's node SBOM, the new
+/// holder uploads at the same epoch as the one stored before, while an
+/// orphaned staged set from an expired holder, with a later scan time,
+/// is still there. With no node SBOM stored, the upload supersedes: it
+/// stores and the claim settles done, never superseded then sbom_missing
+/// again.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_no_stored_node_sbom_means_an_orphaned_set_cannot_loop_the_claim() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    let g = grant(&mut conn, "n1", 2, &[d(1)]).unwrap();
+    upload(&mut conn, &g, upload_json(&d(1), 2, &["a"], None)).unwrap();
+    assert_eq!(epoch_of(&mut conn), 2);
+    // The GC removed the node SBOM while the image was away.
+    exec(
+        &mut conn,
+        "DELETE FROM image_sbom_components WHERE source = 'node'; \
+         DELETE FROM supplychain_image_links WHERE source = 'node'; \
+         DELETE FROM vuln_sources WHERE source = 'node';",
+    );
+    // An expired holder left half a set staged, scanned "later".
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO image_sbom_pages (digest, source, set_id, page_index, total, \
+                 scanned_at, components) \
+             VALUES ('{}', 'node', 'orphan', 0, 2, timezone('UTC', now()) + interval '1 hour', \
+                 '[]')",
+            d(1)
+        ),
+    );
+    let g = grant(&mut conn, "n1", 2, &[d(1)]).expect("sbom_missing");
+    for i in [0, 1] {
+        let u = upload(&mut conn, &g, upload_json(&d(1), 2, &["b"], Some((i, 2)))).unwrap();
+        assert!(
+            !matches!(u.outcome, Outcome::Stale { .. }),
+            "page {i}: {:?}",
+            u.outcome
+        );
+        if i == 1 {
+            assert_eq!(u.outcome, Outcome::Stored { items: 2 });
+            assert_eq!(u.claim, "done");
+        }
+    }
+    assert_eq!(state_of(&mut conn, &d(1)), "done");
+    assert_eq!(
+        text(&mut conn, "SELECT reason AS t FROM node_catalog_claims"),
+        None,
+        "done, not superseded"
+    );
+    assert_eq!(epoch_of(&mut conn), 2);
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM image_sbom_pages"),
+        0,
+        "the orphaned set is gone"
+    );
+    assert_eq!(grant(&mut conn, "n1", 2, &[d(1)]), None, "no re-grant loop");
+}

@@ -43,28 +43,36 @@ The controller never parses image files; it only reads `/proc` metadata and does
 - **Key:** `inventory_digest` only; the row records the `platform` it was cataloged for. One SBOM per inventory digest in v1: no duplicate grype sets across platforms. `index_digest=inventory_digest`; `platform_manifests`/`manifest_digest` filled when resolvable via containerd (read-only). Config-only digests keyed by config digest. Pinned (not running) digests never offered.
 - **Node → platform:** recorded from every offer in `node_catalog_platforms(node, platform, seen_at)`.
 - **Coverage guard** (`in_use_store.rs::refresh_coverage`): a (workload container, digest) pair is `covered` only if every node that ran an instance in the window (`runtime_coverage.node_name`) maps to the SBOM's platform and the SBOM is `completeness=full`; otherwise `unknown` with `platform_mismatch` or `sbom_incomplete`. UI labels "cataloged for linux/arm64".
-- **Claim SQL** (one transaction, DB `now()` only):
+- **Claim SQL** (one transaction, DB `now()` only; as implemented, `node_catalog.rs` `GRANT_SQL`):
 ```sql
 INSERT INTO node_catalog_claims (inventory_digest, state, updated_at)
-  SELECT d, 'pending', now() FROM unnest($offer) d ON CONFLICT DO NOTHING;
+  SELECT d, 'pending', now() FROM unnest($offer) d
+   WHERE EXISTS (SELECT 1 FROM images i WHERE i.digest = d)  -- sorted offer
+  ON CONFLICT DO NOTHING;
 UPDATE node_catalog_claims c SET state='claimed', node=$node, claim_token=gen_random_uuid(),
-       lease_expires_at=now()+interval '15 minutes', attempts=attempts+1, epoch=GREATEST(epoch,$epoch), updated_at=now()
- WHERE c.inventory_digest = (
-   SELECT inventory_digest FROM node_catalog_claims
+       lease_expires_at=now()+interval '15 minutes', attempts=c.attempts+1,
+       grant_epoch=$epoch, claimed_at=now(), updated_at=now()   -- epoch untouched
+  FROM (
+   SELECT inventory_digest, <why> FROM node_catalog_claims n
     WHERE inventory_digest = ANY($offer)
-      AND $epoch >= epoch
       AND ( state='pending'
          OR (state='failed'  AND next_attempt_at <= now())
          OR (state='claimed' AND lease_expires_at <= now())
-         OR (state='done'    AND epoch < $epoch) )
-      AND NOT (skipped_nodes ? $node)
-      AND kg_digest_runs_on_node(inventory_digest, $node)
+         OR (state='done'    AND (epoch < $epoch
+             OR (reason IS DISTINCT FROM 'no_packages_found'        -- sbom_missing
+                 AND NOT EXISTS (SELECT 1 FROM vuln_sources vs WHERE vs.digest = n.inventory_digest
+                                   AND vs.source = 'node' AND vs.kind = 'sbom')))) )
+      AND NOT COALESCE((skipped_nodes ->> $node)::timestamptz > now() - interval '24 hours', false)
+      AND kg_digest_runs_on_node(inventory_digest, $node, $running_window)
     ORDER BY priority DESC, inventory_digest LIMIT 1
-    FOR UPDATE SKIP LOCKED)
-RETURNING inventory_digest, claim_token, lease_expires_at;
+    FOR UPDATE SKIP LOCKED) g
+ WHERE c.inventory_digest = g.inventory_digest
+RETURNING c.inventory_digest, c.claim_token, c.lease_expires_at, g.why;
 ```
+  `epoch` is set only when an SBOM is stored (to the upload's epoch); epochs above
+  `NODE_CATALOG_MAX_EPOCH` are refused.
   - Priority: running containers desc, then first seen. `kg_digest_runs_on_node`: a live `pod_details.node_name = $node` whose containers report the digest (exact join pinned in PR 1, below).
-  - Epochs: grant only if node epoch ≥ row epoch; ingest refuses payloads below the stored epoch.
+  - Epochs: a done row is re-granted only to a higher node epoch; ingest refuses payloads below the grant's epoch (`grant_epoch`).
   - Final page commit re-checks `claim_token` and `lease_expires_at > now()` in the same transaction; stale token → 409.
   - Failure reasons: backoff 1 h → 6 h → 24 h cap for `timeout`, `oom`, `error`; `pid_gone`/`drift` immediately claimable by others, capped at 3 per (digest, node) per 24 h, then that node goes into `skipped_nodes` for 24 h; per-node, non-blocking: `sandboxed`, `lazy_snapshotter`, `unsupported_rootfs`, `kernel_unsupported`, `lsm_denied`, `deferred_pressure`.
   - Kill switch: `NODE_CATALOG_GRANTS=false` on the broker → no grants instantly; uploads under a live lease still complete.
@@ -181,7 +189,7 @@ RETURNING inventory_digest, claim_token, lease_expires_at;
 - Worker: uid 2000000000, runAsNonRoot, RO root fs, drop ALL + `DAC_READ_SEARCH`, RuntimeDefault + in-process seccomp; fds closed to root handle and pipe; no network (AF_UNIX only), no token (SA token shadowed), no host mounts; kernel-confined resolution. A fully compromised worker reads only the one image root it was handed and returns an SBOM the controller size-checks.
 - Data sent: package metadata and package-owned executable paths only.
 - Crafted images: Syft depth limits; memory/time/file caps; fresh child per scan; panic → `error`.
-- Stolen catalog token: only claimed `node` SBOMs, for digests the broker sees running on some node (the node name is self-asserted, see 2a); cannot override Trivy.
+- Stolen catalog token: only claimed `node` SBOMs, for digests the broker sees running on some node (the node name is self-asserted, see 2a); cannot override Trivy. It can pin a digest's epoch at `NODE_CATALOG_MAX_EPOCH` by uploading at the ceiling, which blocks re-cataloging that digest; recover by deleting the digest's `node_catalog_claims` row, or by raising `NODE_CATALOG_MAX_EPOCH` and bumping the Controller's epoch above it.
 - Supply chain: syft lock-step with grype; signed; SLSA.
 
 ## 7. Rollout, release, operations

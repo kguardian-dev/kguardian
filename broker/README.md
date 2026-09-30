@@ -165,7 +165,10 @@ times. At most 16 uploads are read or queued at once (the node share of the
 ingest queue is half of it, and of the SBOM page staging ceiling); beyond
 that `503` with `Retry-After`, before the body is read. The node name in a
 claim is self-asserted: one catalog token serves every node, so a stolen one
-can claim any digest running on some node, and nothing else. A
+can claim any digest running on some node, and nothing else. It can also pin
+a digest's epoch at the ceiling by uploading at `NODE_CATALOG_MAX_EPOCH`;
+recover by deleting that digest's `node_catalog_claims` row, or by raising
+`NODE_CATALOG_MAX_EPOCH` and bumping the Controller's epoch above it. A
 lease lasts 15 minutes; `timeout`, `oom` and `error` back off 1 h, 6 h, then
 24 h; `pid_gone` and `drift` release the digest to other nodes at once, at
 most 3 times per node in 24 h before that node is skipped for 24 h; the
