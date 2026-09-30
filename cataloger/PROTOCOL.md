@@ -312,8 +312,10 @@ counts them). After cataloging, each is classified:
   matched under every path a cataloger could reach it by: a rewritten
   `/var/lib/apk-store/db/installed` also as `/lib/apk/db/installed` when
   `lib/apk/db` links there at image time. Only symlinks that resolve to
-  a directory with a dropped entry somewhere below it take part (others
-  cannot give one another path). The matching is bounded: at most about
+  a directory with a dropped entry, or another such symlink, somewhere
+  below it take part (others cannot give one another path; stacked links
+  such as `var/lib/dpkg -> /x` and `/x/status.d -> /opt/store/s` are
+  both kept). The matching is bounded: at most about
   4 million symlink x entry pairs and 30 s. Past either bound every
   dropped entry not yet matched counts as evidence without being judged
   (`stats.ctime_dropped_unclassified`, included in

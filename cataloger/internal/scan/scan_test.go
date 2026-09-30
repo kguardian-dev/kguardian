@@ -600,6 +600,45 @@ func TestDatabaseBehindImageSymlinkRewritten(t *testing.T) {
 	}
 }
 
+// Links stacked at image time: the outer link's target holds only the
+// inner link, not the dropped file, and the database is reached only
+// through both (review probes).
+func TestDatabaseBehindStackedImageSymlinks(t *testing.T) {
+	// dpkg: var/lib/dpkg -> /x, /x/status.d -> /opt/store/s.
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	for _, d := range []string{"x", "opt/store/s", "var/lib"} {
+		must(t, os.MkdirAll(filepath.Join(root, d), 0o755))
+	}
+	must(t, os.Symlink("/x", filepath.Join(root, "var/lib/dpkg")))
+	must(t, os.Symlink("/opt/store/s", filepath.Join(root, "x/status.d")))
+	body := "Package: libssl3\nStatus: install ok installed\nVersion: 3\nArchitecture: amd64\n"
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"opt/store/s/libssl3": {body, 0o644}})
+	r := runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("dpkg through two links: %s %v %+v", r.Completeness, r.PartialReasons, r.Stats)
+	}
+
+	// apk: lib/apk -> /srv/apk, /srv/apk/db -> /data/db.
+	root = apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	must(t, os.MkdirAll(filepath.Join(root, "data"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(root, "srv/apk"), 0o755))
+	must(t, os.Rename(filepath.Join(root, "lib/apk/db"), filepath.Join(root, "data/db")))
+	must(t, os.RemoveAll(filepath.Join(root, "lib/apk")))
+	must(t, os.Symlink("/srv/apk", filepath.Join(root, "lib/apk")))
+	must(t, os.Symlink("/data/db", filepath.Join(root, "srv/apk/db")))
+	if r := runDir(t, root, opts()); r.Status != protocol.StatusOK || r.Completeness != protocol.CompletenessFull {
+		t.Fatalf("apk baseline: %s %s %v", r.Status, r.Completeness, r.PartialReasons)
+	}
+	db, err := os.ReadFile(filepath.Join(root, "data/db/installed"))
+	must(t, err)
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"data/db/installed": {string(db), 0o644}})
+	r = runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("apk through two links: %s %s %s %v %+v", r.Status, r.Reason, r.Completeness, r.PartialReasons, r.Stats)
+	}
+}
+
 func TestDriftSafetyNet(t *testing.T) {
 	r := &protocol.Response{Completeness: protocol.CompletenessFull}
 	r.Stats.CtimeDropped, r.Stats.CtimeDroppedData = 3, 2

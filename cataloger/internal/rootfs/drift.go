@@ -225,8 +225,8 @@ func (r *Resolver) pathEvidence(paths map[string]struct{}, names map[string][]st
 // when lib/apk/db links there. A glob ending in "/*" is also matched
 // directly against the real names with doublestar, as a second line.
 //
-// Only symlinks that resolve to a directory holding a candidate somewhere
-// below it are added: a link to a file, to an unrelated directory, or
+// Only symlinks that resolve to a directory holding a candidate, or
+// another kept symlink, somewhere below it are added: a link to a file, to an unrelated directory, or
 // dangling cannot give a candidate another path (a link to a dropped file
 // is dangling for the live resolver too). The work is bounded
 // (driftMaxPairs links x names, driftBudget of wall-clock time): past
@@ -254,33 +254,51 @@ func (r *Resolver) globEvidence(globs map[string]struct{}, names map[string][]st
 	}
 	tree := filetree.New()
 	index := filetree.NewIndex()
-	dirs := map[string]bool{"/": true}
+	// dirs: the directories a kept path runs through; work: those added
+	// but not yet looked at for links that resolve to them.
+	dirs := map[string]bool{}
+	var work []string
 	addAncestors := func(p string) {
 		for d := path.Dir(p); !dirs[d]; d = path.Dir(d) {
 			dirs[d] = true
+			work = append(work, d)
 		}
 	}
 	for n := range names {
 		addAncestors(n)
 	}
+	// Directory links by the real directory they resolve to.
 	type link struct{ at, to string }
-	var links []link
+	byTarget := map[string][]link{}
 	for _, ref := range r.tree.AllFiles(stereofile.TypeSymLink) {
 		e, err := r.index.Get(ref)
 		if err != nil || e.LinkDestination == "" {
 			continue
 		}
-		if real, md, ok := r.Lookup(e.LinkDestination); ok && md.IsDir() && dirs[real] {
-			links = append(links, link{string(ref.RealPath), e.LinkDestination})
+		if real, md, ok := r.Lookup(e.LinkDestination); ok && md.IsDir() {
+			byTarget[real] = append(byTarget[real], link{string(ref.RealPath), e.LinkDestination})
 		}
+	}
+	// Keep a link when it resolves to a directory a kept path runs
+	// through: one above a candidate, or one holding a kept link (links
+	// stacked at image time: var/lib/dpkg -> /x, /x/status.d ->
+	// /opt/store/s). Keeping it adds its own parents, until nothing more
+	// is added; each directory is looked at once.
+	var links []link
+	for len(work) > 0 {
+		d := work[len(work)-1]
+		work = work[:len(work)-1]
+		for _, l := range byTarget[d] {
+			links = append(links, l)
+			addAncestors(l.at)
+		}
+		delete(byTarget, d)
 	}
 	if int64(len(links))*int64(len(names)) > driftMaxPairs {
 		giveUp()
 		return unclassified
 	}
-	for _, l := range links {
-		addAncestors(l.at)
-	}
+	dirs["/"] = true
 	sorted := make([]string, 0, len(dirs))
 	for d := range dirs {
 		sorted = append(sorted, d)
