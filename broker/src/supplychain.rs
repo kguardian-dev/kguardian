@@ -2229,7 +2229,7 @@ async fn read_ingest_body(
     req: &HttpRequest,
     body: web::Payload,
     digest: &str,
-) -> Result<(web::Bytes, bool), HttpResponse> {
+) -> Result<(web::Bytes, bool), Box<HttpResponse>> {
     read_ingest_body_limited(req, body, digest, MAX_COMPRESSED_BYTES).await
 }
 
@@ -2240,10 +2240,10 @@ pub(crate) async fn read_ingest_body_limited(
     body: web::Payload,
     digest: &str,
     limit: usize,
-) -> Result<(web::Bytes, bool), HttpResponse> {
+) -> Result<(web::Bytes, bool), Box<HttpResponse>> {
     let gzip = match content_encoding(req) {
         Ok(e) => e.is_some(),
-        Err(e) => return Err(e.into_response()),
+        Err(e) => return Err(Box::new(e.into_response())),
     };
     if let Some(len) = req
         .headers()
@@ -2252,9 +2252,9 @@ pub(crate) async fn read_ingest_body_limited(
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
         if len > limit as u64 {
-            return Err(HttpResponse::PayloadTooLarge().body(format!(
+            return Err(Box::new(HttpResponse::PayloadTooLarge().body(format!(
                 "body of {len} bytes exceeds the {limit}-byte limit"
-            )));
+            ))));
         }
     }
     // Read the (compressed, <= `limit`) body under a deadline BEFORE taking
@@ -2267,15 +2267,16 @@ pub(crate) async fn read_ingest_body_limited(
     {
         Err(_) => {
             warn!(%digest, "supply-chain ingest body not received in time");
-            Err(HttpResponse::RequestTimeout().body(format!(
+            Err(Box::new(HttpResponse::RequestTimeout().body(format!(
                 "body not received within {BODY_READ_TIMEOUT_SECS}s"
-            )))
+            ))))
         }
-        Ok(Err(_)) => {
-            Err(HttpResponse::PayloadTooLarge()
-                .body(format!("body exceeds the {limit}-byte limit")))
-        }
-        Ok(Ok(Err(e))) => Err(HttpResponse::BadRequest().body(format!("reading body: {e}"))),
+        Ok(Err(_)) => Err(Box::new(
+            HttpResponse::PayloadTooLarge().body(format!("body exceeds the {limit}-byte limit")),
+        )),
+        Ok(Ok(Err(e))) => Err(Box::new(
+            HttpResponse::BadRequest().body(format!("reading body: {e}")),
+        )),
         Ok(Ok(Ok(b))) => Ok((b, gzip)),
     }
 }
@@ -2303,7 +2304,7 @@ async fn ingest(
     }
     let (raw, gzip) = match read_ingest_body(&req, body, &digest).await {
         Ok(b) => b,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     // Hand the read body to the ingest worker; it alone inflates, parses
     // and writes. A full queue is 503, never an unbounded backlog.

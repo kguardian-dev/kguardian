@@ -1679,7 +1679,7 @@ async fn post_catalog_sbom(
     .await
     {
         Ok(b) => b,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let pool = req.app_data::<web::Data<DbPool>>().cloned();
     let d = digest.clone();
