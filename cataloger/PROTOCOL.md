@@ -150,7 +150,7 @@ The worker rejects:
 | `op` | string | yes | `scan`, or `ping` (§3.3). |
 | `scan_id` | string | yes | Controller-chosen id, 1..128 chars of `[A-Za-z0-9._:-]`. Echoed back. |
 | `epoch` | int64 | yes | Catalog epoch the grant was made under. Echoed back unchanged; the worker does not interpret it. |
-| `container_start_unix_nanos` | int64 | yes | Container start, `CLOCK_REALTIME` unix nanoseconds (from `/proc/<pid>/stat` field 22 + boot time). A non-directory whose `ctime` is strictly later is runtime drift: it is never catalogued and never credited to a package (§4.3). `0` disables the check (tests only; the Controller always sends it). |
+| `container_start_unix_nanos` | int64 | yes | Container start, `CLOCK_REALTIME` unix nanoseconds (from `/proc/<pid>/stat` field 22 + boot time). A non-directory whose `ctime` is strictly later is runtime drift: it is never catalogued and never credited to a package (§4.3), and it makes the SBOM partial only when it could have been package evidence (§4.2). `0` disables the check (tests only; the Controller always sends it). |
 | `submounts` | string[] | no | Mount points inside the container other than `/`, from `/proc/<pid>/mountinfo`, as absolute clean paths. At most 1024 entries of at most 4096 bytes. The worker never descends into or reads them. This is an extra exclusion: the worker independently refuses to cross any mount (EXDEV + `STATX_MNT_ID`). |
 | `profile` | string | no | `full` (default) or `os_only` (§4.2). |
 | `budgets` | object | no | Every field optional; `0` or absent means the default. Values above the worker's ceiling are clamped to it (the effective values are echoed in `stats.budgets`). |
@@ -209,7 +209,9 @@ means the Controller does not claim.
   "stats": {
     "files": 412, "dirs": 97, "components": 16, "duration_ms": 184,
     "syft_version": "v1.52.0", "worker_version": "0.1.0",
-    "eacces": 0, "ctime_dropped": 0, "mount_skipped": 3, "depth_limited": 0,
+    "eacces": 0, "ctime_dropped": 2, "ctime_dropped_evidence": 0,
+    "ctime_dropped_data": 2, "ctime_dropped_sample": ["/run/app.pid", "/var/log/app.log"],
+    "mount_skipped": 3, "depth_limited": 0,
     "components_dropped": 0, "attempts": 1, "caps_model": "i",
     "max_rss_bytes": 58720256,
     "budgets": { "max_files": 2000000, "max_components": 50000, "max_depth": 4096,
@@ -251,25 +253,65 @@ Top level:
 | `retry_reason` | string | Set when the first attempt failed and the `os_only` retry produced this response: `oom`, `too_many_files` or `too_many_components`. |
 | `scanner` | object | Maps to `ImageSBOM.scanner`. |
 | `os` | object | `{family, name}`: os-release `ID` and `VERSION_ID` (or `PRETTY_NAME` without one). Maps to the broker's `WireOs`. Omitted when no os-release was found, or when either value is over 64 bytes (the broker's limit) or holds control characters. |
-| `stats` | object | Always present, also on failure (what was measured before it). |
+| `stats` | object | Always present, also on failure (what was measured before it). The runtime-drift fields are in §4.2. |
 | `components` | object[] | §4.3. |
 
 ### 4.2 Completeness
 
 | Value | Meaning |
 |---|---|
-| `full` | The `full` profile ran over the whole tree: no unreadable entry, no depth or response trimming, no ctime-dropped owned file, caps model (i). Only a `full` SBOM may support `installed_not_observed` (design §5). |
+| `full` | The `full` profile ran over the whole tree: no unreadable entry, no depth or response trimming, no runtime-changed file that could have been package evidence (below) and no package with `files_truncated`, caps model (i). Only a `full` SBOM may support `installed_not_observed` (design §5). |
 | `partial` | The `full` profile ran, but some evidence may be missing. `partial_reasons` lists why. |
 | `os_only` | The `os_only` profile ran (requested, or the retry after `oom` / `too_many_files` / `too_many_components`): OS package databases plus compiled binaries (Go, Rust cargo-auditable, ELF notes, the binary classifier); no Java, Python, Node or other language catalogers; directories are indexed system-first (`/etc`, `/lib*`, `/usr`, `/bin`, `/sbin`, `/var/lib`, then the rest) until `max_files`. |
 
 `partial_reasons` values: `eacces` (entries that could not be read,
 `stats.eacces`), `no_dac_read_search` (caps model (ii): the scan ran without
-`CAP_DAC_READ_SEARCH`), `ctime_dropped` (runtime-changed files left out,
-§4.3), `depth_limited`, `files_truncated` (some component has
+`CAP_DAC_READ_SEARCH`), `ctime_dropped` (a runtime-changed entry that could
+have been package evidence was left out, see below), `depth_limited`, `files_truncated` (some component has
 `files_truncated`), `response_trimmed` (file paths dropped to fit
 `max_response_bytes`), `components_dropped` (components that failed
 validation, §4.3), `file_budget` (entries skipped: `max_files` reached under
 `os_only`, or a directory with more than 262 144 names).
+
+**Runtime drift.** Every non-directory whose `ctime` is after
+`container_start_unix_nanos` is left out of the scan (`stats.ctime_dropped`
+counts them). After cataloging, each is classified:
+
+- **Evidence** (`stats.ctime_dropped_evidence`): it could have produced a
+  package the SBOM now lacks (a binary or jar from the image replaced at
+  runtime gets a new ctime on overlay copy-up). That is any of:
+  - a file a cataloger went to read (its ctime moved during the scan);
+  - executable-looking (an execute bit, or a `*.so*` name, also for a
+    symlink), unless it is empty or its content sniffs as `text/*`;
+  - a MIME type a cataloger asked for (ELF, Mach-O, PE), or a file that
+    could not be sniffed while a cataloger asked for MIME types;
+  - a path a cataloger asked for, also through a symlinked directory
+    (`/lib/apk/db/installed` finds `/usr/lib/apk/db/installed`);
+  - a match for a glob a cataloger asked for: package databases, `*.jar`
+    `*.war` `*.ear` and the other Java archives, `*dist-info/METADATA`,
+    `*egg-info/PKG-INFO`, `package.json`, `*.gemspec`, composer
+    `installed.json`, `*.deps.json`, the binary classifier's names (`java`,
+    `node`, `python*`, `libpython*.so*`, ...), a JDK `release`, and so on;
+  - anything, when a cataloger listed every file (none does at the pinned
+    Syft except the Nix store cataloger, which counts as its store globs
+    `**/nix/store/*` and `**/nix/store/*/**`).
+
+  The globs, paths and MIME types are not a hand-kept list: the resolver
+  records every query the configured catalogers of the pinned Syft make
+  during the scan, and the dropped entries are matched against them with
+  the same stereoscope search the resolver uses (so the `os_only` profile
+  is judged by its own, narrower catalogers).
+- **Data** (`stats.ctime_dropped_data`): everything else. Logs, caches,
+  Python bytecode caches (`__pycache__/*.pyc`), pid and lock files, temp
+  files, migrations or config written at start, compiled templates.
+
+Only evidence sets `ctime_dropped` (and so `partial`). A dropped file a
+package owns flags that package `files_truncated` either way (§4.3), which
+is a partial reason of its own. `stats.ctime_dropped_sample` lists up to
+20 dropped paths, evidence first, each group sorted; each path is valid
+UTF-8 with control characters replaced by `?`, at most 256 bytes (cut on a
+rune boundary). It is omitted when nothing was dropped. On a response that
+failed before cataloging, only `ctime_dropped` is set.
 
 ### 4.3 Components
 
@@ -392,7 +434,7 @@ the `X-Kguardian-Claim` header carrying the claim token:
 | `epoch` | **required on every page**; the epoch the Controller sent on the claim (echoed in the response). Missing is 400; below the claim's grant epoch is 409; above `NODE_CATALOG_MAX_EPOCH` (default 1000) is 422. |
 | `completeness` | response `completeness` |
 | `partial_reasons` | response `partial_reasons` (the broker keeps at most 16) |
-| `stats` | response `stats` (the broker keeps at most 16 KiB serialised) |
+| `stats` | response `stats` (the broker keeps at most 16 KiB serialised). The Controller forwards scalar entries only (at most 64; strings up to 128 bytes), so nested `budgets` and the `ctime_dropped_sample` list stay in the worker's response. |
 | `platform` | optional: the platform the SBOM was catalogued for (`os/arch[/variant]`) |
 
 Send `epoch`, `completeness`, `partial_reasons`, `stats` and `platform` at

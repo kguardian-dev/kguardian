@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,10 +10,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/anchore/syft/syft"
 	"golang.org/x/sys/unix"
 
 	"github.com/kguardian-dev/kguardian/cataloger/internal/protocol"
+	"github.com/kguardian-dev/kguardian/cataloger/internal/rootfs"
 )
 
 type apkPkg struct {
@@ -281,6 +285,195 @@ func has(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// writeLate writes files (path -> content, mode) into root after the
+// container start it returns, so their ctime is later.
+func writeLate(t *testing.T, root string, files map[string]lateFile) int64 {
+	t.Helper()
+	start := time.Now().UnixNano()
+	time.Sleep(20 * time.Millisecond)
+	for p, f := range files {
+		must(t, os.MkdirAll(filepath.Join(root, filepath.Dir(p)), 0o755))
+		must(t, os.WriteFile(filepath.Join(root, p), []byte(f.content), f.mode))
+		must(t, os.Chmod(filepath.Join(root, p), f.mode))
+	}
+	return start
+}
+
+type lateFile struct {
+	content string
+	mode    os.FileMode
+}
+
+// runtimeData is what workloads on dev write after start (logs, Python
+// bytecode caches, pid and lock files, migrations extracted to /tmp,
+// Laravel's compiled views and bootstrap cache, the latter with a stray
+// execute bit): none of it is package evidence.
+var runtimeData = map[string]lateFile{
+	"var/log/app.log": {"started\n", 0o644},
+	"tmp/cron.log":    {"{\"message\":\"tick\"}\n", 0o644},
+	"usr/local/lib/python3.11/__pycache__/base64.cpython-311.pyc":          {"\xa7\r\r\n\x00\x00\x00\x00binary bytecode\x00\x01", 0o644},
+	"usr/local/lib/python3.11/encodings/__pycache__/utf_8.cpython-311.pyc": {"\xa7\r\r\n\x00\x00\x00\x00\xe3\x00", 0o644},
+	"run/app.pid":                              {"1\n", 0o644},
+	"tmp/ddappsec_1.3.1_82.82.lock":            {"", 0o744},
+	"tmp/migrations-1123293262/0001.up.sql":    {"CREATE TABLE t (id int);\n", 0o600},
+	"app/bootstrap/cache/packages.php":         {"<?php return array ();\n", 0o755},
+	"app/storage/framework/views/00f1aadc.php": {"<?php echo 1; ?>\n", 0o644},
+	"home/app/.cache/pip/http/0/1/abcdef":      {"\x00\x01cache", 0o600},
+}
+
+func TestRuntimeDataKeepsCompletenessFull(t *testing.T) {
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, runtimeData)
+	r := runDir(t, root, o)
+	if r.Status != protocol.StatusOK || r.Completeness != protocol.CompletenessFull || len(r.PartialReasons) != 0 {
+		t.Fatalf("got %s %s %v (sample %v)", r.Status, r.Completeness, r.PartialReasons, r.Stats.CtimeDroppedSample)
+	}
+	n := int64(len(runtimeData))
+	if r.Stats.CtimeDropped != n || r.Stats.CtimeDroppedData != n || r.Stats.CtimeDroppedEvidence != 0 {
+		t.Errorf("stats dropped %d evidence %d data %d, want %d data", r.Stats.CtimeDropped,
+			r.Stats.CtimeDroppedEvidence, r.Stats.CtimeDroppedData, n)
+	}
+	if len(r.Stats.CtimeDroppedSample) != len(runtimeData) || !slices.IsSorted(r.Stats.CtimeDroppedSample) {
+		t.Errorf("sample %v", r.Stats.CtimeDroppedSample)
+	}
+	if bb := comp(t, r, "busybox"); bb.FilesTruncated {
+		t.Errorf("busybox truncated by unrelated runtime data")
+	}
+}
+
+// Any runtime change that could have been package evidence the SBOM now
+// misses keeps it partial: a replaced or added binary (by execute bit or
+// ELF content), a shared object, a jar, language package metadata and a
+// package database, each on its own.
+func TestPossibleEvidenceMakesItPartial(t *testing.T) {
+	cases := map[string]lateFile{
+		"usr/local/bin/app":      {"\x7fELF\x02\x01\x01", 0o755},   // replaced executable
+		"app/server":             {"\x7fELF\x02\x01\x01", 0o644},   // ELF without an execute bit (MIME)
+		"usr/local/bin/wrapper":  {"\x00\x01\x02 not text", 0o755}, // unrecognised binary, execute bit
+		"usr/lib/libfoo.so.1":    {"\x00\x01\x02 not text", 0o644}, // *.so*
+		"app/lib/guava-33.0.jar": {"PK\x03\x04", 0o644},            // jar (glob)
+		"app/app.war":            {"PK\x03\x04", 0o644},            // war (glob)
+		"usr/lib/python3.12/site-packages/requests-2.32.3.dist-info/METADATA": {"Name: requests\nVersion: 2.32.3\n", 0o644},
+		"app/node_modules/left-pad/package.json":                              {"{\"name\":\"left-pad\",\"version\":\"1.3.0\"}", 0o644},
+		"usr/local/lib/ruby/gems/3.3.0/specifications/rack-3.0.gemspec":       {"Gem::Specification.new", 0o644},
+		"var/www/vendor/composer/installed.json":                              {"{\"packages\":[]}", 0o644},
+		"usr/share/java/release":                                              {"JAVA_VERSION=\"21\"\n", 0o644},
+	}
+	for p, f := range cases {
+		t.Run(p, func(t *testing.T) {
+			root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+			o := opts()
+			files := map[string]lateFile{p: f}
+			for k, v := range runtimeData {
+				files[k] = v
+			}
+			o.ContainerStartNanos = writeLate(t, root, files)
+			r := runDir(t, root, o)
+			if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) {
+				t.Fatalf("got %s %v", r.Completeness, r.PartialReasons)
+			}
+			if r.Stats.CtimeDroppedEvidence != 1 || r.Stats.CtimeDroppedData != int64(len(runtimeData)) {
+				t.Errorf("evidence %d data %d", r.Stats.CtimeDroppedEvidence, r.Stats.CtimeDroppedData)
+			}
+			if len(r.Stats.CtimeDroppedSample) == 0 || r.Stats.CtimeDroppedSample[0] != "/"+p {
+				t.Errorf("evidence not first in the sample: %v", r.Stats.CtimeDroppedSample)
+			}
+		})
+	}
+
+	// The package database itself, rewritten at runtime.
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	db, err := os.ReadFile(filepath.Join(root, "lib/apk/db/installed"))
+	must(t, err)
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"lib/apk/db/installed": {string(db), 0o644}})
+	r := runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("package database: %s %s %v", r.Status, r.Completeness, r.PartialReasons)
+	}
+}
+
+func TestDriftSampleIsBounded(t *testing.T) {
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	files := map[string]lateFile{}
+	for i := range 60 {
+		files[fmt.Sprintf("var/cache/app/%02d.cache", i)] = lateFile{"x", 0o644}
+	}
+	long := strings.Repeat("d", 200) + "/" + strings.Repeat("e", 200) + "/" + strings.Repeat("é", 100) + ".log"
+	files[long] = lateFile{"x", 0o644}
+	files["usr/local/bin/zz-new"] = lateFile{"\x7fELF", 0o755}
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, files)
+	r := runDir(t, root, o)
+	s := r.Stats.CtimeDroppedSample
+	if len(s) != protocol.MaxDriftSample || s[0] != "/usr/local/bin/zz-new" {
+		t.Fatalf("sample (%d) %v", len(s), s)
+	}
+	if r.Stats.CtimeDropped != 62 || r.Stats.CtimeDroppedEvidence != 1 || r.Stats.CtimeDroppedData != 61 {
+		t.Errorf("stats %+v", r.Stats)
+	}
+	for _, p := range s {
+		if len(p) > protocol.MaxDriftSamplePathLen || !utf8.ValidString(p) {
+			t.Errorf("sample path %d bytes: %q", len(p), p)
+		}
+	}
+	// The long path sorts before var/: it is in the sample, cut.
+	if !slices.ContainsFunc(s, func(p string) bool { return strings.HasPrefix(p, "/ddd") && len(p) <= protocol.MaxDriftSamplePathLen }) {
+		t.Errorf("long path missing or uncut: %v", s)
+	}
+	if b, _ := json.Marshal(r.Stats); len(b) > 16*1024 {
+		t.Errorf("stats are %d bytes, over the broker's 16 KiB", len(b))
+	}
+}
+
+// The drift rule tests dropped files against what the pinned Syft's
+// catalogers asked the resolver for. No cataloger may list every file
+// (that would make every runtime write evidence again), except the Nix
+// store cataloger, recorded as its store globs. A Syft bump that adds
+// another such cataloger fails here.
+func TestCatalogerQueriesAreBounded(t *testing.T) {
+	for _, prof := range []string{protocol.ProfileFull, protocol.ProfileOSOnly} {
+		root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+		fd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		must(t, err)
+		r, err := rootfs.Open(fd, RootOptions(prof, protocol.Budgets{}.Effective(), nil, 0))
+		must(t, err)
+		src := rootfs.NewSource(r)
+		if _, err := syft.CreateSBOM(context.Background(), src, SyftConfig(prof, "test")); err != nil {
+			t.Fatal(err)
+		}
+		globs, _, mimes, all := src.Resolver().Queries()
+		_ = r.Close()
+		if all {
+			t.Errorf("%s: a cataloger listed every file", prof)
+		}
+		if !slices.Contains(mimes, "application/x-executable") || !slices.Contains(globs, "**/lib/apk/db/installed") {
+			t.Errorf("%s: globs %v mimes %v", prof, globs, mimes)
+		}
+		if prof == protocol.ProfileFull {
+			for _, g := range []string{"**/*.jar", "**/*dist-info/METADATA", "**/package.json", "**/nix/store/*"} {
+				if !slices.Contains(globs, g) {
+					t.Errorf("full: %s not asked for", g)
+				}
+			}
+		}
+	}
+}
+
+func TestSamplePath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/var/log/a.log":               "/var/log/a.log",
+		"/tmp/a\nb\x7f":                "/tmp/a?b?",
+		"/tmp/\xff\xfe":                "/tmp/?",
+		"/" + strings.Repeat("é", 200): "/" + strings.Repeat("é", 127),
+	} {
+		if got := SamplePath(in); got != want {
+			t.Errorf("SamplePath(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestTooManyExecutablePathsTruncates(t *testing.T) {

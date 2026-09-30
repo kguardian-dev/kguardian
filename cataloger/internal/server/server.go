@@ -642,6 +642,14 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 			return fmt.Errorf("partial reason %q", p)
 		}
 	}
+	if len(r.Stats.CtimeDroppedSample) > protocol.MaxDriftSample {
+		return errors.New("drift sample too long")
+	}
+	for _, p := range r.Stats.CtimeDroppedSample {
+		if len(p) > protocol.MaxDriftSamplePathLen || protocol.HasControl(p) {
+			return errors.New("drift sample path too long")
+		}
+	}
 	if int64(len(r.Components)) > b.MaxComponents {
 		return fmt.Errorf("%d components over the budget", len(r.Components))
 	}

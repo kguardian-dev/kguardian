@@ -80,6 +80,8 @@ const (
 // broker cut it silently.
 const (
 	MaxRequestBytes       = 64 * 1024
+	MaxDriftSample        = 20
+	MaxDriftSamplePathLen = 256
 	MaxResponseCeiling    = 64 * 1024 * 1024
 	MaxSubmounts          = 1024
 	MaxSubmountLen        = 4096
@@ -230,20 +232,28 @@ type OS struct {
 
 // Stats describe the scan (also on failure).
 type Stats struct {
-	Files             int64  `json:"files"`
-	Dirs              int64  `json:"dirs"`
-	Components        int64  `json:"components"`
-	DurationMS        int64  `json:"duration_ms"`
-	SyftVersion       string `json:"syft_version"`
-	WorkerVersion     string `json:"worker_version"`
-	EACCES            int64  `json:"eacces"`
-	CtimeDropped      int64  `json:"ctime_dropped"`
-	MountSkipped      int64  `json:"mount_skipped"`
-	DepthLimited      int64  `json:"depth_limited"`
-	ComponentsDropped int64  `json:"components_dropped"`
-	Attempts          int    `json:"attempts"`
-	CapsModel         string `json:"caps_model"`
-	MaxRSSBytes       int64  `json:"max_rss_bytes,omitempty"`
+	Files         int64  `json:"files"`
+	Dirs          int64  `json:"dirs"`
+	Components    int64  `json:"components"`
+	DurationMS    int64  `json:"duration_ms"`
+	SyftVersion   string `json:"syft_version"`
+	WorkerVersion string `json:"worker_version"`
+	EACCES        int64  `json:"eacces"`
+	CtimeDropped  int64  `json:"ctime_dropped"`
+	// CtimeDroppedEvidence + CtimeDroppedData = CtimeDropped once
+	// cataloging ran: the dropped entries that could have been package
+	// evidence (these make the SBOM partial) and plain runtime data.
+	CtimeDroppedEvidence int64 `json:"ctime_dropped_evidence"`
+	CtimeDroppedData     int64 `json:"ctime_dropped_data"`
+	// CtimeDroppedSample: up to MaxDriftSample dropped paths, evidence
+	// first, each at most MaxDriftSamplePathLen bytes.
+	CtimeDroppedSample []string `json:"ctime_dropped_sample,omitempty"`
+	MountSkipped       int64    `json:"mount_skipped"`
+	DepthLimited       int64    `json:"depth_limited"`
+	ComponentsDropped  int64    `json:"components_dropped"`
+	Attempts           int      `json:"attempts"`
+	CapsModel          string   `json:"caps_model"`
+	MaxRSSBytes        int64    `json:"max_rss_bytes,omitempty"`
 	// DegradedMS: how long a degraded worker has been unavailable
 	// (worker_unavailable answers only).
 	DegradedMS int64   `json:"degraded_ms,omitempty"`

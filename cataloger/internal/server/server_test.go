@@ -449,6 +449,13 @@ func TestValidateRejectsBadChildOutput(t *testing.T) {
 	if err := Validate(good(), b); err != nil {
 		t.Fatal(err)
 	}
+	withSample := good()
+	for i := range protocol.MaxDriftSample {
+		withSample.Stats.CtimeDroppedSample = append(withSample.Stats.CtimeDroppedSample, fmt.Sprintf("/tmp/%02d/%s", i, strings.Repeat("y", 240)))
+	}
+	if err := Validate(withSample, b); err != nil {
+		t.Fatalf("a full drift sample: %v", err)
+	}
 	for name, mut := range map[string]func(r *protocol.Response){
 		"status":       func(r *protocol.Response) { r.Status = "maybe" },
 		"completeness": func(r *protocol.Response) { r.Completeness = "most" },
@@ -473,6 +480,15 @@ func TestValidateRejectsBadChildOutput(t *testing.T) {
 				r.Components[0].FilePaths = append(r.Components[0].FilePaths, fmt.Sprintf("/p/%d", i))
 			}
 		},
+		"drift sample too long": func(r *protocol.Response) {
+			for i := range protocol.MaxDriftSample + 1 {
+				r.Stats.CtimeDroppedSample = append(r.Stats.CtimeDroppedSample, fmt.Sprintf("/tmp/%d", i))
+			}
+		},
+		"drift sample path too long": func(r *protocol.Response) {
+			r.Stats.CtimeDroppedSample = []string{"/" + strings.Repeat("x", protocol.MaxDriftSamplePathLen)}
+		},
+		"drift sample ctl": func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/a\nb"} },
 	} {
 		r := good()
 		mut(r)

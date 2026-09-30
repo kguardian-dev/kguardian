@@ -204,14 +204,26 @@ not path strings, keeps every access inside the root:
 - A non-directory whose ctime is after the container's start is runtime
   drift: it is left out, and every package that owns it is flagged
   `files_truncated` (so a shortened file list never supports
-  `installed_not_observed`).
+  `installed_not_observed`). The SBOM as a whole is `partial`
+  (`ctime_dropped`) only when a dropped entry could have been package
+  evidence the SBOM now misses: executable-looking and not empty or text,
+  a binary MIME type, or a path or glob one of the configured catalogers
+  asked the resolver for (package databases, jars, `dist-info/METADATA`,
+  `package.json`, ...). The resolver records those queries during the scan,
+  so the rule follows the pinned Syft. Runtime data (logs, caches, `.pyc`
+  bytecode caches, pid and lock files, temp files) does not make it
+  partial. `stats` splits the count into `ctime_dropped_evidence` and
+  `ctime_dropped_data` and samples up to 20 of the paths (PROTOCOL.md
+  §4.2).
 
 ## What is sent
 
 Package metadata (name, version, PURL, type, class, source package,
 licenses) and, per package, the **executable-looking** files it owns
 (execute bit or `*.so*`), as real in-root paths, at most 4096. Never file
-contents, digests, or data files. Each package also carries:
+contents, digests, or data files; the one exception to "no data file
+paths" is `stats.ctime_dropped_sample`, up to 20 paths (256 bytes each) of
+files changed after the container started. Each package also carries:
 
 - `files_truncated`: the path list is incomplete (over 4096, runtime drift,
   or trimmed to fit the response).

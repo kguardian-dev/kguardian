@@ -34,6 +34,7 @@ type Resolver struct {
 	tree   filetree.Reader
 	index  filetree.IndexReader
 	search filetree.Searcher
+	q      *queries
 }
 
 // NewResolver indexes root and returns a resolver over it.
@@ -42,7 +43,7 @@ func NewResolver(root *Root) (*Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Resolver{root: root, tree: tree, index: index, search: filetree.NewSearchContext(tree, index)}, nil
+	return &Resolver{root: root, tree: tree, index: index, search: filetree.NewSearchContext(tree, index), q: newQueries()}, nil
 }
 
 func requestPath(p string) string {
@@ -70,6 +71,7 @@ func requestGlob(pattern string) string {
 
 // HasPath reports whether p exists (following links).
 func (r *Resolver) HasPath(p string) bool {
+	r.q.add(r.q.paths, requestPath(p))
 	return r.tree.HasPath(stereofile.Path(requestPath(p)))
 }
 
@@ -79,6 +81,7 @@ func (r *Resolver) FilesByPath(paths ...string) ([]file.Location, error) {
 	refs := make([]file.Location, 0)
 	for _, p := range paths {
 		req := requestPath(p)
+		r.q.add(r.q.paths, req)
 		ref, err := r.search.SearchByPath(req, filetree.FollowBasenameLinks)
 		if err != nil || ref == nil || !ref.HasReference() {
 			continue
@@ -98,6 +101,7 @@ func (r *Resolver) FilesByGlob(patterns ...string) ([]file.Location, error) {
 	seen := stereofile.NewFileReferenceSet()
 	out := make([]file.Location, 0)
 	for _, pattern := range patterns {
+		r.q.add(r.q.globs, requestGlob(pattern))
 		refVias, err := r.search.SearchByGlob(requestGlob(pattern), filetree.FollowBasenameLinks)
 		if err != nil {
 			return nil, err
@@ -124,6 +128,7 @@ func (r *Resolver) FilesByGlob(patterns ...string) ([]file.Location, error) {
 func (r *Resolver) FilesByMIMEType(types ...string) ([]file.Location, error) {
 	seen := stereofile.NewFileReferenceSet()
 	out := make([]file.Location, 0)
+	r.q.add(r.q.mimes, types...)
 	refVias, err := r.search.SearchByMIMEType(types...)
 	if err != nil {
 		return nil, err
@@ -165,6 +170,7 @@ func (r *Resolver) FileContentsByLocation(loc file.Location) (io.ReadCloser, err
 
 // AllLocations streams every indexed entry, unresolved.
 func (r *Resolver) AllLocations(ctx context.Context) <-chan file.Location {
+	r.q.listedAll()
 	out := make(chan file.Location)
 	go func() {
 		defer close(out)

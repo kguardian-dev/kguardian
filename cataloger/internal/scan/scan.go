@@ -110,6 +110,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 	}
 
 	res := src.Resolver()
+	classifyDrift(resp, res)
 	fr := resolverAdapter{res: res, root: root}
 	comps, dropped := Components(s, fr, int(o.Budgets.MaxPathsPerPackage))
 	resp.Stats.ComponentsDropped = int64(dropped)
@@ -157,7 +158,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 		if resp.Stats.DepthLimited > 0 {
 			r.AddPartial(protocol.PartialDepthLimited)
 		}
-		if resp.Stats.CtimeDropped > 0 {
+		if resp.Stats.CtimeDroppedEvidence > 0 {
 			r.AddPartial(protocol.PartialCtimeDropped)
 		}
 		if dropped > 0 {
@@ -193,7 +194,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 	if o.CapsModel == "ii" {
 		resp.AddPartial(protocol.PartialNoDACReadSearch)
 	}
-	if resp.Stats.CtimeDropped > 0 {
+	if resp.Stats.CtimeDroppedEvidence > 0 {
 		resp.AddPartial(protocol.PartialCtimeDropped)
 	}
 	if resp.Stats.DepthLimited > 0 {
@@ -229,6 +230,40 @@ func fillStats(resp *protocol.Response, root *rootfs.Root) {
 	resp.Stats.CtimeDropped = st.CtimeDropped.Load()
 	resp.Stats.MountSkipped = st.MountSkipped.Load()
 	resp.Stats.DepthLimited = st.DepthLimited.Load()
+}
+
+// classifyDrift splits the runtime-drift entries (ctime after container
+// start, left out of the index) into possible package evidence, which
+// makes the SBOM partial (ctime_dropped), and plain runtime data (logs,
+// caches, bytecode caches, pid and lock files, temp files), which does
+// not: a package that owns a dropped file is flagged files_truncated
+// either way (PackageFiles). A bounded sample of the paths goes in the
+// stats. It runs after cataloging, when the resolver knows every query
+// the catalogers made.
+func classifyDrift(resp *protocol.Response, res *rootfs.Resolver) {
+	if res == nil {
+		return
+	}
+	d := res.ClassifyDropped(protocol.MaxDriftSample)
+	resp.Stats.CtimeDroppedEvidence, resp.Stats.CtimeDroppedData = d.Evidence, d.Data
+	resp.Stats.CtimeDroppedSample = nil
+	for _, p := range d.Sample {
+		resp.Stats.CtimeDroppedSample = append(resp.Stats.CtimeDroppedSample, SamplePath(p))
+	}
+}
+
+// SamplePath bounds a path for the drift sample: valid UTF-8, control
+// characters replaced by '?', at most MaxDriftSamplePathLen bytes cut on
+// a rune boundary.
+func SamplePath(p string) string {
+	p = strings.ToValidUTF8(p, "?")
+	p = strings.Map(func(c rune) rune {
+		if c < 0x20 || c == 0x7f {
+			return '?'
+		}
+		return c
+	}, p)
+	return protocol.Truncate(p, protocol.MaxDriftSamplePathLen)
 }
 
 func isAccess(err error) bool {
