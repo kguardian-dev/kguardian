@@ -78,7 +78,9 @@ type VulnFinding struct {
 type InUseDetail struct {
 	State string `json:"state"`
 	// Reason is set for unknown: no_runtime_data, capture_gap,
-	// host_network, language_package, no_package_files.
+	// host_network, language_package, no_package_files, probes_missing,
+	// libraries_not_tracked, sbom_incomplete, platform_mismatch,
+	// interpreted_content.
 	Reason        *string `json:"reason"`
 	ObservedSince *string `json:"observedSince"`
 	WindowHours   int64   `json:"windowHours"`

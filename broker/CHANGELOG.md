@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.20.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.7...broker/v1.20.0) (2026-09-30)
+
+
+### Features
+
+* **broker:** claim, store and report node catalog SBOMs ([#1848](https://github.com/kguardian-dev/kguardian/issues/1848)) ([db8ce10](https://github.com/kguardian-dev/kguardian/commit/db8ce105612b8bc6c6268e0674873888801b8671))
+* **broker:** judge node SBOM in-use verdicts behind a platform and completeness guard ([#1863](https://github.com/kguardian-dev/kguardian/issues/1863)) ([87fe158](https://github.com/kguardian-dev/kguardian/commit/87fe15845b52e39279cde801cdb371584732d723))
+
 ## [1.19.7](https://github.com/kguardian-dev/kguardian/compare/broker/v1.19.6...broker/v1.19.7) (2026-09-29)
 
 

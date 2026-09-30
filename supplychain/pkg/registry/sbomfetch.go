@@ -95,9 +95,20 @@ type fetch struct {
 // returned alongside. A refused destination returns a *BlockedError;
 // "nothing attached" is an empty result, not an error.
 func (i *Inspector) FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]FoundSBOM, []string, error) {
+	found, rejected, _, err := i.FetchSBOMsComplete(ctx, registry, repository, digest)
+	return found, rejected, err
+}
+
+// FetchSBOMsComplete is FetchSBOMs that also reports whether the answer
+// is complete: every step answered (found, or definitely nothing). A
+// step that failed (a 429 or 5xx on the referrers API, say) makes it
+// incomplete even when another step found an SBOM, since what that step
+// would have found is unknown. Only a complete answer can show that an
+// SBOM found before is gone.
+func (i *Inspector) FetchSBOMsComplete(ctx context.Context, registry, repository, digest string) ([]FoundSBOM, []string, bool, error) {
 	d, err := i.digestRef(registry, repository, digest)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 6*i.timeout())
 	defer cancel()
@@ -132,13 +143,13 @@ func (i *Inspector) FetchSBOMs(ctx context.Context, registry, repository, digest
 	// A refusal anywhere is the answer: the destination is off limits.
 	for _, e := range errs {
 		if _, ok := blockedReason(e); ok {
-			return nil, nil, e
+			return nil, nil, false, e
 		}
 	}
 	if len(out) == 0 && len(errs) > 0 {
-		return nil, f.rejected, errors.Join(errs...)
+		return nil, f.rejected, false, errors.Join(errs...)
 	}
-	return out, f.rejected, nil
+	return out, f.rejected, len(errs) == 0, nil
 }
 
 func (f *fetch) loadIndex() error {

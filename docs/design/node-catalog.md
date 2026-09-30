@@ -125,7 +125,8 @@ RETURNING c.inventory_digest, c.claim_token, c.lease_expires_at, g.why;
 - **In-use withheld until PR 6:** `kg_pkg_in_use` (redefined in the same migration) and
   `in_use_store::refresh_package_use_batch` ignore `source = 'node'`, so a node SBOM yields no
   `executed`/`loaded`/`installed_not_observed` verdict and no VEX statement. Its packages, findings
-  and CycloneDX export are unaffected. PR 6 drops the exclusion together with the section 5 guard.
+  and CycloneDX export are unaffected. PR 6 drops the exclusion together with the section 5 guard
+  (done: see "PR 6 implementation notes" below).
 - **Review changes (PR 1):** the grant records `grant_epoch` and `claimed_at` and never raises
   `epoch`, which only a stored SBOM sets (to the upload's epoch); epochs above
   `NODE_CATALOG_MAX_EPOCH` (1000) are refused; a done row with its node SBOM collected is claimable
@@ -166,6 +167,57 @@ Deviations from section 1b and the final review changes, with the reason:
   `lang_whiteout` covers only the system-wide directories (`usr{,/local}/lib/python*/
   {site,dist}-packages`, `usr{,/local}/lib/node_modules`, Ruby gem directories), read with a 64k
   entry budget; an incomplete read is `lang_whiteout_unknown`.
+
+#### PR 6 implementation notes (Broker in-use guard)
+Migration `2026-10-04-100000_node_in_use_guard` (functions only, `CREATE OR REPLACE`; its down
+restores the PR 1 `kg_pkg_in_use` byte for byte):
+- **`kg_node_sbom_guard(cluster, ns, kind, name, container, image, window_hours)`**: NULL when the
+  node SBOM linked to the image may support `installed_not_observed`, else the first failing of
+  `sbom_incomplete` (no SBOM, no claim row whose `content_hash` is the stored SBOM's, or
+  `completeness` not `full`), `libraries_not_tracked` (an instance in the window without the
+  library probe in mode `full`; `kg_runtime_coverage` already refuses coverage then, checked again
+  so the guard stands alone), `platform_mismatch` (no instance in the window, or a
+  `runtime_coverage.node_name` whose `node_catalog_platforms` row is missing or differs from the
+  claim's `platform`, or the claim has none). "In the window" is `kg_runtime_coverage`'s rule (a
+  heartbeat within `window_hours`). Platforms compare as exact strings.
+- **Read time, not a snapshot:** `kg_pkg_in_use` calls `kg_node_sbom_guard` and then
+  `kg_node_pkg_flags` when the verdict is read, so a re-catalog, a replaced SBOM, a node or claim
+  platform change, or a new instance on another node takes effect at once, not at the next
+  refresh. (A per-container snapshot table was tried and dropped: it failed open between
+  refreshes, and saved about 4 % over 180k calls.) The container-level guard in
+  `refresh_coverage` stays as defence in depth. A live reference (the first version,
+  `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh and after each
+  such change in the tests.
+- **`kg_node_pkg_flags(image, pkg)`**: the package's flags over every version the SBOM lists:
+  bit 2 → `interpreted_content`, bit 1 → `sbom_incomplete`.
+- **`kg_pkg_in_use`**: unchanged up to the file-list test. A non-node SBOM listing the package's
+  files → `installed_not_observed` exactly as before; no SBOM → `no_package_files`; only the node
+  SBOM → `installed_not_observed` when `kg_node_sbom_guard` and then `kg_node_pkg_flags` pass,
+  else `unknown:<the first reason>`. Trivy-only and registry-only data is byte-identical (a live
+  test compares it with the PR 1 definition across the capture reasons). A live test checks the
+  SQL against the Rust mirror (`in_use::NodeFiles::guard`) on all 32 guard combinations.
+- **"In-use SBOM source is node"** (the coverage guard in `refresh_coverage`) is read as "the
+  node SBOM is the image's only SBOM". With a Trivy Operator or registry SBOM beside it, the
+  container's coverage is not guarded, Trivy/registry-listed packages are judged as before, and
+  only node-only packages meet the guard (per package, in `kg_pkg_in_use`). A capture reason is
+  never replaced by a guard reason.
+- **Positive evidence and drift:** node file lists join the path → package match in
+  `refresh_image_use`, ranked separately from the Trivy/registry lists and then united, so a node
+  package matched at the exact path never hides a Trivy package matched only through the
+  merged-/usr alias or a soname (Trivy owners and ranks are exactly those without the node SBOM; a
+  package both list keeps the stronger rank). A runtime row whose `origin` is `writableLayer`, `memfd` or `deleted`
+  (`runtime_inventory::UNSHIPPED_ORIGINS`) is matched against non-node lists only, so it never
+  credits a package through node data (it shows as unowned instead). The inventory records no
+  ctime; created-after-start files are the cataloger's side (dropped, package `files_truncated`).
+- **Reasons** added to `UnknownReason` and the API (`inUseDetail.reason`): `sbom_incomplete`,
+  `platform_mismatch`, `interpreted_content`, and `libraries_not_tracked`, which
+  `kg_runtime_coverage` already reported but the API folded into `capture_gap`; an exec-mode
+  container's reason now reads `libraries_not_tracked`. Tiers and VEX are unchanged (unknown
+  counts as in use; VEX needs `installed_not_observed`).
+- **Open question 5, measured on the fixtures:** the `interpreted_content` rule flags Debian and
+  Ubuntu `libc6` (gconv module lists under `/usr/lib`) and Ubuntu `libssl3t64` (a lintian override
+  under `/usr/share/lintian`), so those never become `installed_not_observed` from node data.
+  Excluding `share/lintian` (and perhaps `gconv`) in the cataloger would recover them.
 
 ## 3. Edge cases (case → handling → test)
 - Init containers, short-lived Jobs → running containers only in v1; exits first → `pending` / `exited_before_catalog`; recurring CronJobs caught later. → kind Job `sleep 2`, per-minute CronJob.

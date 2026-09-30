@@ -489,7 +489,10 @@ pub struct InUseDetail {
     /// executed | loaded | installed_not_observed | unknown
     pub state: &'static str,
     /// Why it is unknown: no_runtime_data | capture_gap | host_network |
-    /// language_package | no_package_files. `null` otherwise.
+    /// language_package | no_package_files | probes_missing |
+    /// libraries_not_tracked | sbom_incomplete | platform_mismatch |
+    /// interpreted_content (the last three only for a package whose only
+    /// file list is a node catalog SBOM). `null` otherwise.
     pub reason: Option<&'static str>,
     /// Start of continuous capture coverage (the common window across the
     /// containers), when covered.
