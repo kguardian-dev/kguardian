@@ -193,7 +193,14 @@ was cataloged for (a node with no recorded platform fails), capture in mode
 the node SBOM is the image's only SBOM, `runtime_in_use_coverage` carries the
 first two as the container's reason; beside a Trivy Operator or registry
 SBOM, packages those list files for are judged exactly as before and only
-node-only packages are guarded.
+node-only packages are guarded. The container half of the guard is computed
+once per in-use refresh into `runtime_node_sbom_guard`.
+
+Changed reason value: `inUseDetail.reason` for a container captured in exec
+mode (or without the library probe) is now `libraries_not_tracked`, where it
+was `capture_gap`. The coverage function already reported it; the API folded
+it. `sbom_incomplete`, `platform_mismatch` and `interpreted_content` are new.
+Clients should show an unrecognised reason as sent.
 
 `/metrics`:
 

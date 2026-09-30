@@ -169,8 +169,8 @@ Deviations from section 1b and the final review changes, with the reason:
   entry budget; an incomplete read is `lang_whiteout_unknown`.
 
 #### PR 6 implementation notes (Broker in-use guard)
-Migration `2026-10-04-100000_node_in_use_guard` (functions only, `CREATE OR REPLACE`; its down
-restores the PR 1 `kg_pkg_in_use` byte for byte):
+Migration `2026-10-04-100000_node_in_use_guard` (functions plus one new derived table, nothing
+existing altered; its down restores the PR 1 `kg_pkg_in_use` byte for byte):
 - **`kg_node_sbom_guard(cluster, ns, kind, name, container, image, window_hours)`**: NULL when the
   node SBOM linked to the image may support `installed_not_observed`, else the first failing of
   `sbom_incomplete` (no SBOM, no claim row whose `content_hash` is the stored SBOM's, or
@@ -180,19 +180,29 @@ restores the PR 1 `kg_pkg_in_use` byte for byte):
   `runtime_coverage.node_name` whose `node_catalog_platforms` row is missing or differs from the
   claim's `platform`, or the claim has none). "In the window" is `kg_runtime_coverage`'s rule (a
   heartbeat within `window_hours`). Platforms compare as exact strings.
-- **`kg_node_pkg_guard(..., pkg, window_hours)`**: the SBOM guard, then the package's flags over
-  every version the SBOM lists: bit 2 → `interpreted_content`, bit 1 → `sbom_incomplete`.
+- **`runtime_node_sbom_guard`**: `kg_node_sbom_guard` once per workload container of an image
+  with a node SBOM, rebuilt by `refresh_coverage` in the same transaction and window as
+  `runtime_in_use_coverage`, so `kg_pkg_in_use` does not re-evaluate it per package. A container
+  without a row fails closed (`sbom_incomplete`). A live reference (the first, per-call version,
+  `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh in the tests.
+- **`kg_node_pkg_flags(image, pkg)`**: the package's flags over every version the SBOM lists:
+  bit 2 → `interpreted_content`, bit 1 → `sbom_incomplete`.
 - **`kg_pkg_in_use`**: unchanged up to the file-list test. A non-node SBOM listing the package's
   files → `installed_not_observed` exactly as before; no SBOM → `no_package_files`; only the node
-  SBOM → `installed_not_observed` when `kg_node_pkg_guard` is NULL, else `unknown:<reason>`.
-  Trivy-only data is byte-identical (a live test compares it with the PR 1 definition).
+  SBOM → `installed_not_observed` when the container's guard row and then `kg_node_pkg_flags` pass,
+  else `unknown:<the first reason>`. Trivy-only and registry-only data is byte-identical (a live
+  test compares it with the PR 1 definition across the capture reasons). A live test checks the
+  SQL against the Rust mirror (`in_use::NodeFiles::guard`) on all 32 guard combinations.
 - **"In-use SBOM source is node"** (the coverage guard in `refresh_coverage`) is read as "the
   node SBOM is the image's only SBOM". With a Trivy Operator or registry SBOM beside it, the
   container's coverage is not guarded, Trivy/registry-listed packages are judged as before, and
   only node-only packages meet the guard (per package, in `kg_pkg_in_use`). A capture reason is
   never replaced by a guard reason.
 - **Positive evidence and drift:** node file lists join the path → package match in
-  `refresh_image_use`. A runtime row whose `origin` is `writableLayer`, `memfd` or `deleted`
+  `refresh_image_use`, ranked separately from the Trivy/registry lists and then united, so a node
+  package matched at the exact path never hides a Trivy package matched only through the
+  merged-/usr alias or a soname (Trivy owners and ranks are exactly those without the node SBOM; a
+  package both list keeps the stronger rank). A runtime row whose `origin` is `writableLayer`, `memfd` or `deleted`
   (`runtime_inventory::UNSHIPPED_ORIGINS`) is matched against non-node lists only, so it never
   credits a package through node data (it shows as unowned instead). The inventory records no
   ctime; created-after-start files are the cataloger's side (dropped, package `files_truncated`).
