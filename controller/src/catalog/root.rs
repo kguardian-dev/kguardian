@@ -1583,12 +1583,43 @@ mod tests {
         };
         let e = io::Error::last_os_error();
         assert!(rc < 0 && e.raw_os_error() == Some(libc::EROFS), "{e}");
-        // Not recursive: /proc in the clone is an empty directory.
-        let proc = openat(fd.as_raw_fd(), c"proc", libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
-        let self_ = openat(proc.as_raw_fd(), c"self", libc::O_PATH);
+        // It is a clone of this process's root, not of some other tree.
+        let real_root = std::fs::File::open("/").unwrap();
+        assert!(same_object(fd.as_raw_fd(), real_root.as_raw_fd()).unwrap());
+        // Not recursive: no submount comes with it. Checked by mount id,
+        // not by content: under vmtest the guest's / is the host's rootfs
+        // over 9p, whose /proc directory shows the HOST's procfs entries
+        // (`self` included) without any mount in the guest, so "`self` is
+        // absent" is the wrong property. What must hold is that every
+        // directory that is a mount point here is, in the clone, a plain
+        // directory of the clone's own mount.
+        let Ok(Some(clone_mnt)) = mount_id(fd.as_raw_fd()) else {
+            eprintln!("no STATX_MNT_ID here; the catalog clone submount check is skipped");
+            return;
+        };
+        let root_mnt = mount_id(real_root.as_raw_fd()).unwrap().unwrap();
+        let mut checked = 0;
+        for name in [c"proc", c"sys", c"dev", c"run", c"tmp", c"mnt"] {
+            let here = format!("/{}", name.to_string_lossy());
+            let Ok(real) = std::fs::File::open(&here) else {
+                continue;
+            };
+            if mount_id(real.as_raw_fd()).unwrap() == Some(root_mnt) {
+                continue; // not a submount in this namespace
+            }
+            let Ok(inside) = openat(fd.as_raw_fd(), name, libc::O_PATH | libc::O_DIRECTORY) else {
+                continue; // no such directory in the root filesystem itself
+            };
+            assert_eq!(
+                mount_id(inside.as_raw_fd()).unwrap(),
+                Some(clone_mnt),
+                "the clone carries the {here} submount"
+            );
+            checked += 1;
+        }
         assert!(
-            self_.is_err(),
-            "the clone must not carry the /proc submount"
+            checked > 0,
+            "no submount of / to check (/proc at least is one)"
         );
     }
 
