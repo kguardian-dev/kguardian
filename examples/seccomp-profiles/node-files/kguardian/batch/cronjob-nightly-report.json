@@ -1,0 +1,56 @@
+{
+  "defaultAction": "SCMP_ACT_KILL_PROCESS",
+  "architectures": [
+    "SCMP_ARCH_AARCH64",
+    "SCMP_ARCH_X86_64"
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "arch_prctl",
+        "clone",
+        "close",
+        "connect",
+        "epoll_create1",
+        "epoll_ctl",
+        "epoll_pwait",
+        "eventfd2",
+        "execve",
+        "exit_group",
+        "fcntl",
+        "fstat",
+        "futex",
+        "getdents64",
+        "getpeername",
+        "getpid",
+        "getrandom",
+        "getsockname",
+        "getsockopt",
+        "gettid",
+        "madvise",
+        "mmap",
+        "munmap",
+        "nanosleep",
+        "newfstatat",
+        "openat",
+        "prlimit64",
+        "read",
+        "readlinkat",
+        "rt_sigaction",
+        "rt_sigprocmask",
+        "rt_sigreturn",
+        "sched_getaffinity",
+        "sched_yield",
+        "setsockopt",
+        "sigaltstack",
+        "socket",
+        "tgkill",
+        "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ],
+  "flags": [
+    "SECCOMP_FILTER_FLAG_LOG"
+  ]
+}

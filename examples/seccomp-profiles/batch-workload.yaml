@@ -1,0 +1,61 @@
+# Example workload that references a kguardian-distributed seccomp profile:
+# the CronJob that batch-job.yaml covers.
+#
+# The path is kguardian/<SeccompProfile namespace>/<SeccompProfile name>.json
+# relative to the kubelet's seccomp root (<kubeletRoot>/seccomp, by default
+# /var/lib/kubelet/seccomp).
+#
+# Before you apply this (the batch namespace must exist):
+#   1. Apply the batch profile in audit mode, never straight to
+#      SCMP_ACT_KILL_PROCESS. Use your own export (SCMP_ACT_LOG by default)
+#      or, to try the sample, batch-job.yaml with the action swapped:
+#        yq '.spec.defaultAction = "SCMP_ACT_LOG"' batch-job.yaml | kubectl apply -f -
+#   2. Wait until READY counts every node:
+#        kubectl -n batch get seccompprofile cronjob-nightly-report
+#      A Job pod scheduled onto a node that does not have the file yet fails
+#      with CreateContainerError until that node's Controller writes it.
+#   3. After several clean runs (see batch-job.yaml), apply batch-job.yaml as
+#      is. Each Job starts new pods, so the next scheduled run loads the
+#      promoted filter without a restart.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-report
+  namespace: batch
+spec:
+  schedule: "15 2 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # With SCMP_ACT_KILL_PROCESS a disallowed syscall kills the process, so
+      # a too-tight profile shows up as failed Jobs. backoffLimit keeps that
+      # from turning into a retry storm.
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: Localhost
+              localhostProfile: kguardian/batch/cronjob-nightly-report.json
+          containers:
+            - name: report
+              image: registry.example.com/batch/nightly-report:1.4.2
+              args: ["--output=/dev/stdout"]
+              securityContext:
+                # allowPrivilegeEscalation: false sets no_new_privs, which lets
+                # the runtime install the filter just before execve. That is
+                # why the batch profile needs no capset/setuid family.
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi

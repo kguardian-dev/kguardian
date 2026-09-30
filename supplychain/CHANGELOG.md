@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.1...supplychain/v0.2.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* **supplychain:** bump grpc, x/crypto, x/mod and otel past known CVEs ([#1889](https://github.com/kguardian-dev/kguardian/issues/1889)) ([077681f](https://github.com/kguardian-dev/kguardian/commit/077681f21dd17221e97b58b4d2f078ca0dfbbca0))
+
 ## [0.2.1](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.0...supplychain/v0.2.1) (2026-09-30)
 
 
