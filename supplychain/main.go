@@ -28,6 +28,7 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/dispatch"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/match"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/nodesource"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/registry"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/regsource"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/server"
@@ -97,7 +98,11 @@ type config struct {
 	RegistryAllowPrivate bool
 	RegistrySBOM         bool
 	RegistrySBOMInterval time.Duration
-	GrypeMatcherURL      string
+	// NodeSBOM feeds the node catalog's SBOMs (stored in the broker as
+	// source "node") to the Grype matcher. Needs GRYPE_MATCHER_URL.
+	NodeSBOM         bool
+	NodeSBOMInterval time.Duration
+	GrypeMatcherURL  string
 	// GrypeQuarantineTTL is how long a digest quarantined by repeated
 	// match errors waits before one more try (doubling per repeat, at
 	// most 24h).
@@ -148,6 +153,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.RegistrySBOMInterval, err = time.ParseDuration(env("REGISTRY_SBOM_INTERVAL", "15m")); err != nil || c.RegistrySBOMInterval <= 0 {
 		return c, fmt.Errorf("REGISTRY_SBOM_INTERVAL must be a positive duration")
 	}
+	// Node SBOMs are read from the broker only (no egress), but they mean
+	// more matching work: opt-in, like every other source.
+	if c.NodeSBOM, err = strconv.ParseBool(env("NODE_SBOM_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("NODE_SBOM_ENABLED: %w", err)
+	}
+	if c.NodeSBOMInterval, err = time.ParseDuration(env("NODE_SBOM_INTERVAL", "5m")); err != nil || c.NodeSBOMInterval <= 0 {
+		return c, fmt.Errorf("NODE_SBOM_INTERVAL must be a positive duration")
+	}
 	if c.TrivyResync, err = time.ParseDuration(env("TRIVY_RESYNC_PERIOD", "10m")); err != nil || c.TrivyResync <= 0 {
 		return c, fmt.Errorf("TRIVY_RESYNC_PERIOD must be a positive duration")
 	}
@@ -193,6 +206,7 @@ func serve() error {
 		"registryLookup":       c.RegistryLookup,
 		"registryAllowPrivate": c.RegistryAllowPrivate,
 		"registrySBOM":         c.RegistrySBOM,
+		"nodeSBOM":             c.NodeSBOM,
 		"grypeMatcher":         c.GrypeMatcherURL != "",
 		"brokerAuth":           c.BrokerToken != "",
 		"signatureDiscovery":   ac.Enabled,
@@ -224,6 +238,7 @@ func serve() error {
 	errCh := make(chan error, 2)
 	// Every source emits through sink; matching (when enabled) taps it.
 	var sink trivy.Sink = disp
+	var coord *match.Coordinator
 	if c.GrypeMatcherURL != "" {
 		hm, err := match.NewHTTPMatcher(c.GrypeMatcherURL)
 		if err != nil {
@@ -231,7 +246,7 @@ func serve() error {
 		}
 		// Crash markers live on the pod's /tmp emptyDir, which survives a
 		// container restart (an OOMKill) but not the pod.
-		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
+		coord = &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m,
 			CrashDir: filepath.Join(os.TempDir(), "kguardian-match"), ErrorQuarantineTTL: c.GrypeQuarantineTTL,
 			MaxHeldBytes: int64(c.GrypeSBOMBudgetMiB) << 20}
 		sink = coord.Tee(disp)
@@ -309,7 +324,33 @@ func serve() error {
 			src.Run(ctx)
 		}()
 	}
-	if !c.TrivyEnabled && !c.RegistrySBOM {
+	nodeSBOM := c.NodeSBOM && coord != nil
+	if c.NodeSBOM && coord == nil {
+		log.Warn("NODE_SBOM_ENABLED has no effect without the Grype matcher (GRYPE_MATCHER_URL); node SBOM source not started")
+	}
+	if nodeSBOM {
+		rc, err := broker.NewReadClient(c.BrokerURL, c.BrokerToken)
+		if err != nil {
+			return err
+		}
+		// Straight to the coordinator, not through sink: node SBOMs are
+		// already stored in the broker, which refuses them on the
+		// supply-chain ingest route.
+		src := &nodesource.Source{
+			Broker:   rc,
+			Matcher:  coord,
+			Log:      log,
+			Metrics:  m,
+			Interval: c.NodeSBOMInterval,
+		}
+		readiness = append(readiness, src.Ready)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			src.Run(ctx)
+		}()
+	}
+	if !c.TrivyEnabled && !c.RegistrySBOM && !nodeSBOM {
 		log.Info("no vulnerability source enabled; serving health and metrics only")
 	}
 
@@ -349,6 +390,11 @@ func enricher(in *registry.Inspector) dispatch.Enricher {
 		switch {
 		case e.Vulns != nil:
 			in.Enrich(ctx, &e.Vulns.Image)
+			if e.PinPlatform {
+				// A match that includes a node SBOM describes one
+				// platform: keep the others' manifests off the payload.
+				match.PinPlatform(&e.Vulns.Image, e.Platform)
+			}
 		case e.SBOM != nil:
 			in.Enrich(ctx, &e.SBOM.Image)
 		}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,34 @@ type Image struct {
 	Tags              []string `json:"tags"`
 	DigestKind        string   `json:"digestKind"`
 	RunningContainers int64    `json:"runningContainers"`
+	// SBOMSources lists the sources with an SBOM linked to this digest
+	// ("trivy-operator", "registry", "node", ...). Brokers before the node
+	// catalog never send it, and newer ones leave it out when empty.
+	SBOMSources []string `json:"sbomSources,omitempty"`
+	// NodeCatalog is the node catalog's state for this digest; nil when no
+	// node has offered it (or the broker predates the catalog).
+	NodeCatalog *NodeCatalog `json:"nodeCatalog,omitempty"`
+}
+
+// NodeCatalog is the nodeCatalog object of a GET /images item
+// (broker/src/image_inventory.rs NodeCatalogState).
+type NodeCatalog struct {
+	// State is pending, claimed, done or failed.
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	// Platform ("os/arch[/variant]") the stored SBOM was cataloged for.
+	Platform string `json:"platform,omitempty"`
+	// Completeness is full, partial or os_only.
+	Completeness string `json:"completeness,omitempty"`
+	// CatalogedAt is when the stored node SBOM was last written. It
+	// changes with every stored catalog, so it serves as the SBOM's
+	// version.
+	CatalogedAt string `json:"catalogedAt,omitempty"`
+}
+
+// HasSBOM reports whether the image has an SBOM from source.
+func (im Image) HasSBOM(source string) bool {
+	return slices.Contains(im.SBOMSources, source)
 }
 
 type imagePage struct {

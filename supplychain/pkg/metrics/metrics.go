@@ -39,6 +39,9 @@ type Metrics struct {
 	// RegistrySBOMLookups counts registry SBOM lookups per digest by
 	// result (found, none, error, skipped_<reason>, list_error).
 	RegistrySBOMLookups *prometheus.CounterVec
+	// NodeSBOMFetches counts node catalog SBOM reads by result (fetched,
+	// none, changed, too_large, error, list_error, probe_error).
+	NodeSBOMFetches *prometheus.CounterVec
 	// Grype matching (vulnerability source B).
 	GrypeDBBuilt      prometheus.Gauge
 	GrypeMatchRuns    *prometheus.CounterVec
@@ -103,6 +106,10 @@ func New() *Metrics {
 			Name: "kguardian_supplychain_registry_sbom_lookups_total",
 			Help: "Registry SBOM lookups per digest, by result.",
 		}, []string{"result"}),
+		NodeSBOMFetches: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_node_sbom_fetches_total",
+			Help: "Node catalog SBOM reads from the broker, by result.",
+		}, []string{"result"}),
 		GrypeDBBuilt: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_grype_db_built_timestamp_seconds",
 			Help: "Build time of the loaded Grype database (Unix seconds); DB age is time() minus this.",
@@ -153,7 +160,7 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
-		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups,
+		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups, m.NodeSBOMFetches,
 		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeSBOMBytesHeld, m.GrypeSBOMsEvicted, m.GrypeQuarantined, m.GrypeComponentsClamped, m.PendingEmissions,
 	)
 	return m
