@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.5...llm-bridge/v1.13.0) (2026-09-30)
+
+
+### Features
+
+* **frontend:** show node catalog provenance, coverage and not-assessable images ([#1861](https://github.com/kguardian-dev/kguardian/issues/1861)) ([b9d2032](https://github.com/kguardian-dev/kguardian/commit/b9d2032c93837e348553763b5d79f044dd27c9a4))
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.129.0 ([#1769](https://github.com/kguardian-dev/kguardian/issues/1769)) ([f171ff6](https://github.com/kguardian-dev/kguardian/commit/f171ff67b9c5e8d2fa2f5929bd9be47b243acd99))
+
 ## [1.12.5](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.12.4...llm-bridge/v1.12.5) (2026-09-29)
 
 
