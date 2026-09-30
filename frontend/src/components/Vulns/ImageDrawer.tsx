@@ -17,6 +17,8 @@ interface ImageDrawerProps {
   digest: string;
   /** The inventory row it was opened from, when there was one: its SBOM sources and node catalog state. */
   summary?: ImageSummary;
+  /** The node catalog is on (a catalog token): without it, rows left from when it was on show no pending or "not assessable" state. */
+  catalogOn?: boolean;
   onClose: () => void;
   onOpenCve: (id: string) => void;
   onOpenWorkload: (ns: string, kind: string, name: string) => void;
@@ -29,7 +31,7 @@ interface ImageDrawerProps {
  * data: unknown, never clean. The image and SBOM reads settle on their own,
  * so one failing does not blank the other.
  */
-export function ImageDrawer({ digest, summary, onClose, onOpenCve, onOpenWorkload, api = vulnApi }: ImageDrawerProps) {
+export function ImageDrawer({ digest, summary, catalogOn = false, onClose, onOpenCve, onOpenWorkload, api = vulnApi }: ImageDrawerProps) {
   const [detail, setDetail] = useState<ImageDetail | null>(null);
   const [detailError, setDetailError] = useState<unknown>(null);
   const [sbomReports, setSbomReports] = useState<Report[] | null>(null);
@@ -67,8 +69,8 @@ export function ImageDrawer({ digest, summary, onClose, onOpenCve, onOpenWorkloa
   // SBOM still reads "Cataloged on node"), and with no SBOM it says "No SBOM from any source", which claims nothing.
   const nc = summary?.nodeCatalog;
   // A scanner's vulnerability report is an assessment even without an SBOM; a failed or pending read says nothing either way.
-  const na = summary && Array.isArray(vulns.reports) && vulns.reports.length === 0 ? notAssessable(summary) : null;
-  const pending = summary ? catalogPending(summary) : null;
+  const na = catalogOn && summary && Array.isArray(vulns.reports) && vulns.reports.length === 0 ? notAssessable(summary) : null;
+  const pending = catalogOn && summary ? catalogPending(summary) : null;
   const partial = completenessNote(nc);
 
   return (

@@ -37,7 +37,8 @@ const nodeSbom: SbomPage = {
   ...grafanaSbom,
   reports: [{ ...grafanaSbom.reports[0], source: 'node', sbomTrust: 'scanned', attestation: null, scannerName: 'kguardian-cataloger' }, ...grafanaSbom.reports],
 };
-const extra = [answer('GET /images?limit=25', withCatalog), answer('GET /catalog/coverage', coverage), answer(`GET /images/${grafana}/sbom?limit=1`, nodeSbom)];
+const catalogOn = answer('GET /catalog/coverage', coverage);
+const extra = [answer('GET /images?limit=25', withCatalog), catalogOn, answer(`GET /images/${grafana}/sbom?limit=1`, nodeSbom)];
 const rowOf = async (repo: string) => (await screen.findAllByTestId('image-row')).find((r) => within(r).queryByText(repo))!;
 const sbomCell = (row: HTMLElement) => row.querySelector('td:nth-child(4)') as HTMLElement;
 
@@ -94,7 +95,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
 
   test('a failed vulnerability read (503) is unknown, not "no report": no "Not assessable"', async () => {
     const page: ImagePage = { ...imagesPage, items: imagesPage.items.map((i) => (i.digest === ne ? { ...i, nodeCatalog: nc({ state: 'failed', reason: 'oom', completeness: null }) } : i)) };
-    const { api, calls } = replayVulnApi([answer('GET /images?limit=25', page), answer(`GET /images/${ne}/vulnerabilities?limit=1`, 'busy', 503)]);
+    const { api, calls } = replayVulnApi([catalogOn, answer('GET /images?limit=25', page), answer(`GET /images/${ne}/vulnerabilities?limit=1`, 'busy', 503)]);
     render(view({ tab: 'images', api }));
     const n = await rowOf('quay.io/prometheus/node-exporter:v1.8.2');
     await waitFor(() => expect(calls.some((c) => c.startsWith(`GET /images/${ne}/sbom`))).toBe(true));
@@ -104,7 +105,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
 
   test('a pending row whose last node could not catalog it is pending, naming that node\'s reason', async () => {
     const page: ImagePage = { ...imagesPage, items: imagesPage.items.map((i) => (i.digest === ne ? { ...i, nodeCatalog: nc({ state: 'pending', reason: 'lsm_denied', completeness: null }) } : i)) };
-    render(view({ tab: 'images', api: replayVulnApi([answer('GET /images?limit=25', page)]).api }));
+    render(view({ tab: 'images', api: replayVulnApi([catalogOn, answer('GET /images?limit=25', page)]).api }));
     const n = await rowOf('quay.io/prometheus/node-exporter:v1.8.2');
     expect((await within(sbomCell(n)).findByTestId('catalog-pending')).textContent).toBe('Node catalog: pending · last node: LSM denied');
     await waitFor(() => expect(within(sbomCell(n)).getByText('Not read')).toBeTruthy());
@@ -115,7 +116,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
     // reports: Trivy Operator reported on it; the node catalog failed (oom).
     const reports = imageDetail('reports').digest;
     const page: ImagePage = { ...imagesPage, items: imagesPage.items.map((i) => (i.digest === reports ? { ...i, nodeCatalog: nc({ state: 'failed', reason: 'oom', completeness: null }) } : i)) };
-    render(view({ tab: 'images', api: replayVulnApi([answer('GET /images?limit=25', page)]).api }));
+    render(view({ tab: 'images', api: replayVulnApi([catalogOn, answer('GET /images?limit=25', page)]).api }));
     const r = await rowOf('ghcr.io/example/reports:1.0.3');
     await waitFor(() => expect(within(r).getAllByText(/1 finding/).length).toBeGreaterThan(0));
     expect(within(r).queryByTestId('not-assessable')).toBeNull();
@@ -123,7 +124,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
 
   test('the extra SBOM read is only for a registry SBOM: node and Trivy SBOMs show as scanned without it', async () => {
     const page = (sources: string[]): ImagePage => ({ ...imagesPage, items: imagesPage.items.map((i) => (i.digest === ne ? { ...i, sbomSources: sources, nodeCatalog: nc({}) } : i)) });
-    const nodeOnly = replayVulnApi([answer('GET /images?limit=25', page(['node', 'trivy-operator']))]);
+    const nodeOnly = replayVulnApi([catalogOn, answer('GET /images?limit=25', page(['node', 'trivy-operator']))]);
     render(view({ tab: 'images', api: nodeOnly.api }));
     const n = await rowOf('quay.io/prometheus/node-exporter:v1.8.2');
     expect([...sbomCell(n).querySelectorAll('[data-testid="provenance-chip"]')].map((c) => c.textContent)).toEqual(['Trivy Operator', 'Cataloged on node (linux/arm64)']);
@@ -133,7 +134,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
     expect(nodeOnly.calls.some((c) => c.startsWith(`GET /images/${ne}/sbom`))).toBe(false);
     cleanup();
 
-    const withRegistry = replayVulnApi([answer('GET /images?limit=25', page(['node', 'registry']))]);
+    const withRegistry = replayVulnApi([catalogOn, answer('GET /images?limit=25', page(['node', 'registry']))]);
     render(view({ tab: 'images', api: withRegistry.api }));
     await rowOf('quay.io/prometheus/node-exporter:v1.8.2');
     await waitFor(() => expect(withRegistry.calls.some((c) => c.startsWith(`GET /images/${ne}/sbom`))).toBe(true));
@@ -141,7 +142,8 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
 
   test('a new Broker with the catalog disabled makes exactly the reads an older one does, and renders the same', async () => {
     // What a node catalog Broker sends with the catalog off: sbomSources, no nodeCatalog.
-    const sourcesOf: Record<string, string[]> = { [imageDetail('checkout').digest]: ['trivy-operator'], [grafana]: ['registry'], [imageDetail('source-controller').digest]: ['registry'] };
+    // node-exporter: a registry SBOM and no vulnerability report, which an older Broker leaves "Not read".
+    const sourcesOf: Record<string, string[]> = { [imageDetail('checkout').digest]: ['trivy-operator'], [grafana]: ['registry'], [imageDetail('source-controller').digest]: ['registry'], [ne]: ['registry'] };
     const disabled: ImagePage = { ...imagesPage, items: imagesPage.items.map((i) => (sourcesOf[i.digest] ? { ...i, sbomSources: sourcesOf[i.digest] } : i)) };
     const run = async (api: ReturnType<typeof replayVulnApi>) => {
       render(view({ tab: 'images', api: api.api }));
@@ -158,6 +160,44 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
     expect(newer.reads).toEqual(older.reads);
     expect(newer.cells).toEqual(older.cells);
     expect(document.querySelector('[data-testid="provenance-chip"]')).toBeNull();
+  });
+
+  test('with the catalog disabled (no token), leftover pending and failed rows render as an older Broker, and the drawer shows no catalog state', async () => {
+    const leftover: ImagePage = {
+      ...imagesPage,
+      items: imagesPage.items.map((i) => {
+        if (i.digest === ne) return { ...i, nodeCatalog: nc({ state: 'failed', reason: 'timeout', completeness: null }) };
+        if (i.digest === prom) return { ...i, nodeCatalog: nc({ state: 'pending', reason: 'lsm_denied', completeness: null }) };
+        return i;
+      }),
+    };
+    const run = async (extraCaps: Parameters<typeof replayVulnApi>[0]) => {
+      render(view({ tab: 'images', api: replayVulnApi(extraCaps).api }));
+      const rows = await screen.findAllByTestId('image-row');
+      await waitFor(() => expect(rows.every((r) => !sbomCell(r).textContent!.includes('…'))).toBe(true));
+      await new Promise((r) => setTimeout(r, 50));
+      const cells = rows.map((r) => sbomCell(r).textContent);
+      cleanup();
+      return cells;
+    };
+    const off = answer('GET /catalog/coverage', { ...coverage, tokenConfigured: false });
+    const older = await run([]);
+    expect(await run([off, answer('GET /images?limit=25', leftover)])).toEqual(older);
+    // Coverage unknown (it failed): the same.
+    expect(await run([answer('GET /catalog/coverage', 'busy', 503), answer('GET /images?limit=25', leftover)])).toEqual(older);
+
+    let digest: string | undefined;
+    const api = replayVulnApi([off, answer('GET /images?limit=25', leftover)]).api;
+    const onParamsChange = (patch: Record<string, string | undefined>) => {
+      if ('digest' in patch) digest = patch.digest;
+    };
+    const { rerender } = render(view({ tab: 'images', api, onParamsChange }));
+    fireEvent.click(await rowOf('quay.io/prometheus/node-exporter:v1.8.2'));
+    rerender(view({ tab: 'images', api, onParamsChange, digest }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('No SBOM from any source.');
+    expect(within(dialog).queryByTestId('not-assessable')).toBeNull();
+    expect(within(dialog).queryByTestId('catalog-pending')).toBeNull();
   });
 
   test('the image drawer names the node SBOM with its platform and completeness', async () => {
@@ -179,7 +219,7 @@ describe('ImagesView: node catalog (additive; an older Broker sends none of it)'
   test('the image drawer for a failed catalog with no report: not assessable, with the back-off', async () => {
     const page: ImagePage = { ...imagesPage, items: imagesPage.items.map((i) => (i.digest === ne ? { ...i, nodeCatalog: nc({ state: 'failed', reason: 'timeout', completeness: null }) } : i)) };
     let digest: string | undefined;
-    const api = replayVulnApi([answer('GET /images?limit=25', page)]).api;
+    const api = replayVulnApi([catalogOn, answer('GET /images?limit=25', page)]).api;
     const onParamsChange = (patch: Record<string, string | undefined>) => {
       if ('digest' in patch) digest = patch.digest;
     };

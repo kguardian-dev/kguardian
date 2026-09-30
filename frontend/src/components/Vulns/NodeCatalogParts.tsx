@@ -61,13 +61,14 @@ export function NotAssessableState({ na, compact = false }: { na: NotAssessable;
   if (compact) {
     return (
       <span data-testid="not-assessable" data-reason={na.reason} className="inline-flex flex-col items-start gap-0.5">
-        <span className={`${pill} ${WARN}`} title={title}>
+        {/* The sentence is a tooltip (the TrustBadge pattern, which has no focusable disclosure); screen readers get it once, as text, so the tooltip is hidden from them. */}
+        <span className={`${pill} ${WARN}`} title={title} aria-hidden="true">
           <CircleSlash className="w-3 h-3" aria-hidden />
           Not assessable
         </span>
+        <span className="sr-only">Not assessable: </span>
         <span className="text-[11px] text-tertiary">{reasonShort(na.reason)}</span>
-        {/* The sentence is a tooltip (the TrustBadge pattern, which has no focusable disclosure); screen readers get it as text. */}
-        <span className="sr-only">{title}</span>
+        <span className="sr-only">. {title}</span>
       </span>
     );
   }

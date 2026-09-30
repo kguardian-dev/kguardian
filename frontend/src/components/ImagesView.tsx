@@ -82,6 +82,8 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
   // The inventory row an image was opened from: its SBOM sources and node catalog state (the image read does not carry them).
   const [openedImage, setOpenedImage] = useState<ImageSummary | undefined>(undefined);
   const coverage = useCatalogCoverage(refreshTick, api);
+  // Rows keep `nodeCatalog` from claims left when the catalog is disabled: its pending and "not assessable" states show only while it is on (a catalog token), never while coverage is unknown or failed.
+  const catalogOn = coverage?.tokenConfigured === true;
 
   // Tiers are the Broker's (#1678). A Broker without them sends no `tier`:
   // the rows say "Tier ?" and the tier tiles say unknown. Judged on the
@@ -285,7 +287,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
             </section>
           )}
 
-          {tab === 'images' && <ImagesTable namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpen={(img) => { setOpenedImage(img); onParamsChange({ digest: img.digest, cve: undefined }); }} />}
+          {tab === 'images' && <ImagesTable namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} catalogOn={catalogOn} onOpen={(img) => { setOpenedImage(img); onParamsChange({ digest: img.digest, cve: undefined }); }} />}
 
           {tab === 'supply' && <SupplyChainTab namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpenWorkload={onOpenWorkload} />}
         </div>
@@ -304,7 +306,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
         />
       )}
       {digest && !cve && (
-        <ImageDrawer digest={digest} summary={openedImage && openedImage.digest === digest ? openedImage : undefined} onClose={() => onParamsChange({ digest: undefined })} onOpenCve={(id) => openCve(id)} onOpenWorkload={onOpenWorkload} api={api} />
+        <ImageDrawer digest={digest} summary={openedImage && openedImage.digest === digest ? openedImage : undefined} catalogOn={catalogOn} onClose={() => onParamsChange({ digest: undefined })} onOpenCve={(id) => openCve(id)} onOpenWorkload={onOpenWorkload} api={api} />
       )}
     </div>
   );
@@ -346,7 +348,7 @@ function SummaryFreshness({ computedAt, staleSeconds, receivedAt, loading }: { c
   );
 }
 
-function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { namespace?: string; scopeLabel: string; refreshTick?: number; api: VulnApi; onOpen: (img: ImageSummary) => void }) {
+function ImagesTable({ namespace, scopeLabel, refreshTick, api, catalogOn, onOpen }: { namespace?: string; scopeLabel: string; refreshTick?: number; api: VulnApi; catalogOn: boolean; onOpen: (img: ImageSummary) => void }) {
   const list = useImageList(namespace, refreshTick, api);
   return (
     <section aria-label="Images by digest" className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
@@ -372,7 +374,7 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
               </thead>
               <tbody className="divide-y divide-hubble-border">
                 {list.items.map((img) => (
-                  <ImageRow key={img.digest} img={img} e={list.enriched.get(img.digest)} onOpen={() => onOpen(img)} />
+                  <ImageRow key={img.digest} img={img} e={list.enriched.get(img.digest)} catalogOn={catalogOn} onOpen={() => onOpen(img)} />
                 ))}
               </tbody>
             </table>
@@ -429,10 +431,10 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
 /** The vulnerability read landed and no scanner reported on the digest (a failed read is unknown, not "none"). */
 const noVulnReport = (e: ImageEnrichment | undefined) => e !== undefined && Array.isArray(e.vulnReports) && e.vulnReports.length === 0;
 
-function SbomCell({ img, e }: { img: ImageSummary; e: ImageEnrichment | undefined }) {
+function SbomCell({ img, e, catalogOn }: { img: ImageSummary; e: ImageEnrichment | undefined; catalogOn: boolean }) {
   // No SBOM from any source, no vulnerability report, and the node catalog could not make one: never "No SBOM" alone, and never 0 CVEs.
   // A scanner's report (Trivy Operator's without its SBOM) is an assessment, and a failed report read says nothing either way.
-  const na = noVulnReport(e) ? notAssessable(img) : null;
+  const na = catalogOn && noVulnReport(e) ? notAssessable(img) : null;
   if (na) return <NotAssessableState na={na} compact />;
   // Chips only where there is a node SBOM: every other row renders from the reads exactly as before the node catalog.
   if (img.sbomSources?.includes('node')) {
@@ -443,7 +445,7 @@ function SbomCell({ img, e }: { img: ImageSummary; e: ImageEnrichment | undefine
       </div>
     );
   }
-  const pending = catalogPending(img);
+  const pending = catalogOn ? catalogPending(img) : null;
   if (pending) {
     return (
       <div className="flex flex-col items-start gap-1">
@@ -488,7 +490,7 @@ function SbomReadCell({ e }: { e: ImageEnrichment | undefined }) {
   );
 }
 
-function ImageRow({ img, e, onOpen }: { img: ImageSummary; e: ImageEnrichment | undefined; onOpen: () => void }) {
+function ImageRow({ img, e, catalogOn, onOpen }: { img: ImageSummary; e: ImageEnrichment | undefined; catalogOn: boolean; onOpen: () => void }) {
   return (
     <tr data-testid="image-row" onClick={onOpen} className="cursor-pointer hover:bg-hubble-hover/40 transition-colors">
       <td className="px-4 py-2.5 align-top sm:min-w-52">
@@ -504,12 +506,12 @@ function ImageRow({ img, e, onOpen }: { img: ImageSummary; e: ImageEnrichment | 
         <div className="sm:hidden mt-2 space-y-1.5 text-xs">
           <WorkloadsCell e={e} />
           <VulnDataCell e={e} />
-          <SbomCell img={img} e={e} />
+          <SbomCell img={img} e={e} catalogOn={catalogOn} />
         </div>
       </td>
       <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs min-w-40"><WorkloadsCell e={e} /></td>
       <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><VulnDataCell e={e} /></td>
-      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><SbomCell img={img} e={e} /></td>
+      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><SbomCell img={img} e={e} catalogOn={catalogOn} /></td>
       <td className="px-2 py-2.5 align-top text-tertiary"><ChevronRight className="w-4 h-4" aria-hidden /></td>
     </tr>
   );

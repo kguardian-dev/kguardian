@@ -348,8 +348,8 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
       const tasks = rows.map((r) => async () => {
         const [d, v] = await Promise.allSettled([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 })]);
         // No report means nothing was matched from an SBOM, so that read is skipped (most digests on a cluster without a scanner); a failed report read still looks.
-        // The one exception: a registry SBOM (`sbomSources`), whose trust varies and so needs its report. Trivy Operator and node SBOMs are always `scanned`, so they need no read to show.
-        const skipSbom = v.status === 'fulfilled' && v.value.reports.length === 0 && !r.sbomSources?.includes('registry');
+        // The one exception: a registry SBOM beside a node one (`sbomSources`), the only case that renders chips and needs a read (a registry SBOM's trust varies). Trivy Operator and node SBOMs are always `scanned`; every other row reads as it always did.
+        const skipSbom = v.status === 'fulfilled' && v.value.reports.length === 0 && !(r.sbomSources?.includes('registry') && r.sbomSources.includes('node'));
         let sb: PromiseSettledResult<SbomPage> | null = null;
         if (!skipSbom) [sb] = await Promise.allSettled([api.getImageSbom(r.digest, { limit: 1 })]);
         const e: ImageEnrichment = {

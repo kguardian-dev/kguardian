@@ -53,13 +53,15 @@ describe('CatalogPendingChip', () => {
 });
 
 describe('NotAssessableState', () => {
-  test('compact: the chip with the short reason, the sentence in its title and as screen-reader text', () => {
+  test('compact: the chip with the short reason, the sentence in its title, and once for screen readers', () => {
     render(<NotAssessableState na={notAssessable({ nodeCatalog: nc({ state: 'failed', reason: 'oom' }) })!} compact />);
     const el = screen.getByTestId('not-assessable');
     expect(el.getAttribute('data-reason')).toBe('oom');
     expect(within(el).getByText('Not assessable').getAttribute('title')).toMatch(/ran out of memory.*Retried after a back-off\.$/);
     expect(within(el).getByText('out of memory')).toBeTruthy();
-    expect(el.querySelector('.sr-only')!.textContent).toMatch(/ran out of memory/);
+    // Screen readers get the sentence once: the tooltip chip is hidden from them, the text is not.
+    expect(within(el).getByText('Not assessable').closest('[aria-hidden="true"]')).not.toBeNull();
+    expect([...el.querySelectorAll('.sr-only')].map((x) => x.textContent).join('')).toMatch(/^Not assessable: \. .*ran out of memory/);
     expect(el.textContent).not.toMatch(/0 CVE|No vulnerabilities|clean/i);
   });
 
