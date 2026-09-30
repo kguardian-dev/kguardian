@@ -61,6 +61,10 @@ type Metrics struct {
 	// GrypeComponentsClamped counts matches whose SBOM union exceeded the
 	// component cap and was truncated.
 	GrypeComponentsClamped prometheus.Counter
+	// GrypeNodeGroupWaitExpired counts groups (last matched with a node
+	// SBOM) matched with what they held after waiting NodeGroupMaxWait for
+	// the other SBOMs of that match.
+	GrypeNodeGroupWaitExpired prometheus.Counter
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -148,6 +152,10 @@ func New() *Metrics {
 			Name: "kguardian_supplychain_grype_components_clamped_total",
 			Help: "Matches whose de-duplicated SBOM union exceeded the component cap and was truncated.",
 		}),
+		GrypeNodeGroupWaitExpired: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_grype_node_group_wait_expired_total",
+			Help: "Groups last matched with a node SBOM that were matched with what they held after waiting GRYPE_NODE_GROUP_MAX_WAIT for the other SBOMs of that match.",
+		}),
 		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_source_healthy",
 			Help: "0 while a source's list/watch is failing repeatedly, else 1.",
@@ -162,7 +170,7 @@ func New() *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
 		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups, m.NodeSBOMFetches,
-		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeSBOMBytesHeld, m.GrypeSBOMsEvicted, m.GrypeQuarantined, m.GrypeComponentsClamped, m.PendingEmissions,
+		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeSBOMBytesHeld, m.GrypeSBOMsEvicted, m.GrypeQuarantined, m.GrypeComponentsClamped, m.GrypeNodeGroupWaitExpired, m.PendingEmissions,
 	)
 	return m
 }

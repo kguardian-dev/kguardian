@@ -1,11 +1,17 @@
 package match
 
 import (
+	"context"
 	"fmt"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"math/rand"
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,11 +395,12 @@ func TestGroupMoveRequeuesOnlyWithANodeSBOM(t *testing.T) {
 // evictAll drops every settled group's SBOMs, as a full budget would.
 func evictAll(c *Coordinator) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	limit := c.MaxHeldBytes
 	c.MaxHeldBytes = 1
 	c.evictLocked("", 0)
 	c.MaxHeldBytes = limit
+	c.mu.Unlock()
+	c.flushRefetches()
 }
 
 func emissions(s *sink) int {
@@ -513,18 +520,64 @@ func TestEmptyNodeOfferOnlyReleasesAHeldOne(t *testing.T) {
 	}
 }
 
+// heldCheckMatcher checks, at every match, that the input contains every
+// component of the Trivy and registry SBOMs the coordinator holds for the
+// group: whatever the waiting did, a payload never has fewer of their
+// findings than the SBOMs actually held.
+type heldCheckMatcher struct {
+	*mockMatcher
+	c   *Coordinator
+	bad []string
+}
+
+func (h *heldCheckMatcher) Match(ctx context.Context, sb *types.ImageSBOM) ([]types.Vulnerability, error) {
+	h.c.mu.Lock()
+	want := map[string]bool{}
+	for _, m := range h.c.membersLocked(sb.Image.Digest) {
+		if m.Source == types.SourceNode {
+			continue
+		}
+		for _, comp := range m.Components {
+			want[comp.Name] = true
+		}
+	}
+	h.c.mu.Unlock()
+	got := map[string]bool{}
+	for _, comp := range sb.Components {
+		got[comp.Name] = true
+	}
+	for n := range want {
+		if !got[n] {
+			h.bad = append(h.bad, sb.Image.Digest+" lacks held "+n)
+		}
+	}
+	return h.mockMatcher.Match(ctx, sb)
+}
+
 // Invariant, over random orders of offers, evictions, database updates
-// and time: once a group with a node SBOM has been matched with Trivy's
-// or a registry SBOM, it is never matched without it again (none of them
-// is ever deleted here; changed content is re-offered, so still present).
-// Groups that never held a node SBOM are left as on main and not checked.
+// and time:
+//   - within NodeGroupMaxWait, once a group with a node SBOM has been
+//     matched with Trivy's or a registry SBOM, it is never matched without
+//     it again (none is ever declared gone here; changed content is
+//     re-offered, so still present);
+//   - at every match, including after the cap, the input holds every
+//     component of the Trivy and registry SBOMs held for the group;
+//   - no payload with Trivy's or a registry SBOM is pinned.
+//
+// Groups that never held a node SBOM are left as on main and not checked
+// for the first rule.
 func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
 	rng := rand.New(rand.NewSource(1851))
+	expiredRounds := 0
 	for round := 0; round < 300; round++ {
 		now := time.Unix(1000, 0)
-		m := &mockMatcher{built: time.Unix(100, 0)}
+		mm := &mockMatcher{built: time.Unix(100, 0)}
 		s := &sink{}
-		c := &Coordinator{Matcher: m, Sink: s, Log: quiet()}
+		met := metrics.New()
+		log, hook := logtest.NewNullLogger()
+		c := &Coordinator{Sink: s, Log: log, Metrics: met}
+		hm := &heldCheckMatcher{mockMatcher: mm, c: c}
+		c.Matcher = hm
 		c.now = func() time.Time { return now }
 		content := func(prefix string) []string {
 			n := rng.Intn(3)
@@ -535,6 +588,7 @@ func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
 			return out
 		}
 		prev := map[string][]string{}
+		expiredSince := map[string]bool{} // the cap ended the key's wait since its last payload
 		seen := 0
 		var ops []string
 		for step := 0; step < 40; step++ {
@@ -555,16 +609,27 @@ func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
 				evictAll(c)
 				ops = append(ops, "evict")
 			case 6:
-				m.setBuilt(time.Unix(int64(200+step), 0))
+				mm.setBuilt(time.Unix(int64(200+step), 0))
 				ops = append(ops, "db")
 			case 7:
 				now = now.Add(time.Duration(rng.Intn(15)) * time.Minute)
 				c.mu.Lock()
 				c.requeueLocked()
 				c.mu.Unlock()
-				ops = append(ops, "tick")
+				ops = append(ops, fmt.Sprintf("tick@%d", now.Unix()-1000))
 			}
 			pass(c)
+			if len(hm.bad) > 0 {
+				t.Fatalf("round %d: %v after %v", round, hm.bad, ops)
+			}
+			for _, entry := range hook.AllEntries() {
+				if d, ok := entry.Data["digest"].(string); ok && strings.Contains(entry.Message, "did not come back in time") {
+					expiredSince[d] = true
+					expiredRounds++
+					ops = append(ops, "expired:"+d[7:])
+				}
+			}
+			hook.Reset()
 			s.mu.Lock()
 			fresh := s.es[seen:]
 			seen = len(s.es)
@@ -574,7 +639,7 @@ func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
 					continue
 				}
 				cur := e.Vulns.SBOMSources
-				if p := prev[e.Digest]; slices.Contains(p, types.SourceNode) {
+				if p := prev[e.Digest]; !expiredSince[e.Digest] && slices.Contains(p, types.SourceNode) {
 					for _, src := range p {
 						if src != types.SourceNode && !slices.Contains(cur, src) {
 							t.Fatalf("round %d: %s matched without %s after %v (before %v, now %v)", round, e.Digest, src, ops, p, cur)
@@ -584,9 +649,14 @@ func TestInvariantNodeNeverDropsOtherSources(t *testing.T) {
 				if e.PinPlatform && (slices.Contains(cur, types.SourceTrivyOperator) || slices.Contains(cur, types.SourceRegistry)) {
 					t.Fatalf("round %d: pinned payload with other sources %v after %v", round, cur, ops)
 				}
+				ops = append(ops, fmt.Sprintf("emit:%s%v", e.Digest[7:], cur))
+				delete(expiredSince, e.Digest)
 				prev[e.Digest] = cur
 			}
 		}
+	}
+	if expiredRounds == 0 {
+		t.Error("the cap never expired: the sequences do not exercise it")
 	}
 }
 
@@ -612,4 +682,163 @@ func emission(t *testing.T, s *sink, digest string) trivy.Emission {
 	}
 	t.Fatalf("no vulnerabilities emitted for %s", digest)
 	return trivy.Emission{}
+}
+
+type recordingRefetcher struct {
+	mu      sync.Mutex
+	digests []string
+}
+
+func (r *recordingRefetcher) Refetch(d string) {
+	r.mu.Lock()
+	r.digests = append(r.digests, d)
+	r.mu.Unlock()
+}
+func (r *recordingRefetcher) got() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := slices.Clone(r.digests)
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+func advance(c *Coordinator, now *time.Time, d time.Duration) {
+	*now = now.Add(d)
+	c.mu.Lock()
+	c.requeueLocked()
+	c.mu.Unlock()
+	pass(c)
+}
+
+// A changed node SBOM after an eviction: the eviction asks Trivy to emit
+// again, and once it does the group is matched with the new node SBOM.
+// If Trivy never does, the cap matches what is held.
+func TestChangedNodeSBOMAfterEvictionIsMatched(t *testing.T) {
+	for _, trivyBack := range []bool{true, false} {
+		now := time.Unix(1000, 0)
+		m := &mockMatcher{built: time.Unix(100, 0)}
+		met := metrics.New()
+		c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet(), Metrics: met}
+		c.now = func() time.Time { return now }
+		tr, reg := &recordingRefetcher{}, &recordingRefetcher{}
+		c.SetRefetcher(types.SourceTrivyOperator, tr)
+		c.SetRefetcher(types.SourceRegistry, reg)
+		c.Offer(trivySBOM("sha256:d", "openssl"))
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+		pass(c)
+		evictAll(c)
+		if !reflect.DeepEqual(tr.got(), []string{"sha256:d"}) || len(reg.got()) != 0 {
+			t.Fatalf("refetch asked of trivy %v, registry %v", tr.got(), reg.got())
+		}
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "zlib")) // a new catalog
+		pass(c)
+		if m.n("sha256:d") != 1 {
+			t.Fatal("matched without Trivy's SBOM inside the wait")
+		}
+		if trivyBack {
+			c.Offer(trivySBOM("sha256:d", "openssl")) // the resync re-emits it
+			pass(c)
+			if names(m.input("sha256:d")) != "openssl,libc6,zlib" {
+				t.Errorf("after Trivy's re-emit: %v", m.input("sha256:d"))
+			}
+			continue
+		}
+		advance(c, &now, 29*time.Minute)
+		if m.n("sha256:d") != 1 {
+			t.Fatal("matched before the cap")
+		}
+		advance(c, &now, 2*time.Minute)
+		if names(m.input("sha256:d")) != "libc6,zlib" || testutil.ToFloat64(met.GrypeNodeGroupWaitExpired) != 1 {
+			t.Errorf("after the cap: %v (expired %v)", m.input("sha256:d"), testutil.ToFloat64(met.GrypeNodeGroupWaitExpired))
+		}
+	}
+}
+
+// A Trivy change while the group's registry input is gone for good: the
+// registry source's gone signal ends the wait at once; without it the cap
+// does.
+func TestTrivyChangeWithAGoneRegistryInputIsMatched(t *testing.T) {
+	for _, gone := range []bool{true, false} {
+		now := time.Unix(1000, 0)
+		m := &mockMatcher{built: time.Unix(100, 0)}
+		c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet()}
+		c.now = func() time.Time { return now }
+		c.Offer(trivySBOM("sha256:d", "openssl"))
+		c.Offer(registrySBOM("sha256:p", "sha256:d", "musl"))
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+		pass(c)
+		evictAll(c)
+		c.Offer(trivySBOM("sha256:d", "openssl", "curl")) // changed
+		c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6"))
+		pass(c)
+		if m.n("sha256:d") != 1 {
+			t.Fatal("matched while the registry SBOM may still come back")
+		}
+		if gone {
+			c.Gone("sha256:p", types.SourceRegistry)
+			pass(c)
+		} else {
+			advance(c, &now, 31*time.Minute)
+		}
+		if names(m.input("sha256:d")) != "curl,openssl,libc6" {
+			t.Errorf("gone %v: %v", gone, m.input("sha256:d"))
+		}
+	}
+}
+
+// Waiting groups are evictable: under memory pressure their SBOMs go (the
+// requirement stays in groupState), so what is held stays bounded.
+func TestWaitingGroupsAreEvicted(t *testing.T) {
+	const groups = 15 // within the kept state (MaxDigests*maxWaitingGroupsFactor = 20)
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet(), MaxDigests: 5}
+	for i := 0; i < groups; i++ {
+		d := fmt.Sprintf("sha256:%02d", i)
+		c.Offer(trivySBOM(d, "openssl"))
+		c.Offer(nodeSBOM(d, "linux/arm64", "libc6"))
+		pass(c)
+	}
+	evictAll(c)
+	m.setBuilt(time.Unix(200, 0)) // stale matches: only waiting could let them go
+	for i := 0; i < groups; i++ {
+		d := fmt.Sprintf("sha256:%02d", i)
+		c.Offer(nodeSBOM(d, "linux/arm64", "libc6", "zlib")) // each group now waits for Trivy
+		pass(c)
+		if m.n(d) != 1 {
+			t.Fatalf("%s matched without Trivy's SBOM", d)
+		}
+		if c.Held() > 6 {
+			t.Fatalf("held %d digests after %d waiting groups (MaxDigests 5)", c.Held(), i+1)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.groups) > 5*maxWaitingGroupsFactor {
+		t.Errorf("%d group states kept", len(c.groups))
+	}
+}
+
+// Node off: evictions ask no source to emit again, and Gone changes
+// nothing.
+func TestNodeOffEvictionAsksNothing(t *testing.T) {
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet()}
+	tr := &recordingRefetcher{}
+	c.SetRefetcher(types.SourceTrivyOperator, tr)
+	c.SetRefetcher(types.SourceRegistry, tr)
+	c.Offer(trivySBOM("sha256:d", "openssl"))
+	c.Offer(registrySBOM("sha256:p", "sha256:d", "musl"))
+	pass(c)
+	evictAll(c)
+	c.Gone("sha256:p", types.SourceRegistry)
+	c.Offer(trivySBOM("sha256:d", "openssl", "curl"))
+	pass(c)
+	if len(tr.got()) != 0 || names(m.input("sha256:d")) != "curl,openssl" {
+		t.Errorf("refetches %v, input %v", tr.got(), m.input("sha256:d"))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groups["sha256:d"].lastOthers != nil {
+		t.Error("node off, yet a requirement was kept")
+	}
 }
