@@ -93,6 +93,36 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
 
+  # Reachability-aware Go vulnerability scan of the cataloger, which embeds
+  # Syft (several hundred modules) and parses untrusted image content.
+  # Results go to the Security tab like the Trivy scans; the syft/grype
+  # Renovate group keeps the dependency tree moving.
+  govulncheck-cataloger:
+    name: govulncheck (cataloger)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cataloger
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: cataloger/go.mod
+          cache-dependency-path: cataloger/go.sum
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -format sarif ./... > govulncheck.sarif
+
+      - name: Upload govulncheck results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        if: always()
+        with:
+          sarif_file: "cataloger/govulncheck.sarif"
+          category: "govulncheck-cataloger"
+
   # Helm chart security linting
   helm-lint-security:
     name: Helm Security Lint

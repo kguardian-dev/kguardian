@@ -44,6 +44,33 @@
       "pinDigests": false,
     },
     {
+      // The cataloger (Syft as a library) produces the SBOMs the supplychain
+      // matcher (Grype) matches, so both must resolve the same Syft and
+      // stereoscope (cataloger/hack/check-syft-version.sh fails CI when they
+      // differ). Syft usually releases ahead of Grype, so the cataloger
+      // never takes a Syft bump on its own: it follows whatever Grype
+      // resolves, via cataloger/hack/sync-syft.sh.
+      "description": "The cataloger's Syft follows the matcher's: never bump it alone",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["cataloger/go.mod"],
+      "matchDepNames": ["github.com/anchore/syft", "github.com/anchore/stereoscope"],
+      "enabled": false,
+    },
+    {
+      // A Grype bump moves the matcher's indirect Syft (go mod tidy). Its PR
+      // then fails the cataloger's lock check until someone runs
+      // cataloger/hack/sync-syft.sh on the branch, which also triggers
+      // cataloger-difftest.yaml. Not auto-merged: reviewed with the difftest.
+      "description": "Grype (supplychain-matcher) bumps: review with the cataloger's Syft sync",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["supplychain-matcher/go.mod"],
+      "matchDepNames": ["github.com/anchore/grype"],
+      "groupName": "syft-grype",
+      "postUpdateOptions": ["gomodTidy"],
+      "automerge": false,
+      "addLabels": ["needs-manual-review"],
+    },
+    {
       // TypeScript 7 (the Go-native compiler) is GA on npm's `latest`, but
       // typescript-eslint refuses to run against it — it throws
       // "typescript-eslint does not support TS 7.0" at load, breaking
