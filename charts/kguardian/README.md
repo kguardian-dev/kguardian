@@ -106,7 +106,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.20.0"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.20.1"` | Broker version tag (auto-updated by release-please) |
 | broker.imageInventory.retention | object | `{"batchSize":5000,"days":30,"intervalSeconds":3600}` | Retention for the image inventory: `images` (one row per image digest) and `workload_containers` (one row per workload, container and digest, with its securityContext). Running pods refresh their rows continuously, so only digests no running pod has reported for `days` are pruned (a finished rollout's old image, a deleted workload), followed by images nothing references any more. The tables are sized by what runs, not by time. |
 | broker.imageInventory.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. Same [100, 100000] clamp as `broker.audit.retention.batchSize`, for the same reason. |
 | broker.imageInventory.retention.days | int | `30` | Prune inventory rows no running pod has refreshed for this many days. Set to 0 to disable pruning (rows of deleted workloads are then kept forever). |
@@ -216,7 +216,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.17.0"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.17.2"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Init container image pull policy. `IfNotPresent`, not `Always`: this init container runs on every node, and `Always` forces a registry manifest request on every pod start even when the image is already cached locally. Those requests count against Docker Hub's anonymous pull limit, which is per source IP, so a NATed cluster shares one bucket across the whole fleet. A throttled pull leaves the init container in ImagePullBackOff and the agent never starts on that node, so its pods are never observed and the generated policy silently omits their rules. |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -282,7 +282,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
 | database.user | string | `"rust"` | PostgreSQL role used by the broker. Must exist on external Postgres. |
-| evaluator | object | `{"affinity":{},"applicationSecurityProfiles":{"enabled":false,"installCRD":true,"resyncInterval":"5m","staleAfter":""},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.5.1"},"imagePullSecrets":[],"imageTrust":{"enabled":null,"installCRDs":true,"interval":"5m"},"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
+| evaluator | object | `{"affinity":{},"applicationSecurityProfiles":{"enabled":false,"installCRD":true,"resyncInterval":"5m","staleAfter":""},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.5.2"},"imagePullSecrets":[],"imageTrust":{"enabled":null,"installCRDs":true,"interval":"5m"},"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
 | evaluator.affinity | object | `{}` | Affinity rules for evaluator pod assignment |
 | evaluator.applicationSecurityProfiles.enabled | bool | `false` | Report each workload's security profile (#1533) as an `ApplicationSecurityProfile` resource. You create one per workload (spec.workloadRef) and set spec.acceptedRevision to the profile revision you reviewed; the evaluator reads the profile from the broker and writes status (posture, per-dimension status, deviation from the accepted revision). Report-only: it never changes a workload and never creates or deletes these resources. Off by default. When broker.auth.enabled=true the evaluator presents the READ-scope token. Requires evaluator.enabled=true. |
 | evaluator.applicationSecurityProfiles.installCRD | bool | `true` | Install the ApplicationSecurityProfile CRD as a release resource (kept on `helm uninstall`, like the SeccompProfile CRD). Set false if you manage CRDs yourself; then apply `charts/kguardian/files/kguardian.dev_applicationsecurityprofiles.yaml` before enabling. |
@@ -298,7 +298,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | evaluator.image.pullPolicy | string | `"IfNotPresent"` | Evaluator image pull policy |
 | evaluator.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/evaluator"` | Evaluator container image repository |
 | evaluator.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| evaluator.image.tag | string | `"v0.5.1"` | Evaluator version tag (auto-updated by release-please) |
+| evaluator.image.tag | string | `"v0.5.2"` | Evaluator version tag (auto-updated by release-please) |
 | evaluator.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | evaluator.imageTrust.enabled | bool | `nil` | Evaluate ImageTrustPolicy / ClusterImageTrustPolicy: compare every running container's image with the signers kguardian verified and write what would be denied to each policy's status. Report only; nothing is blocked. Unset (null) follows supplychain.signatureDiscovery.enabled. Reads the broker with the read token. |
 | evaluator.imageTrust.installCRDs | bool | `true` | Install the ImageTrustPolicy and ClusterImageTrustPolicy CRDs as release resources (kept on `helm uninstall`, like the SeccompProfile CRD), so `helm upgrade` installs and updates them. Independent of `enabled`: the CRDs exist so policies can be written before evaluation is on. Set false if you manage CRDs yourself; then apply `charts/kguardian/files/kguardian.dev_imagetrustpolicies.yaml` and `kguardian.dev_clusterimagetrustpolicies.yaml`. |
@@ -335,7 +335,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.21.0"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.21.1"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.apiPath | bool | `true` | Also route /api on the same host to the Broker. The Broker serves bare paths (/pod/info, /pod/traffic), so this only works behind an ingress controller that strips the prefix, such as nginx with rewrite-target. Controllers that pass the path through unchanged (AWS ALB, for example) make every /api request a 404. The UI image proxies /api to the Broker itself, so setting this to false serves the whole application from the UI Service and works on any controller. |
@@ -394,7 +394,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.13.0"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.13.1"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
@@ -452,7 +452,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | nodeCatalog.worker.image.pullPolicy | string | `"IfNotPresent"` | Cataloger image pull policy |
 | nodeCatalog.worker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/cataloger"` | Cataloger image repository |
 | nodeCatalog.worker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| nodeCatalog.worker.image.tag | string | `"v0.1.1"` | Cataloger version tag |
+| nodeCatalog.worker.image.tag | string | `"v0.1.3"` | Cataloger version tag |
 | nodeCatalog.worker.logLevel | string | `"info"` | Worker log level (`LOG_LEVEL`): `info` or `debug`. |
 | nodeCatalog.worker.memoryLimit | string | `"640Mi"` | Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes (a number or a string) or a whole number of `Ki`, `Mi`, `Gi` or `Ti`; the chart hands the worker bytes. The worker reports `oom` and retries OS packages only when a scan passes it. |
 | nodeCatalog.worker.resources | object | `{"limits":{"cpu":"500m","memory":"1Gi"},"requests":{"cpu":"50m","memory":"512Mi"}}` | Worker resources. The memory limit must hold `memoryLimit` + `tmpLimit` + 128Mi (the child's burst margin and the parent), so the worker's own limits always trip before a cgroup OOM kill, which on cgroup v2 takes the whole container (kubelet sets `memory.oom.group`; `singleProcessOOMKill: true` on Kubernetes 1.32+ kills only the child). The chart refuses a smaller limit. The request (512Mi, half the limit) is reserved on every node, since this runs in a DaemonSet. Under node memory pressure the kubelet evicts pods using more than their request first, and this pod is the Controller's. Lowering it saves that reservation per node but makes the Controller pod an earlier eviction candidate while a large scan runs; raising it to the limit (1Gi) takes it off that list at the cost of 1Gi per node. Override the keys you change; null restores this default rather than removing the resources. |
@@ -481,7 +481,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.grype.image.pullPolicy | string | `"IfNotPresent"` | Matcher image pull policy |
 | supplychain.grype.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain-matcher"` | Matcher image repository |
 | supplychain.grype.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| supplychain.grype.image.tag | string | `"v0.1.1"` | Matcher version tag |
+| supplychain.grype.image.tag | string | `"v0.1.2"` | Matcher version tag |
 | supplychain.grype.matchTimeout | string | `"2m"` | Time limit for matching one SBOM |
 | supplychain.grype.nodeGroupMaxWait | string | `"30m"` | With the node source on: how long a group last matched with a node SBOM waits, after its SBOMs were dropped, for the other SBOMs of that match before it is matched with what it holds (`GRYPE_NODE_GROUP_MAX_WAIT`, at least 1m; the chart refuses less). Frequent expiries (`kguardian_supplychain_grype_node_group_wait_expired_total`) mean the SBOM budget is too small: raise it with `GRYPE_SBOM_BUDGET_MIB` in `supplychain.env` (default 96, at least 16) and the memory limit with it. Rendered only when the node source is on. |
 | supplychain.grype.persistence.enabled | bool | `false` | Keep the DB on a PersistentVolumeClaim instead of an emptyDir, so a restart does not re-download it (181 MB; 75-80 s to fetch, verify and unpack on the measuring machine). Recommended for nodes with less than about 40 GB of free ephemeral storage: the emptyDir needs up to about 6.4 GB during a refresh. |
@@ -493,7 +493,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
 | supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |
 | supplychain.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| supplychain.image.tag | string | `"v0.2.0"` | Supplychain version tag |
+| supplychain.image.tag | string | `"v0.2.2"` | Supplychain version tag |
 | supplychain.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | supplychain.logLevel | string | `"info"` | Log level (panic|fatal|error|warn|info|debug|trace) |
 | supplychain.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator |
