@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.0...supplychain/v0.2.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **supplychain:** recheck the node catalog on a backoff after a 404, not hourly ([#1876](https://github.com/kguardian-dev/kguardian/issues/1876)) ([ec084b8](https://github.com/kguardian-dev/kguardian/commit/ec084b806ad5746eadc15af5e1ca2228b9d10995))
+
 ## [0.2.0](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.1.1...supplychain/v0.2.0) (2026-09-30)
 
 
