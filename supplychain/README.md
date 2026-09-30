@@ -286,13 +286,16 @@ miss node packages: a node SBOM never touches what the other sources give.
 **Old broker.** Before listing, the source asks `GET /catalog/status`
 (read scope) once. A 404 there means the broker predates the node catalog:
 the source logs one info line, lists and fetches nothing, and asks again
-once an hour, resuming if the broker has been upgraded. A 503 (catalog
-token not configured) still counts as available, since SBOMs stored
-earlier can be read. A 401 or 403 (the token lacks the read scope) is
-logged once at error level, sets
-`kguardian_supplychain_source_healthy{source="node"}` to 0 and is asked
-again hourly. A network or 5xx failure warns once and is retried on the
-next interval. A 404 on the SBOM route itself is an ordinary fetch error.
+on a backoff: 30s after the first 404 (or `NODE_SBOM_INTERVAL` when
+shorter), doubling each time up to once an hour. It resumes at the first
+probe that succeeds, so when supplychain rolls out before an upgraded
+broker it is active within one step. A 503 (catalog token not
+configured) still counts as available, since SBOMs stored earlier can be
+read. A 401 or 403 (the token lacks the read scope) is logged once at
+error level, sets `kguardian_supplychain_source_healthy{source="node"}`
+to 0 and is asked again on the same backoff. Each line is logged once
+per streak, not per probe. A network or 5xx failure warns once and is
+retried on the next interval. A 404 on the SBOM route itself is an ordinary fetch error.
 
 Counted in `kguardian_supplychain_node_sbom_fetches_total{result}`
 (`fetched`, `none`, `changed`, `too_large`, `error`, `released`,

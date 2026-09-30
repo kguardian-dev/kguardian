@@ -20,9 +20,11 @@
 // they go to the coordinator only, not through the dispatch queue.
 //
 // Against a broker without the node catalog (GET /catalog/status answers
-// 404) the source idles: it logs once, lists nothing, and asks again only
-// every IdleRecheck. A token the broker refuses (401/403) is logged once
-// at error level and retried at the same pace.
+// 404) the source idles: it logs once, lists nothing, and asks again on a
+// backoff that starts at IdleRetry and doubles up to IdleRecheck, so a
+// supplychain rolled out before its broker resumes within one step of the
+// upgrade. A token the broker refuses (401/403) is logged once at error
+// level and retried on the same backoff. A probe that succeeds ends it.
 package nodesource
 
 import (
@@ -73,8 +75,12 @@ type Source struct {
 	// RecheckAfter is how long an unchanged node SBOM goes before it is
 	// fetched and offered again. Default 24h.
 	RecheckAfter time.Duration
-	// IdleRecheck is how often a broker without the node catalog, or one
-	// that refuses the token, is asked again. Default 1h.
+	// IdleRetry is how long after its first refusal a broker without the
+	// node catalog, or one that refuses the token, is asked again; each
+	// further refusal doubles it, up to IdleRecheck. Default 30s (Interval
+	// when shorter).
+	IdleRetry time.Duration
+	// IdleRecheck caps that backoff. Default 1h.
 	IdleRecheck time.Duration
 	// Workers bounds concurrent fetches. Default 2.
 	Workers int
@@ -86,11 +92,12 @@ type Source struct {
 	mu        sync.Mutex
 	fetched   map[string]fetchState // digest -> last fetch
 	ready     bool
-	available bool      // the broker has the node catalog
-	idle      bool      // on a broker without it (logged once)
-	denied    bool      // the broker refuses the token (logged once)
-	nextProbe time.Time // while idle or denied
-	probeErr  bool      // the last probe failed (logged once per streak)
+	available bool          // the broker has the node catalog
+	idle      bool          // on a broker without it (logged once)
+	denied    bool          // the broker refuses the token (logged once)
+	nextProbe time.Time     // while idle or denied
+	backoff   time.Duration // the last wait before nextProbe
+	probeErr  bool          // the last probe failed (logged once per streak)
 }
 
 type fetchState struct {
@@ -113,6 +120,10 @@ func (s *Source) defaults() {
 	if s.IdleRecheck <= 0 {
 		s.IdleRecheck = time.Hour
 	}
+	if s.IdleRetry <= 0 {
+		s.IdleRetry = min(30*time.Second, s.Interval)
+	}
+	s.IdleRetry = min(s.IdleRetry, s.IdleRecheck)
 	if s.Workers <= 0 {
 		s.Workers = 2
 	}
@@ -160,9 +171,20 @@ func (s *Source) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(s.Interval):
+		case <-time.After(s.wait()):
 		}
 	}
+}
+
+// wait is how long Run sleeps before the next pass: Interval, or less
+// while idle or denied when the next probe is due sooner.
+func (s *Source) wait() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.available || (!s.idle && !s.denied) {
+		return s.Interval
+	}
+	return min(s.Interval, max(s.nextProbe.Sub(s.now()), 0))
 }
 
 // Pass runs one inventory listing and the fetches it calls for.
@@ -208,7 +230,8 @@ func (s *Source) Pass(ctx context.Context) {
 }
 
 // checkAvailable asks the broker whether it has the node catalog until it
-// says yes, at most once per IdleRecheck while it says no (or refuses).
+// says yes, on a backoff (IdleRetry doubling up to IdleRecheck) while it
+// says no or refuses the token.
 func (s *Source) checkAvailable(ctx context.Context) bool {
 	s.mu.Lock()
 	if s.available {
@@ -231,25 +254,28 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 			s.Log.Info("node sbom source: the broker now serves the node catalog; resuming")
 		}
 		s.available, s.idle, s.denied, s.probeErr = true, false, false, false
+		s.nextProbe, s.backoff = time.Time{}, 0
 		s.setGauges(1, 1)
 		return true
 	case errors.Is(err, broker.ErrNoNodeCatalog):
 		if !s.idle {
-			s.Log.WithField("recheck", s.IdleRecheck.String()).
-				Info("node sbom source: the broker has no node catalog (GET /catalog/status answers 404); idle")
+			s.backoff = 0 // a new streak
+			s.Log.WithFields(logrus.Fields{"retry": s.IdleRetry.String(), "maxRetry": s.IdleRecheck.String()}).
+				Info("node sbom source: the broker has no node catalog (GET /catalog/status answers 404); idle, rechecking with backoff")
 		}
 		s.idle, s.denied, s.probeErr = true, false, false
-		s.nextProbe = s.now().Add(s.IdleRecheck)
+		s.backOff()
 		s.setGauges(0, 1)
 		return false
 	case errors.As(err, &se) && (se.StatusCode == http.StatusUnauthorized || se.StatusCode == http.StatusForbidden):
 		s.count("probe_denied")
 		if !s.denied {
-			s.Log.WithError(err).WithField("recheck", s.IdleRecheck.String()).
+			s.backoff = 0 // a new streak
+			s.Log.WithError(err).WithFields(logrus.Fields{"retry": s.IdleRetry.String(), "maxRetry": s.IdleRecheck.String()}).
 				Error("node sbom source: the broker refuses this token (it needs the read scope); not reading node SBOMs")
 		}
 		s.denied, s.idle, s.probeErr = true, false, false
-		s.nextProbe = s.now().Add(s.IdleRecheck)
+		s.backOff()
 		s.setGauges(-1, 0)
 		return false
 	default:
@@ -261,6 +287,14 @@ func (s *Source) checkAvailable(ctx context.Context) bool {
 		s.probeErr = true
 		return false
 	}
+}
+
+// backOff schedules the next probe after a refusal: IdleRetry after the
+// first of a streak, doubling after each further one, at most IdleRecheck.
+// Callers hold s.mu.
+func (s *Source) backOff() {
+	s.backoff = min(max(s.backoff*2, s.IdleRetry), s.IdleRecheck)
+	s.nextProbe = s.now().Add(s.backoff)
 }
 
 // due returns the running images whose node SBOM is new, changed, due for
