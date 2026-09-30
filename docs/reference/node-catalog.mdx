@@ -39,7 +39,7 @@ must stay a string (an image tag such as `1.2`, a Secret key name such as
 Enabling restarts the Controller DaemonSet and the Broker once (new env
 vars and the sidecar). Rotating the `catalog` key needs both restarted
 again. It also needs Broker and Controller releases that include the node
-catalog (the releases after Broker 1.19.7 and Controller 1.16.2) and the
+catalog (Broker 1.20.0 and Controller 1.17.0 or later) and the
 `cataloger` image; an older Broker answers `404` and the Controller idles.
 
 The chart refuses to render when `nodeCatalog.enabled=true` and
@@ -68,7 +68,7 @@ component matches them with Grype. That needs `supplychain.enabled`,
 unless set to `true` or `false`. With the source on and the matcher off,
 the component ignores it with a warning and NOTES says so. Findings come
 back as source `grype` with `node` among their SBOM sources. It needs a
-supplychain release after 0.1.1; older ones ignore the setting. A name set
+supplychain 0.2.0 or later; older ones ignore the setting. A name set
 in `supplychain.env` (for example `NODE_SBOM_INTERVAL`) replaces the
 chart's own, and the chart refuses an interval of zero or a
 `nodeGroupMaxWait` under `1m`, which the component would not start with.
