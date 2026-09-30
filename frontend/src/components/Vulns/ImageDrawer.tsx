@@ -62,9 +62,12 @@ export function ImageDrawer({ digest, summary, onClose, onOpenCve, onOpenWorkloa
   const badDigest = detailError != null && (detailKind === 'not_found' || detailKind === 'bad_request');
   const ref = detail ? `${detail.repository ?? 'unknown repository'}${detail.tags.length ? `:${detail.tags.join(', ')}` : ''}` : shortDigest(digest);
   const matched = sbomFromMatcher(vulns.reports);
+  // Opened by deep link (a pasted #/images?digest=), there is no inventory row: no platform, completeness,
+  // pending or "not assessable" state is shown. That is safe: the SBOM list still comes from the read (a node
+  // SBOM still reads "Cataloged on node"), and with no SBOM it says "No SBOM from any source", which claims nothing.
   const nc = summary?.nodeCatalog;
-  // A scanner's vulnerability report is an assessment even without an SBOM.
-  const na = summary && vulns.reports?.length === 0 ? notAssessable(summary) : null;
+  // A scanner's vulnerability report is an assessment even without an SBOM; a failed or pending read says nothing either way.
+  const na = summary && Array.isArray(vulns.reports) && vulns.reports.length === 0 ? notAssessable(summary) : null;
   const pending = summary ? catalogPending(summary) : null;
   const partial = completenessNote(nc);
 

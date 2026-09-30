@@ -426,21 +426,24 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
   );
 }
 
+/** The vulnerability read landed and no scanner reported on the digest (a failed read is unknown, not "none"). */
+const noVulnReport = (e: ImageEnrichment | undefined) => e !== undefined && Array.isArray(e.vulnReports) && e.vulnReports.length === 0;
+
 function SbomCell({ img, e }: { img: ImageSummary; e: ImageEnrichment | undefined }) {
   // No SBOM from any source, no vulnerability report, and the node catalog could not make one: never "No SBOM" alone, and never 0 CVEs.
-  // A report from a scanner (Trivy Operator's without its SBOM) is an assessment, so it is not said then.
-  const na = e !== undefined && (e.vulnReports?.length ?? 0) === 0 ? notAssessable(img) : null;
+  // A scanner's report (Trivy Operator's without its SBOM) is an assessment, and a failed report read says nothing either way.
+  const na = noVulnReport(e) ? notAssessable(img) : null;
   if (na) return <NotAssessableState na={na} compact />;
-  const pending = catalogPending(img);
-  // A Broker that lists the sources (`sbomSources`) answers without the SBOM read; trust badges follow once it lands.
-  if (img.sbomSources?.length) {
+  // Chips only where there is a node SBOM: every other row renders from the reads exactly as before the node catalog.
+  if (img.sbomSources?.includes('node')) {
     return (
       <div className="flex flex-col items-start gap-1">
         <ProvenanceChips sources={img.sbomSources} nodeCatalog={img.nodeCatalog} reports={e?.sbomReports ?? null} />
-        {pending && <CatalogPendingChip {...pending} />}
+        {e?.sbomError != null && <UnknownPill error={e.sbomError} />}
       </div>
     );
   }
+  const pending = catalogPending(img);
   if (pending) {
     return (
       <div className="flex flex-col items-start gap-1">

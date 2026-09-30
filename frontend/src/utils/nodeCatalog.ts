@@ -20,7 +20,7 @@ import { sourceLabel } from './vulnView';
 export const CATALOG_REASON: Record<string, { short: string; copy: string }> = {
   // Back off 1 h, 6 h, then daily.
   timeout: { short: 'timed out', copy: 'The scan ran past its time limit. It is retried after a back-off.' },
-  oom: { short: 'out of memory', copy: 'The scan ran out of memory. It is retried after a back-off, with OS packages only.' },
+  oom: { short: 'out of memory', copy: 'The scan ran out of memory, even with OS packages only. It is retried after a back-off (1 h, 6 h, then daily).' },
   error: { short: 'scan error', copy: 'The cataloger failed on this image. It is retried after a back-off.' },
   // Another running instance may take it at once.
   pid_gone: { short: 'container went away', copy: 'The container exited or restarted during the scan. Another running instance is tried.' },
@@ -36,14 +36,15 @@ export const CATALOG_REASON: Record<string, { short: string; copy: string }> = {
   deferred_pressure: { short: 'node busy', copy: 'The node was under CPU, memory or I/O pressure, so the scan was put off.' },
   worker_unavailable: { short: 'cataloger down', copy: 'The cataloger sidecar on the node was not running or did not answer.' },
   no_cataloger: { short: 'no cataloger', copy: 'No node running this image has a cataloger (a Windows node, or a node without the Controller).' },
+  // A skip metric label, not a claim row's reason; kept so a Broker that ever sends it reads well.
   retry_cap: { short: 'too many retries', copy: 'Too many attempts failed on one node, so that node is skipped for 24 hours.' },
-  // Done without an SBOM.
+  // Done without an SBOM (superseded: a done row a newer catalog replaced).
   no_packages_found: { short: 'no packages found', copy: 'The cataloger read the image and found no packages it recognises (a scratch image or stripped binaries). Its vulnerabilities cannot be assessed. That is not the same as no CVEs.' },
   superseded: { short: 'replaced', copy: 'A newer catalog of this image replaced this one.' },
 };
 
+/** Released so another instance can take it at once. */
 const RETRY_REASONS = new Set(['pid_gone', 'drift', 'exited_before_catalog']);
-const PER_NODE_REASONS = new Set(['sandboxed', 'lazy_snapshotter', 'unsupported_rootfs', 'kernel_unsupported', 'lsm_denied', 'caps_unavailable', 'deferred_pressure', 'worker_unavailable', 'no_cataloger', 'retry_cap']);
 
 export const reasonShort = (r: string) => (Object.hasOwn(CATALOG_REASON, r) ? CATALOG_REASON[r].short : r);
 export const reasonCopy = (r: string) => (Object.hasOwn(CATALOG_REASON, r) ? CATALOG_REASON[r].copy : `The node catalog reported ${r}.`);
@@ -81,10 +82,12 @@ export interface NotAssessable {
 
 /**
  * "Not assessable": no source holds an SBOM for the image and the node
- * catalog has given up on it for now: nothing to catalog, a scan that
- * failed and backs off, or every node tried so far unable to read it.
- * A pending claim, or one released to another instance, is not this: it
- * is still being cataloged. Without `nodeCatalog` (older Broker, or no
+ * catalog has given up on it for now: nothing to catalog
+ * (`no_packages_found`), or a scan that failed and backs off. A pending
+ * row is never this, whatever its last reason: a per-node reason only
+ * skips that node for 24 hours while others may still catalog it. The
+ * caller also checks no scanner reported on the image (a vulnerability
+ * report is an assessment). Without `nodeCatalog` (older Broker, or no
  * node offered the digest) there is nothing to say.
  */
 export function notAssessable(img: Pick<ImageSummary, 'sbomSources' | 'nodeCatalog'>): NotAssessable | null {
@@ -93,34 +96,45 @@ export function notAssessable(img: Pick<ImageSummary, 'sbomSources' | 'nodeCatal
   const reason = nc.reason ?? '';
   if (nc.state === 'done' && reason === 'no_packages_found') return { reason, copy: reasonCopy(reason), terminal: true, retry: null };
   if (nc.state === 'failed') return { reason: reason || 'error', copy: reasonCopy(reason || 'error'), terminal: false, retry: 'Retried after a back-off.' };
-  if (nc.state === 'pending' && PER_NODE_REASONS.has(reason)) return { reason, copy: reasonCopy(reason), terminal: false, retry: 'Other nodes may still catalog it; this node is retried after 24 hours.' };
   return null;
 }
 
-/** A node catalog still at work on an image with no node SBOM yet; null otherwise. */
-export function catalogPending(img: Pick<ImageSummary, 'sbomSources' | 'nodeCatalog'>): { label: string; title: string } | null {
+/**
+ * A node catalog still at work on an image with no node SBOM yet; null
+ * otherwise. A pending row names why its last attempt ended: "last node"
+ * for a reason that skipped one node, "last attempt" for one released to
+ * another instance.
+ */
+export function catalogPending(img: Pick<ImageSummary, 'sbomSources' | 'nodeCatalog'>): { label: string; title: string; reason: string | null } | null {
   const nc = img.nodeCatalog;
-  if (!nc || img.sbomSources?.includes('node') || notAssessable(img)) return null;
-  if (nc.state === 'claimed') return { label: 'Node catalog: cataloging', title: 'A node is cataloging this image now.' };
-  if (nc.state === 'pending') {
-    const last = nc.reason && RETRY_REASONS.has(nc.reason) ? ` Last attempt: ${reasonCopy(nc.reason)}` : '';
-    return { label: 'Node catalog: pending', title: `Waiting for a node that runs this image to catalog it.${last}` };
-  }
-  return null;
+  if (!nc || img.sbomSources?.includes('node')) return null;
+  if (nc.state === 'claimed') return { label: 'Node catalog: cataloging', title: 'A node is cataloging this image now.', reason: null };
+  if (nc.state !== 'pending') return null;
+  const base = 'Waiting for a node that runs this image to catalog it.';
+  if (!nc.reason) return { label: 'Node catalog: pending', title: base, reason: null };
+  const which = RETRY_REASONS.has(nc.reason) ? 'last attempt' : 'last node';
+  const tail = RETRY_REASONS.has(nc.reason) ? '' : ' That node is skipped for 24 hours; other nodes may still catalog it.';
+  return { label: `Node catalog: pending · ${which}: ${reasonShort(nc.reason)}`, title: `${base} ${reasonCopy(nc.reason)}${tail}`, reason: nc.reason };
+}
+
+/** SBOM sources by trust rank: Trivy Operator (authoritative), the node catalog, then registry; others after, as sent. */
+const SOURCE_RANK: Record<string, number> = { 'trivy-operator': 0, node: 1, registry: 2 };
+export function byTrustRank(sources: readonly string[]): string[] {
+  const rank = (s: string) => (Object.hasOwn(SOURCE_RANK, s) ? SOURCE_RANK[s] : 3);
+  return [...sources].sort((a, b) => rank(a) - rank(b));
 }
 
 // ── GET /catalog/coverage ────────────────────────────────────────────────
 
-const sum = (m: Record<string, number> | undefined) => Object.values(m ?? {}).reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
-
 /**
- * Whether the catalog is in use at all. A Broker whose catalog was never
- * enabled still answers `/catalog/coverage`, with no token, no claims and
- * no node that ever offered: that reads as "disabled", and the banner stays
- * hidden like it does for an older Broker (404) or a busy one (503).
+ * Whether the catalog is on. A Broker answers `/catalog/coverage` with the
+ * catalog disabled too, possibly with rows left from when it was on; only
+ * a configured catalog token means it is enabled. Otherwise the banner
+ * stays hidden, as for an older Broker (404) or a busy one (503); a token
+ * missing where the catalog should be on is the TokenMissing alert's job.
  */
 export function catalogInUse(c: CatalogCoverage): boolean {
-  return c.tokenConfigured || sum(c.byState) > 0 || Object.keys(c.platforms ?? {}).length > 0;
+  return c.tokenConfigured === true;
 }
 
 export interface CoverageSummary {
@@ -130,7 +144,7 @@ export interface CoverageSummary {
   queue: string | null;
   /** Reasons, most frequent first: "LSM denied 3, timed out 1". */
   reasons: Array<{ reason: string; label: string; count: number; copy: string }>;
-  /** Operator-facing warnings (kill switch, missing token). */
+  /** Operator-facing warnings (the kill switch). */
   warnings: string[];
 }
 
@@ -147,6 +161,5 @@ export function coverageSummary(c: CatalogCoverage): CoverageSummary {
     .map(([reason, count]) => ({ reason, label: reasonShort(reason), count, copy: reasonCopy(reason) }));
   const warnings: string[] = [];
   if (!c.grantsEnabled) warnings.push('New node catalog grants are off (the kill switch, nodeCatalog.grants=false).');
-  if (!c.tokenConfigured) warnings.push('The Broker has no catalog token, so node SBOMs cannot be stored.');
   return { headline, queue: parts.length ? parts.join(', ') : null, reasons, warnings };
 }

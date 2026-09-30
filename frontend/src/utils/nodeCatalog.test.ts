@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { CatalogCoverage, NodeCatalogState } from '../types/vulns';
-import { CATALOG_REASON, catalogInUse, catalogPending, completenessNote, coverageSummary, nodeSourceLabel, notAssessable, provenanceLabel, reasonCopy, reasonShort } from './nodeCatalog';
+import { byTrustRank, CATALOG_REASON, catalogInUse, catalogPending, completenessNote, coverageSummary, nodeSourceLabel, notAssessable, provenanceLabel, reasonCopy, reasonShort } from './nodeCatalog';
 
 const nc = (over: Partial<NodeCatalogState> = {}): NodeCatalogState => ({ state: 'done', reason: null, platform: 'linux/arm64', completeness: 'full', catalogedAt: '2026-09-30T10:00:00Z', ...over });
 
@@ -27,6 +27,10 @@ describe('reason copy', () => {
     expect(reasonShort('new_reason')).toBe('new_reason');
     expect(reasonCopy('new_reason')).toBe('The node catalog reported new_reason.');
     expect(reasonShort('constructor')).toBe('constructor');
+  });
+
+  test('oom says it already tried OS packages only, and the back-off', () => {
+    expect(reasonCopy('oom')).toBe('The scan ran out of memory, even with OS packages only. It is retried after a back-off (1 h, 6 h, then daily).');
   });
 
   test('no_packages_found never reads as clean', () => {
@@ -59,11 +63,14 @@ describe('not assessable', () => {
     expect(na).toMatchObject({ reason: 'no_packages_found', terminal: true, retry: null });
   });
 
-  test('a failed scan backs off; a per-node skip leaves other nodes to try', () => {
+  test('a failed scan backs off', () => {
     expect(notAssessable({ nodeCatalog: nc({ state: 'failed', reason: 'oom' }) })).toMatchObject({ reason: 'oom', terminal: false, retry: 'Retried after a back-off.' });
     expect(notAssessable({ nodeCatalog: nc({ state: 'failed', reason: null }) })?.reason).toBe('error');
-    for (const r of ['lsm_denied', 'sandboxed', 'kernel_unsupported', 'lazy_snapshotter', 'unsupported_rootfs', 'caps_unavailable', 'worker_unavailable', 'no_cataloger', 'deferred_pressure', 'retry_cap']) {
-      expect(notAssessable({ nodeCatalog: nc({ state: 'pending', reason: r }) })?.retry, r).toMatch(/Other nodes may still catalog it/);
+  });
+
+  test('a pending row is never not assessable, whatever its last reason: a per-node reason skips one node only', () => {
+    for (const r of ['lsm_denied', 'sandboxed', 'kernel_unsupported', 'lazy_snapshotter', 'unsupported_rootfs', 'caps_unavailable', 'worker_unavailable', 'no_cataloger', 'deferred_pressure', 'retry_cap', 'pid_gone']) {
+      expect(notAssessable({ nodeCatalog: nc({ state: 'pending', reason: r }) }), r).toBeNull();
     }
   });
 
@@ -80,17 +87,31 @@ describe('not assessable', () => {
 });
 
 describe('catalog pending', () => {
-  test('pending and claimed rows without a node SBOM, with the last retry reason', () => {
+  test('pending and claimed rows without a node SBOM', () => {
     expect(catalogPending({ nodeCatalog: nc({ state: 'claimed' }) })?.label).toBe('Node catalog: cataloging');
     expect(catalogPending({ nodeCatalog: nc({ state: 'pending', reason: null }) })?.label).toBe('Node catalog: pending');
-    expect(catalogPending({ nodeCatalog: nc({ state: 'pending', reason: 'drift' }) })?.title).toMatch(/changed its packages/);
   });
 
-  test('nothing once the node SBOM exists, when not assessable, or without data', () => {
+  test('a per-node reason names the last node; a released one the last attempt', () => {
+    const lsm = catalogPending({ nodeCatalog: nc({ state: 'pending', reason: 'lsm_denied' }) })!;
+    expect(lsm.label).toBe('Node catalog: pending · last node: LSM denied');
+    expect(lsm.title).toMatch(/SELinux or AppArmor denied.*skipped for 24 hours; other nodes may still catalog it/);
+    const drift = catalogPending({ nodeCatalog: nc({ state: 'pending', reason: 'drift' }) })!;
+    expect(drift.label).toBe('Node catalog: pending · last attempt: container changed');
+    expect(drift.title).toMatch(/changed its packages/);
+  });
+
+  test('nothing once the node SBOM exists, for done or failed rows, or without data', () => {
     expect(catalogPending({ sbomSources: ['node'], nodeCatalog: nc({ state: 'pending' }) })).toBeNull();
-    expect(catalogPending({ nodeCatalog: nc({ state: 'pending', reason: 'lsm_denied' }) })).toBeNull();
+    expect(catalogPending({ nodeCatalog: nc({ state: 'failed', reason: 'oom' }) })).toBeNull();
     expect(catalogPending({ nodeCatalog: nc() })).toBeNull();
     expect(catalogPending({})).toBeNull();
+  });
+});
+
+describe('trust rank', () => {
+  test('Trivy Operator, then node, then registry; unknown sources last, as sent', () => {
+    expect(byTrustRank(['registry', 'future', 'node', 'trivy-operator'])).toEqual(['trivy-operator', 'node', 'registry', 'future']);
   });
 });
 
@@ -118,20 +139,17 @@ describe('coverage summary', () => {
     expect(s.warnings).toEqual([]);
   });
 
-  test('singular, empty queue, and the operator warnings', () => {
-    const s = coverageSummary(coverage({ runningImages: 1, trusted: 1, trivy: 1, node: 0, byState: { done: 1 }, byReason: {}, grantsEnabled: false, tokenConfigured: false }));
+  test('singular, empty queue, and the kill switch (the only warning: a missing token is the alert\'s job)', () => {
+    const s = coverageSummary(coverage({ runningImages: 1, trusted: 1, trivy: 1, node: 0, byState: { done: 1 }, byReason: {}, grantsEnabled: false }));
     expect(s.headline).toBe('1 of 1 running image has a trusted SBOM: 1 Trivy, 0 node');
     expect(s.queue).toBeNull();
     expect(s.reasons).toEqual([]);
-    expect(s.warnings).toHaveLength(2);
-    expect(s.warnings[0]).toMatch(/nodeCatalog\.grants=false/);
-    expect(s.warnings[1]).toMatch(/no catalog token/);
+    expect(s.warnings).toEqual(['New node catalog grants are off (the kill switch, nodeCatalog.grants=false).']);
   });
 
-  test('a catalog never enabled (no token, no claims, no node offered) is not in use', () => {
+  test('only a configured catalog token means the catalog is on, whatever rows are left from before', () => {
     expect(catalogInUse(coverage())).toBe(true);
     expect(catalogInUse(coverage({ tokenConfigured: false, byState: {}, platforms: {} }))).toBe(false);
-    expect(catalogInUse(coverage({ tokenConfigured: false, byState: { pending: 1 }, platforms: {} }))).toBe(true);
-    expect(catalogInUse(coverage({ tokenConfigured: false, byState: {}, platforms: { 'linux/amd64': 1 } }))).toBe(true);
+    expect(catalogInUse(coverage({ tokenConfigured: false, byState: { pending: 1, done: 40 }, platforms: { 'linux/amd64': 1 } }))).toBe(false);
   });
 });

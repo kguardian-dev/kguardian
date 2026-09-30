@@ -1,6 +1,6 @@
 import { CircleSlash, HardDrive, Hourglass, ShieldCheck, TriangleAlert } from 'lucide-react';
 import type { CatalogCoverage, NodeCatalogState, Report } from '../../types/vulns';
-import { catalogInUse, completenessNote, coverageSummary, provenanceLabel, reasonShort, type NotAssessable } from '../../utils/nodeCatalog';
+import { byTrustRank, catalogInUse, completenessNote, coverageSummary, provenanceLabel, reasonShort, type NotAssessable } from '../../utils/nodeCatalog';
 import { TrustBadge } from './parts';
 
 const pill = 'inline-flex items-center gap-1 shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap';
@@ -8,17 +8,23 @@ const NEUTRAL = 'bg-hubble-border/30 text-secondary border-hubble-border';
 const WARN = 'bg-severity-medium/10 text-severity-medium border-severity-medium/30';
 const UNKNOWN = 'text-tertiary border-dashed border-hubble-border-strong';
 
+/** Sources whose SBOM trust is fixed by the Broker: both are in-cluster scans (`scanned`). */
+const SCANNED_SOURCES = new Set(['trivy-operator', 'node']);
+
 /**
  * Which SBOM sources exist for an image (`sbomSources` on `GET /images`),
- * one chip each: the node catalog's with the platform it was cataloged for,
- * plus its completeness when that is partial or OS-only. A source's trust
- * is shown only once its report was read (`reports`), never inferred.
+ * one chip each, by trust rank (Trivy Operator, node, registry): the node
+ * catalog's with the platform it was cataloged for, plus its completeness
+ * when that is partial or OS-only. Trivy Operator and the node catalog are
+ * always `scanned` (the Broker stores them so); a registry SBOM's trust
+ * varies and is shown only once its report was read (`reports`).
  */
 export function ProvenanceChips({ sources, nodeCatalog, reports = null }: { sources: readonly string[]; nodeCatalog?: NodeCatalogState | null; reports?: readonly Report[] | null }) {
   return (
     <span className="flex flex-col items-start gap-1">
-      {sources.map((s) => {
+      {byTrustRank(sources).map((s) => {
         const report = reports?.find((r) => r.source === s);
+        const trust = SCANNED_SOURCES.has(s) ? 'scanned' : report ? report.sbomTrust : undefined;
         const partial = s === 'node' ? completenessNote(nodeCatalog) : null;
         return (
           <span key={s} className="inline-flex flex-wrap items-center gap-1">
@@ -27,7 +33,7 @@ export function ProvenanceChips({ sources, nodeCatalog, reports = null }: { sour
               {provenanceLabel(s, nodeCatalog)}
             </span>
             {partial && <span data-testid="provenance-completeness" className={`${pill} ${WARN}`} title={partial.title}>{partial.label}</span>}
-            {report && <TrustBadge trust={report.sbomTrust} source={s} />}
+            {trust !== undefined && <TrustBadge trust={trust} source={s} />}
           </span>
         );
       })}
@@ -60,6 +66,8 @@ export function NotAssessableState({ na, compact = false }: { na: NotAssessable;
           Not assessable
         </span>
         <span className="text-[11px] text-tertiary">{reasonShort(na.reason)}</span>
+        {/* The sentence is a tooltip (the TrustBadge pattern, which has no focusable disclosure); screen readers get it as text. */}
+        <span className="sr-only">{title}</span>
       </span>
     );
   }
@@ -76,19 +84,26 @@ export function NotAssessableState({ na, compact = false }: { na: NotAssessable;
 }
 
 /**
- * The Images page's coverage line from `GET /catalog/coverage`: how many
+ * The Images page's coverage line. Cluster-wide, like the app's other
+ * status banners (NodeReportingBanner): it is labelled so and stays when a
+ * namespace filter is on, since the Broker counts every running image. A
+ * plain region, not a live one, so a Refresh does not re-announce it.
+ *
+ * The coverage line from `GET /catalog/coverage`: how many
  * running images have a trusted SBOM (Trivy Operator or the node catalog),
  * and what the node catalog still has queued or could not do, by reason.
  * Renders nothing without data (the hook returns null for an older Broker,
- * a busy one, or any failure) or when the catalog was never enabled.
+ * a busy one, or any failure) or when the catalog is not enabled (no
+ * catalog token), even with rows left from when it was.
  */
 export function CoverageBanner({ coverage }: { coverage: CatalogCoverage | null }) {
   if (!coverage || !catalogInUse(coverage)) return null;
   const s = coverageSummary(coverage);
   return (
-    <div role="status" data-testid="coverage-banner" className="rounded-surface border border-hubble-border bg-hubble-card px-4 py-2.5 text-xs">
+    <section aria-label="Node catalog coverage" data-testid="coverage-banner" className="rounded-surface border border-hubble-border bg-hubble-card px-4 py-2.5 text-xs">
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-accent-fg" aria-hidden />
+        <span className="text-tertiary" data-testid="coverage-scope">Cluster-wide:</span>
         <span className="font-medium text-primary" data-testid="coverage-headline">{s.headline}</span>
         {s.queue && <span className="text-secondary" data-testid="coverage-queue">· {s.queue}</span>}
       </p>
@@ -109,6 +124,6 @@ export function CoverageBanner({ coverage }: { coverage: CatalogCoverage | null 
           {w}
         </p>
       ))}
-    </div>
+    </section>
   );
 }
