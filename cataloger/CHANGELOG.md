@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.2...cataloger/v0.1.3) (2026-09-30)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/anchore/go-logger to v0.2.0 ([#1855](https://github.com/kguardian-dev/kguardian/issues/1855)) ([d9669f8](https://github.com/kguardian-dev/kguardian/commit/d9669f8157dc599ae081efb02a5728f3f5d39e66))
+* **deps:** update module github.com/bmatcuk/doublestar/v4 to v4.10.2 ([#1900](https://github.com/kguardian-dev/kguardian/issues/1900)) ([0ca82a1](https://github.com/kguardian-dev/kguardian/commit/0ca82a155b5fc931bdce346056e188c00433eceb))
+* **deps:** update module modernc.org/sqlite to v1.60.1 ([#1857](https://github.com/kguardian-dev/kguardian/issues/1857)) ([16f7f6b](https://github.com/kguardian-dev/kguardian/commit/16f7f6ba9ce1d64b47aee5bbdaed9451afdf4974))
+
 ## [0.1.2](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.1...cataloger/v0.1.2) (2026-09-30)
 
 
