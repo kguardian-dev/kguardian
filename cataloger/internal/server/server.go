@@ -484,7 +484,8 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 	if int64(len(r.Components)) > b.MaxComponents {
 		return fmt.Errorf("%d components over the budget", len(r.Components))
 	}
-	if r.OS != nil && (len(r.OS.Family) > protocol.MaxOSLen || len(r.OS.Name) > protocol.MaxOSLen) {
+	if r.OS != nil && (len(r.OS.Family) > protocol.MaxOSLen || len(r.OS.Name) > protocol.MaxOSLen ||
+		protocol.HasControl(r.OS.Family+r.OS.Name)) {
 		return errors.New("os fields too long")
 	}
 	for i, c := range r.Components {
@@ -504,7 +505,7 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 			return fmt.Errorf("component %d: %d file paths", i, len(c.FilePaths))
 		}
 		for _, l := range c.Licenses {
-			if len(l) > protocol.MaxLicenseLen {
+			if len(l) > protocol.MaxLicenseLen || protocol.HasControl(l) {
 				return fmt.Errorf("component %d: license too long", i)
 			}
 		}

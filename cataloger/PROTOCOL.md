@@ -159,7 +159,7 @@ Budgets:
 
 | Field | Default | Ceiling | Meaning |
 |---|---|---|---|
-| `max_files` | 2 000 000 | 10 000 000 | Directory entries read, of every kind (files, directories, links, and entries never indexed: devices, FIFOs, sockets, excluded or cross-mount names). One directory is also read in bounded chunks and at most 1 048 576 of its names (more: the rest is skipped, `file_budget`). |
+| `max_files` | 2 000 000 | 10 000 000 | Directory entries read, of every kind (files, directories, links, and entries never indexed: devices, FIFOs, sockets, excluded or cross-mount names). One directory is also read in bounded chunks and at most 262 144 of its names (more: the rest is skipped, `file_budget`). |
 | `max_components` | 50 000 | 50 000 | Components returned (the broker's `MAX_SBOM_COMPONENTS`). |
 | `max_depth` | 4096 | 4096 | Directory depth. Deeper directories are not entered (`partial`). |
 | `scan_timeout_ms` | 600 000 | 1 800 000 | Wall-clock deadline for the whole request, including the `os_only` retry. |
@@ -260,7 +260,7 @@ Top level:
 `files_truncated`), `response_trimmed` (file paths dropped to fit
 `max_response_bytes`), `components_dropped` (components that failed
 validation, §4.3), `file_budget` (entries skipped: `max_files` reached under
-`os_only`, or a directory with more than 1 048 576 names).
+`os_only`, or a directory with more than 262 144 names).
 
 ### 4.3 Components
 
@@ -333,7 +333,7 @@ Unknown response fields must be ignored by the Controller.
 | `timeout` | `scan_timeout_ms` elapsed; the child was SIGKILLed. No `os_only` retry (no time left). | backoff (`timeout`) |
 | `oom` | Memory or temp space ran out (the child's heap watchdog, a Go runtime out-of-memory abort, a cgroup OOM kill, or `ENOSPC`/`EFBIG` in the capped temp dir) **and** the `os_only` retry also failed or had no time. | backoff (`oom`) |
 | `too_many_components` | More than `max_components` even with `os_only`. | backoff (`error`) |
-| `no_packages_found` | The scan completed and found zero packages (the `operating-system` entry does not count). **Terminal only when clean**: `completeness: "full"` and empty `partial_reasons`, meaning the whole tree was readable and nothing was skipped. Otherwise the response says why (`completeness: "partial"` with `partial_reasons` such as `eacces` + `no_dac_read_search` under model (ii), `ctime_dropped`, `depth_limited`, `file_budget`, `components_dropped`; or `completeness: "os_only"`), and the Controller treats it as a retryable `error`. Shown as "not assessable", never "0 CVEs". | terminal only when clean; else backoff (`error`) |
+| `no_packages_found` | The scan completed and found zero packages (the `operating-system` entry does not count). **Terminal only when clean**: `completeness: "full"` and empty `partial_reasons`, meaning the whole tree was readable and nothing was skipped. Otherwise the response says why (`completeness: "partial"` with `partial_reasons` such as `eacces` + `no_dac_read_search` under model (ii), `ctime_dropped`, `depth_limited`, `file_budget`, `components_dropped`; or `completeness: "os_only"`), and the Controller treats it as a retryable `error`. Under capability model (ii) this is what a zero-package image with unreadable entries always gets: the Controller backs it off as `error` (1 h, 6 h, then 24 h), which is expected and bounded; the chart runs model (i), where DAC does not refuse. Shown as "not assessable", never "0 CVEs". | terminal only when clean; else backoff (`error`) |
 | `lsm_denied` | `EACCES`/`EPERM` opening the root for listing or reading an existing `/etc/os-release` / `/usr/lib/os-release`; zero packages with unreadable entries under capability model (i) (DAC is bypassed there, so only an LSM refuses); or the fd was stripped in transit (`MSG_CTRUNC`). Under model (ii) unreadable entries are plain DAC refusals and give a partial `no_packages_found` instead. | per node, non-blocking |
 | `kernel_unsupported` | `openat2(2)` missing (< 5.6) or `statx` does not return `STATX_MNT_ID` (< 5.8). The worker never falls back to weaker resolution. | per node, non-blocking |
 | `caps_unavailable` | The scan child's capabilities are not what the startup probe established (e.g. `CAP_DAC_READ_SEARCH` missing under model (i), or any other capability present). | per node, non-blocking |

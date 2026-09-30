@@ -19,7 +19,7 @@ var errStop = errors.New("stop walking")
 
 // maxNamesPerDir caps the names read from one directory. Past it the rest
 // of the directory is skipped and the scan is partial (Stats.FileBudget).
-var maxNamesPerDir = 1 << 20
+var maxNamesPerDir = 256 << 10
 
 // beforeOpenDir, when set (tests only), runs between the stat of a
 // subdirectory and its open: the window a racing rename or symlink swap

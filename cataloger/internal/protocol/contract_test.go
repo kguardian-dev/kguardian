@@ -95,14 +95,17 @@ func TestComponentsMatchTheBroker(t *testing.T) {
 	}
 
 	// The catalog route (broker/src/node_catalog.rs) sets the per-component
-	// path limit the worker caps at. Absent in trees older than the route.
-	if nc, err := os.ReadFile("../../../broker/src/node_catalog.rs"); err == nil {
-		m := regexp.MustCompile(`(?m)^pub const MAX_CATALOG_PATHS: usize = ([0-9_]+);`).FindSubmatch(nc)
-		if m == nil {
-			t.Error("MAX_CATALOG_PATHS not found in broker/src/node_catalog.rs")
-		} else if n, _ := strconv.Atoi(strings.ReplaceAll(string(m[1]), "_", "")); n != MaxPathsPerPkgCeiling {
-			t.Errorf("broker MAX_CATALOG_PATHS = %d, protocol caps at %d", n, MaxPathsPerPkgCeiling)
-		}
+	// path limit the worker caps at.
+	nc, err := os.ReadFile("../../../broker/src/node_catalog.rs")
+	if err != nil {
+		t.Fatalf("the broker's catalog route is missing: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^pub const MAX_CATALOG_PATHS: usize = ([0-9_]+);`).FindSubmatch(nc)
+	if m == nil {
+		t.Fatal("MAX_CATALOG_PATHS not found in broker/src/node_catalog.rs")
+	}
+	if n, _ := strconv.Atoi(strings.ReplaceAll(string(m[1]), "_", "")); n != MaxPathsPerPkgCeiling {
+		t.Errorf("broker MAX_CATALOG_PATHS = %d, protocol caps at %d", n, MaxPathsPerPkgCeiling)
 	}
 }
 

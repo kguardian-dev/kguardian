@@ -75,6 +75,12 @@ change uid at all (no `CAP_SETUID`/`CAP_SETGID`), it refuses to start
 rather than parse image content as root. The image's default user is
 65532, which yields model (ii) (useful outside the chart).
 
+Under model (ii) an image with no packages and some unreadable entries can
+never prove it has none, so it is reported as a partial
+`no_packages_found` (`eacces`, `no_dac_read_search`). The Controller treats
+that as `error` and backs off (1 h, 6 h, then 24 h): expected and bounded,
+and it does not happen under model (i), which the chart runs.
+
 Every scan child re-checks its capabilities before reading anything: a
 set that differs from what the probe established fails the scan with
 `caps_unavailable`.

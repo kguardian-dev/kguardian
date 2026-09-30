@@ -458,6 +458,9 @@ func TestValidateRejectsBadChildOutput(t *testing.T) {
 		"rel path":     func(r *protocol.Response) { r.Components[0].FilePaths = []string{"bin/a"} },
 		"dotdot path":  func(r *protocol.Response) { r.Components[0].FilePaths = []string{"/bin/../../etc/shadow"} },
 		"class":        func(r *protocol.Response) { r.Components[0].Class = "weird" },
+		"license ctl":  func(r *protocol.Response) { r.Components[0].Licenses = []string{"MIT\nx"} },
+		"os ctl":       func(r *protocol.Response) { r.OS = &protocol.OS{Family: "alpine\x1b", Name: "3"} },
+		"long license": func(r *protocol.Response) { r.Components[0].Licenses = []string{strings.Repeat("l", 129)} },
 		"partial":      func(r *protocol.Response) { r.PartialReasons = []string{"because"} },
 		"failed with components": func(r *protocol.Response) {
 			r.Status, r.Reason, r.Completeness = protocol.StatusFailed, protocol.ReasonOOM, ""
