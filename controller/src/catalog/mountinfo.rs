@@ -46,7 +46,10 @@ pub enum RootRefusal {
     /// filesystem): reading it would pull the image over the network,
     /// and a partially fetched root is not the image.
     LazySnapshotter,
-    /// Anything that is not overlayfs, or a mountinfo without a root.
+    /// Anything that is not overlayfs, a mountinfo without a root, a root
+    /// that is a bind of a subdirectory (root field not `/`), or an
+    /// overlay without an upperdir (not a container snapshot: an image
+    /// volume or a chroot onto some other tree).
     UnsupportedRootfs,
 }
 
@@ -74,6 +77,10 @@ pub enum Upperdir {
 /// What the catalog needs from a container's mountinfo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootInfo {
+    /// Mount id of the `/` entry, compared with `statx(STATX_MNT_ID)` of
+    /// the root fd so the fd is known to be that mount.
+    pub mount_id: u64,
+    /// Never [`Upperdir::Missing`]: a root without an upperdir is refused.
     pub upperdir: Upperdir,
     /// Every mount point other than `/`: absolute, clean, UTF-8, sorted,
     /// unique, at most [`MAX_SUBMOUNTS`].
@@ -235,7 +242,15 @@ pub fn root_info(entries: &[MountEntry]) -> Result<RootInfo, RootRefusal> {
     if root.super_options.iter().any(|o| lowerdir_is_lazy(o)) {
         return Err(RootRefusal::LazySnapshotter);
     }
+    // The container's snapshot is mounted whole at `/`: a root field other
+    // than `/` is a bind of some directory inside a filesystem.
+    if root.root != b"/" {
+        return Err(RootRefusal::UnsupportedRootfs);
+    }
     let upperdir = upperdir_of(&root.super_options);
+    if upperdir == Upperdir::Missing {
+        return Err(RootRefusal::UnsupportedRootfs);
+    }
 
     let mut submounts: Vec<String> = Vec::new();
     let mut dropped = 0usize;
@@ -256,6 +271,7 @@ pub fn root_info(entries: &[MountEntry]) -> Result<RootInfo, RootRefusal> {
         submounts.truncate(MAX_SUBMOUNTS);
     }
     Ok(RootInfo {
+        mount_id: root.mount_id,
         upperdir,
         submounts,
         submounts_dropped: dropped,
@@ -425,13 +441,27 @@ mod tests {
             // Non-UTF-8.
             ("upperdir=/a\\377/fs", Upperdir::Unparseable),
             // None at all: a read-only overlay.
-            ("lowerdir=/a:/b", Upperdir::Missing),
         ];
         for (opts, want) in cases {
             let line = format!("50 40 0:60 / / rw - overlay overlay rw,{opts}");
             let info = root_info(&parse(&line)).unwrap_or_else(|e| panic!("{opts}: {e:?}"));
             assert_eq!(info.upperdir, want, "{opts}");
         }
+    }
+
+    /// M3: only a whole overlay snapshot with an upperdir is a container
+    /// root.
+    #[test]
+    fn roots_that_are_not_a_container_snapshot_are_refused() {
+        // No upperdir: a read-only overlay (image volume, chroot trick).
+        let ro = "50 40 0:60 / / rw - overlay overlay rw,lowerdir=/a:/b";
+        assert_eq!(root_info(&parse(ro)), Err(RootRefusal::UnsupportedRootfs));
+        // A bind of a subdirectory of an overlay.
+        let sub = "50 40 0:60 /some/dir / rw - overlay overlay rw,upperdir=/u/fs";
+        assert_eq!(root_info(&parse(sub)), Err(RootRefusal::UnsupportedRootfs));
+        // The whole snapshot: accepted, with its mount id.
+        let ok = "50 40 0:60 / / rw - overlay overlay rw,upperdir=/u/fs";
+        assert_eq!(root_info(&parse(ok)).unwrap().mount_id, 50);
     }
 
     #[test]

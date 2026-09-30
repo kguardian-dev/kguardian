@@ -334,7 +334,11 @@ impl<B: Broker> GrantCtx<'_, B> {
         }
     }
 
-    async fn upload(&self, subject: &Subject, sbom: &Sbom) -> GrantOutcome {
+    /// Upload the SBOM page by page. `sbom` is consumed: each page's
+    /// components are moved out of it as the page is built, and only one
+    /// page is encoded at a time (reqwest's body), so the SBOM is never
+    /// held twice.
+    async fn upload(&self, subject: &Subject, sbom: Sbom) -> GrantOutcome {
         let set_id = uuid::Uuid::new_v4().to_string();
         let scanned_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let pages = match post::pages(subject, sbom, &set_id, &scanned_at) {
@@ -344,10 +348,10 @@ impl<B: Broker> GrantCtx<'_, B> {
                 return self.report(FailReason::Error).await;
             }
         };
-        let n = pages.len();
+        let n = pages.total();
         let mut last_renew = tokio::time::Instant::now();
         let mut status = String::new();
-        for page in &pages {
+        for page in pages {
             if last_renew.elapsed() >= self.renew_every {
                 if self.renew().await == Answer::Stale {
                     return GrantOutcome::LostLease;
@@ -356,7 +360,7 @@ impl<B: Broker> GrantCtx<'_, B> {
             }
             match self
                 .write("upload", || {
-                    self.broker.upload(self.digest, self.token, page)
+                    self.broker.upload(self.digest, self.token, &page)
                 })
                 .await
             {
@@ -391,7 +395,7 @@ pub async fn run_grant<B: Broker, S: Scan>(ctx: &GrantCtx<'_, B>, scan: &S) -> G
             Err(outcome) => return outcome,
         };
         match result {
-            ScanResult::Sbom { subject, sbom } => return ctx.upload(&subject, &sbom).await,
+            ScanResult::Sbom { subject, sbom } => return ctx.upload(&subject, sbom).await,
             ScanResult::Failed { reason, detail } => {
                 info!(
                     digest = ctx.digest,
@@ -861,7 +865,7 @@ mod tests {
                 platform: "linux/amd64".into(),
                 epoch: 1,
             },
-            &Sbom {
+            Sbom {
                 completeness: "full".into(),
                 partial_reasons: vec![],
                 scanner: Scanner::default(),
@@ -872,7 +876,8 @@ mod tests {
             "2026-10-03T10:00:00Z",
         )
         .unwrap()
-        .remove(0);
+        .next()
+        .unwrap();
         assert_eq!(
             b.upload("sha256:ab", "t-1", &page).await,
             Answer::Unavailable(Duration::from_secs(5))
@@ -892,5 +897,27 @@ mod tests {
         assert!(!lower[0].contains("x-kguardian-claim"));
         assert!(seen[1].ends_with(r#"{"action":"renew","node":"n1"}"#));
         assert!(seen[0].contains(r#""offer":["sha256:ab"]"#));
+    }
+
+    /// The digest goes on the wire as `sha256%3A<hex>` (reserved `:`
+    /// encoded for proxies), and percent-decoding it, which is what the
+    /// Broker's actix `web::Path<String>` does before `is_valid_digest`,
+    /// gives the digest back exactly.
+    #[test]
+    fn digest_paths_are_percent_encoded_and_decode_back() {
+        let d = format!("sha256:{}", "0123456789abcdef".repeat(4));
+        let p = digest_path(&d);
+        assert_eq!(p, format!("sha256%3A{}", "0123456789abcdef".repeat(4)));
+        let back = percent_encoding::percent_decode_str(&p)
+            .decode_utf8()
+            .unwrap();
+        assert_eq!(back, d);
+        let d512 = format!("sha512:{}", "f".repeat(128));
+        assert_eq!(
+            percent_encoding::percent_decode_str(&digest_path(&d512))
+                .decode_utf8()
+                .unwrap(),
+            d512
+        );
     }
 }

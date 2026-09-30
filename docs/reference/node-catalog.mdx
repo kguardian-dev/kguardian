@@ -1,6 +1,6 @@
 ---
 title: "Node catalog"
-description: "The Controller's NODE_CATALOG_* env vars, the kernel it needs, and how a node that cannot catalog shows up"
+description: "The Controller's NODE_CATALOG_* env vars, how it verifies the worker and the container root, its kernel needs and its limits"
 icon: "box-archive"
 ---
 
@@ -22,43 +22,124 @@ this table and starts nothing: no task, no socket, no Broker call.
 | `NODE_CATALOG` | off | `on` / `true` / `1` turns cataloging on. |
 | `BROKER_TOKEN_CATALOG` | unset | The Broker's `catalog` token. Without it the Controller logs once and catalogs nothing. |
 | `NODE_CATALOG_SOCKET` | `/run/kguardian/catalog/worker.sock` | The worker's Unix socket, on the `emptyDir` both containers mount. |
-| `NODE_CATALOG_EPOCH` | `1` | Catalog generation. Raising it re-catalogs every digest. |
-| `NODE_CATALOG_RO_CLONE` | off | Pass the worker a read-only, submount-free `open_tree` clone of the root instead of the plain `O_PATH` handle. Falls back to the handle when the kernel refuses. |
-| `NODE_CATALOG_HOST_PROC` | `/proc` | Where the host's `/proc` is mounted. |
+| `NODE_CATALOG_EPOCH` | `1` | Catalog generation. Raising it re-catalogs every digest. Must not exceed the Broker's `NODE_CATALOG_MAX_EPOCH`. |
+| `NODE_CATALOG_RO_CLONE` | off | Pass the worker a read-only, submount-free `open_tree` clone of the root instead of the plain `O_PATH` handle. Falls back to the handle when the kernel refuses, or when the clone is not the same filesystem object as the verified root. |
+| `NODE_CATALOG_HOST_PROC` | `COMPUTE_HOST_PROC`, else `/proc` | Where the host's `/proc` is mounted. |
 | `NODE_CATALOG_SCAN_TIMEOUT_SECS` | `600` | Worker scan deadline, 10 to 1800. |
 | `NODE_CATALOG_MAX_FILES` | `2000000` | Filesystem entries the worker indexes. |
 | `NODE_CATALOG_MAX_COMPONENTS` | `50000` | Components per SBOM (at most 50 000). |
-| `NODE_CATALOG_MAX_RESPONSE_BYTES` | `33554432` | Largest worker response accepted (at most 64 MiB). |
+| `NODE_CATALOG_MAX_RESPONSE_BYTES` | `16777216` | Largest worker response accepted, 1 MiB to 64 MiB. It bounds the Controller's memory (below). |
 | `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS` | `30` | Minimum gap between claims (at least 30). |
 | `NODE_CATALOG_IDLE_SECS` | `600` | An unchanged offer that got no grant is re-sent after this. |
-| `NODE_CATALOG_STARTUP_JITTER_SECS` | `120` | The first claim waits a random time up to this, so a fleet restart does not arrive at once. |
+| `NODE_CATALOG_STARTUP_JITTER_SECS` | `120` | The first claim waits a random time up to this (at most 3600), so a fleet restart does not arrive at once. |
 | `NODE_CATALOG_PRESSURE_THRESHOLD` | `40` | Host PSI `some avg10` percent (cpu, io or memory) above which scans wait. |
-| `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS` | `1800` | Longest a scan waits for pressure to drop. |
+| `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS` | `1800` | Longest a scan waits for pressure to drop (at most 86400). |
 | `NODE_CATALOG_PEER_UIDS` | `0` | Comma-separated uids the worker process may run as. |
 | `POD_UID` | unset | The Controller pod's own `metadata.uid` (downward API). Its images are never offered. Without it the Controller reads the UID from its kubelet mounts. |
+
+Values over a maximum are clamped with a warning.
+
+## How the worker is verified
+
+Anything in the pod that can write to the shared `emptyDir` could plant a
+socket there and receive container root handles, so the Controller pins
+the socket to the worker before every connection
+(`cataloger/PROTOCOL.md` section 1.1):
+
+1. **The socket file.** The socket is opened `O_PATH|O_NOFOLLOW` and must be a
+   socket owned by uid 0 with mode `0600`; its directory is opened
+   `O_PATH|O_NOFOLLOW|O_DIRECTORY` and must be owned by uid 0 with mode
+   `0700`. Symlinks are never followed. The connect goes through
+   `/proc/self/fd/<n>` of that `O_PATH` handle, so the file that was checked
+   is the one connected to. This proves the socket was created by a uid-0
+   process with the `emptyDir` mounted.
+2. **The peer's uid.** After connecting, `SO_PEERCRED` must report an allowed
+   uid (`0`).
+3. **The peer's container** (Linux 6.5 and later). `SO_PEERPIDFD` pins the
+   worker process, and its cgroup must be a sibling of the Controller's own
+   container, which means the same pod.
+
+The kernel is probed once at startup. On kernels before 6.5, steps 1 and 2
+are the check; nothing is disabled at runtime, and a pidfd error on a
+6.5+ kernel rejects that one connection only.
+
+## How the container root is verified
+
+For a granted digest, the Controller picks a running container with it and:
+
+- asks containerd for the task's pid, and for the upperdir of the container's
+  snapshot (`Containers.Get`, then `Snapshots.Mounts`);
+- opens `/proc/<pid>` as a handle that dies with the process, checks the
+  cgroup (pod and container) and start time, opens `root` through it, and
+  checks the identity again (pid reuse cannot swap the process);
+- requires the `/` entry of the container's mountinfo to be a whole overlay
+  mount (root field `/`) with an upperdir, requires the root handle to be
+  on that mount (`statx` `STATX_MNT_ID`), and requires the upperdir to be
+  the one containerd reports for the container's snapshot. Anything else is
+  `unsupported_rootfs`; lazily pulled roots (stargz, SOCI, nydus, FUSE) are
+  `lazy_snapshotter`.
+
+Only containerd is supported, so every root is checked against its snapshot.
+
+## Drift
+
+A container that changed its packages at runtime is not the image. The
+Controller looks at the four package databases (`lib/apk/db/installed`,
+`var/lib/dpkg/status`, `var/lib/rpm`, `usr/lib/sysimage/rpm`) in the
+container's upperdir, resolved under the host root with `RESOLVE_IN_ROOT`,
+one name at a time with no symlinks followed. These are drift, and the
+next replica is tried:
+
+- the database written, or deleted (an overlay whiteout);
+- a parent directory deleted (a whiteout), replaced by a file or symlink,
+  or deleted and recreated (`trusted.overlay.opaque` or
+  `user.overlay.opaque` set to `y` or `x`).
+
+If the upperdir cannot be read or an xattr read fails, drift is unknown
+and the SBOM is `partial` (`drift_unknown`).
+
+**Language packages.** Deleting a Python, Node or Ruby package does not
+touch those databases. The Controller also looks for whiteouts or opaque
+directories in the system-wide locations only:
+
+- `usr/lib/python*/{site,dist}-packages` and `usr/local/lib/python*/{site,dist}-packages`;
+- `usr/lib/node_modules` and `usr/local/lib/node_modules`;
+- `usr/local/bundle/gems`, `var/lib/gems/*/gems` and `usr/local/lib/ruby/gems/*/gems`.
+
+Each directory is read at most 4096 entries deep. A hit makes the SBOM
+`partial` (`lang_whiteout`). Deletions in application-local trees
+(`/app/node_modules`, a virtualenv) are **not** detected.
 
 ## Kernel requirements
 
 | Need | Kernel | Without it |
 |---|---|---|
-| `SO_PEERPIDFD`, to pin the worker process before checking its cgroup | Linux 6.5 | The Controller cannot verify the worker and catalogs nothing on that node (below). |
+| `SO_PEERPIDFD`, for the peer cgroup check | Linux 6.5 | The worker is verified by its socket file and uid only. |
+| `statx` `STATX_MNT_ID`, to tie the root handle to the `/` mount | Linux 5.8 | `kernel_unsupported` (the node does not catalog). |
 | `openat2` with `RESOLVE_IN_ROOT`, for the drift check | Linux 5.6 | Drift is unknown; SBOMs from the node are `partial`. |
 | `open_tree` / `mount_setattr`, only for `NODE_CATALOG_RO_CLONE` | Linux 5.12 | Falls back to the plain root handle. |
 
-The worker runs in its own container, so the Controller sees it in a
-different pid namespace. `SO_PEERCRED` therefore reports pid 0, and only
-`SO_PEERPIDFD` identifies the worker process. The Controller does not fall
-back to trusting the uid alone.
+## Memory
 
-## A node that cannot catalog
+One scan runs at a time. The worker's response is at most
+`NODE_CATALOG_MAX_RESPONSE_BYTES` (16 MiB by default). It is parsed into
+bounded structures that discard over-long strings, invalid paths and
+anything past the caps while parsing, and the raw response is freed as
+soon as parsing ends. The upload moves components into one page at a time
+(at most 7 MiB encoded). The worst-case extra memory is about the response
+size plus 2.5 times it for the parsed package list: roughly 56 MiB at the
+default, and roughly 220 MiB at the 64 MiB ceiling. Size the Controller's
+memory limit for that before raising it.
 
-On a kernel older than 6.5 (and without `hostPID`), the Controller:
+## A node the Broker refuses
 
-- logs one `error` naming the cause (`SO_PEERPIDFD`, Linux 6.5), then a
-  `warn` at most once an hour;
-- keeps sending an empty offer every `NODE_CATALOG_IDLE_SECS`, so the Broker
-  records the node and its platform, but the node never claims a digest;
-- never restarts, and never retries the worker.
+If the Broker answers a claim with 422 (for example `NODE_CATALOG_EPOCH`
+above the Broker's `NODE_CATALOG_MAX_EPOCH`), the Controller logs one
+`error` naming both settings and stops claiming until it restarts. It keeps
+sending an empty offer (epoch 0) every `NODE_CATALOG_IDLE_SECS`, so the
+Broker still records the node and its platform with no claims, and repeats
+a `warn` at most once an hour. `GET /catalog/status?node=<name>` shows such
+a node as seen recently, with no claims.
 
-`GET /catalog/status?node=<name>` on such a node shows the node as seen
-recently, with no claims.
+A 503 from the claim route (catalog not configured on the Broker) backs off
+from 60 s, doubling, to at most 30 minutes, and is logged once.

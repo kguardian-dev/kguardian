@@ -1,39 +1,37 @@
 //! From a worker response to the Broker's catalog ingest: validate the
 //! untrusted response, apply what the Controller knows that the worker
-//! does not (drift unknown), and cut it into pages.
+//! does not (drift unknown, language-package deletions), and cut it into
+//! pages.
 //!
 //! The worker validates before answering, but a compromised scan child
 //! can return any JSON within the size limit (PROTOCOL.md 6), so every
-//! bound is applied again here.
+//! bound is applied again: most of them while parsing (see
+//! `worker::WireComponent`), the rest here.
+//!
+//! Memory: nothing here copies components. [`validate`] moves each
+//! parsed component into its posted form, and [`pages`] consumes the
+//! SBOM and moves components into one page at a time, so the upload
+//! holds the SBOM plus a single encoded page (at most
+//! [`MAX_PAGE_BYTES`]).
 
-use std::collections::BTreeSet;
+use std::io::Write;
 
 use super::api::{
     Component, Page, SbomImage, SbomPage, Scanner, COMPONENTS_PER_PAGE, MAX_PAGES, MAX_PAGE_BYTES,
-    MAX_PARTIAL_REASONS, MAX_PATHS_PER_COMPONENT, MAX_PATHS_PER_PAGE, SBOM_FORMAT, SBOM_SOURCE,
-    SBOM_TRUST,
+    MAX_PARTIAL_REASONS, MAX_PATHS_PER_PAGE, SBOM_FORMAT, SBOM_SOURCE, SBOM_TRUST,
 };
-use super::worker::{Response, PROTOCOL_VERSION};
+use super::worker::{Response, WireComponent, MAX_PATH_LEN, PROTOCOL_VERSION};
 
-const MAX_NAME: usize = 256;
-const MAX_VERSION: usize = 128;
-const MAX_FIELD: usize = 2048;
-const MAX_LICENSES: usize = 8;
-const MAX_LICENSE: usize = 256;
-const MAX_PATH: usize = 1024;
-const MAX_REASON: usize = 64;
 /// Components in one SBOM (the Broker's `MAX_SBOM_COMPONENTS`).
-pub const MAX_COMPONENTS: usize = 50_000;
-/// `stats` kept verbatim up to this size; over it only scalars survive
-/// (the Broker applies the same rule at 16 KiB).
-const MAX_STATS_BYTES: usize = 16 * 1024;
+pub const MAX_COMPONENTS: usize = super::worker::MAX_COMPONENTS;
 
 /// What a validated response says.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// Components to post.
     Sbom(Sbom),
-    /// `failed`, with the worker's reason verbatim (mapped by the caller).
+    /// `failed`, with the reason to map (the worker's, or
+    /// `no_packages_found` / `error` decided here).
     Failed { reason: String, message: String },
 }
 
@@ -51,14 +49,10 @@ pub struct Sbom {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invalid(pub String);
 
-fn bounded(s: Option<String>, max: usize) -> Option<String> {
-    s.filter(|v| !v.is_empty() && v.len() <= max && !v.contains('\0'))
-}
-
-/// PROTOCOL.md 4.3 path rules: absolute, clean, no NUL, at most 1024
-/// bytes. (UTF-8 is guaranteed by the JSON decoder.)
+/// PROTOCOL.md 4.3 path rules: absolute, clean, no control characters,
+/// at most 1024 bytes. (UTF-8 is guaranteed by the JSON decoder.)
 pub fn valid_path(p: &str) -> bool {
-    if !p.starts_with('/') || p.len() > MAX_PATH || p.contains('\0') {
+    if !p.starts_with('/') || p.len() > MAX_PATH_LEN || p.chars().any(char::is_control) {
         return false;
     }
     p == "/"
@@ -67,35 +61,32 @@ pub fn valid_path(p: &str) -> bool {
             .all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
-fn clean_component(mut c: Component) -> Option<Component> {
-    if c.name.is_empty() || c.name.len() > MAX_NAME || c.name.contains('\0') {
+/// A parsed component as posted, moved rather than copied. `None` when
+/// its name is missing or over-long, or its version over-long (PROTOCOL.md
+/// 4.3: such a component is dropped).
+fn into_component(c: WireComponent) -> Option<Component> {
+    if c.name.too_long || c.version.too_long {
         return None;
     }
-    if c.version.as_ref().is_some_and(|v| v.len() > MAX_VERSION) {
-        return None;
-    }
-    c.version = bounded(c.version, MAX_VERSION);
-    c.purl = bounded(c.purl, MAX_FIELD);
-    c.comp_type = bounded(c.comp_type, MAX_REASON * 2);
-    c.class = bounded(c.class, MAX_REASON);
-    c.src_name = bounded(c.src_name, MAX_NAME);
-    c.src_version = bounded(c.src_version, MAX_VERSION);
-    c.licenses
-        .retain(|l| !l.is_empty() && l.len() <= MAX_LICENSE);
-    c.licenses.truncate(MAX_LICENSES);
-    let before = c.file_paths.len();
-    let paths: BTreeSet<String> = c.file_paths.drain(..).filter(|p| valid_path(p)).collect();
-    let mut paths: Vec<String> = paths.into_iter().collect();
-    if paths.len() > MAX_PATHS_PER_COMPONENT {
-        paths.truncate(MAX_PATHS_PER_COMPONENT);
-    }
-    // Dropped or deduplicated-away paths mean the list is not the
-    // package's complete one.
-    if paths.len() != before {
-        c.files_truncated = true;
-    }
-    c.file_paths = paths;
-    Some(c)
+    let name = c.name.take()?;
+    // A path dropped while parsing (invalid, over-long, over the cap)
+    // means the list is not the package's complete one.
+    let files_truncated = c.files_truncated || c.file_paths.truncated;
+    // An over-long optional field is left out (`take` gives None); it
+    // does not drop the package.
+    Some(Component {
+        name,
+        version: c.version.take(),
+        purl: c.purl.take(),
+        comp_type: c.comp_type.take(),
+        class: c.class.take(),
+        src_name: c.src_name.take(),
+        src_version: c.src_version.take(),
+        licenses: c.licenses.0,
+        file_paths: c.file_paths.paths,
+        files_truncated,
+        interpreted_content: c.interpreted_content,
+    })
 }
 
 fn push_reason(reasons: &mut Vec<String>, r: &str) {
@@ -104,39 +95,21 @@ fn push_reason(reasons: &mut Vec<String>, r: &str) {
     }
 }
 
-/// `stats`, kept when small; otherwise only its scalar fields.
-fn bounded_stats(v: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(map) = v else {
-        return serde_json::json!({});
-    };
-    let v = serde_json::Value::Object(map);
-    if serde_json::to_vec(&v)
-        .map(|b| b.len())
-        .unwrap_or(usize::MAX)
-        <= MAX_STATS_BYTES
-    {
-        return v;
-    }
-    let serde_json::Value::Object(map) = v else {
-        unreachable!()
-    };
-    serde_json::Value::Object(
-        map.into_iter()
-            .filter(|(k, v)| k.len() <= 64 && !v.is_object() && !v.is_array())
-            .filter(|(_, v)| !v.as_str().is_some_and(|s| s.len() > 256))
-            .collect(),
-    )
-}
-
 /// Validate a response to scan `scan_id` under `epoch`.
 ///
-/// `drift_unknown`: the Controller could not check the upperdir, so the
-/// SBOM may include packages installed at runtime; it is never `full`.
+/// `local_reasons`: what the Controller found that makes the SBOM not
+/// `full` whatever the worker says (`drift_unknown`, `lang_whiteout`).
+///
+/// `no_packages_found` is terminal for the digest on the Broker, so it is
+/// reported only for a clean, complete scan: completeness `full` (or none
+/// on a `failed` answer), no partial reasons from the worker and none
+/// from the Controller. Anything less is `error`, which backs off and is
+/// retried.
 pub fn validate(
     r: Response,
     scan_id: &str,
     epoch: i64,
-    drift_unknown: bool,
+    local_reasons: &[&str],
 ) -> Result<Outcome, Invalid> {
     if r.protocol_version != PROTOCOL_VERSION {
         return Err(Invalid(format!(
@@ -144,7 +117,7 @@ pub fn validate(
             r.protocol_version
         )));
     }
-    if r.scan_id != scan_id {
+    if r.scan_id.as_str() != scan_id {
         return Err(Invalid("response for another scan".into()));
     }
     if r.epoch != epoch {
@@ -153,43 +126,40 @@ pub fn validate(
             r.epoch
         )));
     }
+    let clean_scan = |completeness: &str, reasons: &[String]| {
+        matches!(completeness, "" | "full") && reasons.is_empty() && local_reasons.is_empty()
+    };
     match r.status.as_str() {
         "ok" => {}
         "failed" => {
-            let mut message = r.message;
-            message.truncate(message.floor_char_boundary(1024));
-            let reason = if r.reason.is_empty() || r.reason.len() > MAX_REASON {
-                "error".to_string()
-            } else {
-                r.reason
-            };
+            let message = r.message.value.unwrap_or_default();
+            let mut reason = r.reason.take().unwrap_or_else(|| "error".to_string());
+            if reason == "no_packages_found"
+                && !clean_scan(r.completeness.as_str(), &r.partial_reasons.0)
+            {
+                reason = "error".into();
+            }
             return Ok(Outcome::Failed { reason, message });
         }
         other => return Err(Invalid(format!("unknown status {other:?}"))),
     }
-    if r.components.len() > MAX_COMPONENTS {
-        return Err(Invalid(format!(
-            "{} components; at most {MAX_COMPONENTS}",
-            r.components.len()
-        )));
+    if r.components.overflow {
+        return Err(Invalid(format!("over {MAX_COMPONENTS} components")));
     }
 
-    let mut reasons: Vec<String> = r
-        .partial_reasons
-        .into_iter()
-        .filter(|s| !s.is_empty() && s.len() <= MAX_REASON)
-        .collect();
+    let mut reasons = r.partial_reasons.0;
     // PROTOCOL.md 5: an unknown completeness is partial.
     let mut completeness = match r.completeness.as_str() {
-        "full" | "partial" | "os_only" => r.completeness,
+        c @ ("full" | "partial" | "os_only") => c.to_string(),
         _ => "partial".to_string(),
     };
 
-    let total = r.components.len();
+    let total = r.components.items.len();
     let mut components: Vec<Component> = r
         .components
+        .items
         .into_iter()
-        .filter_map(clean_component)
+        .filter_map(into_component)
         .collect();
     if components.len() != total {
         push_reason(&mut reasons, "components_dropped");
@@ -197,35 +167,38 @@ pub fn validate(
     if components.iter().any(|c| c.files_truncated) {
         push_reason(&mut reasons, "files_truncated");
     }
-    if drift_unknown {
-        push_reason(&mut reasons, "drift_unknown");
-    }
-    // The only non-operating-system components count as packages; an
-    // `ok` with none is the worker's `no_packages_found`, which it should
-    // have said. Say it for it rather than store an empty SBOM.
-    if !components
-        .iter()
-        .any(|c| c.comp_type.as_deref() != Some("operating-system"))
-    {
-        return Ok(Outcome::Failed {
-            reason: "no_packages_found".into(),
-            message: "ok response with no packages".into(),
-        });
+    for l in local_reasons {
+        push_reason(&mut reasons, l);
     }
     if completeness == "full" && !reasons.is_empty() {
         completeness = "partial".into();
     }
+    // Only non-operating-system components count as packages. An `ok`
+    // with none is the worker's `no_packages_found` unsaid; terminal only
+    // for a clean scan (see above).
+    if !components
+        .iter()
+        .any(|c| c.comp_type.as_deref() != Some("operating-system"))
+    {
+        let reason = if completeness == "full" && reasons.is_empty() {
+            "no_packages_found"
+        } else {
+            "error"
+        };
+        return Ok(Outcome::Failed {
+            reason: reason.into(),
+            message: format!("ok response with no packages ({completeness})"),
+        });
+    }
     reasons.truncate(MAX_PARTIAL_REASONS);
 
-    let mut stats = bounded_stats(r.stats);
-    if !r.retry_reason.is_empty() && r.retry_reason.len() <= MAX_REASON {
+    let mut stats = r.stats.0;
+    if let Some(rr) = r.retry_reason.take() {
         // The Broker does not read retry_reason; keep it with the stats.
-        if let serde_json::Value::Object(m) = &mut stats {
-            m.insert("retry_reason".into(), r.retry_reason.into());
-        }
+        stats.insert("retry_reason".into(), rr.into());
     }
     // Deterministic order, so an unchanged image posts an unchanged set.
-    components.sort_by(|a, b| {
+    components.sort_unstable_by(|a, b| {
         (&a.comp_type, &a.name, &a.version, &a.purl).cmp(&(
             &b.comp_type,
             &b.name,
@@ -238,10 +211,10 @@ pub fn validate(
         partial_reasons: reasons,
         scanner: Scanner {
             name: Some(SBOM_FORMAT.to_string()),
-            vendor: bounded(r.scanner.vendor, MAX_NAME),
-            version: bounded(r.scanner.version, MAX_VERSION),
+            vendor: r.scanner.vendor.take(),
+            version: r.scanner.version.take(),
         },
-        stats,
+        stats: serde_json::Value::Object(stats),
         components,
     }))
 }
@@ -256,85 +229,444 @@ pub struct Subject {
     pub epoch: i64,
 }
 
-fn approx_bytes(c: &Component) -> usize {
-    // A little over the encoded size: field names, quotes, commas.
-    200 + c.name.len()
-        + c.version.as_ref().map_or(0, String::len)
-        + c.purl.as_ref().map_or(0, String::len)
-        + c.licenses.iter().map(|l| l.len() + 3).sum::<usize>()
-        + c.file_paths.iter().map(|p| p.len() + 3).sum::<usize>()
+/// Counts bytes written; nothing is kept.
+struct Counter(usize);
+
+impl Write for Counter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0 += b.len();
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-/// Cut `sbom` into pages: at most [`COMPONENTS_PER_PAGE`] components,
-/// [`MAX_PATHS_PER_PAGE`] paths and about [`MAX_PAGE_BYTES`] each. Every
-/// page carries the same completeness, reasons and stats (the Broker
-/// keeps the completing page's). `Err` when it would take more than
-/// [`MAX_PAGES`] pages.
+/// The exact encoded size of `v`, every field and escape included.
+pub fn json_len<T: serde::Serialize>(v: &T) -> usize {
+    let mut c = Counter(0);
+    serde_json::to_writer(&mut c, v).map_or(usize::MAX, |_| c.0)
+}
+
+/// The SBOM, cut into pages lazily: each [`Iterator::next`] moves the
+/// next page's components out of the SBOM. Nothing is cloned.
+#[derive(Debug)]
+pub struct Pages {
+    head: SbomPage,
+    lens: std::vec::IntoIter<usize>,
+    rest: std::vec::IntoIter<Component>,
+    index: i64,
+}
+
+impl Pages {
+    /// Pages in the set.
+    pub fn total(&self) -> usize {
+        self.head.page.total as usize
+    }
+}
+
+impl Iterator for Pages {
+    type Item = SbomPage;
+    fn next(&mut self) -> Option<SbomPage> {
+        let n = self.lens.next()?;
+        let mut p = self.head.clone(); // header fields only: components is empty
+        p.page.index = self.index;
+        p.components = self.rest.by_ref().take(n).collect();
+        self.index += 1;
+        Some(p)
+    }
+}
+
+/// Headroom for the page index and total digits on top of the measured
+/// empty page.
+const PAGE_SLACK: usize = 64;
+
+/// Cut `sbom` into pages of at most [`COMPONENTS_PER_PAGE`] components,
+/// [`MAX_PATHS_PER_PAGE`] paths and [`MAX_PAGE_BYTES`] encoded bytes,
+/// measured exactly. Every page carries the same completeness, reasons
+/// and stats (the Broker keeps the completing page's). `Err` when it
+/// would take more than [`MAX_PAGES`] pages, or one component alone is
+/// over the byte ceiling.
 pub fn pages(
     subject: &Subject,
-    sbom: &Sbom,
+    sbom: Sbom,
     set_id: &str,
     scanned_at: &str,
-) -> Result<Vec<SbomPage>, Invalid> {
-    let mut groups: Vec<Vec<Component>> = vec![Vec::new()];
-    let (mut bytes, mut paths) = (0usize, 0usize);
-    for c in &sbom.components {
-        let b = approx_bytes(c);
-        let cur = groups.last().expect("never empty");
-        if !cur.is_empty()
-            && (cur.len() >= COMPONENTS_PER_PAGE
+) -> Result<Pages, Invalid> {
+    let Sbom {
+        completeness,
+        partial_reasons,
+        scanner,
+        stats,
+        components,
+    } = sbom;
+    let mut head = SbomPage {
+        schema_version: 1,
+        image: SbomImage {
+            digest: subject.digest.clone(),
+            digest_kind: subject.digest_kind.clone(),
+            repository: subject.repository.clone(),
+            index_digest: subject.digest.clone(),
+        },
+        source: SBOM_SOURCE,
+        sbom_trust: SBOM_TRUST,
+        scanner,
+        scanned_at: scanned_at.to_string(),
+        format: SBOM_FORMAT,
+        page: Page {
+            set_id: set_id.to_string(),
+            index: 0,
+            total: 0,
+        },
+        components: Vec::new(),
+        epoch: subject.epoch,
+        completeness,
+        partial_reasons,
+        stats,
+        platform: subject.platform.clone(),
+    };
+    let base = json_len(&head) + PAGE_SLACK;
+
+    let mut lens: Vec<usize> = vec![0];
+    let (mut bytes, mut paths) = (base, 0usize);
+    for c in &components {
+        // The component plus the comma before it.
+        let b = json_len(c) + 1;
+        if base + b > MAX_PAGE_BYTES {
+            return Err(Invalid(format!(
+                "component {:?} alone encodes to {b} bytes",
+                c.name
+            )));
+        }
+        let cur = *lens.last().expect("never empty");
+        if cur > 0
+            && (cur >= COMPONENTS_PER_PAGE
                 || bytes + b > MAX_PAGE_BYTES
                 || paths + c.file_paths.len() > MAX_PATHS_PER_PAGE)
         {
-            groups.push(Vec::new());
-            bytes = 0;
+            lens.push(0);
+            bytes = base;
             paths = 0;
         }
         bytes += b;
         paths += c.file_paths.len();
-        groups.last_mut().expect("never empty").push(c.clone());
+        *lens.last_mut().expect("never empty") += 1;
     }
-    if groups.len() > MAX_PAGES {
+    if lens.len() > MAX_PAGES {
         return Err(Invalid(format!(
             "{} pages; at most {MAX_PAGES}",
-            groups.len()
+            lens.len()
         )));
     }
-    let total = groups.len() as i64;
-    Ok(groups
-        .into_iter()
-        .enumerate()
-        .map(|(i, components)| SbomPage {
-            schema_version: 1,
-            image: SbomImage {
-                digest: subject.digest.clone(),
-                digest_kind: subject.digest_kind.clone(),
-                repository: subject.repository.clone(),
-                index_digest: subject.digest.clone(),
-            },
-            source: SBOM_SOURCE,
-            sbom_trust: SBOM_TRUST,
-            scanner: sbom.scanner.clone(),
-            scanned_at: scanned_at.to_string(),
-            format: SBOM_FORMAT,
-            page: Page {
-                set_id: set_id.to_string(),
-                index: i as i64,
-                total,
-            },
-            components,
-            epoch: subject.epoch,
-            completeness: sbom.completeness.clone(),
-            partial_reasons: sbom.partial_reasons.clone(),
-            stats: sbom.stats.clone(),
-            platform: subject.platform.clone(),
-        })
-        .collect())
+    head.page.total = lens.len() as i64;
+    Ok(Pages {
+        head,
+        lens: lens.into_iter(),
+        rest: components.into_iter(),
+        index: 0,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::worker::parse_response;
     use super::*;
+
+    fn comp_json(name: &str, paths: Vec<String>) -> serde_json::Value {
+        serde_json::json!({"name": name, "version": "1.0", "type": "apk", "file_paths": paths})
+    }
+
+    fn resp_json(components: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "protocol_version": 1, "scan_id": "s", "epoch": 2, "status": "ok",
+            "completeness": "full",
+            "scanner": {"name": "kguardian-cataloger", "vendor": "kguardian", "version": "0.1.0"},
+            "stats": {"files": 10},
+            "components": components
+        })
+    }
+
+    fn parse(v: serde_json::Value) -> Response {
+        parse_response(serde_json::to_vec(&v).unwrap()).unwrap()
+    }
+
+    fn resp(components: Vec<serde_json::Value>) -> Response {
+        parse(resp_json(components))
+    }
+
+    fn sbom(o: Outcome) -> Sbom {
+        match o {
+            Outcome::Sbom(s) => s,
+            other => panic!("expected an SBOM, got {other:?}"),
+        }
+    }
+
+    fn failed_reason(o: Outcome) -> String {
+        match o {
+            Outcome::Failed { reason, .. } => reason,
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_clean_response_stays_full() {
+        let s = sbom(
+            validate(
+                resp(vec![comp_json("busybox", vec!["/bin/busybox".into()])]),
+                "s",
+                2,
+                &[],
+            )
+            .unwrap(),
+        );
+        assert_eq!(s.completeness, "full");
+        assert!(s.partial_reasons.is_empty());
+        assert_eq!(s.components[0].file_paths, vec!["/bin/busybox"]);
+    }
+
+    #[test]
+    fn scan_id_epoch_and_version_must_echo() {
+        assert!(validate(resp(vec![]), "other", 2, &[]).is_err());
+        assert!(validate(resp(vec![]), "s", 3, &[]).is_err());
+        let mut v = resp_json(vec![]);
+        v["protocol_version"] = 2.into();
+        assert!(validate(parse(v), "s", 2, &[]).is_err());
+        let mut v = resp_json(vec![]);
+        v["status"] = "weird".into();
+        assert!(validate(parse(v), "s", 2, &[]).is_err());
+    }
+
+    #[test]
+    fn bad_paths_are_dropped_and_mark_the_package_truncated() {
+        let s = sbom(
+            validate(
+                resp(vec![comp_json(
+                    "p",
+                    vec![
+                        "/usr/bin/ok".into(),
+                        "relative/x".into(),
+                        "/a/../etc/shadow".into(),
+                        "/a//b".into(),
+                        format!("/{}", "x".repeat(2000)),
+                        "/tab\there".into(),
+                        "/del\u{7f}".into(),
+                        "/usr/bin/ok".into(),
+                    ],
+                )]),
+                "s",
+                2,
+                &[],
+            )
+            .unwrap(),
+        );
+        assert_eq!(s.components[0].file_paths, vec!["/usr/bin/ok"]);
+        assert!(s.components[0].files_truncated);
+        assert_eq!(s.completeness, "partial");
+        assert!(s.partial_reasons.contains(&"files_truncated".to_string()));
+    }
+
+    #[test]
+    fn valid_path_rejects_control_characters() {
+        assert!(valid_path("/usr/bin/x"));
+        assert!(valid_path("/usr/bin/naïve"));
+        for p in ["/a\nb", "/a\u{0}b", "/a\u{1b}b", "/a\u{85}b"] {
+            assert!(!valid_path(p), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn over_long_names_drop_the_component_and_path_lists_are_capped() {
+        let many: Vec<String> = (0..5000).map(|i| format!("/usr/lib/x{i:05}.so")).collect();
+        let s = sbom(
+            validate(
+                resp(vec![
+                    comp_json(&"n".repeat(300), vec![]),
+                    comp_json("big", many),
+                ]),
+                "s",
+                2,
+                &[],
+            )
+            .unwrap(),
+        );
+        assert_eq!(s.components.len(), 1);
+        assert_eq!(s.components[0].file_paths.len(), 4096);
+        assert!(s.components[0].files_truncated);
+        assert!(s
+            .partial_reasons
+            .contains(&"components_dropped".to_string()));
+    }
+
+    #[test]
+    fn too_many_components_is_refused() {
+        let cs = (0..=MAX_COMPONENTS)
+            .map(|i| serde_json::json!({"name": format!("p{i}")}))
+            .collect();
+        assert!(validate(resp(cs), "s", 2, &[]).is_err());
+    }
+
+    #[test]
+    fn local_reasons_are_never_full() {
+        let s = sbom(
+            validate(
+                resp(vec![comp_json("a", vec![])]),
+                "s",
+                2,
+                &["drift_unknown"],
+            )
+            .unwrap(),
+        );
+        assert_eq!(s.completeness, "partial");
+        assert_eq!(s.partial_reasons, vec!["drift_unknown"]);
+        let mut v = resp_json(vec![comp_json("a", vec![])]);
+        v["completeness"] = "os_only".into();
+        let s = sbom(validate(parse(v), "s", 2, &["drift_unknown", "lang_whiteout"]).unwrap());
+        assert_eq!(s.completeness, "os_only");
+        assert_eq!(s.partial_reasons, vec!["drift_unknown", "lang_whiteout"]);
+    }
+
+    #[test]
+    fn unknown_completeness_is_partial_and_failed_passes_the_reason() {
+        let mut v = resp_json(vec![comp_json("a", vec![])]);
+        v["completeness"] = "mostly".into();
+        assert_eq!(
+            sbom(validate(parse(v), "s", 2, &[]).unwrap()).completeness,
+            "partial"
+        );
+        let mut v = resp_json(vec![]);
+        v["status"] = "failed".into();
+        v["reason"] = "oom".into();
+        v["message"] = "é".repeat(400).into();
+        match validate(parse(v), "s", 2, &[]).unwrap() {
+            Outcome::Failed { reason, message } => {
+                assert_eq!(reason, "oom");
+                assert!(message.len() <= 1024);
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    /// M6: terminal no_packages_found only for a clean, complete scan.
+    #[test]
+    fn no_packages_found_is_reported_only_for_a_clean_full_scan() {
+        let os =
+            serde_json::json!({"name": "alpine", "version": "3.20.3", "type": "operating-system"});
+        // ok, full, no reasons: terminal.
+        assert_eq!(
+            failed_reason(validate(resp(vec![os.clone()]), "s", 2, &[]).unwrap()),
+            "no_packages_found"
+        );
+        // ok but partial from the worker, or drift unknown here: error.
+        let mut v = resp_json(vec![os.clone()]);
+        v["completeness"] = "partial".into();
+        v["partial_reasons"] = serde_json::json!(["eacces"]);
+        assert_eq!(
+            failed_reason(validate(parse(v), "s", 2, &[]).unwrap()),
+            "error"
+        );
+        assert_eq!(
+            failed_reason(validate(resp(vec![os]), "s", 2, &["drift_unknown"]).unwrap()),
+            "error"
+        );
+        // A failed no_packages_found: kept when clean, else error.
+        let failed = |completeness: &str, reasons: serde_json::Value| {
+            let mut v = resp_json(vec![]);
+            v["status"] = "failed".into();
+            v["reason"] = "no_packages_found".into();
+            v["completeness"] = completeness.into();
+            v["partial_reasons"] = reasons;
+            parse(v)
+        };
+        assert_eq!(
+            failed_reason(validate(failed("", serde_json::json!([])), "s", 2, &[]).unwrap()),
+            "no_packages_found"
+        );
+        assert_eq!(
+            failed_reason(
+                validate(
+                    failed("partial", serde_json::json!(["eacces"])),
+                    "s",
+                    2,
+                    &[]
+                )
+                .unwrap()
+            ),
+            "error"
+        );
+        assert_eq!(
+            failed_reason(
+                validate(
+                    failed("", serde_json::json!([])),
+                    "s",
+                    2,
+                    &["drift_unknown"]
+                )
+                .unwrap()
+            ),
+            "error"
+        );
+    }
+
+    #[test]
+    fn retry_reason_and_stats_are_kept_lean() {
+        let mut v = resp_json(vec![comp_json("a", vec![])]);
+        v["retry_reason"] = "oom".into();
+        v["stats"] =
+            serde_json::json!({"files": 1, "blob": "x".repeat(20_000), "nested": {"a": 1}});
+        let s = sbom(validate(parse(v), "s", 2, &[]).unwrap());
+        assert_eq!(s.stats["files"], 1);
+        assert_eq!(s.stats["retry_reason"], "oom");
+        assert!(s.stats.get("blob").is_none());
+        assert!(s.stats.get("nested").is_none());
+    }
+
+    /// The Broker keeps a partial reason only when it is 1..=64 bytes of
+    /// `[A-Za-z0-9_.-]` (node_catalog.rs `clean_short`, no closed set).
+    /// Every reason the Controller adds must pass.
+    #[test]
+    fn the_controllers_own_partial_reasons_pass_the_broker_filter() {
+        let broker_keeps = |r: &str| {
+            !r.is_empty()
+                && r.len() <= 64
+                && r.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        };
+        let r = resp(vec![
+            comp_json("a", vec!["relative".into()]),
+            comp_json(&"n".repeat(300), vec![]),
+        ]);
+        let s = sbom(validate(r, "s", 2, &["drift_unknown", "lang_whiteout"]).unwrap());
+        assert_eq!(
+            s.partial_reasons,
+            vec![
+                "components_dropped",
+                "files_truncated",
+                "drift_unknown",
+                "lang_whiteout"
+            ]
+        );
+        assert!(s.partial_reasons.iter().all(|r| broker_keeps(r)));
+    }
+
+    fn subject() -> Subject {
+        Subject {
+            digest: format!("sha256:{}", "a".repeat(64)),
+            digest_kind: None,
+            repository: Some("docker.io/library/nginx".into()),
+            platform: "linux/arm64".into(),
+            epoch: 2,
+        }
+    }
+
+    fn sbom_of(components: Vec<Component>) -> Sbom {
+        Sbom {
+            completeness: "full".into(),
+            partial_reasons: vec![],
+            scanner: Scanner::default(),
+            stats: serde_json::json!({}),
+            components,
+        }
+    }
 
     fn comp(name: &str, paths: Vec<String>) -> Component {
         Component {
@@ -346,219 +678,14 @@ mod tests {
         }
     }
 
-    fn resp(components: Vec<Component>) -> Response {
-        Response {
-            protocol_version: 1,
-            scan_id: "s".into(),
-            epoch: 2,
-            status: "ok".into(),
-            reason: String::new(),
-            message: String::new(),
-            completeness: "full".into(),
-            partial_reasons: vec![],
-            retry_reason: String::new(),
-            scanner: Scanner {
-                name: Some("kguardian-cataloger".into()),
-                vendor: Some("kguardian".into()),
-                version: Some("0.1.0".into()),
-            },
-            os: None,
-            stats: serde_json::json!({"files": 10}),
-            components,
-        }
-    }
-
-    fn sbom(o: Outcome) -> Sbom {
-        match o {
-            Outcome::Sbom(s) => s,
-            other => panic!("expected an SBOM, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_clean_response_stays_full() {
-        let s = sbom(
-            validate(
-                resp(vec![comp("busybox", vec!["/bin/busybox".into()])]),
-                "s",
-                2,
-                false,
-            )
-            .unwrap(),
-        );
-        assert_eq!(s.completeness, "full");
-        assert!(s.partial_reasons.is_empty());
-        assert_eq!(s.components[0].file_paths, vec!["/bin/busybox"]);
-    }
-
-    #[test]
-    fn scan_id_epoch_and_version_must_echo() {
-        assert!(validate(resp(vec![]), "other", 2, false).is_err());
-        assert!(validate(resp(vec![]), "s", 3, false).is_err());
-        let mut r = resp(vec![]);
-        r.protocol_version = 2;
-        assert!(validate(r, "s", 2, false).is_err());
-        let mut r = resp(vec![]);
-        r.status = "weird".into();
-        assert!(validate(r, "s", 2, false).is_err());
-    }
-
-    #[test]
-    fn bad_paths_are_dropped_and_mark_the_package_truncated() {
-        let s = sbom(
-            validate(
-                resp(vec![comp(
-                    "p",
-                    vec![
-                        "/usr/bin/ok".into(),
-                        "relative/x".into(),
-                        "/a/../etc/shadow".into(),
-                        "/a//b".into(),
-                        format!("/{}", "x".repeat(2000)),
-                        "/usr/bin/ok".into(),
-                    ],
-                )]),
-                "s",
-                2,
-                false,
-            )
-            .unwrap(),
-        );
-        assert_eq!(s.components[0].file_paths, vec!["/usr/bin/ok"]);
-        assert!(s.components[0].files_truncated);
-        assert_eq!(s.completeness, "partial");
-        assert!(s.partial_reasons.contains(&"files_truncated".to_string()));
-    }
-
-    #[test]
-    fn over_long_names_drop_the_component_and_path_lists_are_capped() {
-        let many: Vec<String> = (0..5000).map(|i| format!("/usr/lib/x{i:05}.so")).collect();
-        let s = sbom(
-            validate(
-                resp(vec![comp(&"n".repeat(300), vec![]), comp("big", many)]),
-                "s",
-                2,
-                false,
-            )
-            .unwrap(),
-        );
-        assert_eq!(s.components.len(), 1);
-        assert_eq!(s.components[0].file_paths.len(), MAX_PATHS_PER_COMPONENT);
-        assert!(s.components[0].files_truncated);
-        assert!(s
-            .partial_reasons
-            .contains(&"components_dropped".to_string()));
-    }
-
-    #[test]
-    fn too_many_components_is_refused() {
-        let cs = (0..=MAX_COMPONENTS)
-            .map(|i| comp(&format!("p{i}"), vec![]))
-            .collect();
-        assert!(validate(resp(cs), "s", 2, false).is_err());
-    }
-
-    #[test]
-    fn drift_unknown_is_never_full() {
-        let s = sbom(validate(resp(vec![comp("a", vec![])]), "s", 2, true).unwrap());
-        assert_eq!(s.completeness, "partial");
-        assert_eq!(s.partial_reasons, vec!["drift_unknown"]);
-        // os_only stays os_only, with the reason added.
-        let mut r = resp(vec![comp("a", vec![])]);
-        r.completeness = "os_only".into();
-        let s = sbom(validate(r, "s", 2, true).unwrap());
-        assert_eq!(s.completeness, "os_only");
-    }
-
-    #[test]
-    fn unknown_completeness_is_partial_and_failed_passes_the_reason() {
-        let mut r = resp(vec![comp("a", vec![])]);
-        r.completeness = "mostly".into();
-        assert_eq!(
-            sbom(validate(r, "s", 2, false).unwrap()).completeness,
-            "partial"
-        );
-
-        let mut r = resp(vec![]);
-        r.status = "failed".into();
-        r.reason = "oom".into();
-        r.message = "é".repeat(800);
-        match validate(r, "s", 2, false).unwrap() {
-            Outcome::Failed { reason, message } => {
-                assert_eq!(reason, "oom");
-                assert!(message.len() <= 1024);
-            }
-            o => panic!("{o:?}"),
-        }
-    }
-
-    #[test]
-    fn an_ok_with_only_the_os_entry_is_no_packages_found() {
-        let os = Component {
-            name: "alpine".into(),
-            version: Some("3.20.3".into()),
-            comp_type: Some("operating-system".into()),
-            ..Default::default()
-        };
-        assert!(matches!(
-            validate(resp(vec![os]), "s", 2, false).unwrap(),
-            Outcome::Failed { ref reason, .. } if reason == "no_packages_found"
-        ));
-    }
-
-    #[test]
-    fn retry_reason_and_oversized_stats_are_handled() {
-        let mut r = resp(vec![comp("a", vec![])]);
-        r.retry_reason = "oom".into();
-        r.stats = serde_json::json!({"files": 1, "blob": "x".repeat(20_000), "nested": {"a": 1}});
-        let s = sbom(validate(r, "s", 2, false).unwrap());
-        assert_eq!(s.stats["files"], 1);
-        assert_eq!(s.stats["retry_reason"], "oom");
-        assert!(s.stats.get("blob").is_none());
-        assert!(s.stats.get("nested").is_none());
-    }
-
-    /// The Broker keeps a partial reason only when it is 1..=64 bytes of
-    /// `[A-Za-z0-9_.-]` (node_catalog.rs `clean_short`, no closed set).
-    /// Every reason the Controller adds must pass, `drift_unknown` first.
-    #[test]
-    fn the_controllers_own_partial_reasons_pass_the_broker_filter() {
-        let broker_keeps = |r: &str| {
-            !r.is_empty()
-                && r.len() <= 64
-                && r.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-        };
-        let mut r = resp(vec![
-            comp("a", vec!["relative".into()]),
-            comp(&"n".repeat(300), vec![]),
-        ]);
-        r.completeness = "full".into();
-        let s = sbom(validate(r, "s", 2, true).unwrap());
-        assert_eq!(
-            s.partial_reasons,
-            vec!["components_dropped", "files_truncated", "drift_unknown"]
-        );
-        assert!(s.partial_reasons.iter().all(|r| broker_keeps(r)));
-    }
-
-    fn subject() -> Subject {
-        Subject {
-            digest: format!("sha256:{}", "a".repeat(64)),
-            digest_kind: Some("repo".into()),
-            repository: Some("docker.io/library/nginx".into()),
-            platform: "linux/arm64".into(),
-            epoch: 2,
-        }
-    }
-
     #[test]
     fn pages_split_by_count_and_carry_the_catalog_fields() {
         let cs: Vec<Component> = (0..4500)
             .map(|i| comp(&format!("p{i:05}"), vec![]))
             .collect();
-        let s = sbom(validate(resp(cs), "s", 2, false).unwrap());
-        let pages = pages(&subject(), &s, "set-1", "2026-10-03T10:00:00Z").unwrap();
+        let pages: Vec<SbomPage> = pages(&subject(), sbom_of(cs), "set-1", "2026-10-03T10:00:00Z")
+            .unwrap()
+            .collect();
         assert_eq!(pages.len(), 3);
         assert_eq!(
             pages.iter().map(|p| p.components.len()).sum::<usize>(),
@@ -571,7 +698,6 @@ mod tests {
             assert_eq!(p.epoch, 2);
             assert_eq!(p.completeness, "full");
             assert_eq!(p.source, "node");
-            assert_eq!(p.image.index_digest, p.image.digest);
         }
         let v = serde_json::to_value(&pages[0]).unwrap();
         assert_eq!(v["sbom_trust"], "scanned");
@@ -582,8 +708,27 @@ mod tests {
         assert!(v["components"][0].get("file_paths").is_none());
     }
 
+    /// B2: paging moves components; the heap buffers in the pages are the
+    /// very ones the SBOM held (a clone would allocate new ones).
     #[test]
-    fn pages_split_by_bytes_and_paths() {
+    fn paging_moves_components_and_never_clones_them() {
+        let cs: Vec<Component> = (0..2500)
+            .map(|i| comp(&format!("p{i:05}"), vec![format!("/usr/bin/p{i:05}")]))
+            .collect();
+        let before: Vec<(*const u8, *const String)> = cs
+            .iter()
+            .map(|c| (c.name.as_ptr(), c.file_paths.as_ptr()))
+            .collect();
+        let after: Vec<(*const u8, *const String)> = pages(&subject(), sbom_of(cs), "s", "t")
+            .unwrap()
+            .flat_map(|p| p.components)
+            .map(|c| (c.name.as_ptr(), c.file_paths.as_ptr()))
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn pages_split_by_bytes_and_paths_measured_exactly() {
         // 60 packages x 4096 paths of ~40 bytes: ~10 MiB of paths, over
         // one page's byte ceiling, and 245 760 paths, over the path cap.
         let cs: Vec<Component> = (0..60)
@@ -596,8 +741,9 @@ mod tests {
                 )
             })
             .collect();
-        let s = sbom(validate(resp(cs), "s", 2, false).unwrap());
-        let pages = pages(&subject(), &s, "set", "t").unwrap();
+        let pages: Vec<SbomPage> = pages(&subject(), sbom_of(cs), "set", "t")
+            .unwrap()
+            .collect();
         assert!(pages.len() >= 2);
         for p in &pages {
             let bytes = serde_json::to_vec(p).unwrap().len();
@@ -605,5 +751,41 @@ mod tests {
             let n: usize = p.components.iter().map(|c| c.file_paths.len()).sum();
             assert!(n <= MAX_PATHS_PER_PAGE);
         }
+    }
+
+    /// Escape-heavy content encodes far larger than its length (a quote
+    /// or backslash doubles, a control character becomes `\u00XX`); the
+    /// exact measure keeps every page under the ceiling anyway.
+    #[test]
+    fn escape_heavy_components_are_sized_exactly() {
+        let nasty = "\"\\\u{1}".repeat(80); // 240 bytes -> 80 * 10 encoded
+        let cs: Vec<Component> = (0..9000)
+            .map(|i| Component {
+                name: format!("{nasty}{i}"),
+                version: Some(nasty.clone()),
+                purl: Some(format!("pkg:x/{}", nasty.repeat(4))),
+                licenses: vec![nasty.clone(); 8],
+                ..Default::default()
+            })
+            .collect();
+        let est: usize = cs.iter().map(|c| c.name.len() + 2000).sum();
+        let pages: Vec<SbomPage> = pages(&subject(), sbom_of(cs), "set", "t")
+            .unwrap()
+            .collect();
+        assert!(pages.len() > 1, "{est} bytes of raw text must span pages");
+        for p in &pages {
+            let bytes = serde_json::to_vec(p).unwrap().len();
+            assert!(bytes <= MAX_PAGE_BYTES, "page of {bytes} bytes");
+        }
+        assert_eq!(
+            pages.iter().map(|p| p.components.len()).sum::<usize>(),
+            9000
+        );
+    }
+
+    #[test]
+    fn json_len_is_the_encoded_length() {
+        let c = comp("a\"b", vec!["/x".into()]);
+        assert_eq!(json_len(&c), serde_json::to_vec(&c).unwrap().len());
     }
 }

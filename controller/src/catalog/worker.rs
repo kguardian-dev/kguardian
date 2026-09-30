@@ -5,7 +5,40 @@
 //! Blocking I/O on purpose: it runs on a `spawn_blocking` thread, with
 //! its own deadlines (`poll` in slices, so a cancel flag is noticed
 //! within a second), and never on the runtime the capture paths share.
+//!
+//! ## Peer verification (PROTOCOL.md 1.1)
+//!
+//! Before every connection, the socket FILE is checked: its directory
+//! and the socket are opened `O_PATH|O_NOFOLLOW` and `fstat`ed
+//! (directory owned by uid 0, mode 0700; socket owned by uid 0, mode
+//! 0600), and the connect goes through `/proc/self/fd/<n>` of that very
+//! `O_PATH` fd, so the file checked is the file connected. Only a uid-0
+//! process with the shared `emptyDir` mounted can have created it. After
+//! connecting, `SO_PEERCRED` uid must be allowed (0).
+//!
+//! On top of that, chosen once at startup by [`probe_peer_mode`]:
+//!
+//! * [`PeerMode::Pidfd`] (Linux >= 6.5): `SO_PEERPIDFD` pins the worker
+//!   process and its cgroup must be a sibling container of the
+//!   Controller's own (same pod).
+//! * [`PeerMode::PathCheck`] (older kernels): nothing more. The worker is
+//!   in another pid namespace, so without a pidfd its process cannot be
+//!   named; the file check above is the binding.
+//!
+//! ## Memory
+//!
+//! The response is untrusted and can be large, and an OOM kill of the
+//! Controller takes capture down with it, so parsing is lean: the raw
+//! frame (at most `max_response_bytes`, 16 MiB by default) is parsed
+//! into bounded types ([`Capped`], [`PathList`], [`LeanStats`]) that
+//! drop over-long strings without keeping them, validate paths while
+//! parsing, and skip anything over their caps; the raw buffer is dropped
+//! as soon as parsing ends. Worst case extra memory during a scan is the
+//! raw frame plus the parsed components (about 2.5x the frame, for
+//! string headers), never both after parsing: 16 MiB + 40 MiB at the
+//! default, 64 MiB + 160 MiB at the hard ceiling.
 
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -13,9 +46,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
-
-use super::api::Scanner;
+use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const PROTOCOL_VERSION: i64 = 1;
 /// Request frames are at most 64 KiB (PROTOCOL.md 2).
@@ -29,6 +61,16 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const READ_GRACE: Duration = Duration::from_secs(30);
 /// Deadline for a `ping` answer.
 pub const PING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Components kept from one response (the Broker's `MAX_SBOM_COMPONENTS`).
+pub const MAX_COMPONENTS: usize = 50_000;
+/// File paths kept per component.
+pub const MAX_PATHS: usize = 4096;
+/// Longest file path kept (PROTOCOL.md 4.3).
+pub const MAX_PATH_LEN: usize = 1024;
+/// `partial_reasons` kept from a response.
+pub const MAX_REASONS: usize = 16;
+/// `stats` entries kept (scalars only).
+pub const MAX_STATS_ENTRIES: usize = 64;
 
 /// Budgets sent with a scan (PROTOCOL.md 3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -58,57 +100,324 @@ pub struct Request {
     pub budgets: Option<Budgets>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-pub struct Os {
+// ---- Lean response types ------------------------------------------------
+
+/// A string of at most `N` bytes. A longer one is not kept (only the
+/// fact that it was too long), and neither is a non-string value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capped<const N: usize> {
+    pub value: Option<String>,
+    pub too_long: bool,
+}
+
+impl<const N: usize> Capped<N> {
+    pub fn new(s: &str) -> Self {
+        if s.len() <= N {
+            Self {
+                value: Some(s.to_string()),
+                too_long: false,
+            }
+        } else {
+            Self {
+                value: None,
+                too_long: true,
+            }
+        }
+    }
+
+    pub fn take(self) -> Option<String> {
+        self.value.filter(|s| !s.is_empty())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.value.as_deref().unwrap_or("")
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for Capped<N> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<const N: usize>;
+        impl<'de, const N: usize> Visitor<'de> for V<N> {
+            type Value = Capped<N>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a string")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(Capped::new(v))
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Capped::default())
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Capped::default())
+            }
+        }
+        d.deserialize_any(V::<N>)
+    }
+}
+
+/// Up to `N` non-empty strings of at most `L` bytes; the rest skipped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CappedList<const N: usize, const L: usize>(pub Vec<String>);
+
+impl<'de, const N: usize, const L: usize> Deserialize<'de> for CappedList<N, L> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<const N: usize, const L: usize>;
+        impl<'de, const N: usize, const L: usize> Visitor<'de> for V<N, L> {
+            type Value = CappedList<N, L>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a list of strings")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some(s) = seq.next_element::<Capped<L>>()? {
+                    if out.len() < N {
+                        out.extend(s.take());
+                    }
+                }
+                Ok(CappedList(out))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(CappedList::default())
+            }
+        }
+        d.deserialize_any(V::<N, L>)
+    }
+}
+
+/// A component's file paths, validated while parsing (PROTOCOL.md 4.3):
+/// invalid or over-long paths are never kept, at most [`MAX_PATHS`] are,
+/// and the result is sorted and deduplicated in place. `truncated` says
+/// the list is not the package's complete one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathList {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
+impl<'de> Deserialize<'de> for PathList {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = PathList;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a list of paths")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = PathList::default();
+                while let Some(p) = seq.next_element::<Capped<MAX_PATH_LEN>>()? {
+                    match p.value {
+                        Some(p) if super::post::valid_path(&p) && out.paths.len() < MAX_PATHS => {
+                            out.paths.push(p)
+                        }
+                        _ => out.truncated = true,
+                    }
+                }
+                out.paths.sort_unstable();
+                out.paths.dedup();
+                Ok(out)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(PathList::default())
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// `stats`, kept lean: at most [`MAX_STATS_ENTRIES`] scalar entries
+/// (numbers, booleans, strings up to 128 bytes) with keys up to 64
+/// bytes. Nested objects (`budgets`) and everything else are skipped
+/// unparsed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LeanStats(pub serde_json::Map<String, serde_json::Value>);
+
+/// One stats value: kept when scalar, otherwise skipped.
+struct StatValue(Option<serde_json::Value>);
+
+impl<'de> Deserialize<'de> for StatValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = StatValue;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a value")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(StatValue(Some(v.into())))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(StatValue(Some(v.into())))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(StatValue(Some(v.into())))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(StatValue(serde_json::Number::from_f64(v).map(Into::into)))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(StatValue((v.len() <= 128).then(|| v.into())))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(StatValue(None))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(StatValue(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(StatValue(None))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for LeanStats {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = LeanStats;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "an object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = serde_json::Map::new();
+                while let Some(k) = map.next_key::<Capped<64>>()? {
+                    let v = map.next_value::<StatValue>()?;
+                    if let (Some(k), Some(v)) = (k.value, v.0) {
+                        if out.len() < MAX_STATS_ENTRIES {
+                            out.insert(k, v);
+                        }
+                    }
+                }
+                Ok(LeanStats(out))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(LeanStats::default())
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// One component as received (PROTOCOL.md 4.3), with every field bounded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WireComponent {
     #[serde(default)]
-    pub family: Option<String>,
+    pub name: Capped<256>,
     #[serde(default)]
-    pub name: Option<String>,
+    pub version: Capped<128>,
+    #[serde(default)]
+    pub purl: Capped<2048>,
+    #[serde(default, rename = "type")]
+    pub comp_type: Capped<128>,
+    #[serde(default)]
+    pub class: Capped<64>,
+    #[serde(default)]
+    pub src_name: Capped<256>,
+    #[serde(default)]
+    pub src_version: Capped<128>,
+    #[serde(default)]
+    pub licenses: CappedList<8, 256>,
+    #[serde(default)]
+    pub file_paths: PathList,
+    #[serde(default)]
+    pub files_truncated: bool,
+    #[serde(default)]
+    pub interpreted_content: bool,
+}
+
+/// The component list: at most [`MAX_COMPONENTS`] kept; `overflow` says
+/// there were more (the rest are skipped unparsed).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Components {
+    pub items: Vec<WireComponent>,
+    pub overflow: bool,
+}
+
+impl<'de> Deserialize<'de> for Components {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Components;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a list of components")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = Components::default();
+                loop {
+                    if out.items.len() < MAX_COMPONENTS {
+                        match seq.next_element::<WireComponent>()? {
+                            Some(c) => out.items.push(c),
+                            None => break,
+                        }
+                    } else {
+                        match seq.next_element::<IgnoredAny>()? {
+                            Some(_) => out.overflow = true,
+                            None => break,
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Components::default())
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WireScanner {
+    #[serde(default)]
+    pub vendor: Capped<256>,
+    #[serde(default)]
+    pub version: Capped<128>,
 }
 
 /// A response as received; [`super::post::validate`] turns it into what
-/// is posted. Unknown fields are ignored (PROTOCOL.md 4.3, 5).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// is posted. Unknown fields are ignored, and skipped without being kept
+/// (PROTOCOL.md 4.3, 5).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Response {
     pub protocol_version: i64,
     #[serde(default)]
-    pub scan_id: String,
+    pub scan_id: Capped<128>,
     #[serde(default)]
     pub epoch: i64,
-    pub status: String,
     #[serde(default)]
-    pub reason: String,
+    pub status: Capped<16>,
     #[serde(default)]
-    pub message: String,
+    pub reason: Capped<64>,
     #[serde(default)]
-    pub completeness: String,
+    pub message: Capped<1024>,
     #[serde(default)]
-    pub partial_reasons: Vec<String>,
+    pub completeness: Capped<16>,
     #[serde(default)]
-    pub retry_reason: String,
+    pub partial_reasons: CappedList<MAX_REASONS, 64>,
     #[serde(default)]
-    pub scanner: Scanner,
+    pub retry_reason: Capped<64>,
     #[serde(default)]
-    pub os: Option<Os>,
+    pub scanner: WireScanner,
     #[serde(default)]
-    pub stats: serde_json::Value,
+    pub stats: LeanStats,
     #[serde(default)]
-    pub components: Vec<super::api::Component>,
+    pub components: Components,
 }
+
+// ---- Errors ---------------------------------------------------------------
 
 /// Why a hand-off produced no response.
 #[derive(Debug)]
 pub enum WorkerError {
     /// No worker listening, or the connect timed out.
     Unavailable(io::Error),
-    /// The peer is not the cataloger sidecar of this pod. Nothing was
-    /// sent to it.
+    /// The peer (or, in [`PeerMode::PathCheck`], the socket file) is not
+    /// the cataloger sidecar's. Nothing was sent.
     PeerRejected(String),
-    /// The peer cannot be verified on this node at all: the kernel has no
-    /// `SO_PEERPIDFD` (Linux < 6.5) and the Controller does not share the
-    /// worker's pid namespace. Nothing was sent. Permanent for the life of
-    /// the process; the claim loop stops claiming (see `catalog::degraded`).
-    PeerUnsupported(String),
     /// A framing or deadline violation by the peer, or I/O failing
     /// mid-exchange. The connection is closed (which cancels the scan).
     Protocol(String),
@@ -118,12 +427,11 @@ pub enum WorkerError {
     Cancelled,
 }
 
-impl std::fmt::Display for WorkerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WorkerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WorkerError::Unavailable(e) => write!(f, "worker unavailable: {e}"),
             WorkerError::PeerRejected(m) => write!(f, "worker peer rejected: {m}"),
-            WorkerError::PeerUnsupported(m) => write!(f, "worker peer cannot be verified: {m}"),
             WorkerError::Protocol(m) => write!(f, "worker protocol error: {m}"),
             WorkerError::Timeout => write!(f, "worker did not answer before the deadline"),
             WorkerError::Cancelled => write!(f, "scan cancelled"),
@@ -131,52 +439,61 @@ impl std::fmt::Display for WorkerError {
     }
 }
 
-// ---- Peer verification --------------------------------------------------
+// ---- Peer verification ----------------------------------------------------
+
+/// What is checked beyond the socket file and the uid (see module
+/// docs). Decided once, at startup, by [`probe_peer_mode`]; never changed
+/// at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerMode {
+    Pidfd,
+    PathCheck,
+}
+
+impl PeerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PeerMode::Pidfd => "pidfd",
+            PeerMode::PathCheck => "path_check",
+        }
+    }
+}
+
+/// The mode for a `getsockopt(SO_PEERPIDFD)` probe's result. Only
+/// `ENOPROTOOPT` (a kernel without the option, < 6.5) selects the path
+/// check; any other error still means the kernel knows the option.
+pub fn peer_mode_from(probe: Result<(), i32>) -> PeerMode {
+    match probe {
+        Err(e) if e == libc::ENOPROTOOPT => PeerMode::PathCheck,
+        _ => PeerMode::Pidfd,
+    }
+}
+
+/// Probe `SO_PEERPIDFD` on a local socketpair.
+pub fn probe_peer_mode() -> PeerMode {
+    let probe = UnixStream::pair()
+        .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+        .and_then(|(a, _b)| {
+            peer_pidfd(a.as_raw_fd())
+                .map(drop)
+                .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
+        });
+    peer_mode_from(probe)
+}
 
 /// Why a peer was not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PeerError {
-    /// This peer is not the cataloger sidecar of this pod.
-    Rejected(String),
-    /// No peer can be verified on this node (see
-    /// [`WorkerError::PeerUnsupported`]).
-    Unsupported(String),
-}
+pub struct PeerError(pub String);
 
 impl From<String> for PeerError {
     fn from(m: String) -> Self {
-        PeerError::Rejected(m)
+        PeerError(m)
     }
 }
 
 impl From<&str> for PeerError {
     fn from(m: &str) -> Self {
-        PeerError::Rejected(m.to_string())
-    }
-}
-
-/// The minimum kernel for [`peer_pidfd`], named in logs and docs.
-pub const PEERPIDFD_KERNEL: &str = "Linux 6.5";
-
-/// With `SO_PEERPIDFD` refused by `err`: the peer pid to fall back on,
-/// or why there is none. The fallback (`SO_PEERCRED`'s pid) is only
-/// meaningful when the host procfs is in the Controller's own pid
-/// namespace (`hostPID`); otherwise that pid is 0, or a number in a
-/// namespace the procfs does not show. Fails closed either way.
-pub fn without_pidfd(err: &io::Error, same_pid_ns: bool, peer_pid: i32) -> Result<i32, PeerError> {
-    if same_pid_ns && peer_pid > 0 {
-        return Ok(peer_pid);
-    }
-    match err.raw_os_error() {
-        // What a kernel without the option answers at SOL_SOCKET.
-        Some(libc::ENOPROTOOPT) | Some(libc::EINVAL) => Err(PeerError::Unsupported(format!(
-            "the kernel has no SO_PEERPIDFD ({err}; needs {PEERPIDFD_KERNEL} or later) and the \
-             Controller does not share the worker's pid namespace, so the worker's process \
-             cannot be pinned for the cgroup check"
-        ))),
-        _ => Err(PeerError::Rejected(format!(
-            "cannot pin the peer process (SO_PEERPIDFD: {err}; peer pid {peer_pid})"
-        ))),
+        PeerError(m.to_string())
     }
 }
 
@@ -302,13 +619,12 @@ pub fn same_pod_sibling(own: &str, peer: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// How to find the peer's cgroup.
+/// How to find the peer's cgroup ([`PeerMode::Pidfd`]).
 pub trait PeerProc {
     /// The Controller's own cgroup body.
     fn own_cgroup(&self) -> io::Result<String>;
-    /// The peer's cgroup body, pid-reuse safe, or an error when the
-    /// peer's process cannot be pinned.
-    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, PeerError>;
+    /// The peer's cgroup body, pid-reuse safe.
+    fn peer_cgroup(&self, sock: RawFd) -> Result<String, PeerError>;
 }
 
 /// The real lookups, through the host procfs.
@@ -316,77 +632,57 @@ pub struct HostPeerProc {
     pub host_proc: PathBuf,
 }
 
-impl HostPeerProc {
-    /// Is `host_proc` a procfs of the Controller's own pid namespace?
-    /// `self` there resolves to our pid in THAT procfs's namespace.
-    fn same_pid_ns(&self) -> bool {
-        // SAFETY: getpid has no preconditions.
-        let me = unsafe { libc::getpid() };
-        std::fs::read_link(self.host_proc.join("self"))
-            .ok()
-            .and_then(|p| p.to_str().and_then(|s| s.parse::<i32>().ok()))
-            == Some(me)
-    }
-}
-
 impl PeerProc for HostPeerProc {
     fn own_cgroup(&self) -> io::Result<String> {
         std::fs::read_to_string(self.host_proc.join("self/cgroup"))
     }
 
-    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, PeerError> {
+    fn peer_cgroup(&self, sock: RawFd) -> Result<String, PeerError> {
         // The worker is in another pid namespace (its own container), so
         // SO_PEERCRED's pid is 0 here. SO_PEERPIDFD pins the peer, and
         // its fdinfo, read through the host procfs, names it in the host
         // namespace. Re-reading the pid after the cgroup proves the
-        // process the cgroup belonged to was alive throughout.
-        match peer_pidfd(sock) {
-            Ok(pidfd) => {
-                let info = self
-                    .host_proc
-                    .join(format!("self/fdinfo/{}", pidfd.as_raw_fd()));
-                let pid = |_: ()| {
-                    std::fs::read_to_string(&info)
-                        .ok()
-                        .and_then(|b| fdinfo_pid(&b))
-                        .filter(|p| *p > 0)
-                };
-                let before = pid(()).ok_or("peer pidfd names no live process")?;
-                let cg = std::fs::read_to_string(self.host_proc.join(format!("{before}/cgroup")))
-                    .map_err(|e| format!("peer cgroup: {e}"))?;
-                if pid(()) != Some(before) {
-                    return Err("peer exited while being verified".into());
-                }
-                Ok(cg)
-            }
-            Err(e) => {
-                // A kernel without SO_PEERPIDFD: usable only when a shared
-                // pid namespace makes SO_PEERCRED's pid meaningful.
-                let pid = without_pidfd(&e, self.same_pid_ns(), cred.pid)?;
-                tracing::debug!(error = %e, "SO_PEERPIDFD unavailable; using SO_PEERCRED pid");
-                Ok(
-                    std::fs::read_to_string(self.host_proc.join(format!("{pid}/cgroup")))
-                        .map_err(|e| format!("peer cgroup: {e}"))?,
-                )
-            }
+        // process the cgroup belonged to was alive throughout. Any error
+        // (EINVAL, ENODATA, ...) rejects this peer only: the mode was
+        // decided at startup and does not change.
+        let pidfd = peer_pidfd(sock).map_err(|e| format!("SO_PEERPIDFD: {e}"))?;
+        let info = self
+            .host_proc
+            .join(format!("self/fdinfo/{}", pidfd.as_raw_fd()));
+        let pid = || {
+            std::fs::read_to_string(&info)
+                .ok()
+                .and_then(|b| fdinfo_pid(&b))
+                .filter(|p| *p > 0)
+        };
+        let before = pid().ok_or("peer pidfd names no live process")?;
+        let cg = std::fs::read_to_string(self.host_proc.join(format!("{before}/cgroup")))
+            .map_err(|e| format!("peer cgroup: {e}"))?;
+        if pid() != Some(before) {
+            return Err("peer exited while being verified".into());
         }
+        Ok(cg)
     }
 }
 
-/// `SO_PEERCRED` uid in the allowed set, and the peer a sibling
-/// container of this pod. Fails closed: any lookup that does not work
-/// rejects the peer.
+fn check_uid(sock: RawFd, allowed_uids: &[u32]) -> Result<(), PeerError> {
+    let cred = peer_cred(sock).map_err(|e| format!("SO_PEERCRED: {e}"))?;
+    if !allowed_uids.contains(&cred.uid) {
+        return Err(format!("peer uid {} is not allowed", cred.uid).into());
+    }
+    Ok(())
+}
+
+/// [`PeerMode::Pidfd`]: `SO_PEERCRED` uid in the allowed set, and the
+/// peer a sibling container of this pod. Fails closed.
 pub fn verify_peer<P: PeerProc>(
     sock: RawFd,
     allowed_uids: &[u32],
     proc: &P,
 ) -> Result<(), PeerError> {
-    let cred = peer_cred(sock).map_err(|e| format!("SO_PEERCRED: {e}"))?;
-    if !allowed_uids.contains(&cred.uid) {
-        return Err(format!("peer uid {} is not allowed", cred.uid).into());
-    }
+    check_uid(sock, allowed_uids)?;
     let own = proc.own_cgroup().map_err(|e| format!("own cgroup: {e}"))?;
-    let peer = proc.peer_cgroup(sock, &cred)?;
+    let peer = proc.peer_cgroup(sock)?;
     let (Some(o), Some(p)) = (v2_path(&own), v2_path(&peer)) else {
         return Err("no cgroup v2 path to compare".into());
     };
@@ -451,6 +747,113 @@ pub fn connect(path: &Path) -> io::Result<UnixStream> {
     }
     set_timeout(fd, libc::SO_SNDTIMEO, WRITE_TIMEOUT)?;
     Ok(UnixStream::from(sock))
+}
+
+fn fstat(fd: RawFd) -> io::Result<libc::stat> {
+    // SAFETY: zeroed stat is a valid out-parameter.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: valid fd and out-pointer.
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+fn open_path(dir: RawFd, name: &std::ffi::CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+    // SAFETY: valid dirfd and NUL-terminated name.
+    let fd = unsafe {
+        libc::openat(
+            dir,
+            name.as_ptr(),
+            flags | libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a new fd from the kernel.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Why the socket file failed [`connect_checked`].
+#[derive(Debug)]
+pub enum PathCheckError {
+    /// Nothing there (the worker has not created it yet).
+    Missing(io::Error),
+    /// There, but not the worker's.
+    Bad(String),
+}
+
+/// The mode/owner rule: a `kind` (`S_IFDIR`/`S_IFSOCK`) owned by `owner`
+/// with exactly `mode` permission bits (no setuid/setgid/sticky).
+pub fn check_mode(
+    what: &str,
+    st: &libc::stat,
+    kind: libc::mode_t,
+    owner: u32,
+    mode: libc::mode_t,
+) -> Result<(), String> {
+    if st.st_mode & libc::S_IFMT != kind {
+        return Err(format!(
+            "{what} is not a {}",
+            if kind == libc::S_IFDIR {
+                "directory"
+            } else {
+                "socket"
+            }
+        ));
+    }
+    if st.st_uid != owner {
+        return Err(format!("{what} is owned by uid {}, not {owner}", st.st_uid));
+    }
+    if st.st_mode & 0o7777 != mode {
+        return Err(format!(
+            "{what} has mode {:04o}, not {mode:04o}",
+            st.st_mode & 0o7777
+        ));
+    }
+    Ok(())
+}
+
+/// PROTOCOL.md 1.1 steps 1 and 2: open the socket's directory and the socket
+/// `O_PATH|O_NOFOLLOW`, check both (directory uid `owner` mode 0700,
+/// socket uid `owner` mode 0600), and connect through
+/// `/proc/self/fd/<socket fd>`, so the file checked is the file
+/// connected: a rename or symlink swap after the check cannot redirect
+/// the connect.
+pub fn connect_checked(path: &Path, owner: u32) -> Result<UnixStream, PathCheckError> {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = |m: String| PathCheckError::Bad(m);
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(bad(format!("{} names no file", path.display())));
+    };
+    let c = |b: &[u8]| {
+        std::ffi::CString::new(b).map_err(|_| PathCheckError::Bad("path with a NUL".into()))
+    };
+    let dirfd = open_path(
+        libc::AT_FDCWD,
+        &c(dir.as_os_str().as_bytes())?,
+        libc::O_DIRECTORY,
+    )
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ENOENT) => PathCheckError::Missing(e),
+        _ => bad(format!("socket directory {}: {e}", dir.display())),
+    })?;
+    let st = fstat(dirfd.as_raw_fd()).map_err(|e| bad(format!("fstat directory: {e}")))?;
+    check_mode("socket directory", &st, libc::S_IFDIR, owner, 0o700).map_err(bad)?;
+    let sock = open_path(dirfd.as_raw_fd(), &c(name.as_bytes())?, 0).map_err(|e| {
+        match e.raw_os_error() {
+            Some(libc::ENOENT) => PathCheckError::Missing(e),
+            _ => bad(format!("socket {}: {e}", path.display())),
+        }
+    })?;
+    let st = fstat(sock.as_raw_fd()).map_err(|e| bad(format!("fstat socket: {e}")))?;
+    check_mode("socket", &st, libc::S_IFSOCK, owner, 0o600).map_err(bad)?;
+    let via = PathBuf::from(format!("/proc/self/fd/{}", sock.as_raw_fd()));
+    connect(&via).map_err(|e| match e.raw_os_error() {
+        Some(libc::ECONNREFUSED) | Some(libc::ENOENT) => PathCheckError::Missing(e),
+        _ => bad(format!("connect: {e}")),
+    })
 }
 
 /// One frame: big-endian u32 length, then the payload.
@@ -576,25 +979,35 @@ pub fn read_frame(
     Ok(buf)
 }
 
-/// One exchange on an already-connected, not-yet-verified socket: verify
-/// the peer, send, close our copy of the fd, read the answer.
-#[allow(clippy::too_many_arguments)]
-pub fn exchange<P: PeerProc>(
+/// Parse a response frame into the lean types, consuming (and so
+/// freeing) the raw buffer.
+pub fn parse_response(body: Vec<u8>) -> Result<Response, WorkerError> {
+    let r = serde_json::from_slice(&body)
+        .map_err(|e| WorkerError::Protocol(format!("response JSON: {e}")));
+    drop(body);
+    r
+}
+
+/// Limits for one exchange.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub response_bytes: usize,
+    pub read_timeout: Duration,
+}
+
+/// One exchange on an already-connected, not-yet-verified socket: run
+/// `verify`, send, close our copy of the fd, read and parse the answer.
+pub fn exchange(
     sock: UnixStream,
-    allowed_uids: &[u32],
-    peer: &P,
+    verify: impl FnOnce(RawFd) -> Result<(), PeerError>,
     req: &Request,
     root: Option<OwnedFd>,
-    response_limit: usize,
-    read_timeout: Duration,
+    limits: Limits,
     cancel: &AtomicBool,
 ) -> Result<Response, WorkerError> {
     // The fd is not sent to a peer that fails verification; dropping
     // `root` on that path closes it.
-    verify_peer(sock.as_raw_fd(), allowed_uids, peer).map_err(|e| match e {
-        PeerError::Rejected(m) => WorkerError::PeerRejected(m),
-        PeerError::Unsupported(m) => WorkerError::PeerUnsupported(m),
-    })?;
+    verify(sock.as_raw_fd()).map_err(|e| WorkerError::PeerRejected(e.0))?;
     let payload = serde_json::to_vec(req).map_err(|e| WorkerError::Protocol(e.to_string()))?;
     if payload.len() > MAX_REQUEST_BYTES {
         return Err(WorkerError::Protocol(format!(
@@ -611,33 +1024,49 @@ pub fn exchange<P: PeerProc>(
     // its own reference now, and the Controller has no further use.
     drop(root);
     sent.map_err(|e| WorkerError::Protocol(format!("send: {e}")))?;
-    let limit = response_limit.min(MAX_RESPONSE_CEILING);
-    let body = read_frame(&sock, limit, Instant::now() + read_timeout, cancel)?;
-    // `sock` drops here: one request, one response, no reuse.
-    serde_json::from_slice(&body).map_err(|e| WorkerError::Protocol(format!("response JSON: {e}")))
+    let limit = limits.response_bytes.min(MAX_RESPONSE_CEILING);
+    let body = read_frame(&sock, limit, Instant::now() + limits.read_timeout, cancel)?;
+    // One request, one response, no reuse: close before parsing.
+    drop(sock);
+    parse_response(body)
 }
 
-/// Connect and [`exchange`].
-#[allow(clippy::too_many_arguments)]
-pub fn call<P: PeerProc>(
+/// Everything [`call`] needs to find and verify the worker.
+pub struct PeerPolicy {
+    pub mode: PeerMode,
+    pub allowed_uids: Vec<u32>,
+    /// Owner the socket file and its directory must have; 0 in
+    /// production.
+    pub socket_owner: u32,
+    pub host_proc: PathBuf,
+}
+
+/// Check the socket file, connect through it, verify the peer (uid, and
+/// the cgroup in [`PeerMode::Pidfd`]), and [`exchange`].
+pub fn call(
     path: &Path,
-    allowed_uids: &[u32],
-    peer: &P,
+    policy: &PeerPolicy,
     req: &Request,
     root: Option<OwnedFd>,
-    response_limit: usize,
-    read_timeout: Duration,
+    limits: Limits,
     cancel: &AtomicBool,
 ) -> Result<Response, WorkerError> {
-    let sock = connect(path).map_err(WorkerError::Unavailable)?;
+    let sock = connect_checked(path, policy.socket_owner).map_err(|e| match e {
+        PathCheckError::Missing(e) => WorkerError::Unavailable(e),
+        PathCheckError::Bad(m) => WorkerError::PeerRejected(m),
+    })?;
+    let proc = HostPeerProc {
+        host_proc: policy.host_proc.clone(),
+    };
     exchange(
         sock,
-        allowed_uids,
-        peer,
+        |fd| match policy.mode {
+            PeerMode::Pidfd => verify_peer(fd, &policy.allowed_uids, &proc),
+            PeerMode::PathCheck => check_uid(fd, &policy.allowed_uids),
+        },
         req,
         root,
-        response_limit,
-        read_timeout,
+        limits,
         cancel,
     )
 }
@@ -656,8 +1085,9 @@ pub fn ping_request(scan_id: String) -> Request {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
     /// Peer lookups answered from fixed cgroup bodies.
@@ -670,12 +1100,8 @@ mod tests {
         fn own_cgroup(&self) -> io::Result<String> {
             Ok(self.own.to_string())
         }
-        fn peer_cgroup(&self, _: RawFd, _: &libc::ucred) -> Result<String, PeerError> {
-            match self.peer {
-                Ok(p) => Ok(p.to_string()),
-                Err(m) if m.starts_with("unsupported") => Err(PeerError::Unsupported(m.into())),
-                Err(m) => Err(PeerError::Rejected(m.into())),
-            }
+        fn peer_cgroup(&self, _: RawFd) -> Result<String, PeerError> {
+            self.peer.map(str::to_string).map_err(PeerError::from)
         }
     }
 
@@ -690,14 +1116,24 @@ mod tests {
     }
 
     // SAFETY: getuid has no preconditions.
-    fn me() -> u32 {
+    pub(crate) fn me() -> u32 {
         unsafe { libc::getuid() }
+    }
+
+    fn limits(bytes: usize, secs: u64) -> Limits {
+        Limits {
+            response_bytes: bytes,
+            read_timeout: Duration::from_secs(secs),
+        }
+    }
+
+    fn verify_good(fd: RawFd) -> Result<(), PeerError> {
+        verify_peer(fd, &[me()], &good_peer())
     }
 
     #[test]
     fn siblings_in_a_private_cgroup_namespace_are_the_same_pod() {
         assert!(same_pod_sibling("/", "/../cri-containerd-bbbb.scope").is_ok());
-        // Our own container, a nested child of it, another pod, the host.
         assert!(same_pod_sibling("/", "/").is_err());
         assert!(same_pod_sibling("/", "/child").is_err());
         assert!(same_pod_sibling("/", "/../../other-pod/ctr").is_err());
@@ -729,51 +1165,68 @@ mod tests {
         assert_eq!(fdinfo_pid("pos: 0\n"), None);
     }
 
-    /// A fake worker on the other end of a socketpair: reads one framed
+    /// Only ENOPROTOOPT means "no SO_PEERPIDFD"; everything else keeps the
+    /// pidfd check (a runtime error then rejects one peer, never degrades).
+    #[test]
+    fn the_peer_mode_is_path_check_only_for_enoprotoopt() {
+        assert_eq!(peer_mode_from(Ok(())), PeerMode::Pidfd);
+        assert_eq!(peer_mode_from(Err(libc::ENOPROTOOPT)), PeerMode::PathCheck);
+        for e in [libc::EINVAL, libc::ENODATA, libc::EBADF] {
+            assert_eq!(peer_mode_from(Err(e)), PeerMode::Pidfd, "errno {e}");
+        }
+        // This kernel answers one way or the other without panicking.
+        let _ = probe_peer_mode();
+    }
+
+    /// A fake worker on the other end of a stream: reads one framed
     /// request with its fd, checks it, and answers with `reply`.
-    fn fake_worker(
+    pub(crate) fn fake_worker(
         theirs: UnixStream,
         hold: bool,
         reply: impl FnOnce(&serde_json::Value, bool) -> Vec<u8> + Send + 'static,
     ) -> std::thread::JoinHandle<(serde_json::Value, bool, Option<UnixStream>)> {
-        std::thread::spawn(move || {
-            let mut len = [0u8; 4];
-            let mut cbuf = [0u64; 8];
-            let mut iov = libc::iovec {
-                iov_base: len.as_mut_ptr().cast(),
-                iov_len: 4,
-            };
-            // SAFETY: zeroed msghdr pointing at locals.
-            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-            msg.msg_iov = &mut iov;
-            msg.msg_iovlen = 1;
-            msg.msg_control = cbuf.as_mut_ptr().cast();
-            msg.msg_controllen = std::mem::size_of_val(&cbuf) as _;
-            // SAFETY: valid socket and msghdr.
-            let n = unsafe { libc::recvmsg(theirs.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
-            assert_eq!(n, 4, "the fd rides the first bytes of the frame");
-            let mut got_fd = false;
-            // SAFETY: walking the control buffer the kernel filled.
-            unsafe {
-                let c = libc::CMSG_FIRSTHDR(&msg);
-                if !c.is_null() && (*c).cmsg_type == libc::SCM_RIGHTS {
-                    let fd = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<RawFd>());
-                    let f = OwnedFd::from_raw_fd(fd);
-                    let mut st: libc::stat = std::mem::zeroed();
-                    assert_eq!(libc::fstat(f.as_raw_fd(), &mut st), 0);
-                    assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFDIR);
-                    got_fd = true;
-                }
+        std::thread::spawn(move || serve_one(theirs, hold, reply))
+    }
+
+    pub(crate) fn serve_one(
+        theirs: UnixStream,
+        hold: bool,
+        reply: impl FnOnce(&serde_json::Value, bool) -> Vec<u8>,
+    ) -> (serde_json::Value, bool, Option<UnixStream>) {
+        let mut len = [0u8; 4];
+        let mut cbuf = [0u64; 8];
+        let mut iov = libc::iovec {
+            iov_base: len.as_mut_ptr().cast(),
+            iov_len: 4,
+        };
+        // SAFETY: zeroed msghdr pointing at locals.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf.as_mut_ptr().cast();
+        msg.msg_controllen = std::mem::size_of_val(&cbuf) as _;
+        // SAFETY: valid socket and msghdr.
+        let n = unsafe { libc::recvmsg(theirs.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
+        assert_eq!(n, 4, "the fd rides the first bytes of the frame");
+        let mut got_fd = false;
+        // SAFETY: walking the control buffer the kernel filled.
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            if !c.is_null() && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let fd = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<RawFd>());
+                let f = OwnedFd::from_raw_fd(fd);
+                let mut st: libc::stat = std::mem::zeroed();
+                assert_eq!(libc::fstat(f.as_raw_fd(), &mut st), 0);
+                assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFDIR);
+                got_fd = true;
             }
-            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-            (&theirs).read_exact(&mut body).unwrap();
-            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let out = reply(&req, got_fd);
-            let _ = (&theirs).write_all(&out);
-            // Held: handed back so the socket stays open until the test
-            // joins. Otherwise closed now, like a worker that exits.
-            (req, got_fd, hold.then_some(theirs))
-        })
+        }
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        (&theirs).read_exact(&mut body).unwrap();
+        let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let out = reply(&req, got_fd);
+        let _ = (&theirs).write_all(&out);
+        (req, got_fd, hold.then_some(theirs))
     }
 
     fn scan_request() -> Request {
@@ -805,7 +1258,7 @@ mod tests {
                 "protocol_version": 1, "scan_id": req["scan_id"], "epoch": req["epoch"],
                 "status": "ok", "completeness": "full",
                 "scanner": {"name": "kguardian-cataloger", "version": "0.1.0"},
-                "stats": {"files": 3, "future_field": true},
+                "stats": {"files": 3, "future_field": true, "budgets": {"max_files": 1}},
                 "components": [{"name": "busybox", "version": "1.36.1-r29", "type": "apk",
                                 "file_paths": ["/bin/busybox"], "files_truncated": false,
                                 "interpreted_content": false, "extra": 1}],
@@ -813,16 +1266,13 @@ mod tests {
             });
             frame(&serde_json::to_vec(&resp).unwrap())
         });
-        let cancel = AtomicBool::new(false);
         let resp = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &scan_request(),
             Some(root_fd()),
-            1 << 20,
-            Duration::from_secs(5),
-            &cancel,
+            limits(1 << 20, 5),
+            &AtomicBool::new(false),
         )
         .expect("round trip");
         let (req, _, _) = worker.join().unwrap();
@@ -833,9 +1283,49 @@ mod tests {
             1_790_000_000_123_456_789i64
         );
         assert_eq!(req["budgets"]["max_response_bytes"], 1 << 20);
-        assert_eq!(resp.status, "ok");
-        assert_eq!(resp.scan_id, "scan-1");
-        assert_eq!(resp.components[0].file_paths, vec!["/bin/busybox"]);
+        assert_eq!(resp.status.as_str(), "ok");
+        assert_eq!(resp.scan_id.as_str(), "scan-1");
+        assert_eq!(
+            resp.components.items[0].file_paths.paths,
+            vec!["/bin/busybox"]
+        );
+        // Lean stats: scalars kept, the nested object skipped.
+        assert_eq!(resp.stats.0["files"], 3);
+        assert!(resp.stats.0.get("budgets").is_none());
+    }
+
+    /// The lean types never keep what they would drop: over-long strings,
+    /// invalid paths, components past the cap, nested stats.
+    #[test]
+    fn lean_parsing_bounds_everything() {
+        let long = "x".repeat(5000);
+        let body = serde_json::json!({
+            "protocol_version": 1, "scan_id": "s", "status": "ok",
+            "message": long, "reason": long,
+            "partial_reasons": (0..40).map(|i| format!("r{i}")).collect::<Vec<_>>(),
+            "stats": {"a": 1, "big": long, "deep": {"x": [1, 2, 3]}},
+            "components": [{
+                "name": "p", "purl": long, "licenses": (0..20).map(|i| format!("L{i}")).collect::<Vec<_>>(),
+                "file_paths": ["/b", "/a", "/a", "rel", "/x/../y", format!("/{long}"), "/ctl\u{1}char"]
+            }]
+        });
+        let r = parse_response(serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(r.message.too_long && r.message.value.is_none());
+        assert_eq!(r.partial_reasons.0.len(), MAX_REASONS);
+        assert_eq!(r.stats.0.len(), 1);
+        let c = &r.components.items[0];
+        assert!(c.purl.too_long);
+        assert_eq!(c.licenses.0.len(), 8);
+        assert_eq!(c.file_paths.paths, vec!["/a", "/b"]);
+        assert!(c.file_paths.truncated);
+
+        let many = serde_json::json!({
+            "protocol_version": 1, "status": "ok",
+            "components": (0..(MAX_COMPONENTS + 3)).map(|_| serde_json::json!({"name": "n"})).collect::<Vec<_>>()
+        });
+        let r = parse_response(serde_json::to_vec(&many).unwrap()).unwrap();
+        assert_eq!(r.components.items.len(), MAX_COMPONENTS);
+        assert!(r.components.overflow);
     }
 
     #[test]
@@ -847,17 +1337,14 @@ mod tests {
             out.extend_from_slice(b"{\"a\":");
             out
         });
-        let cancel = AtomicBool::new(false);
         let started = Instant::now();
         let e = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &scan_request(),
             Some(root_fd()),
-            1 << 20,
-            Duration::from_secs(30),
-            &cancel,
+            limits(1 << 20, 30),
+            &AtomicBool::new(false),
         )
         .expect_err("oversized");
         assert!(
@@ -879,12 +1366,10 @@ mod tests {
         });
         let e = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &scan_request(),
             None,
-            usize::MAX,
-            Duration::from_secs(5),
+            limits(usize::MAX, 5),
             &AtomicBool::new(false),
         )
         .expect_err("over the ceiling");
@@ -895,23 +1380,19 @@ mod tests {
     #[test]
     fn a_peer_with_the_wrong_uid_gets_nothing() {
         let (ours, theirs) = UnixStream::pair().unwrap();
-        let cancel = AtomicBool::new(false);
         let e = exchange(
             ours,
-            &[me().wrapping_add(1)],
-            &good_peer(),
+            |fd| verify_peer(fd, &[me().wrapping_add(1)], &good_peer()),
             &scan_request(),
             Some(root_fd()),
-            1 << 20,
-            Duration::from_secs(5),
-            &cancel,
+            limits(1 << 20, 5),
+            &AtomicBool::new(false),
         )
         .expect_err("uid mismatch");
         assert!(
             matches!(e, WorkerError::PeerRejected(ref m) if m.contains("uid")),
             "{e}"
         );
-        // Nothing reached the peer: the socket is closed with no bytes.
         let mut buf = [0u8; 1];
         assert_eq!((&theirs).read(&mut buf).unwrap(), 0);
     }
@@ -925,7 +1406,7 @@ mod tests {
             },
             FakePeer {
                 own: OWN_PRIVATE_NS,
-                peer: Err("cannot pin the peer"),
+                peer: Err("SO_PEERPIDFD: Invalid argument"),
             },
             // cgroup v1 only: nothing to compare, fail closed.
             FakePeer {
@@ -936,12 +1417,10 @@ mod tests {
             let (ours, theirs) = UnixStream::pair().unwrap();
             let e = exchange(
                 ours,
-                &[me()],
-                &peer,
+                |fd| verify_peer(fd, &[me()], &peer),
                 &scan_request(),
                 Some(root_fd()),
-                1 << 20,
-                Duration::from_secs(5),
+                limits(1 << 20, 5),
                 &AtomicBool::new(false),
             )
             .expect_err("cgroup mismatch");
@@ -957,12 +1436,13 @@ mod tests {
         let worker = fake_worker(theirs, true, |_, _| Vec::new());
         let e = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &ping_request("p".into()),
             None,
-            1 << 20,
-            Duration::from_millis(300),
+            Limits {
+                response_bytes: 1 << 20,
+                read_timeout: Duration::from_millis(300),
+            },
             &AtomicBool::new(false),
         )
         .expect_err("silent");
@@ -1002,12 +1482,10 @@ mod tests {
         });
         let e = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &scan_request(),
             None,
-            1 << 20,
-            Duration::from_secs(5),
+            limits(1 << 20, 5),
             &AtomicBool::new(false),
         )
         .expect_err("truncated");
@@ -1018,12 +1496,10 @@ mod tests {
         let worker = fake_worker(theirs, true, |_, _| frame(b"[not an object]"));
         let e = exchange(
             ours,
-            &[me()],
-            &good_peer(),
+            verify_good,
             &scan_request(),
             None,
-            1 << 20,
-            Duration::from_secs(5),
+            limits(1 << 20, 5),
             &AtomicBool::new(false),
         )
         .expect_err("malformed");
@@ -1034,79 +1510,40 @@ mod tests {
         worker.join().unwrap();
     }
 
-    #[test]
-    fn a_missing_socket_is_unavailable() {
-        let e = call(
-            Path::new("/nonexistent/kguardian/worker.sock"),
-            &[0],
-            &good_peer(),
-            &ping_request("p".into()),
-            None,
-            1024,
-            Duration::from_secs(1),
-            &AtomicBool::new(false),
-        )
-        .expect_err("no socket");
-        assert!(matches!(e, WorkerError::Unavailable(_)));
-    }
-
-    /// Kernels before 6.5 answer SO_PEERPIDFD with ENOPROTOOPT. Without
-    /// hostPID that is a typed, permanent "cannot verify", never a
-    /// fallback to SO_PEERCRED's meaningless pid.
-    #[test]
-    fn without_pidfd_fails_closed_and_names_the_kernel() {
-        let old_kernel = io::Error::from_raw_os_error(libc::ENOPROTOOPT);
-        match without_pidfd(&old_kernel, false, 0) {
-            Err(PeerError::Unsupported(m)) => {
-                assert!(m.contains("SO_PEERPIDFD") && m.contains("6.5"), "{m}")
-            }
-            other => panic!("{other:?}"),
+    fn policy(mode: PeerMode) -> PeerPolicy {
+        PeerPolicy {
+            mode,
+            allowed_uids: vec![me()],
+            socket_owner: me(),
+            host_proc: PathBuf::from("/proc"),
         }
-        // A non-zero pid from another namespace is not trusted either.
-        assert!(matches!(
-            without_pidfd(&old_kernel, false, 4242),
-            Err(PeerError::Unsupported(_))
-        ));
-        // Any other failure rejects this peer only.
-        assert!(matches!(
-            without_pidfd(&io::Error::from_raw_os_error(libc::EBADF), false, 0),
-            Err(PeerError::Rejected(_))
-        ));
-        // hostPID: SO_PEERCRED's pid is a real, host-procfs pid.
-        assert_eq!(without_pidfd(&old_kernel, true, 4242), Ok(4242));
-        assert!(without_pidfd(&old_kernel, true, 0).is_err());
     }
 
     #[test]
-    fn an_unverifiable_peer_is_a_typed_error_and_gets_nothing() {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let e = exchange(
-            ours,
-            &[me()],
-            &FakePeer {
-                own: OWN_PRIVATE_NS,
-                peer: Err("unsupported: no SO_PEERPIDFD"),
-            },
-            &scan_request(),
-            Some(root_fd()),
-            1 << 20,
-            Duration::from_secs(5),
-            &AtomicBool::new(false),
-        )
-        .expect_err("unverifiable");
-        assert!(matches!(e, WorkerError::PeerUnsupported(_)), "{e}");
-        let mut buf = [0u8; 1];
-        assert_eq!((&theirs).read(&mut buf).unwrap(), 0);
+    fn a_missing_socket_is_unavailable_in_both_modes() {
+        for mode in [PeerMode::Pidfd, PeerMode::PathCheck] {
+            let e = call(
+                Path::new("/nonexistent/kguardian/worker.sock"),
+                &policy(mode),
+                &ping_request("p".into()),
+                None,
+                limits(1024, 1),
+                &AtomicBool::new(false),
+            )
+            .expect_err("no socket");
+            assert!(matches!(e, WorkerError::Unavailable(_)), "{mode:?}: {e}");
+        }
     }
 
-    /// The real peer lookups against a real listener in this process:
+    /// The real pidfd lookups against a real listener in this process:
     /// the peer is ourselves, so it is rejected as the Controller's own
-    /// container — which proves the lookups ran and resolved the peer.
+    /// container, which proves the lookups ran and resolved the peer.
     #[test]
     fn host_peer_proc_resolves_a_real_peer() {
-        let dir = std::env::temp_dir().join(format!("kg-catalog-peer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        if probe_peer_mode() != PeerMode::Pidfd {
+            return; // < 6.5: covered by the path-check tests.
+        }
+        let dir = tmp_dir("peer");
         let path = dir.join("w.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let sock = connect(&path).unwrap();
@@ -1114,13 +1551,141 @@ mod tests {
         let proc = HostPeerProc {
             host_proc: PathBuf::from("/proc"),
         };
-        let r = verify_peer(sock.as_raw_fd(), &[me()], &proc);
-        // Our own process: rejected as the Controller's own container on
-        // a >= 6.5 kernel, or (same pid namespace here) via the fallback.
-        match r.expect_err("our own process is not a sibling container") {
-            PeerError::Rejected(m) => assert!(m.contains("own container"), "{m}"),
-            PeerError::Unsupported(m) => panic!("same pid namespace must fall back: {m}"),
-        }
+        let err = verify_peer(sock.as_raw_fd(), &[me()], &proc)
+            .expect_err("our own process is not a sibling container");
+        assert!(err.0.contains("own container"), "{}", err.0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    pub(crate) fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "kg-cat-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A worker socket laid out as the path check requires: directory
+    /// 0700, socket 0600, both owned by us. Returns (dir, socket path,
+    /// listener).
+    pub(crate) fn worker_socket(tag: &str) -> (PathBuf, PathBuf, std::os::unix::net::UnixListener) {
+        let dir = tmp_dir(tag).join("catalog");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("worker.sock");
+        let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (dir, path, l)
+    }
+
+    fn reply_ok(req: &serde_json::Value, _: bool) -> Vec<u8> {
+        frame(
+            &serde_json::to_vec(&serde_json::json!({
+                "protocol_version": 1, "scan_id": req["scan_id"], "status": "ok"
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// Below 6.5: the checked socket file is the connected one, and the
+    /// exchange goes through with the uid check.
+    #[test]
+    fn path_check_connects_through_the_checked_fd() {
+        let (dir, path, l) = worker_socket("pc-ok");
+        let t = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            serve_one(s, false, reply_ok)
+        });
+        let r = call(
+            &path,
+            &policy(PeerMode::PathCheck),
+            &ping_request("p1".into()),
+            None,
+            limits(1024, 5),
+            &AtomicBool::new(false),
+        )
+        .expect("path check");
+        assert_eq!(r.scan_id.as_str(), "p1");
+        t.join().unwrap();
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn path_check_refuses_loose_modes_symlinks_and_non_sockets() {
+        let check = |p: &Path| connect_checked(p, me());
+        // Directory too open.
+        let (dir, path, _l) = worker_socket("pc-dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(matches!(check(&path), Err(PathCheckError::Bad(m)) if m.contains("0750")));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Socket too open.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(matches!(check(&path), Err(PathCheckError::Bad(m)) if m.contains("0660")));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check(&path).is_ok());
+        // A symlink in place of the socket is not followed.
+        let link = dir.join("link.sock");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(matches!(check(&link), Err(PathCheckError::Bad(m)) if m.contains("not a socket")));
+        // A regular file is not a socket.
+        let file = dir.join("file.sock");
+        std::fs::write(&file, b"").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(check(&file), Err(PathCheckError::Bad(_))));
+        // A symlinked directory is not followed.
+        let base = dir.parent().unwrap();
+        let dlink = base.join("dirlink");
+        std::os::unix::fs::symlink(&dir, &dlink).unwrap();
+        assert!(matches!(
+            check(&dlink.join("worker.sock")),
+            Err(PathCheckError::Bad(_))
+        ));
+        // The wrong owner.
+        assert!(matches!(
+            connect_checked(&path, me().wrapping_add(1)),
+            Err(PathCheckError::Bad(m)) if m.contains("owned by")
+        ));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn check_mode_rejects_special_bits() {
+        // SAFETY: zeroed stat is valid.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        st.st_mode = libc::S_IFDIR | 0o1700;
+        st.st_uid = 0;
+        assert!(check_mode("d", &st, libc::S_IFDIR, 0, 0o700).is_err());
+        st.st_mode = libc::S_IFDIR | 0o700;
+        assert!(check_mode("d", &st, libc::S_IFDIR, 0, 0o700).is_ok());
+    }
+
+    #[test]
+    fn path_check_still_checks_the_peer_uid() {
+        let (dir, path, l) = worker_socket("pc-uid");
+        let t = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut b = [0u8; 1];
+            (&s).read(&mut b).unwrap()
+        });
+        let mut p = policy(PeerMode::PathCheck);
+        p.allowed_uids = vec![me().wrapping_add(1)];
+        let e = call(
+            &path,
+            &p,
+            &ping_request("p".into()),
+            Some(root_fd()),
+            limits(1024, 5),
+            &AtomicBool::new(false),
+        )
+        .expect_err("uid");
+        assert!(
+            matches!(e, WorkerError::PeerRejected(ref m) if m.contains("uid")),
+            "{e}"
+        );
+        assert_eq!(t.join().unwrap(), 0, "nothing was sent");
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 }

@@ -71,9 +71,15 @@ fn send(build: impl FnOnce() -> Option<FeedMsg>) {
     // Off: nothing is built, nothing is sent.
     let Some(tx) = FEED.get() else { return };
     if let Some(msg) = build() {
-        // Never waits. A dropped message is repaired by the next resync.
-        let _ = tx.try_send(msg);
+        try_feed(tx, msg);
     }
+}
+
+/// Offer `msg` without ever waiting. `false` when it was dropped (the
+/// channel is full, or the catalog task is gone); the next resync
+/// re-sends every pod, so a drop costs at most one resync interval.
+pub fn try_feed(tx: &mpsc::Sender<FeedMsg>, msg: FeedMsg) -> bool {
+    tx.try_send(msg).is_ok()
 }
 
 /// Is the feed open (the catalog on)? For tests of the off path.
@@ -196,6 +202,15 @@ impl Inventory {
             pods: HashMap::new(),
             own_pod,
         }
+    }
+
+    /// Set (or learn late) the Controller's own pod, dropping it if it
+    /// was already fed.
+    pub fn set_own_pod(&mut self, own_pod: Option<String>) {
+        if let Some(uid) = &own_pod {
+            self.pods.remove(uid);
+        }
+        self.own_pod = own_pod;
     }
 
     pub fn apply(&mut self, msg: FeedMsg) {
@@ -646,6 +661,40 @@ mod tests {
         );
         // Private cgroup namespace and nothing else: unknown.
         assert_eq!(own_pod_uid(None, Some(""), Some("0::/\n")), None);
+    }
+
+    /// The pod watcher's side never waits: with the channel full, a
+    /// message is dropped at once and the sender carries on.
+    #[tokio::test]
+    async fn a_full_feed_channel_drops_rather_than_blocks() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let forget = |u: &str| FeedMsg::Forget { uid: u.into() };
+        assert!(try_feed(&tx, forget("a")));
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(!try_feed(&tx, forget("b")), "full: dropped");
+        }
+        assert!(started.elapsed() < Duration::from_secs(1), "never waited");
+        assert_eq!(rx.recv().await, Some(forget("a")));
+        assert!(try_feed(&tx, forget("c")), "room again");
+        drop(rx);
+        assert!(!try_feed(&tx, forget("d")), "closed: dropped");
+    }
+
+    #[test]
+    fn the_own_pod_learnt_late_is_removed() {
+        let mut inv = Inventory::default();
+        inv.apply(FeedMsg::Pod {
+            uid: OWN.into(),
+            containers: running_containers(&pod(
+                OWN,
+                vec![status("controller", "c1", &digest('c'), true)],
+                vec![],
+            )),
+        });
+        assert_eq!(inv.containers(), 1);
+        inv.set_own_pod(Some(OWN.into()));
+        assert_eq!(inv.containers(), 0);
     }
 
     #[test]

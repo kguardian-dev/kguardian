@@ -250,11 +250,11 @@ pub fn start_unix_nanos(start_ticks: u64) -> i64 {
 /// The drift check's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drift {
-    /// No package database was written since the container started.
+    /// No package database was written, deleted or hidden since the
+    /// container started.
     Clean,
-    /// This package database (or a directory on its path) is in the
-    /// upperdir: packages changed at runtime.
-    Drifted(&'static str),
+    /// Packages changed at runtime: what was found in the upperdir.
+    Drifted(String),
     /// It could not be told. The scan goes ahead, and its SBOM is
     /// `partial` (final review item 2).
     Unknown(String),
@@ -282,72 +282,340 @@ fn openat2_in_root(root: RawFd, path: &CStr, flags: u64) -> io::Result<OwnedFd> 
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
-/// Is `rel` present under `dir`? Walked one name at a time, never
-/// following a symlink: intermediate components with `O_PATH|O_NOFOLLOW|
-/// O_DIRECTORY`, the last with `fstatat(AT_SYMLINK_NOFOLLOW)`. Anything at
-/// the leaf counts, including an overlay whiteout (a deleted database is
-/// a changed one). A non-directory where a directory should be (a symlink
-/// or file replacing `var/lib/dpkg`) counts too: the path was rewritten.
-fn present(dir: RawFd, rel: &str) -> io::Result<bool> {
-    let parts: Vec<&str> = rel.split('/').collect();
-    let (last, dirs) = parts.split_last().expect("non-empty path");
-    let mut held: Option<OwnedFd> = None;
-    for d in dirs {
-        let at = held.as_ref().map_or(dir, |f| f.as_raw_fd());
-        match openat(
-            at,
-            &cstr(d)?,
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        ) {
-            Ok(fd) => held = Some(fd),
-            Err(e) => match e.raw_os_error() {
-                Some(libc::ENOENT) => return Ok(false),
-                Some(libc::ENOTDIR) | Some(libc::ELOOP) => return Ok(true),
-                _ => return Err(e),
-            },
-        }
-    }
-    let at = held.as_ref().map_or(dir, |f| f.as_raw_fd());
-    let name = cstr(last)?;
+/// `fstatat(AT_SYMLINK_NOFOLLOW)` of one name; `None` when absent.
+fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<Option<libc::stat>> {
     // SAFETY: zeroed stat is a valid out-parameter.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: valid dirfd, NUL-terminated name, out-pointer to a local.
-    let rc = unsafe { libc::fstatat(at, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    let rc = unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
     if rc == 0 {
-        return Ok(true);
+        return Ok(Some(st));
     }
     let e = io::Error::last_os_error();
     match e.raw_os_error() {
-        Some(libc::ENOENT) => Ok(false),
+        Some(libc::ENOENT) => Ok(None),
         _ => Err(e),
     }
 }
 
-/// Look for the package databases in the container's upperdir, resolved
-/// under `host_root` (an fd on `/proc/1/root`) with `RESOLVE_IN_ROOT`,
-/// so the host path string from mountinfo can never escape the host
-/// root or follow a magic link. No walk of the upperdir: four lookups.
+/// An overlay whiteout: a character device 0:0.
+fn is_whiteout(st: &libc::stat) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFCHR && st.st_rdev == 0
+}
+
+/// The two xattrs overlayfs marks an opaque directory with (`trusted.*`
+/// for a privileged mount, `user.*` for a userxattr one).
+const OPAQUE_XATTRS: [&CStr; 2] = [c"trusted.overlay.opaque", c"user.overlay.opaque"];
+
+/// Is the directory `fd` opaque? `y` (opaque: everything below in the
+/// lower layers is hidden) and `x` (has whiteouts, kernel >= 6.7) both
+/// mean lower content was removed. `ENODATA` is "not set". `ENOTSUP` is
+/// too: a filesystem without that xattr namespace cannot carry the mark,
+/// so overlayfs cannot have set it there. Any other error is unknown.
+pub fn opaque(fd: RawFd) -> io::Result<bool> {
+    for name in OPAQUE_XATTRS {
+        let mut buf = [0u8; 8];
+        // SAFETY: valid fd, NUL-terminated name, buffer of the size passed.
+        let n = unsafe { libc::fgetxattr(fd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            if matches!(&buf[..n as usize], b"y" | b"x") {
+                return Ok(true);
+            }
+            continue;
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENODATA) | Some(libc::ENOTSUP) => {}
+            // A value longer than 8 bytes is not y/x.
+            Some(libc::ERANGE) => {}
+            _ => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// Walk `rel` inside the upperdir `dir`, one name at a time, never
+/// following a symlink. `Some(what)` is drift:
+///
+/// * anything at the leaf (the database written, or deleted: a whiteout);
+/// * a whiteout at a parent (`var/lib/dpkg` deleted);
+/// * a non-directory at a parent (replaced by a file or symlink);
+/// * an opaque parent directory (deleted and recreated, which hides the
+///   lower layers' database without writing the database itself).
+///
+/// Parents are opened `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` (an `O_PATH` fd
+/// cannot read xattrs) relative to the upperdir fd, which was itself
+/// resolved `RESOLVE_IN_ROOT` under the host root.
+fn drift_along(dir: RawFd, rel: &str) -> io::Result<Option<String>> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut held: Option<OwnedFd> = None;
+    for (i, part) in parts.iter().enumerate() {
+        let at = held.as_ref().map_or(dir, |f| f.as_raw_fd());
+        let name = cstr(part)?;
+        let path = parts[..=i].join("/");
+        let Some(st) = lstat_at(at, &name)? else {
+            return Ok(None);
+        };
+        if i == parts.len() - 1 {
+            return Ok(Some(if is_whiteout(&st) {
+                format!("{path} deleted (whiteout)")
+            } else {
+                format!("{path} written")
+            }));
+        }
+        if is_whiteout(&st) {
+            return Ok(Some(format!("{path} deleted (whiteout)")));
+        }
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Ok(Some(format!("{path} replaced by a non-directory")));
+        }
+        let fd = match openat(
+            at,
+            &name,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        ) {
+            Ok(fd) => fd,
+            Err(e) => match e.raw_os_error() {
+                // Swapped between the stat and the open.
+                Some(libc::ENOENT) => return Ok(None),
+                Some(libc::ENOTDIR) | Some(libc::ELOOP) => {
+                    return Ok(Some(format!("{path} replaced by a non-directory")))
+                }
+                _ => return Err(e),
+            },
+        };
+        if opaque(fd.as_raw_fd())? {
+            return Ok(Some(format!("{path} opaque (deleted and recreated)")));
+        }
+        held = Some(fd);
+    }
+    Ok(None)
+}
+
+/// Open the container's upperdir under `host_root` (an fd on
+/// `/proc/1/root`) with `RESOLVE_IN_ROOT`, so the host path string from
+/// mountinfo can never escape the host root or follow a magic link.
+fn open_upper(host_root: RawFd, path: &str) -> io::Result<OwnedFd> {
+    openat2_in_root(
+        host_root,
+        &cstr(path)?,
+        (libc::O_RDONLY | libc::O_DIRECTORY) as u64,
+    )
+}
+
+/// Look for runtime changes to the package databases in the container's
+/// upperdir. No walk of the upperdir: the four database paths only.
 pub fn drift_check(host_root: RawFd, upper: &Upperdir) -> Drift {
     let path = match upper {
         Upperdir::Path(p) => p,
         Upperdir::Missing => return Drift::Unknown("no upperdir".into()),
         Upperdir::Unparseable => return Drift::Unknown("unparseable upperdir".into()),
     };
-    let Ok(c) = cstr(path) else {
-        return Drift::Unknown("upperdir with a NUL".into());
-    };
-    let upfd = match openat2_in_root(host_root, &c, (libc::O_PATH | libc::O_DIRECTORY) as u64) {
+    let upfd = match open_upper(host_root, path) {
         Ok(fd) => fd,
         Err(e) => return Drift::Unknown(format!("open upperdir: {e}")),
     };
+    drift_in(upfd.as_raw_fd())
+}
+
+fn drift_in(upfd: RawFd) -> Drift {
     for db in PACKAGE_DBS {
-        match present(upfd.as_raw_fd(), db) {
-            Ok(true) => return Drift::Drifted(db),
-            Ok(false) => {}
+        match drift_along(upfd, db) {
+            Ok(Some(what)) => return Drift::Drifted(what),
+            Ok(None) => {}
             Err(e) => return Drift::Unknown(format!("{db}: {e}")),
         }
     }
     Drift::Clean
+}
+
+// ---- Language-package deletions ---------------------------------------------
+
+/// Entries read from any one directory by [`lang_whiteout`].
+const LANG_SCAN_ENTRIES: usize = 4096;
+
+/// Up to `cap` entry names of the directory `fd` (not `.`/`..`), with
+/// their `d_type`.
+fn list_dir(fd: RawFd, cap: usize) -> io::Result<Vec<(std::ffi::CString, u8)>> {
+    // SAFETY: dup of a valid fd; fdopendir takes ownership of the copy.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: dup is a directory fd we own.
+    let d = unsafe { libc::fdopendir(dup) };
+    if d.is_null() {
+        let e = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so dup is still ours.
+        unsafe { libc::close(dup) };
+        return Err(e);
+    }
+    let mut out = Vec::new();
+    while out.len() < cap {
+        // SAFETY: d is a valid DIR*.
+        let ent = unsafe { libc::readdir(d) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: readdir returned a valid dirent with a NUL-terminated name.
+        let (name, ty) = unsafe {
+            (
+                CStr::from_ptr((*ent).d_name.as_ptr()).to_owned(),
+                (*ent).d_type,
+            )
+        };
+        if name.as_bytes() != b"." && name.as_bytes() != b".." {
+            out.push((name, ty));
+        }
+    }
+    // SAFETY: closes the DIR* and its fd.
+    unsafe { libc::closedir(d) };
+    Ok(out)
+}
+
+/// Open `rel` as a directory below `dir`, name by name, no symlinks.
+fn open_dir_path(dir: RawFd, rel: &str) -> Option<OwnedFd> {
+    let mut held: Option<OwnedFd> = None;
+    for part in rel.split('/') {
+        let at = held.as_ref().map_or(dir, |f| f.as_raw_fd());
+        held = Some(
+            openat(
+                at,
+                &cstr(part).ok()?,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+            .ok()?,
+        );
+    }
+    held
+}
+
+/// Did the container delete a language package at runtime? The package
+/// databases do not cover Python, Node or Ruby packages, whose metadata
+/// lives in their own directories; deleting one leaves a whiteout (or an
+/// opaque directory) in the upperdir. This checks the well-known
+/// system-wide locations only, each read at most [`LANG_SCAN_ENTRIES`]
+/// entries deep and one level down:
+///
+/// * `usr/lib/python*/{site,dist}-packages`,
+///   `usr/local/lib/python*/{site,dist}-packages`;
+/// * `usr/lib/node_modules`, `usr/local/lib/node_modules`;
+/// * `usr/local/bundle/gems`, `var/lib/gems/*/gems`,
+///   `usr/local/lib/ruby/gems/*/gems`.
+///
+/// Application-local trees (`/app/node_modules`, a virtualenv) are not
+/// looked at. Best effort: an unreadable directory counts as clean. A hit
+/// makes the SBOM `partial` (`lang_whiteout`), not drift.
+pub fn lang_whiteout(upfd: RawFd) -> Option<String> {
+    let mut dirs: Vec<String> = vec![
+        "usr/lib/node_modules".into(),
+        "usr/local/lib/node_modules".into(),
+        "usr/local/bundle/gems".into(),
+    ];
+    for base in ["usr/lib", "usr/local/lib"] {
+        let Some(fd) = open_dir_path(upfd, base) else {
+            continue;
+        };
+        for (name, _) in list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES).unwrap_or_default() {
+            let n = name.to_string_lossy();
+            if n.starts_with("python") {
+                dirs.push(format!("{base}/{n}/site-packages"));
+                dirs.push(format!("{base}/{n}/dist-packages"));
+            }
+        }
+    }
+    for base in ["var/lib/gems", "usr/local/lib/ruby/gems"] {
+        let Some(fd) = open_dir_path(upfd, base) else {
+            continue;
+        };
+        for (name, _) in list_dir(fd.as_raw_fd(), 64).unwrap_or_default() {
+            dirs.push(format!("{base}/{}/gems", name.to_string_lossy()));
+        }
+    }
+    for d in dirs {
+        let Some(fd) = open_dir_path(upfd, &d) else {
+            continue;
+        };
+        if opaque(fd.as_raw_fd()).unwrap_or(false) {
+            return Some(format!("{d} opaque"));
+        }
+        for (name, ty) in list_dir(fd.as_raw_fd(), LANG_SCAN_ENTRIES).unwrap_or_default() {
+            if ty != libc::DT_CHR && ty != libc::DT_UNKNOWN {
+                continue;
+            }
+            if let Ok(Some(st)) = lstat_at(fd.as_raw_fd(), &name) {
+                if is_whiteout(&st) {
+                    return Some(format!("{d}/{} deleted", name.to_string_lossy()));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Both upperdir checks, through one open of the upperdir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpperCheck {
+    pub drift: Drift,
+    /// A language package was deleted at runtime ([`lang_whiteout`]).
+    pub lang_whiteout: Option<String>,
+}
+
+pub fn check_upper(host_root: RawFd, upper: &Upperdir) -> UpperCheck {
+    let Upperdir::Path(path) = upper else {
+        return UpperCheck {
+            drift: drift_check(host_root, upper),
+            lang_whiteout: None,
+        };
+    };
+    match open_upper(host_root, path) {
+        Ok(fd) => UpperCheck {
+            drift: drift_in(fd.as_raw_fd()),
+            lang_whiteout: lang_whiteout(fd.as_raw_fd()),
+        },
+        Err(e) => UpperCheck {
+            drift: Drift::Unknown(format!("open upperdir: {e}")),
+            lang_whiteout: None,
+        },
+    }
+}
+
+// ---- Mount identity -----------------------------------------------------------
+
+/// The mount id of the mount `fd` is on (`statx` `STATX_MNT_ID`, Linux
+/// 5.8). `None` when the kernel does not report it.
+pub fn mount_id(fd: RawFd) -> io::Result<Option<u64>> {
+    // SAFETY: zeroed statx is a valid out-parameter.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: valid fd, empty path with AT_EMPTY_PATH, out-pointer.
+    let rc = unsafe {
+        libc::statx(
+            fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_MNT_ID,
+            &mut stx,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((stx.stx_mask & libc::STATX_MNT_ID != 0).then_some(stx.stx_mnt_id))
+}
+
+/// Do two fds name the same filesystem object (device and inode)?
+pub fn same_object(a: RawFd, b: RawFd) -> io::Result<bool> {
+    let st = |fd: RawFd| -> io::Result<libc::stat> {
+        // SAFETY: zeroed stat is a valid out-parameter.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid fd and out-pointer.
+        if unsafe { libc::fstat(fd, &mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(st)
+    };
+    let (x, y) = (st(a)?, st(b)?);
+    Ok(x.st_dev == y.st_dev && x.st_ino == y.st_ino)
 }
 
 /// `/proc/1/root` of the host procfs, for [`drift_check`].
@@ -386,6 +654,9 @@ pub struct CloneError {
 
 impl std::fmt::Display for CloneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.errno == 0 {
+            return write!(f, "{}", self.stage);
+        }
         write!(
             f,
             "{}: {}",
@@ -521,14 +792,24 @@ pub fn readonly_clone(proc: &ProcDir) -> Result<OwnedFd, CloneError> {
     drop(ns);
 
     let got = recv_clone(ours.as_raw_fd());
-    let mut status = 0;
     if got.is_err() {
         // SAFETY: our own child.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
-    // SAFETY: reap our own child; it has exited or was just killed.
-    unsafe { libc::waitpid(pid, &mut status, 0) };
+    reap(pid);
     got
+}
+
+/// Reap our own child, retrying on `EINTR`.
+fn reap(pid: libc::pid_t) {
+    let mut status = 0;
+    loop {
+        // SAFETY: waiting on our own child.
+        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if r >= 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 fn recv_clone(sock: RawFd) -> Result<OwnedFd, CloneError> {
@@ -559,10 +840,12 @@ fn recv_clone(sock: RawFd) -> Result<OwnedFd, CloneError> {
     msg.msg_controllen = std::mem::size_of_val(&cbuf) as _;
     // SAFETY: valid socket and msghdr.
     let r = unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) };
-    if r < 8 {
+    if r < 0 {
         return Err(CloneError {
-            stage: "helper exited",
-            errno: libc::EPIPE,
+            stage: "recvmsg",
+            errno: io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
         });
     }
     let mut fd: Option<OwnedFd> = None;
@@ -576,6 +859,21 @@ fn recv_clone(sock: RawFd) -> Result<OwnedFd, CloneError> {
             }
             c = libc::CMSG_NXTHDR(&msg, c);
         }
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        // A truncated control message may have dropped the fd (an LSM
+        // refusing `fd use`); whatever did arrive is closed with `fd`.
+        return Err(CloneError {
+            stage: "control message truncated",
+            errno: 0,
+        });
+    }
+    if r < 8 {
+        // The helper died before answering (killed, or crashed).
+        return Err(CloneError {
+            stage: "helper exited without an answer",
+            errno: 0,
+        });
     }
     match (code[0], fd) {
         (-1, Some(fd)) => Ok(fd),
@@ -794,6 +1092,13 @@ mod tests {
         std::fs::remove_dir_all(&up).unwrap();
     }
 
+    fn drifted(d: Drift) -> String {
+        match d {
+            Drift::Drifted(w) => w,
+            other => panic!("expected drift, got {other:?}"),
+        }
+    }
+
     #[test]
     fn each_package_db_in_the_upperdir_is_drift() {
         for db in PACKAGE_DBS {
@@ -801,7 +1106,7 @@ mod tests {
             let p = up.join(db);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, b"").unwrap();
-            assert_eq!(check(&up), Drift::Drifted(db), "{db}");
+            assert_eq!(drifted(check(&up)), format!("{db} written"));
             std::fs::remove_dir_all(&up).unwrap();
         }
     }
@@ -811,14 +1116,51 @@ mod tests {
         let up = tmp("link");
         std::fs::create_dir_all(up.join("var/lib")).unwrap();
         std::os::unix::fs::symlink("/etc", up.join("var/lib/dpkg")).unwrap();
-        assert_eq!(check(&up), Drift::Drifted("var/lib/dpkg/status"));
+        assert_eq!(
+            drifted(check(&up)),
+            "var/lib/dpkg replaced by a non-directory"
+        );
         // A symlink AT the leaf counts without being followed.
         let up2 = tmp("leaf");
         std::fs::create_dir_all(up2.join("lib/apk/db")).unwrap();
         std::os::unix::fs::symlink("/nonexistent", up2.join("lib/apk/db/installed")).unwrap();
-        assert_eq!(check(&up2), Drift::Drifted("lib/apk/db/installed"));
+        assert_eq!(drifted(check(&up2)), "lib/apk/db/installed written");
         std::fs::remove_dir_all(&up).unwrap();
         std::fs::remove_dir_all(&up2).unwrap();
+    }
+
+    /// B3 without privilege: `user.overlay.opaque` (a userxattr overlay's
+    /// mark) on a parent of a database is drift. Skipped where the temp
+    /// filesystem has no user xattrs.
+    #[test]
+    fn a_user_xattr_opaque_parent_is_drift() {
+        let up = tmp("uopaque");
+        std::fs::create_dir_all(up.join("var/lib/dpkg")).unwrap();
+        let p = std::ffi::CString::new(up.join("var/lib").to_string_lossy().as_bytes()).unwrap();
+        for (value, want_drift) in [(&b"y"[..], true), (b"x", true), (b"n", false)] {
+            // SAFETY: valid path, name and value buffers.
+            let rc = unsafe {
+                libc::setxattr(
+                    p.as_ptr(),
+                    c"user.overlay.opaque".as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                )
+            };
+            if rc != 0 {
+                eprintln!("no user xattrs here: {}", io::Error::last_os_error());
+                std::fs::remove_dir_all(&up).unwrap();
+                return;
+            }
+            let d = check(&up);
+            if want_drift {
+                assert_eq!(drifted(d), "var/lib opaque (deleted and recreated)");
+            } else {
+                assert_eq!(d, Drift::Clean, "value {value:?}");
+            }
+        }
+        std::fs::remove_dir_all(&up).unwrap();
     }
 
     #[test]
@@ -844,19 +1186,199 @@ mod tests {
         let host = tmp("host");
         std::fs::create_dir_all(host.join("snap/fs/lib/apk/db")).unwrap();
         std::fs::write(host.join("snap/fs/lib/apk/db/installed"), b"").unwrap();
-        // A link to the real / from inside: RESOLVE_IN_ROOT makes "/"
-        // the temp dir, so this names host/snap, not the filesystem root.
         std::os::unix::fs::symlink("/snap", host.join("escape")).unwrap();
         let root = std::fs::File::open(&host).unwrap();
-        assert_eq!(
-            drift_check(root.as_raw_fd(), &Upperdir::Path("/escape/fs".into())),
-            Drift::Drifted("lib/apk/db/installed")
-        );
-        assert_eq!(
-            drift_check(root.as_raw_fd(), &Upperdir::Path("/../../snap/fs".into())),
-            Drift::Drifted("lib/apk/db/installed")
-        );
+        for p in ["/escape/fs", "/../../snap/fs"] {
+            assert_eq!(
+                drifted(drift_check(root.as_raw_fd(), &Upperdir::Path(p.into()))),
+                "lib/apk/db/installed written"
+            );
+        }
         std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn mount_id_and_same_object_describe_the_fd() {
+        let a = std::fs::File::open("/").unwrap();
+        let b = std::fs::File::open("/").unwrap();
+        let c = std::fs::File::open("/proc").unwrap();
+        assert!(same_object(a.as_raw_fd(), b.as_raw_fd()).unwrap());
+        assert!(!same_object(a.as_raw_fd(), c.as_raw_fd()).unwrap());
+        let (ma, mc) = (
+            mount_id(a.as_raw_fd()).unwrap(),
+            mount_id(c.as_raw_fd()).unwrap(),
+        );
+        if let (Some(ma), Some(mc)) = (ma, mc) {
+            assert_ne!(ma, mc, "/proc is its own mount");
+        }
+    }
+
+    fn mount(src: &str, target: &Path, fstype: &str, data: &str) -> io::Result<()> {
+        let s = std::ffi::CString::new(src).unwrap();
+        let t = std::ffi::CString::new(target.to_string_lossy().as_bytes()).unwrap();
+        let f = std::ffi::CString::new(fstype).unwrap();
+        let d = std::ffi::CString::new(data).unwrap();
+        // SAFETY: valid NUL-terminated strings.
+        if unsafe { libc::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), 0, d.as_ptr().cast()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn umount(target: &Path) {
+        let t = std::ffi::CString::new(target.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: valid path.
+        unsafe { libc::umount2(t.as_ptr(), libc::MNT_DETACH) };
+    }
+
+    /// A real overlay on a tmpfs: lower layers with the package databases
+    /// and a Python package, and the upperdir the kernel writes when the
+    /// container deletes things through the merged view.
+    struct Overlay {
+        base: std::path::PathBuf,
+        merged: std::path::PathBuf,
+        upper: std::path::PathBuf,
+    }
+
+    impl Overlay {
+        fn new(tag: &str) -> Self {
+            let base = tmp(tag);
+            mount("tmpfs", &base, "tmpfs", "size=16m").expect("mount tmpfs");
+            let (lower, upper, work, merged) = (
+                base.join("lower"),
+                base.join("upper"),
+                base.join("work"),
+                base.join("merged"),
+            );
+            for d in [&upper, &work, &merged] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            for f in [
+                "var/lib/dpkg/status",
+                "lib/apk/db/installed",
+                "usr/lib/python3.12/site-packages/requests-2.32.0.dist-info/METADATA",
+            ] {
+                let p = lower.join(f);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, b"x").unwrap();
+            }
+            mount(
+                "overlay",
+                &merged,
+                "overlay",
+                &format!(
+                    "lowerdir={},upperdir={},workdir={}",
+                    lower.display(),
+                    upper.display(),
+                    work.display()
+                ),
+            )
+            .expect("mount overlay");
+            Overlay {
+                base,
+                merged,
+                upper,
+            }
+        }
+
+        fn check(&self) -> UpperCheck {
+            let root = std::fs::File::open("/").unwrap();
+            check_upper(
+                root.as_raw_fd(),
+                &Upperdir::Path(self.upper.to_string_lossy().into_owned()),
+            )
+        }
+    }
+
+    impl Drop for Overlay {
+        fn drop(&mut self) {
+            umount(&self.merged);
+            umount(&self.base);
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// B3 on a real overlay (needs CAP_SYS_ADMIN): every way a container
+    /// can remove a package database through the merged view is drift,
+    /// and a deleted Python package is `lang_whiteout`.
+    #[test]
+    #[ignore = "needs CAP_SYS_ADMIN (run with --ignored as root)"]
+    fn real_overlay_whiteouts_and_opaque_dirs_are_drift() {
+        // Untouched: clean.
+        let o = Overlay::new("ovl-clean");
+        assert_eq!(
+            o.check(),
+            UpperCheck {
+                drift: Drift::Clean,
+                lang_whiteout: None
+            }
+        );
+        drop(o);
+
+        // The database deleted: a whiteout at the leaf.
+        let o = Overlay::new("ovl-leaf");
+        std::fs::remove_file(o.merged.join("lib/apk/db/installed")).unwrap();
+        assert_eq!(
+            drifted(o.check().drift),
+            "lib/apk/db/installed deleted (whiteout)"
+        );
+        drop(o);
+
+        // A parent deleted: a whiteout at var/lib.
+        let o = Overlay::new("ovl-parent");
+        std::fs::remove_dir_all(o.merged.join("var/lib")).unwrap();
+        assert_eq!(drifted(o.check().drift), "var/lib deleted (whiteout)");
+        drop(o);
+
+        // Deleted and recreated empty: an opaque directory, no database
+        // written in the upperdir at all.
+        let o = Overlay::new("ovl-opaque");
+        std::fs::remove_dir_all(o.merged.join("var/lib/dpkg")).unwrap();
+        std::fs::create_dir(o.merged.join("var/lib/dpkg")).unwrap();
+        assert!(!o.upper.join("var/lib/dpkg/status").exists());
+        assert_eq!(
+            drifted(o.check().drift),
+            "var/lib/dpkg opaque (deleted and recreated)"
+        );
+        drop(o);
+
+        // A Python package deleted: not drift, but lang_whiteout.
+        let o = Overlay::new("ovl-lang");
+        std::fs::remove_dir_all(
+            o.merged
+                .join("usr/lib/python3.12/site-packages/requests-2.32.0.dist-info"),
+        )
+        .unwrap();
+        let c = o.check();
+        assert_eq!(c.drift, Drift::Clean);
+        let hit = c.lang_whiteout.expect("a deleted dist-info is seen");
+        assert!(hit.contains("requests-2.32.0.dist-info"), "{hit}");
+        drop(o);
+    }
+
+    /// `trusted.overlay.opaque=x` (kernel >= 6.7 "has whiteouts") is drift
+    /// too; set by hand on a tmpfs, which takes trusted xattrs (root only).
+    #[test]
+    #[ignore = "needs CAP_SYS_ADMIN (run with --ignored as root)"]
+    fn a_trusted_opaque_x_parent_is_drift() {
+        let base = tmp("topaque");
+        mount("tmpfs", &base, "tmpfs", "size=1m").expect("mount tmpfs");
+        std::fs::create_dir_all(base.join("var/lib/dpkg")).unwrap();
+        let p = std::ffi::CString::new(base.join("var").to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: valid path, name and value buffers.
+        let rc = unsafe {
+            libc::setxattr(
+                p.as_ptr(),
+                c"trusted.overlay.opaque".as_ptr(),
+                b"x".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+        assert_eq!(drifted(check(&base)), "var opaque (deleted and recreated)");
+        umount(&base);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

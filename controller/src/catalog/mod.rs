@@ -9,8 +9,9 @@
 //!  pod watcher --try_send--> feed (Inventory) <--snapshot-- claim loop
 //!                                                     |  POST /catalog/claims
 //!                                                     v
-//!                        containerd pid -> /proc/<pid> handle -> identity
-//!                        -> mountinfo -> drift -> root fd -> worker.sock
+//!                containerd pid + snapshot -> /proc/<pid> handle -> identity
+//!                -> mountinfo -> mount id + snapshot check -> drift
+//!                -> root fd -> checked worker.sock
 //!                                                     |  PUT renew / fail / skip
 //!                                                     v  POST /catalog/images/{d}/sbom
 //! ```
@@ -19,13 +20,22 @@
 //! reading any other variable: no task, no channel, no socket, no HTTP
 //! call, and the pod watcher hooks are one failed `OnceLock` read each.
 //!
-//! On, it never touches the capture paths: two ordinary tasks, the
-//! pod watcher feeding them through a bounded channel it never waits
-//! on, and every blocking step (`/proc`, the fork for the read-only
-//! clone, the worker socket) on `spawn_blocking`. It is deliberately
-//! not a supervised subsystem: like node facts, a catalog failure must
-//! never end the Controller. A panic in the claim loop is logged and the
-//! loop restarts after a minute.
+//! On, it never touches the capture paths: ordinary tasks, the pod
+//! watcher feeding them through a bounded channel it never waits on, and
+//! every blocking step (`/proc`, PSI, the fork for the read-only clone,
+//! the worker socket) on `spawn_blocking`. It is deliberately not a
+//! supervised subsystem: like node facts, a catalog failure must never
+//! end the Controller. A panic in the claim loop is logged and the loop
+//! restarts after a minute ([`supervise`]).
+//!
+//! Memory is bounded so the catalog cannot OOM the Controller (which
+//! would take capture down): one scan at a time, a response of at most
+//! `NODE_CATALOG_MAX_RESPONSE_BYTES` (16 MiB default, 64 MiB cap) parsed
+//! into bounded types with the raw buffer freed straight after, and the
+//! upload built page by page by moving components (see `worker` and
+//! `post` for the arithmetic). Worst case extra memory at the default is
+//! about 16 MiB (raw) + 40 MiB (parsed) during parsing, then the parsed
+//! SBOM plus one 7 MiB page and its HTTP body during upload.
 
 pub mod api;
 pub mod claim;
@@ -33,31 +43,43 @@ pub mod feed;
 pub mod mountinfo;
 pub mod post;
 pub mod root;
+pub mod scan;
 pub mod worker;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
-use api::{ClaimRequest, FailReason};
-use claim::{Answer, Backoff, Broker, GrantCtx, GrantOutcome, HttpBroker, Scan, ScanResult};
+use api::{ClaimRequest, ClaimUpdate, FailReason};
+use claim::{Answer, Backoff, Broker, GrantCtx, GrantOutcome, HttpBroker, Scan};
 use feed::{Cooldown, Inventory, Pacer, RunningContainer};
+use worker::{PeerMode, PeerPolicy};
+
+pub use scan::MAX_CANDIDATES;
 
 pub const DEFAULT_SOCKET: &str = "/run/kguardian/catalog/worker.sock";
+/// Default and ceiling for the worker response size.
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Candidates (replicas) tried for one grant before reporting
-/// drift / pid_gone (design section 2 retry caps are the Broker's; this
-/// bounds the local work per grant).
-pub const MAX_CANDIDATES: usize = 3;
 /// How often the loop looks at its inventory.
 const TICK: Duration = Duration::from_secs(10);
 /// How often counters are logged.
 const SUMMARY_EVERY: Duration = Duration::from_secs(600);
+/// Ceilings for operator-set waits (L7).
+const MAX_STARTUP_JITTER: Duration = Duration::from_secs(3600);
+const MAX_PRESSURE_DEFER: Duration = Duration::from_secs(24 * 3600);
+/// Backoff on a 503 from the claim route: from 60 s, doubling, to 30 min.
+const UNAVAILABLE_BASE: Duration = Duration::from_secs(60);
+const UNAVAILABLE_CAP: Duration = Duration::from_secs(1800);
+/// Wait after a claim loop panic before restarting it.
+const RESTART_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -70,7 +92,8 @@ pub struct Config {
     /// `NODE_CATALOG_RO_CLONE`: pass a read-only `open_tree` clone of the
     /// root instead of the plain `O_PATH` fd, falling back when refused.
     pub ro_clone: bool,
-    /// `NODE_CATALOG_HOST_PROC` (default `/proc`, the host procfs mount).
+    /// `NODE_CATALOG_HOST_PROC`, else `COMPUTE_HOST_PROC`, else `/proc`
+    /// (the host procfs mount).
     pub host_proc: PathBuf,
     /// `NODE_CATALOG_SCAN_TIMEOUT_SECS` (600).
     pub scan_timeout: Duration,
@@ -78,21 +101,21 @@ pub struct Config {
     pub max_files: u64,
     /// `NODE_CATALOG_MAX_COMPONENTS` (50 000).
     pub max_components: u64,
-    /// `NODE_CATALOG_MAX_RESPONSE_BYTES` (32 MiB, at most 64 MiB).
+    /// `NODE_CATALOG_MAX_RESPONSE_BYTES` (16 MiB, at most 64 MiB).
     pub max_response_bytes: u64,
     /// `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS` (30): gap between claims.
     pub min_scan_interval: Duration,
     /// `NODE_CATALOG_IDLE_SECS` (600): an unchanged offer that got no
     /// grant is re-sent after this.
     pub idle: Duration,
-    /// `NODE_CATALOG_STARTUP_JITTER_SECS` (120): first claim is delayed
-    /// by a uniform draw from this, so a fleet restart does not stampede.
+    /// `NODE_CATALOG_STARTUP_JITTER_SECS` (120, at most 3600): first
+    /// claim is delayed by a uniform draw from this.
     pub startup_jitter: Duration,
     /// `NODE_CATALOG_PRESSURE_THRESHOLD` (40): PSI `some avg10` percent
     /// above which scans are deferred.
     pub pressure_threshold: f64,
-    /// `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS` (1800): defer at most this
-    /// long, then scan anyway (the worker runs at nice 19, idle I/O).
+    /// `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS` (1800, at most 86400):
+    /// defer at most this long, then scan anyway.
     pub max_pressure_defer: Duration,
     /// `NODE_CATALOG_PEER_UIDS` (`0`): uids the worker may run as.
     pub peer_uids: Vec<u32>,
@@ -112,7 +135,7 @@ impl Default for Config {
             scan_timeout: Duration::from_secs(600),
             max_files: 2_000_000,
             max_components: 50_000,
-            max_response_bytes: 32 * 1024 * 1024,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             min_scan_interval: Duration::from_secs(30),
             idle: Duration::from_secs(600),
             startup_jitter: Duration::from_secs(120),
@@ -134,6 +157,20 @@ fn num<T: std::str::FromStr>(name: &str, raw: Option<String>, default: T) -> T {
     }
 }
 
+fn capped(name: &str, v: Duration, max: Duration) -> Duration {
+    if v > max {
+        warn!(
+            env = name,
+            secs = v.as_secs(),
+            max_secs = max.as_secs(),
+            "over the maximum; clamped"
+        );
+        max
+    } else {
+        v
+    }
+}
+
 impl Config {
     /// Pure parser over a variable lookup. With `NODE_CATALOG` off it
     /// returns without looking up anything else.
@@ -147,11 +184,10 @@ impl Config {
             return d;
         }
         let secs = |k: &str, def: Duration| Duration::from_secs(num(k, get(k), def.as_secs()));
-        let path = |k: &str, def: &Path| {
+        let text = |k: &str| {
             get(k)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .map_or_else(|| def.to_path_buf(), PathBuf::from)
         };
         let peer_uids: Vec<u32> = get("NODE_CATALOG_PEER_UIDS")
             .map(|s| s.split(',').filter_map(|u| u.trim().parse().ok()).collect())
@@ -159,13 +195,15 @@ impl Config {
             .unwrap_or(d.peer_uids.clone());
         Self {
             enabled,
-            socket: path("NODE_CATALOG_SOCKET", &d.socket),
+            socket: text("NODE_CATALOG_SOCKET").map_or(d.socket, PathBuf::from),
             epoch: num("NODE_CATALOG_EPOCH", get("NODE_CATALOG_EPOCH"), d.epoch).max(0),
             ro_clone: crate::pod_watcher::parse_lenient_bool(
                 get("NODE_CATALOG_RO_CLONE").as_deref().unwrap_or_default(),
                 false,
             ),
-            host_proc: path("NODE_CATALOG_HOST_PROC", &d.host_proc),
+            host_proc: text("NODE_CATALOG_HOST_PROC")
+                .or_else(|| text("COMPUTE_HOST_PROC"))
+                .map_or(d.host_proc, PathBuf::from),
             scan_timeout: secs("NODE_CATALOG_SCAN_TIMEOUT_SECS", d.scan_timeout)
                 .clamp(Duration::from_secs(10), Duration::from_secs(1800)),
             max_files: num(
@@ -184,21 +222,27 @@ impl Config {
                 get("NODE_CATALOG_MAX_RESPONSE_BYTES"),
                 d.max_response_bytes,
             )
-            .min(worker::MAX_RESPONSE_CEILING as u64),
+            .clamp(1 << 20, worker::MAX_RESPONSE_CEILING as u64),
             min_scan_interval: secs("NODE_CATALOG_MIN_SCAN_INTERVAL_SECS", d.min_scan_interval)
                 .max(Duration::from_secs(30)),
             idle: secs("NODE_CATALOG_IDLE_SECS", d.idle).max(Duration::from_secs(60)),
-            startup_jitter: secs("NODE_CATALOG_STARTUP_JITTER_SECS", d.startup_jitter),
+            startup_jitter: capped(
+                "NODE_CATALOG_STARTUP_JITTER_SECS",
+                secs("NODE_CATALOG_STARTUP_JITTER_SECS", d.startup_jitter),
+                MAX_STARTUP_JITTER,
+            ),
             pressure_threshold: num(
                 "NODE_CATALOG_PRESSURE_THRESHOLD",
                 get("NODE_CATALOG_PRESSURE_THRESHOLD"),
                 d.pressure_threshold,
             ),
-            max_pressure_defer: secs("NODE_CATALOG_MAX_PRESSURE_DEFER_SECS", d.max_pressure_defer),
+            max_pressure_defer: capped(
+                "NODE_CATALOG_MAX_PRESSURE_DEFER_SECS",
+                secs("NODE_CATALOG_MAX_PRESSURE_DEFER_SECS", d.max_pressure_defer),
+                MAX_PRESSURE_DEFER,
+            ),
             peer_uids,
-            pod_uid: get("POD_UID")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
+            pod_uid: text("POD_UID"),
         }
     }
 
@@ -249,38 +293,85 @@ pub fn start(config: Config, node: String, broker_url: String) -> Option<JoinHan
         return None;
     };
     let rx = feed::open()?;
+    // Decided once: a socketpair and one getsockopt (M2).
+    let mode = worker::probe_peer_mode();
     info!(
         socket = %config.socket.display(),
         epoch = config.epoch,
         platform,
         ro_clone = config.ro_clone,
+        peer_check = mode.as_str(),
         "node catalog: on"
     );
-    let own_pod = own_pod(&config);
-    let inventory = Arc::new(Mutex::new(Inventory::excluding(own_pod)));
-    tokio::spawn(drain_feed(rx, Arc::clone(&inventory)));
+    if mode == PeerMode::PathCheck {
+        info!(
+            "node catalog: this kernel has no SO_PEERPIDFD (Linux < 6.5); the worker is \
+             verified by its socket file (uid 0, 0600, in a uid-0 0700 directory) and \
+             SO_PEERCRED uid, without the cgroup check"
+        );
+    }
+    let inventory = Arc::new(Mutex::new(Inventory::default()));
     let broker = Arc::new(HttpBroker::new(broker_url, &token));
+    let env = Arc::new(NodeEnv {
+        policy: Arc::new(PeerPolicy {
+            mode,
+            allowed_uids: config.peer_uids.clone(),
+            socket_owner: 0,
+            host_proc: config.host_proc.clone(),
+        }),
+        runtime: Arc::new(scan::Containerd),
+        platform: platform.clone(),
+        config: config.clone(),
+    });
     let ctx = Arc::new(LoopCtx {
         config,
         node,
         platform,
     });
     Some(tokio::spawn(async move {
-        loop {
-            let run = tokio::spawn(claim_loop(
-                Arc::clone(&ctx),
-                Arc::clone(&broker),
-                Arc::clone(&inventory),
-            ));
-            match run.await {
-                Ok(()) => return,
-                Err(e) => {
-                    error!(error = %e, "node catalog: claim loop crashed; restarting in 60s");
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                }
+        // Procfs reads off the runtime (L5).
+        let cfg = ctx.config.clone();
+        let own = tokio::task::spawn_blocking(move || own_pod(&cfg))
+            .await
+            .ok()
+            .flatten();
+        lock(&inventory).set_own_pod(own);
+        tokio::spawn(drain_feed(rx, Arc::clone(&inventory)));
+        supervise(
+            move || {
+                claim_loop(
+                    Arc::clone(&ctx),
+                    Arc::clone(&broker),
+                    Arc::clone(&env),
+                    Arc::clone(&inventory),
+                )
+            },
+            RESTART_AFTER,
+        )
+        .await;
+    }))
+}
+
+/// Run `make()`'s future as a task until it returns; restart it after
+/// `restart_after` when it panics. A panic is logged, never propagated.
+pub async fn supervise<F, Fut>(make: F, restart_after: Duration)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    loop {
+        match tokio::spawn(make()).await {
+            Ok(()) => return,
+            Err(e) => {
+                error!(
+                    error = %e,
+                    restart_secs = restart_after.as_secs(),
+                    "node catalog: claim loop crashed; restarting"
+                );
+                tokio::time::sleep(restart_after).await;
             }
         }
-    }))
+    }
 }
 
 /// The Controller's own pod UID, so its digests are never offered.
@@ -322,10 +413,10 @@ async fn drain_feed(
     }
 }
 
-struct LoopCtx {
-    config: Config,
-    node: String,
-    platform: String,
+pub struct LoopCtx {
+    pub config: Config,
+    pub node: String,
+    pub platform: String,
 }
 
 /// Counters, logged every [`SUMMARY_EVERY`] (the Controller exports no
@@ -380,48 +471,86 @@ fn host_pressure(host_proc: &Path) -> Option<f64> {
         .reduce(f64::max)
 }
 
-/// Is the worker there and answering? `ping` before claiming, so a
-/// missing sidecar never holds a lease (PROTOCOL.md 3.3).
-/// Why a ping did not come back `ok`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PingError {
-    /// The peer can never be verified on this node (kernel < 6.5 without
-    /// hostPID). Permanent: the loop switches to [`degraded`].
-    Unsupported(String),
-    Other(String),
+/// What the claim loop needs from the node, so it runs in tests against
+/// scripted answers.
+pub trait LoopEnv: Send + Sync + 'static {
+    type Scanner: Scan;
+    /// Is the worker there and answering?
+    fn ping(&self) -> impl Future<Output = Result<(), String>> + Send;
+    /// Host pressure (PSI `some avg10`, percent), if known.
+    fn pressure(&self) -> impl Future<Output = Option<f64>> + Send;
+    /// A scanner for one grant over these candidates.
+    fn scanner(&self, candidates: Vec<RunningContainer>) -> Self::Scanner;
 }
 
-async fn ping(cfg: &Config) -> Result<(), PingError> {
-    let path = cfg.socket.clone();
-    let uids = cfg.peer_uids.clone();
-    let host_proc = cfg.host_proc.clone();
-    tokio::task::spawn_blocking(move || {
-        let id = format!("ping-{}", uuid::Uuid::new_v4().simple());
-        let r = worker::call(
-            &path,
-            &uids,
-            &worker::HostPeerProc { host_proc },
-            &worker::ping_request(id.clone()),
-            None,
-            1 << 20,
-            worker::PING_TIMEOUT,
-            &AtomicBool::new(false),
-        )
-        .map_err(|e| match e {
-            worker::WorkerError::PeerUnsupported(m) => PingError::Unsupported(m),
-            e => PingError::Other(e.to_string()),
-        })?;
-        if r.status == "ok" && r.scan_id == id {
-            Ok(())
-        } else {
-            Err(PingError::Other(format!(
-                "ping answered {} {}",
-                r.status, r.reason
-            )))
+/// The real node.
+pub struct NodeEnv {
+    pub config: Config,
+    pub platform: String,
+    pub policy: Arc<PeerPolicy>,
+    pub runtime: Arc<scan::Containerd>,
+}
+
+impl LoopEnv for NodeEnv {
+    type Scanner = scan::NodeScanner<scan::Containerd>;
+
+    /// `ping` before claiming, so a missing sidecar never holds a lease
+    /// (PROTOCOL.md 3.3). The same socket and peer checks as a scan.
+    async fn ping(&self) -> Result<(), String> {
+        let path = self.config.socket.clone();
+        let policy = Arc::clone(&self.policy);
+        tokio::task::spawn_blocking(move || {
+            let id = format!("ping-{}", uuid::Uuid::new_v4().simple());
+            let r = worker::call(
+                &path,
+                &policy,
+                &worker::ping_request(id.clone()),
+                None,
+                worker::Limits {
+                    response_bytes: 1 << 20,
+                    read_timeout: worker::PING_TIMEOUT,
+                },
+                &AtomicBool::new(false),
+            )
+            .map_err(|e| e.to_string())?;
+            if r.status.as_str() == "ok" && r.scan_id.as_str() == id {
+                Ok(())
+            } else {
+                Err(format!(
+                    "ping answered {} {}",
+                    r.status.as_str(),
+                    r.reason.as_str()
+                ))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn pressure(&self) -> Option<f64> {
+        let host_proc = self.config.host_proc.clone();
+        tokio::task::spawn_blocking(move || host_pressure(&host_proc))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    fn scanner(&self, candidates: Vec<RunningContainer>) -> Self::Scanner {
+        scan::NodeScanner {
+            config: scan::ScanConfig {
+                host_proc: self.config.host_proc.clone(),
+                socket: self.config.socket.clone(),
+                epoch: self.config.epoch,
+                ro_clone: self.config.ro_clone,
+                budgets: self.config.budgets(),
+                read_timeout: self.config.scan_timeout + worker::READ_GRACE,
+                platform: self.platform.clone(),
+            },
+            policy: Arc::clone(&self.policy),
+            runtime: Arc::clone(&self.runtime),
+            candidates,
         }
-    })
-    .await
-    .map_err(|e| PingError::Other(e.to_string()))?
+    }
 }
 
 /// At most one event per `every`.
@@ -456,35 +585,27 @@ impl RateLimit {
     }
 }
 
-/// How often the degraded mode repeats its warning.
+/// How often degraded mode repeats its warning.
 const DEGRADED_WARN_EVERY: Duration = Duration::from_secs(3600);
 
-/// Cataloging cannot run on this node: the worker can never be verified
-/// (see [`worker::WorkerError::PeerUnsupported`]). Fail closed, visibly:
+/// Claiming cannot work on this node (the Broker refuses this
+/// Controller's claims as a contract violation, 422, e.g. an epoch above
+/// its `NODE_CATALOG_MAX_EPOCH`). Stop claiming, visibly:
 ///
-/// * one `error` line naming the cause and the fix;
-/// * an empty offer every `every`: the Broker records the node and its
-///   platform (`node_catalog_platforms.seen_at`) but it never claims,
-///   so "offering, no claims" is the operator-visible signal, and no
-///   grant is ever taken that could not be served;
-/// * a `warn` at most once an hour after that.
+/// * one `error` line naming the cause (logged by the caller);
+/// * an empty offer every `every`, under epoch 0 (an empty offer can be
+///   granted nothing, and 0 is valid on any Broker): the Broker records
+///   the node and its platform, with no claims;
+/// * a `warn` at most once an hour.
 ///
-/// Never returns and never retries hot. The kernel does not change under
-/// a running process, so the worker is not pinged again.
+/// Never returns and never retries hot.
 async fn degraded<B: Broker>(ctx: &LoopCtx, broker: &B, why: &str, every: Duration) {
-    error!(
-        cause = why,
-        kernel_min = worker::PEERPIDFD_KERNEL,
-        "node catalog: cannot verify the cataloger worker on this node, so it catalogs nothing \
-         here. It keeps offering an empty set, so the Broker sees this node with no claims. \
-         Needs a kernel with SO_PEERPIDFD (Linux 6.5 or later)"
-    );
     let mut warn_limit = RateLimit::starting(DEGRADED_WARN_EVERY, Instant::now());
     loop {
         let req = ClaimRequest {
             node: ctx.node.clone(),
             platform: ctx.platform.clone(),
-            epoch: ctx.config.epoch,
+            epoch: 0,
             offer: Vec::new(),
         };
         let answer = broker.claim(&req).await;
@@ -496,10 +617,7 @@ async fn degraded<B: Broker>(ctx: &LoopCtx, broker: &B, why: &str, every: Durati
             );
         }
         if warn_limit.allow(Instant::now()) {
-            warn!(
-                cause = why,
-                "node catalog: still not cataloging on this node (worker cannot be verified)"
-            );
+            warn!(cause = why, "node catalog: still not claiming on this node");
         }
         tokio::time::sleep(every).await;
     }
@@ -520,9 +638,10 @@ fn cooldown_for(outcome: &GrantOutcome) -> Duration {
     })
 }
 
-async fn claim_loop<B: Broker + 'static>(
+async fn claim_loop<B: Broker + 'static, E: LoopEnv>(
     ctx: Arc<LoopCtx>,
     broker: Arc<B>,
+    env: Arc<E>,
     inv: Arc<Mutex<Inventory>>,
 ) {
     let cfg = &ctx.config;
@@ -536,6 +655,8 @@ async fn claim_loop<B: Broker + 'static>(
     let mut pacer = Pacer::new(cfg.min_scan_interval, cfg.idle);
     let mut cooldown = Cooldown::default();
     let mut backoff = Backoff::new(Duration::from_secs(5), Duration::from_secs(300));
+    let mut unavailable = Backoff::new(UNAVAILABLE_BASE, UNAVAILABLE_CAP);
+    let mut unavailable_logged = false;
     let mut stats = Stats::default();
     let mut last_summary = Instant::now();
     let mut deferred_since: Option<Instant> = None;
@@ -545,18 +666,21 @@ async fn claim_loop<B: Broker + 'static>(
     loop {
         tokio::time::sleep(TICK).await;
         let now = Instant::now();
+        // Pacer and cooldown keep std instants; tokio's converts (and
+        // follows the paused clock in tests).
+        let now_std = now.into_std();
         if now.duration_since(last_summary) >= SUMMARY_EVERY {
             stats.log(lock(&inv).containers());
             last_summary = now;
         }
-        cooldown.prune(now);
-        let offer = feed::offer(&lock(&inv), &cooldown, now);
-        if !pacer.due(&offer, now) {
+        cooldown.prune(now_std);
+        let offer = feed::offer(&lock(&inv), &cooldown, now_std);
+        if !pacer.due(&offer, now_std) {
             continue;
         }
 
         // Node pressure: defer, but not forever.
-        match host_pressure(&cfg.host_proc) {
+        match env.pressure().await {
             Some(p) if p > cfg.pressure_threshold => {
                 let since = *deferred_since.get_or_insert(now);
                 if now.duration_since(since) < cfg.max_pressure_defer {
@@ -573,12 +697,7 @@ async fn claim_loop<B: Broker + 'static>(
         }
         deferred_since = None;
 
-        let pinged = ping(cfg).await;
-        if let Err(PingError::Unsupported(why)) = &pinged {
-            degraded(&ctx, broker.as_ref(), why, cfg.idle).await;
-            return;
-        }
-        if let Err(PingError::Other(e)) = pinged {
+        if let Err(e) = env.ping().await {
             stats.worker_unavailable += 1;
             if !worker_down_logged {
                 warn!(error = e, "node catalog: worker unavailable; not claiming");
@@ -586,7 +705,7 @@ async fn claim_loop<B: Broker + 'static>(
             }
             // Counted as a no-grant: retried after `idle`, or sooner on
             // a changed offer.
-            pacer.sent(&offer, false, now);
+            pacer.sent(&offer, false, now_std);
             continue;
         }
         if worker_down_logged {
@@ -604,24 +723,30 @@ async fn claim_loop<B: Broker + 'static>(
         let grant = match broker.claim(&req).await {
             Answer::Ok(r) => {
                 backoff.reset();
+                unavailable.reset();
+                unavailable_logged = false;
                 if !r.grants_enabled && !grants_off_logged {
                     info!("node catalog: grants are switched off on the Broker");
                 }
                 grants_off_logged = !r.grants_enabled;
-                pacer.sent(&offer, r.grant.is_some(), now);
+                pacer.sent(&offer, r.grant.is_some(), now_std);
                 r.grant
             }
-            Answer::Unavailable(d) => {
-                warn!(
-                    wait_secs = d.as_secs(),
-                    "node catalog: Broker catalog unavailable (503)"
-                );
-                tokio::time::sleep(d.max(Duration::from_secs(60))).await;
+            Answer::Unavailable(hint) => {
+                let d = unavailable.next(Some(hint));
+                if !unavailable_logged {
+                    warn!(
+                        wait_secs = d.as_secs(),
+                        "node catalog: Broker catalog unavailable (503); backing off up to 30 min"
+                    );
+                    unavailable_logged = true;
+                }
+                tokio::time::sleep(d).await;
                 continue;
             }
             Answer::Missing => {
                 warn!("node catalog: the Broker has no catalog routes (404); idle for 30 min");
-                tokio::time::sleep(Duration::from_secs(1800)).await;
+                tokio::time::sleep(UNAVAILABLE_CAP).await;
                 continue;
             }
             Answer::Retry(hint) => {
@@ -633,18 +758,36 @@ async fn claim_loop<B: Broker + 'static>(
                 tokio::time::sleep(d).await;
                 continue;
             }
+            Answer::Refused(422, body) => {
+                error!(
+                    epoch = cfg.epoch,
+                    body,
+                    "node catalog: the Broker refuses this node's claims (422). Check \
+                     NODE_CATALOG_EPOCH on the Controller against the Broker's \
+                     NODE_CATALOG_MAX_EPOCH. Not claiming until the Controller restarts"
+                );
+                degraded(&ctx, broker.as_ref(), &body, cfg.idle).await;
+                return;
+            }
             other => {
                 warn!(answer = ?other, "node catalog: claim refused");
-                pacer.sent(&offer, false, now);
+                pacer.sent(&offer, false, now_std);
                 continue;
             }
         };
         let Some(grant) = grant else { continue };
         if !offer.contains(&grant.digest) {
+            // Not ours to scan: hand it straight back (L2).
             warn!(
                 digest = grant.digest,
-                "node catalog: granted a digest that was not offered"
+                "node catalog: granted a digest that was not offered; failing it"
             );
+            let u = ClaimUpdate {
+                action: api::Action::Fail,
+                node: ctx.node.clone(),
+                reason: Some(FailReason::Error.as_str().to_string()),
+            };
+            let _ = broker.update(&grant.digest, &grant.claim_token, &u).await;
             continue;
         }
         stats.granted += 1;
@@ -655,11 +798,7 @@ async fn claim_loop<B: Broker + 'static>(
             lease_expires_at = grant.lease_expires_at.as_deref().unwrap_or(""),
             "node catalog: granted"
         );
-        let scanner = NodeScanner {
-            config: cfg.clone(),
-            platform: ctx.platform.clone(),
-            candidates,
-        };
+        let scanner = env.scanner(candidates);
         let gctx = GrantCtx {
             broker: broker.as_ref(),
             node: &ctx.node,
@@ -669,6 +808,9 @@ async fn claim_loop<B: Broker + 'static>(
             busy_wait: claim::BUSY_WAIT,
             retry_base: Duration::from_secs(2),
         };
+        // The scan and upload use `cfg.epoch`, the epoch this claim was
+        // just made under: the Broker grants under the request's epoch,
+        // so by construction the upload's epoch is the grant's (L1).
         let started = Instant::now();
         let outcome = claim::run_grant(&gctx, &scanner).await;
         match &outcome {
@@ -692,474 +834,13 @@ async fn claim_loop<B: Broker + 'static>(
                 );
             }
         }
-        cooldown.hold(&grant.digest, Instant::now(), cooldown_for(&outcome));
-    }
-}
-
-// ---- The real scan -----------------------------------------------------
-
-/// One grant's scan over this node's candidates for the digest.
-struct NodeScanner {
-    config: Config,
-    platform: String,
-    candidates: Vec<RunningContainer>,
-}
-
-/// One candidate's result (see [`ScanResult`] on its size).
-#[allow(clippy::large_enum_variant)]
-enum Attempt {
-    Done(ScanResult),
-    Drift(&'static str),
-    PidGone(String),
-}
-
-/// The container's task pid from containerd, with the existing bounds.
-async fn task_pid(container_id: &str) -> Option<u32> {
-    let sock = crate::container::containerd_sock();
-    let ch = crate::container::connect_containerd(&sock, crate::container::CONNECT_TIMEOUT).await?;
-    crate::PodInspect {
-        container_id: Some(container_id.to_string()),
-        ..Default::default()
-    }
-    .get_pid(ch)
-    .await
-    .pid
-}
-
-fn failed(reason: FailReason, detail: impl Into<String>) -> Attempt {
-    Attempt::Done(ScanResult::Failed {
-        reason,
-        detail: detail.into(),
-    })
-}
-
-/// Everything blocking for one candidate, on a `spawn_blocking` thread.
-fn scan_one(
-    cfg: &Config,
-    platform: &str,
-    c: &RunningContainer,
-    pid: u32,
-    cancel: &AtomicBool,
-) -> Attempt {
-    use root::{AcquireError, Drift, ProcDir};
-
-    let dir = match ProcDir::open(&cfg.host_proc, pid) {
-        Ok(d) => d,
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH)) => {
-            return Attempt::PidGone(format!("pid {pid} gone"))
-        }
-        Err(e) => return failed(FailReason::Error, format!("open /proc/{pid}: {e}")),
-    };
-    let want = root::Expected {
-        pod_uid: c.pod_uid.clone(),
-        container_id: c.container_id.clone(),
-    };
-    let acq = match root::acquire(&dir, &want) {
-        Ok(a) => a,
-        Err(AcquireError::PidGone(why)) => return Attempt::PidGone(why.to_string()),
-        Err(AcquireError::Io(e)) => return failed(FailReason::Error, format!("acquire: {e}")),
-    };
-    let info = match mountinfo::root_info(&mountinfo::parse(&acq.mountinfo)) {
-        Ok(i) => i,
-        Err(mountinfo::RootRefusal::LazySnapshotter) => {
-            return failed(FailReason::LazySnapshotter, "lazily pulled root")
-        }
-        Err(mountinfo::RootRefusal::UnsupportedRootfs) => {
-            return failed(FailReason::UnsupportedRootfs, "root is not overlayfs")
-        }
-    };
-    if info.submounts_dropped > 0 {
-        debug!(
-            dropped = info.submounts_dropped,
-            "node catalog: submounts left out of the request"
+        cooldown.hold(
+            &grant.digest,
+            Instant::now().into_std(),
+            cooldown_for(&outcome),
         );
-    }
-    let drift = match root::open_host_root(&cfg.host_proc) {
-        Ok(h) => root::drift_check(std::os::fd::AsRawFd::as_raw_fd(&h), &info.upperdir),
-        Err(e) => Drift::Unknown(format!("open /proc/1/root: {e}")),
-    };
-    let drift_unknown = match drift {
-        Drift::Drifted(db) => return Attempt::Drift(db),
-        Drift::Unknown(why) => {
-            info!(
-                container = c.container_id,
-                why, "node catalog: drift unknown; SBOM will be partial"
-            );
-            true
-        }
-        Drift::Clean => false,
-    };
-    let root_fd = if cfg.ro_clone {
-        match root::readonly_clone(&dir) {
-            Ok(clone) => clone,
-            Err(e) => {
-                debug!(error = %e, "node catalog: read-only clone unavailable; passing the O_PATH root");
-                acq.root
-            }
-        }
-    } else {
-        acq.root
-    };
-
-    let scan_id = uuid::Uuid::new_v4().to_string();
-    let req = worker::Request {
-        protocol_version: worker::PROTOCOL_VERSION,
-        op: "scan",
-        scan_id: scan_id.clone(),
-        epoch: Some(cfg.epoch),
-        container_start_unix_nanos: Some(root::start_unix_nanos(acq.start_ticks)),
-        submounts: info.submounts,
-        profile: Some("full"),
-        budgets: Some(cfg.budgets()),
-    };
-    let resp = worker::call(
-        &cfg.socket,
-        &cfg.peer_uids,
-        &worker::HostPeerProc {
-            host_proc: cfg.host_proc.clone(),
-        },
-        &req,
-        Some(root_fd),
-        cfg.max_response_bytes as usize,
-        cfg.scan_timeout + worker::READ_GRACE,
-        cancel,
-    );
-    let resp = match resp {
-        Ok(r) => r,
-        Err(worker::WorkerError::Cancelled) => return Attempt::Done(ScanResult::Cancelled),
-        Err(worker::WorkerError::Timeout) => {
-            return failed(FailReason::Timeout, "no answer in time")
-        }
-        Err(e @ worker::WorkerError::Unavailable(_))
-        | Err(e @ worker::WorkerError::PeerRejected(_))
-        | Err(e @ worker::WorkerError::PeerUnsupported(_)) => {
-            error!(error = %e, "node catalog: cannot hand off to the worker");
-            return failed(FailReason::WorkerUnavailable, e.to_string());
-        }
-        Err(e) => return failed(FailReason::Error, e.to_string()),
-    };
-    match post::validate(resp, &scan_id, cfg.epoch, drift_unknown) {
-        Ok(post::Outcome::Sbom(sbom)) => Attempt::Done(ScanResult::Sbom {
-            subject: post::Subject {
-                digest: c.digest.clone(),
-                // The Broker's digest_kind is index | manifest, which the
-                // pod status cannot tell apart (a repo digest is either);
-                // left out, it is stored as unknown.
-                digest_kind: None,
-                repository: c.repository.clone(),
-                platform: platform.to_string(),
-                epoch: cfg.epoch,
-            },
-            sbom,
-        }),
-        Ok(post::Outcome::Failed { reason, .. }) if reason == "busy" => {
-            Attempt::Done(ScanResult::Busy)
-        }
-        Ok(post::Outcome::Failed { reason, message }) => failed(
-            FailReason::from_worker(&reason),
-            format!("{reason}: {message}"),
-        ),
-        Err(post::Invalid(why)) => {
-            warn!(why, "node catalog: worker response refused");
-            failed(FailReason::Error, why)
-        }
-    }
-}
-
-impl Scan for NodeScanner {
-    async fn scan(&self, digest: &str, cancel: Arc<AtomicBool>) -> ScanResult {
-        let mut tried = 0usize;
-        let mut sandboxed = false;
-        let mut drift: Option<&'static str> = None;
-        let mut pid_gone = false;
-        for c in self.candidates.iter().filter(|c| c.digest == digest) {
-            if cancel.load(Ordering::Relaxed) {
-                return ScanResult::Cancelled;
-            }
-            if c.sandboxed {
-                sandboxed = true;
-                continue;
-            }
-            if tried == MAX_CANDIDATES {
-                break;
-            }
-            tried += 1;
-            let Some(pid) = task_pid(&c.container_id).await else {
-                continue;
-            };
-            let (cfg, platform, cand, cancel) = (
-                self.config.clone(),
-                self.platform.clone(),
-                c.clone(),
-                Arc::clone(&cancel),
-            );
-            let attempt =
-                tokio::task::spawn_blocking(move || scan_one(&cfg, &platform, &cand, pid, &cancel))
-                    .await;
-            match attempt {
-                Ok(Attempt::Done(r)) => return r,
-                Ok(Attempt::Drift(db)) => {
-                    info!(
-                        container = c.container_id,
-                        db, "node catalog: container drifted; trying another"
-                    );
-                    drift = Some(db);
-                }
-                Ok(Attempt::PidGone(why)) => {
-                    debug!(
-                        container = c.container_id,
-                        why, "node catalog: pid gone; trying another"
-                    );
-                    pid_gone = true;
-                }
-                Err(e) => {
-                    return ScanResult::Failed {
-                        reason: FailReason::Error,
-                        detail: format!("scan thread: {e}"),
-                    }
-                }
-            }
-        }
-        let (reason, detail) = if let Some(db) = drift {
-            (FailReason::Drift, format!("{db} changed at runtime"))
-        } else if pid_gone {
-            (
-                FailReason::PidGone,
-                "every candidate's process changed".to_string(),
-            )
-        } else if sandboxed && tried == 0 {
-            (
-                FailReason::Sandboxed,
-                "only sandboxed containers run it here".to_string(),
-            )
-        } else {
-            (
-                FailReason::ExitedBeforeCatalog,
-                "no running container left".to_string(),
-            )
-        };
-        ScanResult::Failed { reason, detail }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn off_by_default_and_off_reads_nothing_else() {
-        let seen = Mutex::new(Vec::<String>::new());
-        let c = Config::from_lookup(|k| {
-            seen.lock().unwrap().push(k.to_string());
-            None
-        });
-        assert!(!c.enabled);
-        assert_eq!(c, Config::default());
-        assert_eq!(*seen.lock().unwrap(), vec!["NODE_CATALOG"]);
-
-        for off in ["off", "false", "0", "", "banana"] {
-            let c = Config::from_lookup(|k| (k == "NODE_CATALOG").then(|| off.to_string()));
-            assert!(!c.enabled, "{off:?}");
-        }
-    }
-
-    /// The off path starts nothing: no task, no feed, and the pod
-    /// watcher hooks do nothing.
-    #[tokio::test]
-    async fn start_with_the_gate_off_does_nothing() {
-        assert!(start(Config::default(), "n".into(), "http://127.0.0.1:1".into()).is_none());
-        assert!(!feed::is_open(), "no channel was opened");
-        // The hooks are inert with no feed.
-        let pod = k8s_openapi::api::core::v1::Pod::default();
-        feed::note_pod(&pod);
-        feed::forget_pod(&pod);
-        feed::retain_pods(&Default::default());
-        assert!(!feed::is_open());
-    }
-
-    #[test]
-    fn values_parse_and_clamp() {
-        let env: HashMap<&str, &str> = [
-            ("NODE_CATALOG", "on"),
-            ("NODE_CATALOG_SOCKET", " /tmp/w.sock "),
-            ("NODE_CATALOG_EPOCH", "7"),
-            ("NODE_CATALOG_RO_CLONE", "true"),
-            ("NODE_CATALOG_SCAN_TIMEOUT_SECS", "99999"),
-            ("NODE_CATALOG_MAX_COMPONENTS", "900000"),
-            ("NODE_CATALOG_MAX_RESPONSE_BYTES", "999999999999"),
-            ("NODE_CATALOG_MIN_SCAN_INTERVAL_SECS", "1"),
-            ("NODE_CATALOG_PEER_UIDS", "0, 2000000000"),
-            ("NODE_CATALOG_MAX_FILES", "not-a-number"),
-        ]
-        .into();
-        let c = Config::from_lookup(|k| env.get(k).map(|v| v.to_string()));
-        assert!(c.enabled);
-        assert_eq!(c.socket, PathBuf::from("/tmp/w.sock"));
-        assert_eq!(c.epoch, 7);
-        assert!(c.ro_clone);
-        assert_eq!(c.scan_timeout, Duration::from_secs(1800));
-        assert_eq!(c.max_components, 50_000);
-        assert_eq!(c.max_response_bytes, 64 * 1024 * 1024);
-        assert_eq!(c.min_scan_interval, Duration::from_secs(30));
-        assert_eq!(c.peer_uids, vec![0, 2_000_000_000]);
-        assert_eq!(c.max_files, 2_000_000);
-        assert_eq!(c.budgets().scan_timeout_ms, 1_800_000);
-    }
-
-    /// A Broker that only records claims (degraded mode sends nothing
-    /// else).
-    #[derive(Default)]
-    struct ClaimRecorder {
-        offers: Mutex<Vec<Vec<String>>>,
-    }
-
-    impl Broker for ClaimRecorder {
-        async fn claim(&self, r: &ClaimRequest) -> Answer<api::ClaimResponse> {
-            self.offers.lock().unwrap().push(r.offer.clone());
-            Answer::Ok(api::ClaimResponse {
-                grants_enabled: true,
-                grant: Some(api::Grant {
-                    digest: "sha256:x".into(),
-                    claim_token: "t".into(),
-                    lease_expires_at: None,
-                    lease_seconds: None,
-                }),
-            })
-        }
-        async fn update(
-            &self,
-            _: &str,
-            _: &str,
-            _: &api::ClaimUpdate,
-        ) -> Answer<api::ClaimUpdateResponse> {
-            panic!("degraded mode never touches a claim")
-        }
-        async fn upload(&self, _: &str, _: &str, _: &api::SbomPage) -> Answer<serde_json::Value> {
-            panic!("degraded mode never uploads")
-        }
-    }
-
-    /// Kernel < 6.5 without hostPID: offer nothing, claim nothing, at the
-    /// idle cadence, forever; even a (bogus) grant is not acted on.
-    #[tokio::test(start_paused = true)]
-    async fn degraded_mode_offers_nothing_at_the_idle_cadence() {
-        let ctx = LoopCtx {
-            config: Config::default(),
-            node: "n1".into(),
-            platform: "linux/amd64".into(),
-        };
-        let b = ClaimRecorder::default();
-        let every = Duration::from_secs(600);
-        let r = tokio::time::timeout(
-            Duration::from_secs(1500),
-            degraded(&ctx, &b, "no SO_PEERPIDFD", every),
-        )
-        .await;
-        assert!(r.is_err(), "degraded mode never returns");
-        let offers = b.offers.lock().unwrap().clone();
-        assert_eq!(offers.len(), 3, "t=0, 10 min, 20 min; never hot");
-        assert!(offers.iter().all(Vec::is_empty));
-    }
-
-    #[test]
-    fn rate_limit_allows_one_per_period() {
-        let t0 = Instant::now();
-        let mut r = RateLimit::new(Duration::from_secs(3600));
-        assert!(r.allow(t0));
-        assert!(!r.allow(t0 + Duration::from_secs(10)));
-        assert!(r.allow(t0 + Duration::from_secs(3600)));
-        let mut s = RateLimit::starting(Duration::from_secs(60), t0);
-        assert!(!s.allow(t0));
-        assert!(s.allow(t0 + Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn pod_uid_is_read_only_when_on() {
-        let c = Config::from_lookup(|k| match k {
-            "NODE_CATALOG" => Some("on".into()),
-            "POD_UID" => Some(" 5d7c1c2e-1f2a-4b3c-9d8e-0a1b2c3d4e5f ".into()),
-            _ => None,
-        });
-        assert_eq!(
-            c.pod_uid.as_deref(),
-            Some("5d7c1c2e-1f2a-4b3c-9d8e-0a1b2c3d4e5f")
-        );
-    }
-
-    #[test]
-    fn psi_parses_some_avg10() {
-        let body = "some avg10=41.50 avg60=10.00 avg300=2.00 total=123\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
-        assert_eq!(psi_some_avg10(body), Some(41.5));
-        assert_eq!(psi_some_avg10("full avg10=3.0\n"), None);
-        assert_eq!(psi_some_avg10(""), None);
-    }
-
-    #[test]
-    fn cooldowns_follow_the_retry_class() {
-        let h = Duration::from_secs(3600);
-        assert_eq!(
-            cooldown_for(&GrantOutcome::Stored {
-                pages: 1,
-                status: String::new()
-            }),
-            24 * h
-        );
-        assert_eq!(
-            cooldown_for(&GrantOutcome::Reported(FailReason::LazySnapshotter)),
-            24 * h
-        );
-        assert_eq!(cooldown_for(&GrantOutcome::Reported(FailReason::Oom)), h);
-        assert_eq!(
-            cooldown_for(&GrantOutcome::Reported(FailReason::Drift)),
-            Duration::from_secs(600)
-        );
-        assert_eq!(
-            cooldown_for(&GrantOutcome::LostLease),
-            Duration::from_secs(900)
-        );
-    }
-
-    fn cand(sandboxed: bool) -> RunningContainer {
-        RunningContainer {
-            pod_uid: "u".into(),
-            namespace: "n".into(),
-            pod: "p".into(),
-            container: "c".into(),
-            container_id: "c".repeat(64),
-            digest: "sha256:x".into(),
-            digest_kind: crate::image_inventory::DigestKind::Repo,
-            repository: None,
-            started_unix: None,
-            sandboxed,
-        }
-    }
-
-    #[tokio::test]
-    async fn only_sandboxed_candidates_are_sandboxed_and_none_is_exited() {
-        let s = NodeScanner {
-            config: Config::default(),
-            platform: "linux/amd64".into(),
-            candidates: vec![cand(true)],
-        };
-        assert!(matches!(
-            s.scan("sha256:x", Arc::default()).await,
-            ScanResult::Failed {
-                reason: FailReason::Sandboxed,
-                ..
-            }
-        ));
-        let s = NodeScanner {
-            config: Config::default(),
-            platform: "linux/amd64".into(),
-            candidates: vec![],
-        };
-        assert!(matches!(
-            s.scan("sha256:x", Arc::default()).await,
-            ScanResult::Failed {
-                reason: FailReason::ExitedBeforeCatalog,
-                ..
-            }
-        ));
-    }
-}
+mod tests;
