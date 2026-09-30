@@ -75,7 +75,7 @@ func Harden(l Limits) error {
 		{unix.RLIMIT_CORE, 0},
 		{unix.RLIMIT_DATA, uint64(max(l.DataLimit, 0))},
 	} {
-		if rl.res == unix.RLIMIT_DATA && rl.v == 0 {
+		if rl.res == unix.RLIMIT_DATA && (rl.v == 0 || RaceEnabled) {
 			continue
 		}
 		if err := unix.Setrlimit(rl.res, &unix.Rlimit{Cur: rl.v, Max: rl.v}); err != nil {

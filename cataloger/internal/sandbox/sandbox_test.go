@@ -259,7 +259,11 @@ func TestHarden(t *testing.T) {
 		got.IoprioClass != ioprioClassIdle || (got.Nice != 19 && got.Nice != 1) {
 		t.Errorf("limits %+v", got)
 	}
-	if got.OOMScoreAdj != "1000" || got.Dumpable != 0 || got.Data != 1<<30 {
+	wantData := uint64(1 << 30)
+	if RaceEnabled {
+		wantData = got.Data // not set in race builds
+	}
+	if got.OOMScoreAdj != "1000" || got.Dumpable != 0 || got.Data != wantData {
 		t.Errorf("oom_score_adj %q dumpable %d RLIMIT_DATA %d", got.OOMScoreAdj, got.Dumpable, got.Data)
 	}
 }
@@ -292,6 +296,9 @@ func burstChild() int {
 }
 
 func TestBurstAllocationHitsTheDataLimit(t *testing.T) {
+	if RaceEnabled {
+		t.Skip("race builds run without RLIMIT_DATA (ThreadSanitizer's shadow memory)")
+	}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), "KG_SANDBOX_CHILD=burst")
 	var stderr strings.Builder
@@ -312,7 +319,7 @@ func TestBurstAllocationHitsTheDataLimit(t *testing.T) {
 func forkProbe(nr uintptr) unix.Errno {
 	r, _, e := unix.RawSyscall(nr, 0, 0, 0)
 	if e == 0 && r == 0 {
-		unix.RawSyscall(unix.SYS_EXIT_GROUP, 0, 0, 0)
+		_, _, _ = unix.RawSyscall(unix.SYS_EXIT_GROUP, 0, 0, 0)
 	}
 	return e
 }
