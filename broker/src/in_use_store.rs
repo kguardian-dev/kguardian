@@ -168,14 +168,38 @@ struct UnownedAcc {
     last: NaiveDateTime,
 }
 
+/// The owners of `path`, each with the rank it matched at. Ownership is
+/// ranked per source family, then the two are united: the Trivy Operator /
+/// registry owners (`comps`) are exactly what they would be without a node
+/// SBOM, so a node package matched at a stronger rank never hides one of
+/// theirs. The node owners (`node_comps`) are added only for a file the
+/// image shipped: a runtime path with a drift origin ([`RtRow::drift`]) is
+/// never credited through node data (design node-catalog.md section 5,
+/// "drift evidence"). A package in both families keeps its stronger rank.
+fn owners_by_family(
+    path: &str,
+    drift: bool,
+    comps: &[Component],
+    node_comps: &[Component],
+) -> Vec<(PackageKey, PathMatch)> {
+    let mut out: BTreeMap<PackageKey, PathMatch> = BTreeMap::new();
+    let mut add = |o: in_use::Ownership| {
+        let how = o.how.unwrap_or(PathMatch::Soname);
+        for k in o.owners {
+            let e = out.entry(k).or_insert(how);
+            *e = (*e).min(how);
+        }
+    };
+    add(in_use::owners_of(path, comps));
+    if !drift && !node_comps.is_empty() {
+        add(in_use::owners_of(path, node_comps));
+    }
+    out.into_iter().collect()
+}
+
 /// `comps` are the packages of the image's Trivy Operator / registry
-/// SBOMs, `node_comps` those of its node catalog SBOM. A node file list
-/// credits a package only with a file the image shipped: a runtime path
-/// with a drift origin ([`RtRow::drift`]) is matched against `comps`
-/// alone (design node-catalog.md section 5, "drift evidence"), so a binary
-/// copied over a packaged path at runtime is never credited to that
-/// package by node data. Trivy Operator and registry matching is
-/// unchanged.
+/// SBOMs, `node_comps` those of its node catalog SBOM
+/// ([`owners_by_family`]).
 fn compute_image_use(
     rows: &[RtRow],
     comps: &[Component],
@@ -183,21 +207,14 @@ fn compute_image_use(
     has_sbom: bool,
 ) -> ImageUse {
     let mut out = ImageUse::default();
-    let all: Vec<Component>;
-    let every: &[Component] = if node_comps.is_empty() {
-        comps
-    } else {
-        all = comps.iter().chain(node_comps).cloned().collect();
-        &all
-    };
-    let mut owners_cache: BTreeMap<(&str, bool), in_use::Ownership> = BTreeMap::new();
+    let mut owners_cache: BTreeMap<(&str, bool), Vec<(PackageKey, PathMatch)>> = BTreeMap::new();
     for r in rows {
         let drift = r.drift();
         let o = owners_cache
             .entry((r.path.as_str(), drift))
-            .or_insert_with(|| in_use::owners_of(&r.path, if drift { comps } else { every }));
+            .or_insert_with(|| owners_by_family(&r.path, drift, comps, node_comps));
         let executed = r.kind == "exec";
-        if o.unowned() {
+        if o.is_empty() {
             if has_sbom {
                 let e = out
                     .unowned
@@ -218,8 +235,8 @@ fn compute_image_use(
             }
             continue;
         }
-        let how = o.how.unwrap_or(PathMatch::Soname);
-        for pkg in &o.owners {
+        for (pkg, how) in o.iter() {
+            let how = *how;
             let key = (
                 r.cluster_id.clone(),
                 r.pod_namespace.clone(),
@@ -517,6 +534,10 @@ pub struct UseEvidence {
 /// `capture_gap`, so nothing is claimed installed-but-not-observed from
 /// part of the evidence.
 ///
+/// It also rebuilds `runtime_node_sbom_guard`: `kg_node_sbom_guard` once
+/// per container of an image with a node SBOM, which `kg_pkg_in_use`
+/// reads per package.
+///
 /// Node catalog guard (design node-catalog.md section 2): where the
 /// image's only SBOM is a node catalog SBOM, a covered container stays
 /// covered only if `kg_node_sbom_guard` passes (the SBOM is
@@ -535,6 +556,24 @@ pub fn refresh_coverage(
     let available = coverage_available(conn)?;
     conn.transaction(|conn| {
         sql_query("DELETE FROM runtime_in_use_coverage").execute(conn)?;
+        // The node SBOM guard, once per container of an image with a node
+        // SBOM linked (kg_pkg_in_use reads it per package), over the same
+        // window as the coverage below.
+        sql_query("DELETE FROM runtime_node_sbom_guard").execute(conn)?;
+        sql_query(
+            "INSERT INTO runtime_node_sbom_guard (cluster_id, pod_namespace, workload_kind, \
+                 workload_name, container_name, image_digest, reason) \
+             SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
+                 wc.container_name, wc.image_digest, \
+                 kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                     wc.workload_name, wc.container_name, wc.image_digest, $1) \
+             FROM workload_containers wc \
+             WHERE EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
+                 ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
+                 WHERE l.image_digest = wc.image_digest AND l.source = 'node')",
+        )
+        .bind::<Integer, _>(s.min_window_hours as i32)
+        .execute(conn)?;
         let select = if available {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, \
@@ -551,16 +590,16 @@ pub fn refresh_coverage(
                  wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest, $1) k \
                  ON true \
              CROSS JOIN LATERAL (SELECT (NOT $2 OR wc.image_digest = ANY($3)) AS gap) g \
+             LEFT JOIN runtime_node_sbom_guard ng ON ng.cluster_id = wc.cluster_id \
+                 AND ng.pod_namespace = wc.pod_namespace AND ng.workload_kind = wc.workload_kind \
+                 AND ng.workload_name = wc.workload_name \
+                 AND ng.container_name = wc.container_name AND ng.image_digest = wc.image_digest \
              CROSS JOIN LATERAL (SELECT CASE \
-                 WHEN k.covered IS TRUE AND NOT g.gap \
-                     AND EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
-                         ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-                         WHERE l.image_digest = wc.image_digest AND l.source = 'node') \
+                 WHEN k.covered IS TRUE AND NOT g.gap AND ng.image_digest IS NOT NULL \
                      AND NOT EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
                          ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
                          WHERE l.image_digest = wc.image_digest AND l.source <> 'node') \
-                 THEN kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
-                     wc.workload_name, wc.container_name, wc.image_digest, $1) END AS reason) n"
+                 THEN ng.reason END AS reason) n"
         } else {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, false, 'no_runtime_data', \
@@ -1082,7 +1121,7 @@ mod tests {
         let u = compute_image_use(&rows, &trivy, &node, true);
         assert_eq!(state(&u, "curl"), Some(true));
         assert!(u.unowned.is_empty());
-        // Both lists: owners are merged at the strongest rank.
+        // Both lists: each family's owners are credited.
         let u = compute_image_use(
             &rows[..1],
             &[comp("bb-trivy", &["bin/busybox"])],
@@ -1092,6 +1131,57 @@ mod tests {
         let mut names: Vec<&str> = u.uses.keys().map(|k| k.5.name.as_str()).collect();
         names.sort();
         assert_eq!(names, ["bb-trivy", "busybox"]);
+    }
+
+    /// A node package matched at the exact path never hides a Trivy
+    /// package that matches only through the merged-/usr alias or a
+    /// shorter soname: ownership is ranked per family, so the Trivy owners
+    /// (and their ranks) are those without the node SBOM.
+    #[test]
+    fn a_node_exact_match_never_hides_a_weaker_trivy_owner() {
+        // dpkg records /lib/... and the soname link; the node list the
+        // resolved /usr/lib/... real files, under other package names.
+        let trivy = vec![
+            comp("libc6", &["lib/x86_64-linux-gnu/libc.so.6"]),
+            comp("zlib1g", &["lib/x86_64-linux-gnu/libz.so.1"]),
+            comp("coreutils", &["bin/cat"]),
+        ];
+        let node = vec![
+            comp("libc6-node", &["/usr/lib/x86_64-linux-gnu/libc.so.6"]),
+            comp("zlib1g-node", &["/usr/lib/x86_64-linux-gnu/libz.so.1.3"]),
+            comp("coreutils-node", &["/usr/bin/cat"]),
+        ];
+        let rows = vec![
+            rt("app", "lib", "/usr/lib/x86_64-linux-gnu/libc.so.6"),
+            rt("app", "lib", "/usr/lib/x86_64-linux-gnu/libz.so.1.3"),
+            rt("app", "exec", "/usr/bin/cat"),
+        ];
+        let owners = |u: &ImageUse, family: &str| -> Vec<(String, bool, PathMatch)> {
+            u.uses
+                .iter()
+                .filter(|(k, _)| k.5.name.ends_with("-node") == (family == "node"))
+                .map(|(k, a)| (k.5.name.clone(), a.executed, a.how))
+                .collect()
+        };
+        let alone = compute_image_use(&rows, &trivy, &[], true);
+        let both = compute_image_use(&rows, &trivy, &node, true);
+        assert_eq!(owners(&both, "trivy"), owners(&alone, "trivy"));
+        assert_eq!(
+            owners(&alone, "trivy"),
+            [
+                ("coreutils".to_string(), true, PathMatch::MergedUsrAlias),
+                ("libc6".to_string(), false, PathMatch::MergedUsrAlias),
+                ("zlib1g".to_string(), false, PathMatch::Soname),
+            ]
+        );
+        assert_eq!(
+            owners(&both, "node"),
+            [
+                ("coreutils-node".to_string(), true, PathMatch::Exact),
+                ("libc6-node".to_string(), false, PathMatch::Exact),
+                ("zlib1g-node".to_string(), false, PathMatch::Exact),
+            ]
+        );
     }
 
     /// The guard migration's down restores exactly the kg_pkg_in_use the
@@ -1110,8 +1200,9 @@ mod tests {
         let down = include_str!("../db/migrations/2026-10-04-100000_node_in_use_guard/down.sql");
         assert_eq!(kg_pkg_in_use(down), kg_pkg_in_use(pr1));
         assert_ne!(kg_pkg_in_use(up), kg_pkg_in_use(pr1));
-        assert!(kg_pkg_in_use(up).contains("kg_node_pkg_guard("));
-        for f in ["kg_node_pkg_guard", "kg_node_sbom_guard"] {
+        assert!(kg_pkg_in_use(up).contains("kg_node_pkg_flags("));
+        assert!(kg_pkg_in_use(up).contains("runtime_node_sbom_guard"));
+        for f in ["kg_node_pkg_flags", "kg_node_sbom_guard"] {
             assert!(
                 down.contains(&format!("DROP FUNCTION IF EXISTS {f}(")),
                 "{f}"
@@ -1121,7 +1212,11 @@ mod tests {
                 "{f}"
             );
         }
-        assert!(!up.contains("CREATE TABLE") && !up.contains("ALTER TABLE"));
+        // Only its own new table: nothing existing is altered.
+        assert_eq!(up.matches("CREATE TABLE IF NOT EXISTS").count(), 1);
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard ("));
+        assert!(down.contains("DROP TABLE IF EXISTS runtime_node_sbom_guard;"));
+        assert!(!up.contains("ALTER TABLE"));
     }
 
     #[test]

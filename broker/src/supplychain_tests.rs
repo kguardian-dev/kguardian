@@ -3855,7 +3855,59 @@ fn live_database_cve_summary_rebuild_names_every_column() {
 
 // ---------------------------------------------------------------------
 // Node catalog in-use guard (docs/design/node-catalog.md section 5)
+//
+// These tests share and clean whole tables (runtime_executables,
+// runtime_package_use, runtime_in_use_coverage, node_catalog_*, ...), so
+// like every live test here they need `--test-threads=1`.
 // ---------------------------------------------------------------------
+
+/// The guard as first written (kg_node_sbom_guard evaluated on every
+/// kg_pkg_in_use call): the shipped function, which reads it once per
+/// container from runtime_node_sbom_guard, must give the same text.
+const NODE_GUARD_PER_CALL: &str = include_str!("../test/fixtures/node_guard_per_call.sql");
+
+/// After an in-use refresh: kg_pkg_in_use equals the per-call reference
+/// for every workload container of this test's namespace, every package
+/// any of its SBOMs lists (plus one no SBOM lists), observable or not.
+fn node_guard_same_as_per_call(conn: &mut PgConnection) {
+    #[derive(QueryableByName, Debug)]
+    struct Pair {
+        #[diesel(sql_type = Text)]
+        pkg: String,
+        #[diesel(sql_type = Text)]
+        shipped: String,
+        #[diesel(sql_type = Text)]
+        per_call: String,
+    }
+    exec(conn, NODE_GUARD_PER_CALL);
+    let rows: Vec<Pair> = sql_query(format!(
+        "WITH p AS ( \
+             SELECT wc.*, n.name, o.obs FROM workload_containers wc \
+             CROSS JOIN LATERAL (SELECT sc.name FROM supplychain_image_links l \
+                 JOIN image_sbom_components sc ON sc.digest = l.digest AND sc.source = l.source \
+                 WHERE l.image_digest = wc.image_digest \
+                 UNION SELECT 'absent') n \
+             CROSS JOIN (VALUES (true), (false)) o(obs) \
+             WHERE wc.pod_namespace = '{NS}') \
+         SELECT p.name AS pkg, \
+             kg_pkg_in_use(p.cluster_id, p.pod_namespace, p.workload_kind, p.workload_name, \
+                 p.container_name, p.image_digest, p.name, p.obs) AS shipped, \
+             kg_pkg_in_use_per_call(p.cluster_id, p.pod_namespace, p.workload_kind, \
+                 p.workload_name, p.container_name, p.image_digest, p.name, p.obs) AS per_call \
+         FROM p"
+    ))
+    .load(conn)
+    .unwrap();
+    exec(
+        conn,
+        "DROP FUNCTION kg_pkg_in_use_per_call(text, text, text, text, text, text, text, boolean); \
+         DROP FUNCTION kg_node_pkg_guard_per_call(text, text, text, text, text, text, text, integer);",
+    );
+    assert!(!rows.is_empty());
+    for r in &rows {
+        assert_eq!(r.shipped, r.per_call, "{}", r.pkg);
+    }
+}
 
 /// One instance of `api`/`app` on `node`, heartbeating now, captured from
 /// its start 48 hours ago, in `mode` (the real `kg_runtime_coverage` then
@@ -4007,6 +4059,7 @@ fn node_guard_refresh(conn: &mut PgConnection) {
     )
     .unwrap();
     iu::refresh_exposure(conn, 168).unwrap();
+    node_guard_same_as_per_call(conn);
 }
 
 /// (package, state, reason, tier) for every finding of `img`, by package.
@@ -4377,8 +4430,9 @@ fn live_database_node_guard_leaves_trivy_verdicts_alone() {
 /// Trivy-only data is byte-identical under the guarded kg_pkg_in_use: the
 /// node catalog migration's definition, installed beside it under another
 /// name, gives the same text for every package in every container state
-/// (loaded / executed / covered / uncovered / capture reasons / language
-/// package / no file list), and the same holds for the Trivy-listed
+/// (loaded / executed / covered / uncovered / exec mode, events_dropped,
+/// incomplete_paths, host_network / unfinished pass / language package /
+/// no file list), for a registry-only SBOM too, and for the Trivy-listed
 /// packages of an image that also has a node SBOM.
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
@@ -4420,6 +4474,7 @@ fn live_database_guarded_in_use_is_byte_identical_without_node_sboms() {
     comps.as_array_mut().unwrap().push(json!(
         {"name": "nofiles", "version": "1", "type": "debian", "file_paths": []}));
     t["components"] = comps;
+    let trivy = t.clone();
     store_s(&mut conn, t).unwrap();
     relink_batch(&mut conn, None, 100).unwrap();
     #[derive(QueryableByName, Debug, PartialEq)]
@@ -4487,7 +4542,77 @@ fn live_database_guarded_in_use_is_byte_identical_without_node_sboms() {
     )
     .unwrap();
     compare(&mut conn, "unfinished pass");
+    // Capture reasons from the runtime inventory, and host_network.
+    node_guard_instance(&mut conn, &img, "g7", "n1", "full");
+    for (sql, want) in [
+        (
+            "UPDATE runtime_coverage SET last_drop_at = timezone('UTC', NOW()) \
+             WHERE container_id = 'sc-guard-g7'",
+            "unknown:events_dropped",
+        ),
+        (
+            "UPDATE runtime_coverage SET last_drop_at = NULL, incomplete = true \
+             WHERE container_id = 'sc-guard-g7'",
+            "unknown:incomplete_paths",
+        ),
+    ] {
+        exec(&mut conn, sql);
+        node_guard_refresh(&mut conn);
+        let s = compare(&mut conn, want);
+        assert!(s.contains(&want.to_string()), "{s:?}");
+    }
+    exec(
+        &mut conn,
+        "UPDATE runtime_coverage SET incomplete = false WHERE container_id = 'sc-guard-g7'",
+    );
+    node_guard_refresh(&mut conn);
+    exec(
+        &mut conn,
+        "UPDATE runtime_in_use_coverage SET covered = false, reason = 'host_network', \
+             observed_since = NULL",
+    );
+    let s = compare(&mut conn, "host_network");
+    assert!(s.contains(&"unknown:host_network".to_string()), "{s:?}");
+    // Registry only: the same SBOM from the registry source.
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_sbom_components WHERE digest = '{img}' AND source = 'trivy-operator'; \
+             DELETE FROM supplychain_image_links WHERE digest = '{img}' AND source = 'trivy-operator'; \
+             DELETE FROM vuln_sources WHERE digest = '{img}' AND source = 'trivy-operator';"
+        ),
+    );
+    let mut r = trivy.clone();
+    r["source"] = json!("registry");
+    store_s(&mut conn, r).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    assert_eq!(
+        count(
+            &mut conn,
+            &format!(
+                "SELECT count(*) AS n FROM supplychain_image_links \
+                 WHERE image_digest = '{img}' AND source = 'registry'"
+            )
+        ),
+        1
+    );
+    node_guard_refresh(&mut conn);
+    let s = compare(&mut conn, "registry only");
+    assert!(s.contains(&"installed_not_observed".to_string()), "{s:?}");
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id = 'sc-guard-g7'",
+    );
     // A node SBOM beside Trivy: the Trivy-listed packages are unchanged.
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_sbom_components WHERE digest = '{img}' AND source = 'registry'; \
+             DELETE FROM supplychain_image_links WHERE digest = '{img}' AND source = 'registry'; \
+             DELETE FROM vuln_sources WHERE digest = '{img}' AND source = 'registry';"
+        ),
+    );
+    store_s(&mut conn, trivy).unwrap();
     node_guard_instance(&mut conn, &img, "g6", "n2", "full");
     let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
     s["source"] = json!(NODE_SOURCE);
@@ -4515,6 +4640,250 @@ fn live_database_guarded_in_use_is_byte_identical_without_node_sboms() {
     );
     exec(
         &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+    );
+}
+
+/// (package, version, state, path_match, sample_path) of every
+/// runtime_package_use row, sorted.
+fn package_use_rows(conn: &mut PgConnection) -> Vec<(String, String, String, String, String)> {
+    #[derive(QueryableByName)]
+    struct U {
+        #[diesel(sql_type = Text)]
+        pkg_name: String,
+        #[diesel(sql_type = Text)]
+        pkg_version: String,
+        #[diesel(sql_type = Text)]
+        state: String,
+        #[diesel(sql_type = Text)]
+        path_match: String,
+        #[diesel(sql_type = Text)]
+        sample_path: String,
+    }
+    sql_query(
+        "SELECT pkg_name, pkg_version, state, path_match, sample_path FROM runtime_package_use \
+         ORDER BY 1, 2, 3, 4, 5",
+    )
+    .load::<U>(conn)
+    .unwrap()
+    .into_iter()
+    .map(|u| {
+        (
+            u.pkg_name,
+            u.pkg_version,
+            u.state,
+            u.path_match,
+            u.sample_path,
+        )
+    })
+    .collect()
+}
+
+/// A node SBOM never takes a runtime_package_use row from a Trivy package.
+/// Ownership is ranked per source family: the node list (real paths, so an
+/// exact match) must not hide Trivy owners that match only through the
+/// merged-/usr alias (dpkg's /lib and /bin) or a shorter soname (dpkg's
+/// soname link), which would turn them installed_not_observed. The Trivy
+/// packages' rows are identical with and without the node SBOM, and so
+/// are their verdicts.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_node_owners_never_hide_trivy_owners() {
+    let mut conn = live_conn();
+    let img = d(82);
+    seed_node_guard(&mut conn, &img);
+    // Only Trivy first: drop the node SBOM seed_node_guard stored.
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_sbom_components WHERE source = 'node'; \
+             DELETE FROM supplychain_image_links WHERE source = 'node'; \
+             DELETE FROM vuln_sources WHERE source = 'node'; \
+             DELETE FROM runtime_executables WHERE image_digest = '{img}'; \
+             INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, origin, first_seen, last_seen) \
+             SELECT '{NS}', 'Deployment', 'api', 'app', '{img}', k, p, 'ebpf', 'image', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()) \
+             FROM (VALUES ('lib', '/usr/lib/x86_64-linux-gnu/libc.so.6'), \
+                          ('lib', '/usr/lib/x86_64-linux-gnu/libz.so.1.3'), \
+                          ('exec', '/usr/bin/cat'), \
+                          ('lib', '/usr/lib/x86_64-linux-gnu/libssl.so.3')) r(k, p);"
+        ),
+    );
+    // dpkg's view (Trivy): unresolved /lib and /bin paths, the soname link.
+    let mut t = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    t["components"] = json!([
+        {"name": "libc6", "version": "2.39", "type": "debian",
+         "file_paths": ["lib/x86_64-linux-gnu/libc.so.6"]},
+        {"name": "zlib1g", "version": "1.3", "type": "debian",
+         "file_paths": ["lib/x86_64-linux-gnu/libz.so.1"]},
+        {"name": "coreutils", "version": "9.4", "type": "debian", "file_paths": ["bin/cat"]},
+        {"name": "libssl3", "version": "3.0", "type": "debian",
+         "file_paths": ["usr/lib/x86_64-linux-gnu/libssl.so.3"]},
+        {"name": "unseen", "version": "1", "type": "debian",
+         "file_paths": ["usr/lib/x86_64-linux-gnu/libunseen.so.1"]},
+    ]);
+    store_s(&mut conn, t).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    node_guard_refresh(&mut conn);
+    let trivy_only = package_use_rows(&mut conn);
+    assert_eq!(
+        trivy_only
+            .iter()
+            .map(|r| (r.0.as_str(), r.3.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("coreutils", "merged_usr_alias"),
+            ("libc6", "merged_usr_alias"),
+            ("libssl3", "exact"),
+            ("zlib1g", "soname"),
+        ]
+    );
+    let verdict = |conn: &mut PgConnection, pkg: &str| {
+        #[derive(QueryableByName)]
+        struct T {
+            #[diesel(sql_type = Text)]
+            t: String,
+        }
+        sql_query(format!(
+            "SELECT kg_pkg_in_use(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                 wc.workload_name, wc.container_name, wc.image_digest, '{pkg}', true) AS t \
+             FROM workload_containers wc WHERE wc.image_digest = '{img}'"
+        ))
+        .get_result::<T>(conn)
+        .unwrap()
+        .t
+    };
+    let trivy_names = ["coreutils", "libc6", "libssl3", "zlib1g", "unseen"];
+    let before: Vec<String> = trivy_names.iter().map(|p| verdict(&mut conn, p)).collect();
+    assert_eq!(before[4], "installed_not_observed");
+    // The cataloger's view (node): the resolved real files, exact matches,
+    // under Syft's own names for the same files.
+    let mut n = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    n["source"] = json!(NODE_SOURCE);
+    n["components"] = json!([
+        {"name": "libc6-syft", "version": "2.39", "type": "deb",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libc.so.6"]},
+        {"name": "zlib1g-syft", "version": "1.3", "type": "deb",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libz.so.1.3"]},
+        {"name": "coreutils-syft", "version": "9.4", "type": "deb",
+         "file_paths": ["/usr/bin/cat"]},
+        {"name": "libssl3-syft", "version": "3.0", "type": "deb",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libssl.so.3"]},
+    ]);
+    let p = normalise_sbom_from(
+        &img,
+        serde_json::from_value(n).unwrap(),
+        Utc::now(),
+        |s| s == NODE_SOURCE,
+        NODE_SOURCE,
+        crate::node_catalog::MAX_CATALOG_PATHS,
+    )
+    .unwrap();
+    store_sbom(&mut conn, p).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    node_guard_refresh(&mut conn);
+    let with_node = package_use_rows(&mut conn);
+    let (node_rows, trivy_rows): (Vec<_>, Vec<_>) =
+        with_node.into_iter().partition(|r| r.0.ends_with("-syft"));
+    assert_eq!(trivy_rows, trivy_only, "Trivy owners unchanged");
+    assert_eq!(
+        node_rows
+            .iter()
+            .map(|r| (r.0.as_str(), r.3.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("coreutils-syft", "exact"),
+            ("libc6-syft", "exact"),
+            ("libssl3-syft", "exact"),
+            ("zlib1g-syft", "exact"),
+        ]
+    );
+    let after: Vec<String> = trivy_names.iter().map(|p| verdict(&mut conn, p)).collect();
+    assert_eq!(after, before, "Trivy verdicts unchanged");
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+    );
+}
+
+/// The Rust mirror of the guard (`NodeFiles::guard` through `in_use_of`)
+/// agrees with the SQL on all 2^5 combinations of completeness, library
+/// capture (mode full vs exec), platform, files_truncated and
+/// interpreted_content, for the node-only libbar1 both on a node-only
+/// image (the coverage guard fires) and beside a Trivy SBOM that does not
+/// list it (the per-package guard fires).
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_node_guard_sql_matches_rust_on_every_combination() {
+    use crate::in_use::{in_use_of, Evidence, InUse, NodeFiles, UnknownReason};
+    let mut n = 0;
+    for beside_trivy in [false, true] {
+        let mut conn = live_conn();
+        let img = d(83);
+        seed_node_guard(&mut conn, &img);
+        if beside_trivy {
+            let mut t = sbom_json(&img, "2026-09-20T08:00:00Z", &["other"], None);
+            t["components"][0]["file_paths"] = json!(["usr/lib/other.so.1"]);
+            store_s(&mut conn, t).unwrap();
+            relink_batch(&mut conn, None, 100).unwrap();
+        }
+        for mask in 0..32u32 {
+            let nf = NodeFiles {
+                full: mask & 1 != 0,
+                libraries_tracked: mask & 2 != 0,
+                platform_match: mask & 4 != 0,
+                files_truncated: mask & 8 != 0,
+                interpreted_content: mask & 16 != 0,
+            };
+            let flags = i32::from(nf.files_truncated) | (i32::from(nf.interpreted_content) << 1);
+            exec(
+                &mut conn,
+                &format!(
+                    "UPDATE node_catalog_claims SET completeness = '{}'; \
+                     DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'; \
+                     DELETE FROM node_sbom_package_flags WHERE pkg_key = 'libbar1@4.5-2'; \
+                     INSERT INTO node_sbom_package_flags (digest, pkg_key, flags) \
+                        SELECT '{img}', 'libbar1@4.5-2', {flags} WHERE {flags} <> 0;",
+                    if nf.full { "full" } else { "partial" }
+                ),
+            );
+            node_guard_instance(
+                &mut conn,
+                &img,
+                "g1",
+                if nf.platform_match { "n1" } else { "n2" },
+                if nf.libraries_tracked { "full" } else { "exec" },
+            );
+            node_guard_refresh(&mut conn);
+            let (want, why) = in_use_of(&Evidence {
+                covered: nf.libraries_tracked,
+                gap: (!nf.libraries_tracked).then_some(UnknownReason::LibrariesNotTracked),
+                observable: true,
+                has_files: true,
+                node_files: Some(nf),
+                ..Default::default()
+            });
+            let s = node_guard_states(&mut conn, &img);
+            let got = s
+                .iter()
+                .find(|r| r.0 == "libbar1")
+                .map(|r| (r.1, r.2))
+                .unwrap();
+            assert_eq!(
+                got,
+                (want.as_str(), why.map(|r| r.as_str())),
+                "beside_trivy={beside_trivy} {nf:?}"
+            );
+            if want == InUse::InstalledNotObserved {
+                assert_eq!(mask, 7, "only the all-pass case");
+            }
+            n += 1;
+        }
+    }
+    assert_eq!(n, 64);
+    exec(
+        &mut live_conn(),
         "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
     );
 }

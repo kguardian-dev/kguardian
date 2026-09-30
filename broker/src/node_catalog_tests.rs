@@ -1707,7 +1707,7 @@ fn live_database_uploaded_flags_and_platform_drive_the_in_use_guard() {
 const GUARD_UP: &str = include_str!("../db/migrations/2026-10-04-100000_node_in_use_guard/up.sql");
 
 /// Which kg_pkg_in_use is installed: `guarded` (2026-10-04-100000, node
-/// file lists behind kg_node_pkg_guard), `excluded` (2026-10-03-100000,
+/// file lists behind the node SBOM guard), `excluded` (2026-10-03-100000,
 /// source 'node' ignored) or `unguarded` (2026-09-28-200000).
 fn in_use_definition(conn: &mut PgConnection) -> &'static str {
     let src = text(
@@ -1715,7 +1715,7 @@ fn in_use_definition(conn: &mut PgConnection) -> &'static str {
         "SELECT prosrc AS t FROM pg_proc WHERE proname = 'kg_pkg_in_use'",
     )
     .unwrap();
-    if src.contains("kg_node_pkg_guard(") {
+    if src.contains("kg_node_pkg_flags(") {
         "guarded"
     } else if src.contains("sc.source <> 'node'") {
         "excluded"
@@ -1738,7 +1738,7 @@ fn live_database_the_in_use_guard_migration_is_reversible_and_idempotent() {
         count(
             conn,
             "SELECT count(*) AS n FROM pg_proc \
-             WHERE proname IN ('kg_node_sbom_guard', 'kg_node_pkg_guard')",
+             WHERE proname IN ('kg_node_sbom_guard', 'kg_node_pkg_flags')",
         )
     };
     conn.batch_execute(GUARD_UP).unwrap();

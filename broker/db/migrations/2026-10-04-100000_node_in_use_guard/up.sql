@@ -5,10 +5,29 @@
 -- whole guard below, and anything short of it is 'unknown' with a reason.
 -- Nothing changes for Trivy Operator or registry SBOMs.
 --
--- Two new functions and kg_pkg_in_use redefined: nothing here locks or
--- rewrites a table, so the migration is safe at startup behind long
--- reads. Every statement is CREATE OR REPLACE, so a re-run is a no-op.
--- Timestamps are naive UTC, like runtime_coverage.
+-- One new (derived) table, two new functions and kg_pkg_in_use
+-- redefined: nothing here locks or rewrites an existing table, so the
+-- migration is safe at startup behind long reads. Every statement is
+-- IF NOT EXISTS / OR REPLACE, so a re-run is a no-op. Timestamps are
+-- naive UTC, like runtime_coverage.
+
+-- kg_node_sbom_guard (below) per workload container whose image has a
+-- node SBOM linked, rebuilt whole by every in-use refresh
+-- (in_use_store::refresh_coverage, in the same transaction and with the
+-- same window as runtime_in_use_coverage), so kg_pkg_in_use evaluates it
+-- once per container rather than once per package. reason NULL = passes.
+-- A container with no row here fails closed (sbom_incomplete).
+CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard (
+    cluster_id     VARCHAR NOT NULL,
+    pod_namespace  VARCHAR NOT NULL,
+    workload_kind  VARCHAR NOT NULL,
+    workload_name  VARCHAR NOT NULL,
+    container_name VARCHAR NOT NULL,
+    image_digest   VARCHAR NOT NULL,
+    reason         VARCHAR NULL,
+    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name,
+                 image_digest)
+);
 
 -- Whether the node SBOM linked to p_image may support
 -- installed_not_observed for the workload container: NULL when it may,
@@ -61,28 +80,23 @@ SELECT CASE
 END
 $fn$;
 
--- The guard for one package whose only file list is a node SBOM's: the
--- SBOM's guard above, then the package's own flags (node_sbom_package_flags,
--- keyed name@version, over every version of p_pkg the SBOM lists):
--- interpreted_content (bit 2: it owns interpreted or loadable
--- non-executable content, which exec/mmap capture cannot see), then
--- sbom_incomplete (bit 1, files_truncated: its file list is not whole,
--- including files the cataloger dropped as runtime drift). NULL when the
--- package may be installed_not_observed.
-CREATE OR REPLACE FUNCTION kg_node_pkg_guard(
-    p_cluster text, p_ns text, p_kind text, p_name text, p_container text, p_image text,
-    p_pkg text, p_window_hours integer)
+-- The per-package half of the guard for a package whose only file list is
+-- a node SBOM's: its flags (node_sbom_package_flags, keyed name@version,
+-- over every version of p_pkg the SBOM lists). interpreted_content (bit
+-- 2: it owns interpreted or loadable non-executable content, which
+-- exec/mmap capture cannot see), then sbom_incomplete (bit 1,
+-- files_truncated: its file list is not whole, including files the
+-- cataloger dropped as runtime drift). NULL when neither is set.
+CREATE OR REPLACE FUNCTION kg_node_pkg_flags(p_image text, p_pkg text)
 RETURNS text LANGUAGE sql STABLE AS $fn$
-SELECT COALESCE(
-    kg_node_sbom_guard(p_cluster, p_ns, p_kind, p_name, p_container, p_image, p_window_hours),
-    (SELECT CASE WHEN bit_or(f.flags) & 2 <> 0 THEN 'interpreted_content'
-                 WHEN bit_or(f.flags) & 1 <> 0 THEN 'sbom_incomplete' END
-     FROM supplychain_image_links l
-     JOIN image_sbom_components sc ON sc.digest = l.digest AND sc.source = l.source
-         AND sc.name = p_pkg
-     JOIN node_sbom_package_flags f ON f.digest = sc.digest
-         AND f.pkg_key = sc.name || '@' || COALESCE(sc.version, '')
-     WHERE l.image_digest = p_image AND l.source = 'node'))
+SELECT CASE WHEN bit_or(f.flags) & 2 <> 0 THEN 'interpreted_content'
+            WHEN bit_or(f.flags) & 1 <> 0 THEN 'sbom_incomplete' END
+FROM supplychain_image_links l
+JOIN image_sbom_components sc ON sc.digest = l.digest AND sc.source = l.source
+    AND sc.name = p_pkg
+JOIN node_sbom_package_flags f ON f.digest = sc.digest
+    AND f.pkg_key = sc.name || '@' || COALESCE(sc.version, '')
+WHERE l.image_digest = p_image AND l.source = 'node'
 $fn$;
 
 -- kg_pkg_in_use (2026-10-03-100000) with node file lists let in:
@@ -92,8 +106,10 @@ $fn$;
 --   * a non-node SBOM lists the package's files: installed_not_observed,
 --     exactly as before (Trivy Operator and registry SBOMs unchanged);
 --   * no SBOM lists them: unknown:no_package_files, as before;
---   * only a node SBOM lists them: installed_not_observed only when
---     kg_node_pkg_guard passes, else unknown:<its reason>.
+--   * only a node SBOM lists them: installed_not_observed only when the
+--     container's kg_node_sbom_guard (runtime_node_sbom_guard, fail
+--     closed without a row) and then the package's kg_node_pkg_flags both
+--     pass, else unknown:<the first reason>.
 CREATE OR REPLACE FUNCTION kg_pkg_in_use(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text,
     p_image text, p_pkg text, p_observable boolean
@@ -123,8 +139,15 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
                 WHERE l.image_digest = p_image AND l.source = 'node'
                   AND cardinality(sc.file_paths) > 0)
                 THEN 'unknown:no_package_files'
-            ELSE COALESCE('unknown:' || kg_node_pkg_guard(p_cluster, p_ns, p_kind, p_name,
-                              p_container, p_image, p_pkg, c.window_hours),
+            ELSE COALESCE('unknown:' || COALESCE(
+                              NULLIF(COALESCE(
+                                  (SELECT COALESCE(ng.reason, '') FROM runtime_node_sbom_guard ng
+                                   WHERE ng.cluster_id = p_cluster AND ng.pod_namespace = p_ns
+                                     AND ng.workload_kind = p_kind AND ng.workload_name = p_name
+                                     AND ng.container_name = p_container
+                                     AND ng.image_digest = p_image),
+                                  'sbom_incomplete'), ''),
+                              kg_node_pkg_flags(p_image, p_pkg)),
                           'installed_not_observed')
          END
          FROM (SELECT (SELECT covered FROM runtime_in_use_coverage cv
@@ -136,11 +159,6 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
                        WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns
                          AND cv.workload_kind = p_kind AND cv.workload_name = p_name
                          AND cv.container_name = p_container AND cv.image_digest = p_image)
-                          AS reason,
-                      (SELECT window_hours FROM runtime_in_use_coverage cv
-                       WHERE cv.cluster_id = p_cluster AND cv.pod_namespace = p_ns
-                         AND cv.workload_kind = p_kind AND cv.workload_name = p_name
-                         AND cv.container_name = p_container AND cv.image_digest = p_image)
-                          AS window_hours) c)
+                          AS reason) c)
     )
 $$;

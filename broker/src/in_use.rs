@@ -445,7 +445,8 @@ pub struct Evidence {
 
 /// What a node catalog file list must prove before it may support
 /// installed_not_observed (design node-catalog.md section 5). Mirrors
-/// `kg_node_pkg_guard` (migration 2026-10-04-100000).
+/// `kg_node_sbom_guard` then `kg_node_pkg_flags` (migration
+/// 2026-10-04-100000).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NodeFiles {
     /// The SBOM is `completeness=full`.

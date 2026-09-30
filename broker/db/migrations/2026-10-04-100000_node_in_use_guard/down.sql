@@ -1,6 +1,6 @@
 -- kg_pkg_in_use back to its 2026-10-03-100000 definition (a source 'node'
 -- file list never makes a package installed_not_observed), then the guard
--- functions it no longer calls.
+-- functions and the table it no longer reads.
 CREATE OR REPLACE FUNCTION kg_pkg_in_use(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text,
     p_image text, p_pkg text, p_observable boolean
@@ -38,5 +38,6 @@ CREATE OR REPLACE FUNCTION kg_pkg_in_use(
     )
 $$;
 
-DROP FUNCTION IF EXISTS kg_node_pkg_guard(text, text, text, text, text, text, text, integer);
+DROP FUNCTION IF EXISTS kg_node_pkg_flags(text, text);
 DROP FUNCTION IF EXISTS kg_node_sbom_guard(text, text, text, text, text, text, integer);
+DROP TABLE IF EXISTS runtime_node_sbom_guard;
