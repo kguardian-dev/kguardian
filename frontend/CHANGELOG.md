@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.21.0...frontend/v1.21.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **llm-bridge:** update vulnerable npm dependencies and restrict the default CORS origin ([#1885](https://github.com/kguardian-dev/kguardian/issues/1885)) ([b7a879e](https://github.com/kguardian-dev/kguardian/commit/b7a879e3880298a02a8b306ad5d93e602126ce90))
+
 ## [1.21.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.20.8...frontend/v1.21.0) (2026-09-30)
 
 
