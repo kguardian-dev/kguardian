@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.1...cataloger/v0.1.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* **cataloger:** mark SBOMs partial only for runtime changes that could hide packages, and bound memory on large binaries ([#1882](https://github.com/kguardian-dev/kguardian/issues/1882)) ([8046419](https://github.com/kguardian-dev/kguardian/commit/804641920df8d298129a53d5396b28cb713637cf))
+
 ## [0.1.1](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.0...cataloger/v0.1.1) (2026-09-30)
 
 
