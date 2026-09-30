@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.2...controller/v1.17.0) (2026-09-30)
+
+
+### Features
+
+* **controller:** catalog node SBOMs through the cataloger worker ([#1850](https://github.com/kguardian-dev/kguardian/issues/1850)) ([07b1e62](https://github.com/kguardian-dev/kguardian/commit/07b1e6207cce9facd3ab11741b03be2ff3df78d9))
+
 ## [1.16.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.16.1...controller/v1.16.2) (2026-09-28)
 
 
