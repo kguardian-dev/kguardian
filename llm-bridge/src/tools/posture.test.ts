@@ -173,6 +173,7 @@ test("get_image_inventory: node catalog fields pass through, known keys only; an
   assert.equal("sbomSources" in scratch, false, "a missing sbomSources is not invented");
   assert.equal("nodeCatalog" in imgs[0], false);
   assert.match(String(got.note), /never that it has no vulnerabilities/);
+  assert.match(String(got.note), /no vulnerability report \(check get_image_vulnerabilities\)/);
 });
 
 test("get_image_inventory: a broker error is a tool error, not an empty inventory", async () => {

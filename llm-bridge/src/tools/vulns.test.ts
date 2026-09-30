@@ -409,6 +409,8 @@ test("get_image_sbom: a node catalog SBOM is a source like any other, with fileP
   assertItemsFromBroker(got.components, c.body.items, "components");
   const busybox = got.components.find((x: any) => x.name === "busybox");
   assert.equal(busybox.filePathsTotal, 402);
+  // One base: the listed paths plus the omitted ones make the total.
+  assert.equal(busybox.filePaths.length + busybox.filePathsOmitted, 402);
   assert.equal("filePathsTotal" in got.components.find((x: any) => x.name === "musl"), false);
   assert.match(got.note, /kguardian's node catalog/);
   assert.match(got.note, /Trivy Operator is authoritative/);
