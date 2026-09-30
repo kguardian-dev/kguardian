@@ -16,16 +16,14 @@ contract.
 
 - **Socket:** `SOCK_STREAM` Unix socket at `CATALOG_SOCKET` (default
   `/run/kguardian/catalog/worker.sock`), on an `emptyDir` shared by the
-  Controller and worker containers. The worker creates it, mode `0600`,
-  owned by uid 0 (the worker parent runs as uid 0; see README "Process
-  model").
+  Controller and worker containers (see §1.1 for how it is created and
+  checked).
 - **Peer checks, both directions:**
   - The worker reads `SO_PEERCRED` on accept and refuses (closes without a
     response) any peer whose uid is not in `CATALOG_ALLOWED_PEER_UIDS`
     (default `0`).
-  - The Controller reads `SO_PEERCRED` after connect: uid must be `0` (the
-    worker parent), and `/proc/<peer pid>/cgroup` must be the worker
-    container's cgroup, not merely any uid-0 process in the pod.
+  - The Controller checks the socket before it connects and the peer after
+    (§1.1).
 - **One connection per scan.** The Controller connects, sends exactly one
   request, reads exactly one response, and the worker closes the
   connection. No pipelining, no reuse.
@@ -38,7 +36,42 @@ contract.
   `budgets.scan_timeout_ms + 30 s`. The worker enforces the scan deadline
   itself; the extra 30 s covers the retry bookkeeping and the write.
 
-## 2. Framing
+### 1.1 Socket and peer verification
+
+Anything in the pod that can write to the shared emptyDir could otherwise
+plant a socket there and receive container root fds. So both sides pin
+the socket to the worker parent (uid 0):
+
+**Worker, at startup** (`internal/server.Listen`):
+
+1. The socket directory (the socket path's parent, the shared emptyDir) is
+   opened `O_NOFOLLOW` (a symlinked directory is refused), must be owned by
+   the worker's uid (0), and is `fchmod`ed to `0700`. Kubelet creates
+   emptyDirs owned by uid 0 with mode `0777`, so this only tightens the
+   mode; the worker has no `CAP_CHOWN`/`CAP_FOWNER`, so a directory owned
+   by any other uid is an error, not something it takes over.
+2. A stale socket at the path is removed; anything else there (a regular
+   file, a symlink) is refused.
+3. The socket is bound with umask `0177`, so it is created `0600` (owned by
+   uid 0) with no moment at which it is wider, and then re-checked with
+   `lstat`.
+4. The listening socket and accepted connections are `O_CLOEXEC`; no scan
+   child inherits them (tested: a child's descriptors are stdio, the root
+   fd and its own socketpair, plus the Go runtime's own).
+
+**Controller, before every connection:**
+
+1. Open the socket path `O_PATH|O_NOFOLLOW`; `fstat` must show a socket,
+   uid 0, mode `0600`. Open the directory `O_PATH|O_NOFOLLOW|O_DIRECTORY`;
+   it must be uid 0, mode `0700`.
+2. Connect through `/proc/self/fd/<N>` of that `O_PATH` fd, so the socket
+   that was checked is the one connected to (no path race).
+3. After connecting, `SO_PEERCRED` uid must be 0.
+4. On kernels ≥ 6.5, additionally take `SO_PEERPIDFD` and check that the
+   peer's cgroup (`/proc/<pid>/cgroup`, read with the pidfd kept open) is
+   the worker container's. On older kernels steps 1 to 3 are the check.
+
+
 
 Every message, in both directions, is one frame:
 

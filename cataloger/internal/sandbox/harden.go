@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -90,9 +92,25 @@ func Harden(l Limits) error {
 // epoll instance and its wake-up eventfd; the first timer or pollable file
 // creates them, possibly during package initialisation). Closing them
 // kills the process with "netpoll failed".
+//
+// Since Go 1.25 the runtime also keeps the cgroup CPU limit files open to
+// follow the container's CPU quota (container-aware GOMAXPROCS).
 func runtimeFD(target string) bool {
-	return target == "anon_inode:[eventpoll]" || target == "anon_inode:[eventfd]"
+	if target == "anon_inode:[eventpoll]" || target == "anon_inode:[eventfd]" {
+		return true
+	}
+	if strings.HasPrefix(target, "/sys/fs/cgroup/") {
+		switch path.Base(target) {
+		case "cpu.max", "cpu.cfs_quota_us", "cpu.cfs_period_us":
+			return true
+		}
+	}
+	return false
 }
+
+// RuntimeFD reports whether a /proc/self/fd target is one the Go runtime
+// opens for itself (tests).
+func RuntimeFD(target string) bool { return runtimeFD(target) }
 
 // closeInherited closes every descriptor >= keep except the runtime's own.
 // Everything the parent passes is O_CLOEXEC except fds 0..keep-1, so this

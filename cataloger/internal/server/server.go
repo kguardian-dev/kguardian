@@ -84,17 +84,34 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 // Model returns the capability model in use.
 func (s *Server) Model() Model { return s.model }
 
-// Listen creates the socket (mode 0600, replacing a stale one).
+// Listen creates the socket the Controller verifies before connecting
+// (PROTOCOL.md §1): its directory owned by us (uid 0 in the pod) with mode
+// 0700, and the socket itself mode 0600, owned by us, with no moment at
+// which either is wider. A stale socket is replaced; anything else at the
+// path, or a symlinked directory, is refused.
+//
+// The parent has no CAP_CHOWN or CAP_FOWNER: it can tighten the mode of a
+// directory it owns (kubelet creates emptyDirs owned by uid 0, mode 0777),
+// but a directory owned by anyone else is an error, not something to
+// take over.
 func Listen(path string) (*net.UnixListener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := secureDir(dir); err != nil {
 		return nil, err
 	}
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("%s exists and is not a socket", path)
 		}
-		_ = os.Remove(path)
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale socket: %w", err)
+		}
 	}
+	// bind(2) creates the socket file with 0777 &^ umask: 0600 from the
+	// start. The umask is process-wide, so this runs before any child.
 	old := syscall.Umask(0o177)
 	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	syscall.Umask(old)
@@ -102,7 +119,34 @@ func Listen(path string) (*net.UnixListener, error) {
 		return nil, err
 	}
 	l.SetUnlinkOnClose(true)
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFSOCK ||
+		st.Mode&0o7777 != 0o600 || int(st.Uid) != os.Geteuid() {
+		_ = l.Close()
+		return nil, fmt.Errorf("socket %s is not a 0600 socket owned by uid %d (mode %o uid %d)", path, os.Geteuid(), st.Mode, st.Uid)
+	}
 	return l, nil
+}
+
+// secureDir makes dir mode 0700 through a no-follow fd, after checking it
+// is a real directory owned by this process's uid.
+func secureDir(dir string) error {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("socket directory %s: %w", dir, err)
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("socket directory %s is owned by uid %d, not %d (the worker has no CAP_CHOWN to take it over)", dir, st.Uid, os.Geteuid())
+	}
+	if err := unix.Fchmod(fd, 0o700); err != nil {
+		return fmt.Errorf("chmod 0700 %s: %w", dir, err)
+	}
+	return nil
 }
 
 // Serve accepts connections until ctx ends.

@@ -251,9 +251,17 @@ func TestTwoFDsRejected(t *testing.T) {
 
 func TestPeerNotAllowed(t *testing.T) {
 	e := newServer(t, func(c *Config) { c.AllowedPeerUIDs = []uint32{4242} })
-	_, err := e.controller(t, req("peer"), rootFD(t, alpineRoot(t, 1)))
-	if err == nil {
-		t.Fatal("a refused peer got a response")
+	c, err := net.Dial("unix", e.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	// The worker hangs up at once: the send may already fail, and the read
+	// must never produce a response.
+	_ = protocol.SendRequest(c.(*net.UnixConn), req("peer"), rootFD(t, alpineRoot(t, 1)))
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if resp, err := protocol.ReadResponse(c, 1<<20); err == nil {
+		t.Fatalf("a refused peer got a response: %+v", resp)
 	}
 }
 

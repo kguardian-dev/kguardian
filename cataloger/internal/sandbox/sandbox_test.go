@@ -169,7 +169,13 @@ func hardenChild() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	fds, _ := OpenFDs()
+	var fds []int
+	list, _ := OpenFDs()
+	for _, fd := range list {
+		if target, _ := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); !runtimeFD(target) {
+			fds = append(fds, fd)
+		}
+	}
 	var nofile, core, fsize unix.Rlimit
 	_ = unix.Getrlimit(unix.RLIMIT_NOFILE, &nofile)
 	_ = unix.Getrlimit(unix.RLIMIT_CORE, &core)

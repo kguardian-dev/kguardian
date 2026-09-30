@@ -44,6 +44,10 @@ type ProbeResult struct {
 	UID  int          `json:"uid"`
 	GID  int          `json:"gid"`
 	Caps sandbox.Caps `json:"caps"`
+	// FDs maps each descriptor the child inherited to its /proc target
+	// (read before anything is closed), so tests can prove nothing but
+	// the intended descriptors reaches a child.
+	FDs map[int]string `json:"fds"`
 }
 
 // Probe reports the child's identity and capabilities on fd 4 (the
@@ -54,8 +58,15 @@ func Probe() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	fds := map[int]string{}
+	if list, err := sandbox.OpenFDs(); err == nil {
+		for _, fd := range list {
+			target, _ := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
+			fds[fd] = target
+		}
+	}
 	conn := os.NewFile(FDConn, "conn")
-	if err := protocol.WriteJSON(conn, ProbeResult{UID: os.Getuid(), GID: os.Getgid(), Caps: caps}); err != nil {
+	if err := protocol.WriteJSON(conn, ProbeResult{UID: os.Getuid(), GID: os.Getgid(), Caps: caps, FDs: fds}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
