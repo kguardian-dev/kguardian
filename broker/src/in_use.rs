@@ -29,7 +29,17 @@
 //!
 //! Fixtures: `test/fixtures/in_use_paths.json`, real file lists from
 //! Debian bookworm and Alpine 3.20 packages and the host's Ubuntu 24.04
-//! dpkg database, with kernel-reported mappings.
+//! dpkg database, with kernel-reported mappings, and for each the
+//! Syft-style list the node cataloger sends for the same packages
+//! (`node_components`).
+//!
+//! # Node catalog SBOMs
+//!
+//! A node catalog SBOM (source `node`, docs/design/node-catalog.md) lists
+//! only executable-looking files, each the real path inside the image with
+//! symlinks resolved, so a kernel path matches it exactly. Its file lists
+//! are positive evidence like any other (executed / loaded); a negative
+//! claim from them (installed_not_observed) needs [`NodeFiles::guard`].
 
 use serde::{Deserialize, Serialize};
 
@@ -291,6 +301,22 @@ pub enum UnknownReason {
     /// The exec / shared-library probes are not loaded on a node that ran
     /// the container (kernel or BTF).
     ProbesMissing,
+    /// Capture ran in exec mode (or without the library probe) on an
+    /// instance: a shared object never being mapped cannot be vouched for.
+    LibrariesNotTracked,
+    /// The package's only file list is a node catalog SBOM that is not
+    /// complete (`completeness` is not `full`), or whose list for this
+    /// package was cut (`files_truncated`, which includes files dropped as
+    /// runtime drift).
+    SbomIncomplete,
+    /// The package's only file list is a node catalog SBOM cataloged for
+    /// another platform than a node that ran the container (or a node
+    /// whose platform is not known: fail closed).
+    PlatformMismatch,
+    /// The package's only file list is a node catalog SBOM, and the package
+    /// owns interpreted or loadable non-executable content that exec/mmap
+    /// capture cannot see.
+    InterpretedContent,
 }
 
 impl UnknownReason {
@@ -302,6 +328,10 @@ impl UnknownReason {
             UnknownReason::LanguagePackage => "language_package",
             UnknownReason::NoPackageFiles => "no_package_files",
             UnknownReason::ProbesMissing => "probes_missing",
+            UnknownReason::LibrariesNotTracked => "libraries_not_tracked",
+            UnknownReason::SbomIncomplete => "sbom_incomplete",
+            UnknownReason::PlatformMismatch => "platform_mismatch",
+            UnknownReason::InterpretedContent => "interpreted_content",
         }
     }
 }
@@ -407,11 +437,56 @@ pub struct Evidence {
     pub observable: bool,
     /// Some SBOM for the image lists files for the package.
     pub has_files: bool,
+    /// Set when the only SBOM listing the package's files is a node
+    /// catalog SBOM (source `node`): what its guard needs. `None` when a
+    /// Trivy Operator or registry SBOM lists them (unchanged behaviour).
+    pub node_files: Option<NodeFiles>,
+}
+
+/// What a node catalog file list must prove before it may support
+/// installed_not_observed (design node-catalog.md section 5). Mirrors
+/// `kg_node_pkg_guard` (migration 2026-10-04-100000).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NodeFiles {
+    /// The SBOM is `completeness=full`.
+    pub full: bool,
+    /// Every instance in the window ran with the library probe in mode
+    /// `full`.
+    pub libraries_tracked: bool,
+    /// Every node that ran an instance in the window reported the platform
+    /// the SBOM was cataloged for (a node with no recorded platform does
+    /// not).
+    pub platform_match: bool,
+    /// `files_truncated` (flag bit 1).
+    pub files_truncated: bool,
+    /// `interpreted_content` (flag bit 2).
+    pub interpreted_content: bool,
+}
+
+impl NodeFiles {
+    /// Why this file list cannot support installed_not_observed, first
+    /// failing check first; `None` when it can.
+    pub fn guard(&self) -> Option<UnknownReason> {
+        if !self.full {
+            Some(UnknownReason::SbomIncomplete)
+        } else if !self.libraries_tracked {
+            Some(UnknownReason::LibrariesNotTracked)
+        } else if !self.platform_match {
+            Some(UnknownReason::PlatformMismatch)
+        } else if self.interpreted_content {
+            Some(UnknownReason::InterpretedContent)
+        } else if self.files_truncated {
+            Some(UnknownReason::SbomIncomplete)
+        } else {
+            None
+        }
+    }
 }
 
 /// The in-use state and, for unknown, why. Positive evidence always wins
 /// (a package seen loaded is loaded, coverage or not); a negative claim
-/// needs coverage, an observable package type, and a file list.
+/// needs coverage, an observable package type, and a file list, and a
+/// file list only a node catalog SBOM provides must pass its guard.
 pub fn in_use_of(e: &Evidence) -> (InUse, Option<UnknownReason>) {
     if e.executed {
         return (InUse::Executed, None);
@@ -430,6 +505,9 @@ pub fn in_use_of(e: &Evidence) -> (InUse, Option<UnknownReason>) {
     }
     if !e.has_files {
         return (InUse::Unknown, Some(UnknownReason::NoPackageFiles));
+    }
+    if let Some(r) = e.node_files.as_ref().and_then(NodeFiles::guard) {
+        return (InUse::Unknown, Some(r));
     }
     (InUse::InstalledNotObserved, None)
 }
@@ -682,7 +760,11 @@ mod tests {
     }
 
     fn components(v: &serde_json::Value) -> Vec<Component> {
-        v["components"]
+        components_of(v, "components")
+    }
+
+    fn components_of(v: &serde_json::Value, list: &str) -> Vec<Component> {
+        v[list]
             .as_array()
             .unwrap()
             .iter()
@@ -745,6 +827,91 @@ mod tests {
             }
         }
         assert!(checked >= 20, "{checked}");
+    }
+
+    /// The node cataloger's lists for the same packages (resolved real
+    /// paths, executable-looking files only): every kernel path the dpkg /
+    /// apk lists match, by whatever rank, the node list matches exactly and
+    /// to the same package; the unpackaged binary stays unowned.
+    #[test]
+    fn syft_style_node_lists_match_every_runtime_path_exactly() {
+        let f = fixture();
+        let mut checked = 0;
+        for (distro, v) in f["distros"].as_object().unwrap() {
+            let node = components_of(v, "node_components");
+            assert_eq!(
+                node.len(),
+                v["components"].as_array().unwrap().len(),
+                "{distro}"
+            );
+            for c in &node {
+                let mut sorted = c.file_paths.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(
+                    sorted, c.file_paths,
+                    "{distro} {}: sorted, unique",
+                    c.key.name
+                );
+                assert!(
+                    c.file_paths.iter().all(|p| p.starts_with('/')
+                        && !p.contains("/share/doc/")
+                        && normalise_path(p).as_deref() == Some(p.as_str())),
+                    "{distro} {}: absolute, clean, executable-looking",
+                    c.key.name
+                );
+            }
+            for r in v["runtime"].as_array().unwrap() {
+                let path = r["path"].as_str().unwrap();
+                let got = owners_of(path, &node);
+                match r["expect"].as_str() {
+                    None => assert!(got.unowned(), "{distro} {path}: {got:?}"),
+                    Some(want) => {
+                        assert_eq!(
+                            got.owners
+                                .iter()
+                                .map(|o| o.name.as_str())
+                                .collect::<Vec<_>>(),
+                            [want],
+                            "{distro} {path}"
+                        );
+                        assert_eq!(got.how, Some(PathMatch::Exact), "{distro} {path}");
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "{checked}");
+    }
+
+    /// The fixture's `interpreted_content` flags, as the cataloger's rule
+    /// computes them from the complete owned-file list: a non-executable,
+    /// non-`.so` file under a library or share directory (gconv module
+    /// lists, lintian overrides, binfmt entries) marks the package, so
+    /// those packages can be executed or loaded but never
+    /// installed_not_observed from node data (design open question 5).
+    #[test]
+    fn node_fixture_flags_follow_the_interpreted_content_rule() {
+        let f = fixture();
+        let mut flagged: Vec<String> = Vec::new();
+        for (distro, v) in f["distros"].as_object().unwrap() {
+            for c in v["node_components"].as_array().unwrap() {
+                assert_eq!(c["files_truncated"], false);
+                if c["interpreted_content"] == true {
+                    flagged.push(format!("{distro}/{}", c["name"].as_str().unwrap()));
+                }
+            }
+        }
+        flagged.sort();
+        assert_eq!(
+            flagged,
+            [
+                "debian-bookworm/libc6",
+                "ubuntu-noble/libc6",
+                "ubuntu-noble/libssl3t64",
+                "ubuntu-noble/python3.12-minimal",
+            ]
+        );
     }
 
     #[test]
@@ -923,9 +1090,153 @@ mod tests {
         );
         assert!(InUse::Unknown.counts_as_in_use());
         assert!(!InUse::InstalledNotObserved.counts_as_in_use());
+        // The exec-mode reason the runtime inventory reports is kept.
+        assert_eq!(
+            in_use_of(&Evidence {
+                covered: false,
+                gap: Some(UnknownReason::LibrariesNotTracked),
+                ..covered.clone()
+            }),
+            (InUse::Unknown, Some(UnknownReason::LibrariesNotTracked))
+        );
         assert!(
             InUse::Unknown < InUse::InstalledNotObserved,
             "unknown ranks above not-observed"
+        );
+    }
+
+    /// Design node-catalog.md section 5: installed_not_observed from a
+    /// node file list needs every check; each failing alone is unknown
+    /// with its reason, and positive evidence still wins.
+    #[test]
+    fn a_node_file_list_needs_the_whole_guard() {
+        let ok = NodeFiles {
+            full: true,
+            libraries_tracked: true,
+            platform_match: true,
+            files_truncated: false,
+            interpreted_content: false,
+        };
+        let e = |n: NodeFiles| Evidence {
+            covered: true,
+            observable: true,
+            has_files: true,
+            node_files: Some(n),
+            ..Default::default()
+        };
+        assert_eq!(in_use_of(&e(ok)), (InUse::InstalledNotObserved, None));
+        for (n, want) in [
+            (
+                NodeFiles { full: false, ..ok },
+                UnknownReason::SbomIncomplete,
+            ),
+            (
+                NodeFiles {
+                    libraries_tracked: false,
+                    ..ok
+                },
+                UnknownReason::LibrariesNotTracked,
+            ),
+            (
+                NodeFiles {
+                    platform_match: false,
+                    ..ok
+                },
+                UnknownReason::PlatformMismatch,
+            ),
+            (
+                NodeFiles {
+                    files_truncated: true,
+                    ..ok
+                },
+                UnknownReason::SbomIncomplete,
+            ),
+            (
+                NodeFiles {
+                    interpreted_content: true,
+                    ..ok
+                },
+                UnknownReason::InterpretedContent,
+            ),
+        ] {
+            assert_eq!(in_use_of(&e(n)), (InUse::Unknown, Some(want)), "{n:?}");
+            // Positive evidence always wins.
+            assert_eq!(
+                in_use_of(&Evidence {
+                    loaded: true,
+                    ..e(n)
+                }),
+                (InUse::Loaded, None)
+            );
+            assert_eq!(
+                in_use_of(&Evidence {
+                    executed: true,
+                    ..e(n)
+                }),
+                (InUse::Executed, None)
+            );
+        }
+        // A capture reason, the package type and a missing file list come
+        // first, exactly as without a node SBOM.
+        let bad = NodeFiles { full: false, ..ok };
+        assert_eq!(
+            in_use_of(&Evidence {
+                covered: false,
+                gap: Some(UnknownReason::CaptureGap),
+                ..e(bad)
+            })
+            .1,
+            Some(UnknownReason::CaptureGap)
+        );
+        assert_eq!(
+            in_use_of(&Evidence {
+                observable: false,
+                ..e(bad)
+            })
+            .1,
+            Some(UnknownReason::LanguagePackage)
+        );
+        assert_eq!(
+            in_use_of(&Evidence {
+                has_files: false,
+                ..e(bad)
+            })
+            .1,
+            Some(UnknownReason::NoPackageFiles)
+        );
+    }
+
+    /// C3 (design section 5): exec-mode capture never vouches for a shared
+    /// object, so a `.so`-only package stays unknown:libraries_not_tracked
+    /// even with a full, matching, clean node SBOM listing its file.
+    #[test]
+    fn c3_a_library_only_package_stays_unknown_under_exec_mode() {
+        let e = Evidence {
+            covered: false,
+            gap: Some(UnknownReason::LibrariesNotTracked),
+            observable: true,
+            has_files: true,
+            node_files: Some(NodeFiles {
+                full: true,
+                libraries_tracked: false,
+                platform_match: true,
+                files_truncated: false,
+                interpreted_content: false,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            in_use_of(&e),
+            (InUse::Unknown, Some(UnknownReason::LibrariesNotTracked))
+        );
+        // Even if coverage were (wrongly) reported, the guard refuses.
+        assert_eq!(
+            in_use_of(&Evidence {
+                covered: true,
+                gap: None,
+                ..e
+            }),
+            (InUse::Unknown, Some(UnknownReason::LibrariesNotTracked))
         );
     }
 

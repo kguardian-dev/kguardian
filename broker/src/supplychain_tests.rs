@@ -3853,30 +3853,56 @@ fn live_database_cve_summary_rebuild_names_every_column() {
     assert_eq!(written, table);
 }
 
-/// Node catalog SBOMs (source `node`) feed no in-use verdict until the
-/// guard of design section 5 lands: the dlopen fixture above, with its
-/// SBOM from the node catalog and its findings matched from it, under
-/// full coverage. Nothing is loaded or installed-not-observed, no VEX
-/// statement is drafted, and the packages, findings and CycloneDX export
-/// are all still there. The same SBOM from Trivy Operator restores both
-/// verdicts, so the guard is on the source alone.
-#[test]
-#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
-fn live_database_a_node_sbom_produces_no_in_use_verdict() {
-    use crate::in_use_store::{self as iu, VexOutcome};
-    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
-    let mut conn = live_conn();
-    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+// ---------------------------------------------------------------------
+// Node catalog in-use guard (docs/design/node-catalog.md section 5)
+// ---------------------------------------------------------------------
+
+/// One instance of `api`/`app` on `node`, heartbeating now, captured from
+/// its start 48 hours ago, in `mode` (the real `kg_runtime_coverage` then
+/// reports it covered for a 24 h window in mode full).
+fn node_guard_instance(conn: &mut PgConnection, img: &str, id: &str, node: &str, mode: &str) {
     exec(
-        &mut conn,
-        "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
-            runtime_in_use_coverage, workload_network_exposure;",
+        conn,
+        &format!(
+            "INSERT INTO runtime_coverage (container_id, pod_namespace, workload_kind, \
+                workload_name, container_name, image_digest, pod_name, node_name, mode, \
+                exec_probe, lib_probe, start_mode, tracking_since, covered_since, \
+                last_heartbeat, heartbeat_secs) \
+             VALUES ('sc-guard-{id}', '{NS}', 'Deployment', 'api', 'app', '{img}', 'api-{id}', '{node}', \
+                '{mode}', true, {libs}, 'start', timezone('UTC', NOW()) - INTERVAL '48 hours', \
+                timezone('UTC', NOW()) - INTERVAL '48 hours', timezone('UTC', NOW()), 300)",
+            libs = mode == "full",
+        ),
     );
-    crate::runtime_inventory::restore_coverage_function(&mut conn);
-    let img = d(79);
+}
+
+/// The node guard fixture: image `img` run by Deployment `api` (container
+/// `app`), whose only SBOM is a node catalog SBOM in the cataloger's
+/// shape (real paths, symlinks resolved), with grype findings matched
+/// from it, one per package:
+///   libfoo1 (a shared object the process maps: loaded),
+///   tool    (a binary it runs: executed),
+///   libbar1 (a shared object never mapped: the guard's subject),
+///   curl    (its binary was replaced at runtime: the path ran from the
+///            writable layer, so the cataloger dropped it and marked the
+///            package files_truncated, and the sighting credits nothing).
+/// The claim is done, full, cataloged for linux/amd64; node n1 reports
+/// linux/amd64 and runs the only instance, in mode full.
+fn seed_node_guard(conn: &mut PgConnection, img: &str) {
+    exec(conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        conn,
+        &format!(
+            "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+                runtime_in_use_coverage, workload_network_exposure, node_catalog_claims, \
+                node_catalog_platforms, node_sbom_package_flags; \
+             DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}';"
+        ),
+    );
+    crate::runtime_inventory::restore_coverage_function(conn);
     seed_inventory(
-        &mut conn,
-        &img,
+        conn,
+        img,
         "ghcr.io/example/api",
         "2.4.1",
         "Deployment",
@@ -3884,128 +3910,612 @@ fn live_database_a_node_sbom_produces_no_in_use_verdict() {
         "app",
         0,
     );
-    let lib = |n: &str| format!("/usr/lib/x86_64-linux-gnu/lib{n}.so.1");
-    let sbom = |source: &str| {
-        let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
-        s["source"] = json!(source);
-        s["components"] = json!([
-            {"name": "libfoo1", "version": "1.2.3-1", "purl": "pkg:deb/debian/libfoo1@1.2.3-1",
-             "type": "debian", "file_paths": [lib("foo")]},
-            {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
-             "type": "debian", "file_paths": [lib("bar")]},
-        ]);
-        s
-    };
+    let mut s = sbom_json(img, "2026-09-20T08:00:00Z", &[], None);
+    s["source"] = json!(NODE_SOURCE);
+    s["components"] = json!(node_guard_components());
     let p = normalise_sbom_from(
-        &img,
-        serde_json::from_value(sbom(NODE_SOURCE)).unwrap(),
+        img,
+        serde_json::from_value(s).unwrap(),
         Utc::now(),
         |s| s == NODE_SOURCE,
         NODE_SOURCE,
-        MAX_FILE_PATHS,
+        crate::node_catalog::MAX_CATALOG_PATHS,
     )
     .unwrap();
-    store_sbom(&mut conn, p).unwrap();
-    // The matcher's findings, matched from the node SBOM.
+    store_sbom(conn, p).unwrap();
+    let pkgs = [
+        ("libfoo1", "1.2.3-1", "CVE-2026-0101"),
+        ("tool", "2.0-1", "CVE-2026-0102"),
+        ("libbar1", "4.5-2", "CVE-2026-0103"),
+        ("curl", "8.5.0-2", "CVE-2026-0104"),
+    ];
     let mut v = vulns_json(
-        &img,
+        img,
         "2026-09-20T08:00:00Z",
-        &[
-            ("CVE-2026-0001", "HIGH", Some("1.2.4")),
-            ("CVE-2026-0002", "HIGH", Some("4.6")),
-        ],
+        &pkgs
+            .iter()
+            .map(|(_, _, id)| (*id, "HIGH", Some("9")))
+            .collect::<Vec<_>>(),
     );
     v["source"] = json!("grype");
     v["sbom_source"] = json!(["node"]);
     v["sbom_trust"] = json!("scanned");
     v["observed_in"] = json!([]);
-    for (i, (name, ver)) in [("libfoo1", "1.2.3-1"), ("libbar1", "4.5-2")]
-        .iter()
-        .enumerate()
-    {
-        v["vulnerabilities"][i]["package"] = json!({"name": name, "version": ver, "type": "debian",
+    for (i, (name, ver, _)) in pkgs.iter().enumerate() {
+        v["vulnerabilities"][i]["package"] = json!({"name": name, "version": ver, "type": "deb",
             "purl": format!("pkg:deb/debian/{name}@{ver}")});
         v["vulnerabilities"][i]["class"] = json!("os-pkgs");
         v["vulnerabilities"][i]["file_paths"] = json!([]);
     }
-    store_v(&mut conn, v);
-    relink_batch(&mut conn, None, 100).unwrap();
+    store_v(conn, v);
+    relink_batch(conn, None, 100).unwrap();
     exec(
-        &mut conn,
+        conn,
         &format!(
-            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
-                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+            "INSERT INTO node_catalog_claims (inventory_digest, state, node, epoch, platform, \
+                completeness, content_hash, cataloged_at) \
+             SELECT '{img}', 'done', 'n1', 1, 'linux/amd64', 'full', vs.content_hash, now() \
+             FROM vuln_sources vs WHERE vs.digest = '{img}' AND vs.source = 'node' \
+               AND vs.kind = 'sbom'; \
+             INSERT INTO node_catalog_platforms (node, platform) VALUES \
+                ('n1', 'linux/amd64'), ('n2', 'linux/arm64'); \
+             INSERT INTO node_sbom_package_flags (digest, pkg_key, flags) \
+                VALUES ('{img}', 'curl@8.5.0-2', 1); \
+             INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, origin, first_seen, last_seen) \
+             VALUES \
              ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', \
-                '/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3', 'ebpf', \
-                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+                '/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3', 'ebpf', 'image', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW())), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'exec', '/usr/bin/tool', 'ebpf', \
+                'image', timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW())), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'exec', '/usr/bin/curl', 'ebpf', \
+                'writableLayer', timezone('UTC', NOW()) - INTERVAL '1 hour', \
+                timezone('UTC', NOW()))"
         ),
     );
-    let whole = iu::UseEvidence {
-        complete: true,
-        truncated: vec![],
-    };
-    let t = crate::in_use::TierSettings::default();
+    node_guard_instance(conn, img, "g1", "n1", "full");
+}
+
+/// The node SBOM of [`seed_node_guard`], as the cataloger sends it.
+fn node_guard_components() -> serde_json::Value {
+    json!([
+        {"name": "libfoo1", "version": "1.2.3-1", "purl": "pkg:deb/debian/libfoo1@1.2.3-1",
+         "type": "deb", "class": "os-pkgs",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3"]},
+        {"name": "tool", "version": "2.0-1", "purl": "pkg:deb/debian/tool@2.0-1",
+         "type": "deb", "class": "os-pkgs", "file_paths": ["/usr/bin/tool"]},
+        {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
+         "type": "deb", "class": "os-pkgs",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.4.5"]},
+        {"name": "curl", "version": "8.5.0-2", "purl": "pkg:deb/debian/curl@8.5.0-2",
+         "type": "deb", "class": "os-pkgs", "file_paths": ["/usr/bin/curl"]},
+    ])
+}
+
+fn node_guard_refresh(conn: &mut PgConnection) {
+    use crate::in_use_store as iu;
+    exec(conn, "TRUNCATE runtime_package_use, runtime_unowned_paths");
+    iu::refresh_package_use_batch(conn, None, 10).unwrap();
+    iu::refresh_coverage(
+        conn,
+        &crate::in_use::TierSettings::default(),
+        &iu::UseEvidence {
+            complete: true,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    iu::refresh_exposure(conn, 168).unwrap();
+}
+
+/// (package, state, reason, tier) for every finding of `img`, by package.
+fn node_guard_states(
+    conn: &mut PgConnection,
+    img: &str,
+) -> Vec<(String, &'static str, Option<&'static str>, &'static str)> {
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let p =
+        image_vulnerabilities_filtered(conn, img, None, &ListFilters::default(), None, 50).unwrap();
+    let mut s: Vec<_> = p
+        .items
+        .iter()
+        .map(|f| {
+            (
+                f.package.name.clone(),
+                f.in_use_state,
+                f.in_use_detail.reason,
+                f.tier,
+            )
+        })
+        .collect();
+    s.sort();
+    s
+}
+
+fn node_guard_coverage(conn: &mut PgConnection) -> (bool, Option<String>) {
+    #[derive(QueryableByName)]
+    struct C {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        covered: bool,
+        #[diesel(sql_type = Nullable<Text>)]
+        reason: Option<String>,
+    }
+    let c: C = sql_query(
+        "SELECT covered, reason FROM runtime_in_use_coverage \
+         WHERE workload_name = 'api' AND container_name = 'app'",
+    )
+    .get_result(conn)
+    .unwrap();
+    (c.covered, c.reason)
+}
+
+fn node_guard_vex(conn: &mut PgConnection) -> Vec<String> {
+    use crate::in_use_store::{self as iu, VexOutcome};
     let key = crate::workload_profile::Key {
         namespace: NS.into(),
         kind: "Deployment".into(),
         name: "api".into(),
     };
-    let refresh = |conn: &mut PgConnection| {
-        exec(conn, "TRUNCATE runtime_package_use, runtime_unowned_paths");
-        iu::refresh_package_use_batch(conn, None, 10).unwrap();
-        iu::refresh_coverage(conn, &t, &whole).unwrap();
-        iu::refresh_exposure(conn, 168).unwrap();
-    };
-    let states = |conn: &mut PgConnection| {
-        let p = image_vulnerabilities_filtered(conn, &img, None, &ListFilters::default(), None, 50)
-            .unwrap();
-        let mut s: Vec<(String, &'static str)> = p
-            .items
+    match iu::openvex_draft(conn, &key).unwrap() {
+        VexOutcome::Draft(d) => d.doc["statements"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|f| (f.package.name.clone(), f.in_use_state))
+            .map(|s| s["vulnerability"]["name"].as_str().unwrap().to_string())
+            .collect(),
+        VexOutcome::Unavailable(_) => Vec::new(),
+    }
+}
+
+/// libbar1's (state, reason, tier), everything else pinned: positive
+/// evidence from the node file lists is unaffected by any guard.
+fn node_guard_bar(
+    conn: &mut PgConnection,
+    img: &str,
+) -> (&'static str, Option<&'static str>, &'static str) {
+    let s = node_guard_states(conn, img);
+    let get = |n: &str| s.iter().find(|r| r.0 == n).map(|r| (r.1, r.2)).unwrap();
+    assert_eq!(get("libfoo1"), ("loaded", None), "{s:?}");
+    assert_eq!(get("tool"), ("executed", None), "{s:?}");
+    let bar = s.iter().find(|r| r.0 == "libbar1").unwrap();
+    (bar.1, bar.2, bar.3)
+}
+
+/// Design section 5 end to end on a node-only image. With every guard
+/// passing, node file lists give all three verdicts (loaded and executed
+/// from positive evidence, installed_not_observed for the library nothing
+/// mapped, with its VEX draft statement). Each guard failing on its own
+/// turns the negative claim into unknown with its reason, while the
+/// positive verdicts stay: a second node of another platform (mixed
+/// arch), a node with no recorded platform, a partial SBOM, a truncated
+/// or interpreted package, and exec-mode capture (the C3 pin: the
+/// `.so`-only libbar1 stays unknown:libraries_not_tracked with a full
+/// node SBOM). A drifted binary credits nothing.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_node_sbom_in_use_guard() {
+    let mut conn = live_conn();
+    let img = d(79);
+    seed_node_guard(&mut conn, &img);
+    node_guard_refresh(&mut conn);
+
+    // Every guard passes.
+    assert_eq!(node_guard_coverage(&mut conn), (true, None));
+    assert_eq!(
+        node_guard_states(&mut conn, &img),
+        [
+            ("curl".to_string(), "unknown", Some("sbom_incomplete"), "P1"),
+            (
+                "libbar1".to_string(),
+                "installed_not_observed",
+                None,
+                "Background"
+            ),
+            ("libfoo1".to_string(), "loaded", None, "P1"),
+            ("tool".to_string(), "executed", None, "P1"),
+        ]
+    );
+    assert_eq!(node_guard_vex(&mut conn), ["CVE-2026-0103"]);
+    // Drift: the curl binary that ran came from the writable layer. Not
+    // credited to curl; reported as an unowned path instead.
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use WHERE pkg_name = 'curl'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_unowned_paths WHERE path = '/usr/bin/curl'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use \
+             WHERE pkg_name = 'libfoo1' AND state = 'loaded' AND path_match = 'exact'"
+        ),
+        1,
+        "the node list's resolved path matches the kernel's exactly"
+    );
+
+    let unknown = |r: &'static str| ("unknown", Some(r), "P1");
+
+    // Mixed arch: a second instance on an arm64 node.
+    node_guard_instance(&mut conn, &img, "g2", "n2", "full");
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        node_guard_coverage(&mut conn),
+        (false, Some("platform_mismatch".into()))
+    );
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    assert!(node_guard_vex(&mut conn).is_empty());
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id = 'sc-guard-g2'",
+    );
+
+    // A node with no recorded platform fails closed.
+    node_guard_instance(&mut conn, &img, "g3", "n3", "full");
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id = 'sc-guard-g3'",
+    );
+    // So does an SBOM with no platform.
+    exec(&mut conn, "UPDATE node_catalog_claims SET platform = NULL");
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        node_guard_bar(&mut conn, &img),
+        unknown("platform_mismatch")
+    );
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET platform = 'linux/amd64'",
+    );
+
+    // A partial SBOM, a claim row describing another SBOM, or none.
+    for sql in [
+        "UPDATE node_catalog_claims SET completeness = 'partial'",
+        "UPDATE node_catalog_claims SET completeness = 'os_only'",
+        "UPDATE node_catalog_claims SET completeness = 'full', content_hash = 'md5:other'",
+        "DELETE FROM node_catalog_claims",
+    ] {
+        exec(&mut conn, sql);
+        node_guard_refresh(&mut conn);
+        assert_eq!(
+            node_guard_coverage(&mut conn),
+            (false, Some("sbom_incomplete".into())),
+            "{sql}"
+        );
+        assert_eq!(
+            node_guard_bar(&mut conn, &img),
+            unknown("sbom_incomplete"),
+            "{sql}"
+        );
+    }
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO node_catalog_claims (inventory_digest, state, node, epoch, platform, \
+                completeness, content_hash) \
+             SELECT '{img}', 'done', 'n1', 1, 'linux/amd64', 'full', vs.content_hash \
+             FROM vuln_sources vs WHERE vs.digest = '{img}' AND vs.source = 'node' \
+               AND vs.kind = 'sbom'"
+        ),
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(node_guard_bar(&mut conn, &img).0, "installed_not_observed");
+
+    // Per package: truncated, interpreted (the container stays covered).
+    for (flags, reason) in [
+        (1, "sbom_incomplete"),
+        (2, "interpreted_content"),
+        (3, "interpreted_content"),
+    ] {
+        exec(
+            &mut conn,
+            &format!(
+                "INSERT INTO node_sbom_package_flags (digest, pkg_key, flags) \
+                 VALUES ('{img}', 'libbar1@4.5-2', {flags}) \
+                 ON CONFLICT (digest, pkg_key) DO UPDATE SET flags = EXCLUDED.flags"
+            ),
+        );
+        node_guard_refresh(&mut conn);
+        assert_eq!(node_guard_coverage(&mut conn), (true, None));
+        assert_eq!(node_guard_bar(&mut conn, &img), unknown(reason), "{flags}");
+        assert!(node_guard_vex(&mut conn).is_empty());
+    }
+    exec(
+        &mut conn,
+        "DELETE FROM node_sbom_package_flags WHERE pkg_key = 'libbar1@4.5-2'",
+    );
+
+    // C3: exec-mode capture. The library-only package stays
+    // unknown:libraries_not_tracked with a full, matching node SBOM; the
+    // executed binary is still executed.
+    exec(
+        &mut conn,
+        &format!("DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'"),
+    );
+    node_guard_instance(&mut conn, &img, "g4", "n1", "exec");
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM runtime_executables WHERE kind = 'lib'; \
+             UPDATE runtime_coverage SET lib_probe = false WHERE pod_namespace = '{NS}'"
+        ),
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        node_guard_coverage(&mut conn),
+        (false, Some("libraries_not_tracked".into()))
+    );
+    let s = node_guard_states(&mut conn, &img);
+    let get = |n: &str| s.iter().find(|r| r.0 == n).map(|r| (r.1, r.2)).unwrap();
+    assert_eq!(get("libbar1"), ("unknown", Some("libraries_not_tracked")));
+    assert_eq!(get("libfoo1"), ("unknown", Some("libraries_not_tracked")));
+    assert_eq!(get("tool"), ("executed", None));
+    // Back to full mode: the negative claim returns.
+    exec(
+        &mut conn,
+        &format!("DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'"),
+    );
+    node_guard_instance(&mut conn, &img, "g5", "n1", "full");
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        get_state(&node_guard_states(&mut conn, &img), "libbar1"),
+        "installed_not_observed"
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+    );
+}
+
+fn get_state(
+    s: &[(String, &'static str, Option<&'static str>, &'static str)],
+    n: &str,
+) -> &'static str {
+    s.iter().find(|r| r.0 == n).map(|r| r.1).unwrap()
+}
+
+/// With a Trivy Operator SBOM beside the node SBOM, Trivy stays the in-use
+/// source: the container's coverage is not guarded and a package Trivy
+/// lists files for is judged exactly as before, whatever the node SBOM
+/// says. A package only the node SBOM lists files for is guarded per
+/// package (here, the same mixed-arch and partial cases).
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_node_guard_leaves_trivy_verdicts_alone() {
+    let mut conn = live_conn();
+    let img = d(80);
+    seed_node_guard(&mut conn, &img);
+    // Trivy lists libbar1 (dpkg's unresolved path) but not tool / libfoo1 /
+    // curl; its component rows are the Trivy SBOM of the same image.
+    let mut t = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    t["components"] = json!([
+        {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
+         "type": "debian", "file_paths": ["lib/x86_64-linux-gnu/libbar.so.4.5"]},
+    ]);
+    store_s(&mut conn, t).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    node_guard_instance(&mut conn, &img, "g2", "n2", "full");
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'partial'",
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(node_guard_coverage(&mut conn), (true, None), "not guarded");
+    let s = node_guard_states(&mut conn, &img);
+    assert_eq!(
+        s,
+        [
+            ("curl".to_string(), "unknown", Some("sbom_incomplete"), "P1"),
+            (
+                "libbar1".to_string(),
+                "installed_not_observed",
+                None,
+                "Background"
+            ),
+            ("libfoo1".to_string(), "loaded", None, "P1"),
+            ("tool".to_string(), "executed", None, "P1"),
+        ]
+    );
+    // tool is executed, so give the node-only guard a package to judge:
+    // without its runtime row it is unknown with the node SBOM's reason.
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_executables WHERE path = '/usr/bin/tool'",
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        get_state(&node_guard_states(&mut conn, &img), "libbar1"),
+        "installed_not_observed"
+    );
+    let s = node_guard_states(&mut conn, &img);
+    assert_eq!(
+        s.iter().find(|r| r.0 == "tool").map(|r| (r.1, r.2)),
+        Some(("unknown", Some("sbom_incomplete")))
+    );
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'full'",
+    );
+    node_guard_refresh(&mut conn);
+    let s = node_guard_states(&mut conn, &img);
+    assert_eq!(
+        s.iter().find(|r| r.0 == "tool").map(|r| (r.1, r.2)),
+        Some(("unknown", Some("platform_mismatch")))
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id = 'sc-guard-g2'",
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(
+        get_state(&node_guard_states(&mut conn, &img), "tool"),
+        "installed_not_observed"
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+    );
+}
+
+/// Trivy-only data is byte-identical under the guarded kg_pkg_in_use: the
+/// node catalog migration's definition, installed beside it under another
+/// name, gives the same text for every package in every container state
+/// (loaded / executed / covered / uncovered / capture reasons / language
+/// package / no file list), and the same holds for the Trivy-listed
+/// packages of an image that also has a node SBOM.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_guarded_in_use_is_byte_identical_without_node_sboms() {
+    let mut conn = live_conn();
+    let pr1 = include_str!("../db/migrations/2026-10-03-100000_node_catalog/up.sql");
+    let start = pr1
+        .find("CREATE OR REPLACE FUNCTION kg_pkg_in_use(")
+        .unwrap();
+    exec(
+        &mut conn,
+        &pr1[start..].replacen("FUNCTION kg_pkg_in_use(", "FUNCTION kg_pkg_in_use_pr1(", 1),
+    );
+    let img = d(81);
+    seed_node_guard(&mut conn, &img);
+    // Replace the node SBOM with the same components from Trivy Operator
+    // (dpkg-style relative paths), plus one without files and one npm.
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_sbom_components WHERE source = 'node'; \
+             DELETE FROM supplychain_image_links WHERE source = 'node'; \
+             DELETE FROM vuln_sources WHERE source = 'node'; \
+             DELETE FROM node_catalog_claims WHERE inventory_digest = '{img}';"
+        ),
+    );
+    let mut t = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    let mut comps = node_guard_components();
+    for c in comps.as_array_mut().unwrap() {
+        c["type"] = json!("debian");
+        let p: Vec<String> = c["file_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().trim_start_matches('/').to_string())
             .collect();
+        c["file_paths"] = json!(p);
+    }
+    comps.as_array_mut().unwrap().push(json!(
+        {"name": "nofiles", "version": "1", "type": "debian", "file_paths": []}));
+    t["components"] = comps;
+    store_s(&mut conn, t).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    #[derive(QueryableByName, Debug, PartialEq)]
+    struct Pair {
+        #[diesel(sql_type = Text)]
+        new: String,
+        #[diesel(sql_type = Text)]
+        old: String,
+    }
+    let compare = |conn: &mut PgConnection, what: &str| -> Vec<String> {
+        let rows: Vec<Pair> = sql_query(format!(
+            "SELECT kg_pkg_in_use(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                 wc.workload_name, wc.container_name, wc.image_digest, p.name, p.obs) AS new, \
+             kg_pkg_in_use_pr1(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                 wc.workload_name, wc.container_name, wc.image_digest, p.name, p.obs) AS old \
+             FROM workload_containers wc \
+             CROSS JOIN (VALUES ('libfoo1'), ('tool'), ('libbar1'), ('curl'), ('nofiles'), \
+                 ('absent')) n(name) \
+             CROSS JOIN (VALUES (true), (false)) o(obs) \
+             CROSS JOIN LATERAL (SELECT n.name, o.obs) p \
+             WHERE wc.image_digest = '{img}' ORDER BY 1, 2"
+        ))
+        .load(conn)
+        .unwrap();
+        assert_eq!(rows.len(), 12, "{what}");
+        for r in &rows {
+            assert_eq!(r.new, r.old, "{what}");
+        }
+        let mut s: Vec<String> = rows.into_iter().map(|r| r.new).collect();
         s.sort();
+        s.dedup();
         s
     };
-    let _stub = CoverageStub::install(&mut conn);
-    refresh(&mut conn);
-    assert_eq!(
-        count(&mut conn, "SELECT count(*) AS n FROM runtime_package_use"),
-        0,
-        "no package is marked in use from a node SBOM"
-    );
-    assert_eq!(
-        states(&mut conn),
-        [
-            ("libbar1".to_string(), "unknown"),
-            ("libfoo1".to_string(), "unknown"),
-        ],
-        "both findings listed, neither with a verdict"
-    );
-    assert!(!matches!(
-        iu::openvex_draft(&mut conn, &key).unwrap(),
-        VexOutcome::Draft(ref d) if d.statements > 0
-    ));
-    // Packages and the export are unaffected.
-    assert_eq!(component_names(&mut conn, &img), ["libfoo1", "libbar1"]);
-    match crate::supplychain_read::cyclonedx_for(&mut conn, &img, 100).unwrap() {
-        crate::supplychain_read::CycloneDx::Doc(doc, report, n) => {
-            assert_eq!((report.source.as_str(), n), ("node", 2));
-            let doc = serde_json::to_value(&doc).unwrap();
-            assert_eq!(doc["components"].as_array().unwrap().len(), 2);
-        }
-        _ => panic!("expected the node SBOM as CycloneDX"),
+    node_guard_refresh(&mut conn);
+    let covered = compare(&mut conn, "covered");
+    assert!(covered.contains(&"installed_not_observed".to_string()));
+    assert!(covered.contains(&"unknown:no_package_files".to_string()));
+    assert!(covered.contains(&"unknown:language_package".to_string()));
+    assert!(covered.contains(&"executed".to_string()));
+    assert!(covered.contains(&"loaded".to_string()));
+    for (sql, what) in [
+        (
+            "UPDATE runtime_coverage SET mode = 'exec', lib_probe = false \
+             WHERE container_id LIKE 'sc-guard-%'",
+            "exec mode",
+        ),
+        (
+            "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
+            "no runtime data",
+        ),
+    ] {
+        exec(&mut conn, sql);
+        node_guard_refresh(&mut conn);
+        let s = compare(&mut conn, what);
+        assert!(s.iter().any(|x| x.starts_with("unknown:")), "{what} {s:?}");
     }
-    // The same SBOM from Trivy Operator: the verdicts are back.
-    store_s(&mut conn, sbom("trivy-operator")).unwrap();
+    let t = crate::in_use::TierSettings::default();
+    crate::in_use_store::refresh_coverage(
+        &mut conn,
+        &t,
+        &crate::in_use_store::UseEvidence {
+            complete: false,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    compare(&mut conn, "unfinished pass");
+    // A node SBOM beside Trivy: the Trivy-listed packages are unchanged.
+    node_guard_instance(&mut conn, &img, "g6", "n2", "full");
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["source"] = json!(NODE_SOURCE);
+    s["components"] = node_guard_components();
+    let p = normalise_sbom_from(
+        &img,
+        serde_json::from_value(s).unwrap(),
+        Utc::now(),
+        |s| s == NODE_SOURCE,
+        NODE_SOURCE,
+        crate::node_catalog::MAX_CATALOG_PATHS,
+    )
+    .unwrap();
+    store_sbom(&mut conn, p).unwrap();
     relink_batch(&mut conn, None, 100).unwrap();
-    refresh(&mut conn);
-    assert_eq!(
-        states(&mut conn),
-        [
-            ("libbar1".to_string(), "installed_not_observed"),
-            ("libfoo1".to_string(), "loaded"),
-        ]
+    node_guard_refresh(&mut conn);
+    let s = compare(&mut conn, "node SBOM beside Trivy");
+    assert!(
+        s.contains(&"installed_not_observed".to_string()),
+        "mixed arch and no claim row, yet Trivy's verdict stands: {s:?}"
+    );
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_pkg_in_use_pr1(text, text, text, text, text, text, text, boolean)",
+    );
+    exec(
+        &mut conn,
+        "DELETE FROM runtime_coverage WHERE container_id LIKE 'sc-guard-%'",
     );
 }
 

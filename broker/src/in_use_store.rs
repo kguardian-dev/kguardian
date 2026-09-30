@@ -7,15 +7,19 @@
 //! 1. [`refresh_package_use_batch`]: per inventory digest, map every
 //!    executed / mapped path to the SBOM packages that own it
 //!    ([`crate::in_use::owners_of`]) -> `runtime_package_use`, and the
-//!    paths nothing owns -> `runtime_unowned_paths`.
+//!    paths nothing owns -> `runtime_unowned_paths`. Node catalog SBOMs
+//!    count, except for paths the image did not ship as they ran.
 //! 2. [`refresh_coverage`]: per workload container and digest, whether
-//!    capture covered it for the minimum window -> `runtime_in_use_coverage`.
+//!    capture covered it for the minimum window -> `runtime_in_use_coverage`
+//!    (and, for an image whose only SBOM is a node catalog SBOM, whether
+//!    that SBOM passes the platform / completeness guard).
 //! 3. [`refresh_exposure`]: observed network exposure per workload that
 //!    runs an image with findings -> `workload_network_exposure`.
 //!
 //! The per-package state is then one SQL function, `kg_pkg_in_use`
-//! (migration 2026-09-28-200000), shared by the CVE summary, the per-image
-//! reads, the exposure view and the VEX draft.
+//! (migration 2026-09-28-200000; node catalog guard 2026-10-04-100000),
+//! shared by the CVE summary, the per-image reads, the exposure view and
+//! the VEX draft.
 //!
 //! # Coverage
 //!
@@ -74,10 +78,21 @@ struct RtRow {
     kind: String,
     #[diesel(sql_type = Text)]
     path: String,
+    /// Where the file lived as it ran (`runtime_executables.origin`).
+    #[diesel(sql_type = Text)]
+    origin: String,
     #[diesel(sql_type = Timestamp)]
     first_seen: NaiveDateTime,
     #[diesel(sql_type = Timestamp)]
     last_seen: NaiveDateTime,
+}
+
+impl RtRow {
+    /// The image did not ship the file as it ran (written to the writable
+    /// layer, run from a memfd, or deleted while running): runtime drift.
+    fn drift(&self) -> bool {
+        crate::runtime_inventory::UNSHIPPED_ORIGINS.contains(&self.origin.as_str())
+    }
 }
 
 #[derive(QueryableByName, Debug, Clone)]
@@ -88,6 +103,9 @@ struct CompRow {
     version: String,
     #[diesel(sql_type = Array<Text>)]
     file_paths: Vec<String>,
+    /// From a node catalog SBOM (source `node`).
+    #[diesel(sql_type = Bool)]
+    node: bool,
 }
 
 #[derive(QueryableByName)]
@@ -150,13 +168,34 @@ struct UnownedAcc {
     last: NaiveDateTime,
 }
 
-fn compute_image_use(rows: &[RtRow], comps: &[Component], has_sbom: bool) -> ImageUse {
+/// `comps` are the packages of the image's Trivy Operator / registry
+/// SBOMs, `node_comps` those of its node catalog SBOM. A node file list
+/// credits a package only with a file the image shipped: a runtime path
+/// with a drift origin ([`RtRow::drift`]) is matched against `comps`
+/// alone (design node-catalog.md section 5, "drift evidence"), so a binary
+/// copied over a packaged path at runtime is never credited to that
+/// package by node data. Trivy Operator and registry matching is
+/// unchanged.
+fn compute_image_use(
+    rows: &[RtRow],
+    comps: &[Component],
+    node_comps: &[Component],
+    has_sbom: bool,
+) -> ImageUse {
     let mut out = ImageUse::default();
-    let mut owners_cache: BTreeMap<&str, in_use::Ownership> = BTreeMap::new();
+    let all: Vec<Component>;
+    let every: &[Component] = if node_comps.is_empty() {
+        comps
+    } else {
+        all = comps.iter().chain(node_comps).cloned().collect();
+        &all
+    };
+    let mut owners_cache: BTreeMap<(&str, bool), in_use::Ownership> = BTreeMap::new();
     for r in rows {
+        let drift = r.drift();
         let o = owners_cache
-            .entry(r.path.as_str())
-            .or_insert_with(|| in_use::owners_of(&r.path, comps));
+            .entry((r.path.as_str(), drift))
+            .or_insert_with(|| in_use::owners_of(&r.path, if drift { comps } else { every }));
         let executed = r.kind == "exec";
         if o.unowned() {
             if has_sbom {
@@ -229,7 +268,7 @@ pub(crate) fn refresh_image_use_capped(
 ) -> Result<ImageRefresh, DbError> {
     let mut rows: Vec<RtRow> = sql_query(format!(
         "SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
-             kind, path, first_seen, last_seen \
+             kind, path, origin, first_seen, last_seen \
          FROM {RUNTIME_TABLE} \
          WHERE image_digest = $1 AND path_complete AND kind IN ('exec', 'lib') \
          ORDER BY last_seen DESC LIMIT $2"
@@ -251,12 +290,13 @@ pub(crate) fn refresh_image_use_capped(
         #[diesel(sql_type = Bool)]
         has: bool,
     }
-    // Node catalog SBOMs (source 'node') feed no in-use verdict until the
-    // platform / completeness / flag guard lands (design section 5, PR 6).
+    // Node catalog SBOMs (source 'node') count like any other: their file
+    // lists are positive evidence. A negative claim from them is guarded
+    // in kg_pkg_in_use / refresh_coverage (design section 5).
     let has_sbom = sql_query(
         "SELECT EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
              ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-         WHERE l.image_digest = $1 AND l.source <> 'node') AS has",
+         WHERE l.image_digest = $1) AS has",
     )
     .bind::<Text, _>(image)
     .get_result::<Has>(conn)?
@@ -265,27 +305,27 @@ pub(crate) fn refresh_image_use_capped(
         Vec::new()
     } else {
         sql_query(
-            "SELECT DISTINCT c.name, COALESCE(c.version, '') AS version, c.file_paths \
+            "SELECT DISTINCT c.name, COALESCE(c.version, '') AS version, c.file_paths, \
+                 (c.source = 'node') AS node \
              FROM supplychain_image_links l \
              JOIN image_sbom_components c ON c.digest = l.digest AND c.source = l.source \
-             WHERE l.image_digest = $1 AND l.source <> 'node' \
-               AND c.file_paths && $2::text[]",
+             WHERE l.image_digest = $1 AND c.file_paths && $2::text[]",
         )
         .bind::<Text, _>(image)
         .bind::<Array<Text>, _>(&cands)
         .load(conn)?
     };
-    let comps: Vec<Component> = comps
-        .into_iter()
-        .map(|c| Component {
-            key: PackageKey {
-                name: c.name,
-                version: Some(c.version),
-            },
-            file_paths: c.file_paths,
-        })
-        .collect();
-    let u = compute_image_use(&rows, &comps, has_sbom);
+    let (node_comps, comps): (Vec<CompRow>, Vec<CompRow>) = comps.into_iter().partition(|c| c.node);
+    let component = |c: CompRow| Component {
+        key: PackageKey {
+            name: c.name,
+            version: Some(c.version),
+        },
+        file_paths: c.file_paths,
+    };
+    let comps: Vec<Component> = comps.into_iter().map(component).collect();
+    let node_comps: Vec<Component> = node_comps.into_iter().map(component).collect();
+    let u = compute_image_use(&rows, &comps, &node_comps, has_sbom);
 
     let uses: Vec<UseRow> = u
         .uses
@@ -476,6 +516,17 @@ pub struct UseEvidence {
 /// were truncated), a covered container is downgraded to
 /// `capture_gap`, so nothing is claimed installed-but-not-observed from
 /// part of the evidence.
+///
+/// Node catalog guard (design node-catalog.md section 2): where the
+/// image's only SBOM is a node catalog SBOM, a covered container stays
+/// covered only if `kg_node_sbom_guard` passes (the SBOM is
+/// `completeness=full` and every node that ran an instance in the window
+/// reported the platform it was cataloged for); otherwise it is unknown
+/// with `sbom_incomplete`, `libraries_not_tracked` or
+/// `platform_mismatch`. A capture reason is never replaced by it.
+/// Containers of images with a Trivy Operator or registry SBOM are
+/// unchanged (a package only the node SBOM lists is guarded per package
+/// in `kg_pkg_in_use`).
 pub fn refresh_coverage(
     conn: &mut PgConnection,
     s: &TierSettings,
@@ -486,17 +537,30 @@ pub fn refresh_coverage(
         sql_query("DELETE FROM runtime_in_use_coverage").execute(conn)?;
         let select = if available {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
-                 wc.container_name, wc.image_digest, COALESCE(k.covered, false) AND NOT g.gap, \
-                 CASE WHEN k.covered IS TRUE AND NOT g.gap THEN NULL \
-                      WHEN k.covered IS TRUE THEN 'capture_gap' \
+                 wc.container_name, wc.image_digest, \
+                 COALESCE(k.covered, false) AND NOT g.gap AND n.reason IS NULL, \
+                 CASE WHEN k.covered IS TRUE AND NOT g.gap AND n.reason IS NULL THEN NULL \
+                      WHEN k.covered IS TRUE AND g.gap THEN 'capture_gap' \
+                      WHEN k.covered IS TRUE THEN n.reason \
                       ELSE COALESCE(NULLIF(k.reason, ''), 'no_runtime_data') END, \
-                 CASE WHEN k.covered IS TRUE AND NOT g.gap THEN k.observed_since END, \
+                 CASE WHEN k.covered IS TRUE AND NOT g.gap AND n.reason IS NULL \
+                      THEN k.observed_since END, \
                  $1, timezone('UTC', NOW()) \
              FROM workload_containers wc \
              LEFT JOIN LATERAL kg_runtime_coverage(wc.cluster_id, wc.pod_namespace, \
                  wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest, $1) k \
                  ON true \
-             CROSS JOIN LATERAL (SELECT (NOT $2 OR wc.image_digest = ANY($3)) AS gap) g"
+             CROSS JOIN LATERAL (SELECT (NOT $2 OR wc.image_digest = ANY($3)) AS gap) g \
+             CROSS JOIN LATERAL (SELECT CASE \
+                 WHEN k.covered IS TRUE AND NOT g.gap \
+                     AND EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
+                         ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
+                         WHERE l.image_digest = wc.image_digest AND l.source = 'node') \
+                     AND NOT EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
+                         ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
+                         WHERE l.image_digest = wc.image_digest AND l.source <> 'node') \
+                 THEN kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                     wc.workload_name, wc.container_name, wc.image_digest, $1) END AS reason) n"
         } else {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, false, 'no_runtime_data', \
@@ -600,6 +664,10 @@ pub fn parse_state(s: &str) -> (InUse, Option<UnknownReason>) {
                 Some("language_package") => UnknownReason::LanguagePackage,
                 Some("no_package_files") => UnknownReason::NoPackageFiles,
                 Some("probes_missing") => UnknownReason::ProbesMissing,
+                Some("libraries_not_tracked") => UnknownReason::LibrariesNotTracked,
+                Some("sbom_incomplete") => UnknownReason::SbomIncomplete,
+                Some("platform_mismatch") => UnknownReason::PlatformMismatch,
+                Some("interpreted_content") => UnknownReason::InterpretedContent,
                 Some(_) => UnknownReason::CaptureGap,
             };
             (InUse::Unknown, Some(reason))
@@ -906,6 +974,7 @@ mod tests {
             container_name: container.into(),
             kind: kind.into(),
             path: path.into(),
+            origin: "image".into(),
             first_seen: t("2026-09-20 00:00"),
             last_seen: t("2026-09-27 00:00"),
         }
@@ -933,7 +1002,7 @@ mod tests {
             rt("app", "exec", "/usr/local/bin/app"),
             rt("side", "lib", "/usr/lib/x86_64-linux-gnu/libc.so.6"),
         ];
-        let u = compute_image_use(&rows, &comps, true);
+        let u = compute_image_use(&rows, &comps, &[], true);
         let get = |c: &str, p: &str| {
             u.uses
                 .iter()
@@ -958,8 +1027,101 @@ mod tests {
             .unowned
             .contains_key(&("/usr/local/bin/app".into(), "exec".into())));
         // Without an SBOM nothing is "unowned": there is nothing to own it.
-        let u = compute_image_use(&rows, &[], false);
+        let u = compute_image_use(&rows, &[], &[], false);
         assert!(u.unowned.is_empty() && u.uses.is_empty());
+    }
+
+    /// Node file lists are positive evidence (executed / loaded), except
+    /// for a path the image did not ship as it ran (writable layer, memfd,
+    /// deleted): that is never credited to a package by node data, and
+    /// shows as unowned instead. A Trivy Operator / registry list still
+    /// credits it, as before.
+    #[test]
+    fn node_lists_credit_only_files_the_image_shipped() {
+        let node = vec![
+            comp("busybox", &["/bin/busybox"]),
+            comp("musl", &["/lib/ld-musl-x86_64.so.1"]),
+            comp("curl", &["/usr/bin/curl"]),
+        ];
+        let drift = |kind: &str, path: &str, origin: &str| RtRow {
+            origin: origin.into(),
+            ..rt("app", kind, path)
+        };
+        let rows = vec![
+            rt("app", "exec", "/bin/busybox"),
+            rt("app", "lib", "/lib/ld-musl-x86_64.so.1"),
+            drift("exec", "/usr/bin/curl", "writableLayer"),
+        ];
+        let u = compute_image_use(&rows, &[], &node, true);
+        let state = |u: &ImageUse, p: &str| {
+            u.uses
+                .iter()
+                .find(|(k, _)| k.5.name == p)
+                .map(|(_, a)| a.executed)
+        };
+        assert_eq!(state(&u, "busybox"), Some(true), "executed");
+        assert_eq!(state(&u, "musl"), Some(false), "loaded");
+        assert_eq!(state(&u, "curl"), None, "a replaced binary is not curl's");
+        assert!(u
+            .unowned
+            .contains_key(&("/usr/bin/curl".into(), "exec".into())));
+        for origin in ["memfd", "deleted"] {
+            let rows = vec![drift("exec", "/usr/bin/curl", origin)];
+            assert!(compute_image_use(&rows, &[], &node, true).uses.is_empty());
+        }
+        // An image-origin (or unknown-origin) sighting credits it.
+        for origin in ["image", "unknown"] {
+            let rows = vec![drift("exec", "/usr/bin/curl", origin)];
+            assert_eq!(
+                state(&compute_image_use(&rows, &[], &node, true), "curl"),
+                Some(true)
+            );
+        }
+        // Trivy's list is unchanged: it credits the drifted path.
+        let trivy = vec![comp("curl", &["usr/bin/curl"])];
+        let u = compute_image_use(&rows, &trivy, &node, true);
+        assert_eq!(state(&u, "curl"), Some(true));
+        assert!(u.unowned.is_empty());
+        // Both lists: owners are merged at the strongest rank.
+        let u = compute_image_use(
+            &rows[..1],
+            &[comp("bb-trivy", &["bin/busybox"])],
+            &node,
+            true,
+        );
+        let mut names: Vec<&str> = u.uses.keys().map(|k| k.5.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["bb-trivy", "busybox"]);
+    }
+
+    /// The guard migration's down restores exactly the kg_pkg_in_use the
+    /// node catalog migration defined (source 'node' excluded).
+    #[test]
+    fn the_guard_migration_reverts_to_the_node_catalog_definition() {
+        fn kg_pkg_in_use(sql: &str) -> &str {
+            let start = sql
+                .find("CREATE OR REPLACE FUNCTION kg_pkg_in_use(")
+                .expect("defines kg_pkg_in_use");
+            let body = &sql[start..];
+            &body[..body.find("\n$$;").expect("ends with $$;") + 4]
+        }
+        let pr1 = include_str!("../db/migrations/2026-10-03-100000_node_catalog/up.sql");
+        let up = include_str!("../db/migrations/2026-10-04-100000_node_in_use_guard/up.sql");
+        let down = include_str!("../db/migrations/2026-10-04-100000_node_in_use_guard/down.sql");
+        assert_eq!(kg_pkg_in_use(down), kg_pkg_in_use(pr1));
+        assert_ne!(kg_pkg_in_use(up), kg_pkg_in_use(pr1));
+        assert!(kg_pkg_in_use(up).contains("kg_node_pkg_guard("));
+        for f in ["kg_node_pkg_guard", "kg_node_sbom_guard"] {
+            assert!(
+                down.contains(&format!("DROP FUNCTION IF EXISTS {f}(")),
+                "{f}"
+            );
+            assert!(
+                up.contains(&format!("CREATE OR REPLACE FUNCTION {f}(")),
+                "{f}"
+            );
+        }
+        assert!(!up.contains("CREATE TABLE") && !up.contains("ALTER TABLE"));
     }
 
     #[test]
@@ -983,6 +1145,19 @@ mod tests {
             "an unrecognised reason is still a gap"
         );
         assert_eq!(parse_state("unknown").1, Some(UnknownReason::NoRuntimeData));
+        for r in [
+            UnknownReason::LibrariesNotTracked,
+            UnknownReason::SbomIncomplete,
+            UnknownReason::PlatformMismatch,
+            UnknownReason::InterpretedContent,
+            UnknownReason::NoPackageFiles,
+            UnknownReason::ProbesMissing,
+        ] {
+            assert_eq!(
+                parse_state(&format!("unknown:{}", r.as_str())),
+                (InUse::Unknown, Some(r))
+            );
+        }
         assert_eq!(parse_state("").0, InUse::Unknown);
     }
 
