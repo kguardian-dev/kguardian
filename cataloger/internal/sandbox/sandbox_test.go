@@ -268,6 +268,23 @@ func TestHarden(t *testing.T) {
 	}
 }
 
+func TestCloexecInherited(t *testing.T) {
+	var p [2]int
+	if err := unix.Pipe2(p[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(p[0]); _ = unix.Close(p[1]) }()
+	if err := CloexecInherited(); err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range p {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Errorf("fd %d: FD_CLOEXEC not set (flags %#x, %v)", fd, flags, err)
+		}
+	}
+}
+
 func TestFilterShape(t *testing.T) {
 	f := Filter()
 	if len(f) > 4096 || len(f) < 50 {

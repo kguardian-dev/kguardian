@@ -89,6 +89,13 @@ func TestListenRefusesHostilePaths(t *testing.T) {
 // The listening socket (and every other parent descriptor) must never
 // reach a child: children get stdio, the root fd and their socketpair.
 func TestChildrenInheritOnlyTheirDescriptors(t *testing.T) {
+	// A descriptor the worker itself inherited without close-on-exec (as
+	// from a CI runner or a container runtime) must not reach a child.
+	var leak [2]int
+	if err := unix.Pipe2(leak[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(leak[0]); _ = unix.Close(leak[1]) })
 	e := newServer(t, nil)
 	// Hold a connection open too, so an accepted socket would show.
 	c, err := net.Dial("unix", e.sock)

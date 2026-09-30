@@ -64,6 +64,11 @@ type Server struct {
 
 // New probes the capability model and returns a server.
 func New(ctx context.Context, cfg Config) (*Server, error) {
+	// Before any child is started: nothing this process inherited may
+	// reach one (children get stdio, their root fd and socketpair only).
+	if err := sandbox.CloexecInherited(); err != nil {
+		return nil, err
+	}
 	if cfg.ChildPath == "" {
 		cfg.ChildPath = "/proc/self/exe"
 	}
