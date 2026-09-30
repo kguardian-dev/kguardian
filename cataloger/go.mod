@@ -8,6 +8,7 @@ require (
 	github.com/anchore/go-logger v0.1.1
 	github.com/anchore/stereoscope v0.3.2
 	github.com/anchore/syft v1.52.0
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/sirupsen/logrus v1.9.4
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.58.0
@@ -78,7 +79,6 @@ require (
 	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/bitnami/go-version v0.0.0-20250131085805-b1f57a8634ef // indirect
 	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb // indirect
-	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.1 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect

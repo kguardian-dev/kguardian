@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/anchore/syft/syft"
 	"github.com/anchore/syft/syft/sbom"
@@ -64,7 +65,10 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 		return fail(protocol.ReasonBadRequest, err.Error())
 	}
 	defer func() { _ = root.Close() }()
-	defer func() { fillStats(resp, root) }()
+	defer func() {
+		fillStats(resp, root)
+		driftSafetyNet(resp)
+	}()
 
 	for _, p := range osReleasePaths {
 		if _, err := root.StatPath(p); err != nil {
@@ -110,6 +114,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 	}
 
 	res := src.Resolver()
+	classifyDrift(resp, res)
 	fr := resolverAdapter{res: res, root: root}
 	comps, dropped := Components(s, fr, int(o.Budgets.MaxPathsPerPackage))
 	resp.Stats.ComponentsDropped = int64(dropped)
@@ -157,7 +162,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 		if resp.Stats.DepthLimited > 0 {
 			r.AddPartial(protocol.PartialDepthLimited)
 		}
-		if resp.Stats.CtimeDropped > 0 {
+		if resp.Stats.CtimeDroppedEvidence > 0 {
 			r.AddPartial(protocol.PartialCtimeDropped)
 		}
 		if dropped > 0 {
@@ -193,7 +198,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 	if o.CapsModel == "ii" {
 		resp.AddPartial(protocol.PartialNoDACReadSearch)
 	}
-	if resp.Stats.CtimeDropped > 0 {
+	if resp.Stats.CtimeDroppedEvidence > 0 {
 		resp.AddPartial(protocol.PartialCtimeDropped)
 	}
 	if resp.Stats.DepthLimited > 0 {
@@ -229,6 +234,75 @@ func fillStats(resp *protocol.Response, root *rootfs.Root) {
 	resp.Stats.CtimeDropped = st.CtimeDropped.Load()
 	resp.Stats.MountSkipped = st.MountSkipped.Load()
 	resp.Stats.DepthLimited = st.DepthLimited.Load()
+	resp.Stats.Reclaims = st.Reclaims.Load()
+	resp.Stats.ReclaimMS = st.ReclaimNanos.Load() / 1e6
+}
+
+// driftSafetyNet: an entry dropped after classification (none is today:
+// nothing reads a file then) was never judged, so it counts as evidence.
+// Only responses that carry a completeness are touched.
+func driftSafetyNet(resp *protocol.Response) {
+	st := &resp.Stats
+	if resp.Completeness == "" || st.CtimeDropped <= st.CtimeDroppedEvidence+st.CtimeDroppedData {
+		return
+	}
+	resp.AddPartial(protocol.PartialCtimeDropped)
+	if resp.Completeness == protocol.CompletenessFull {
+		resp.Completeness = protocol.CompletenessPartial
+	}
+}
+
+// classifyDrift splits the runtime-drift entries (ctime after container
+// start, left out of the index) into possible package evidence, which
+// makes the SBOM partial (ctime_dropped), and plain runtime data (logs,
+// caches, bytecode caches, pid and lock files, temp files), which does
+// not: a package that owns a dropped file is flagged files_truncated
+// either way (PackageFiles). A bounded sample of the paths goes in the
+// stats. It runs after cataloging, when the resolver knows every query
+// the catalogers made.
+func classifyDrift(resp *protocol.Response, res *rootfs.Resolver) {
+	if res == nil {
+		return
+	}
+	// More candidates than fit: a path SamplePath cannot make valid is
+	// left out and the next one taken.
+	d := res.ClassifyDropped(4 * protocol.MaxDriftSample)
+	resp.Stats.CtimeDroppedEvidence, resp.Stats.CtimeDroppedData = d.Evidence, d.Data
+	resp.Stats.CtimeDroppedUnclassified = d.Unclassified
+	resp.Stats.CtimeDroppedSample = nil
+	for _, p := range d.Sample {
+		if len(resp.Stats.CtimeDroppedSample) == protocol.MaxDriftSample {
+			break
+		}
+		if sp, ok := SamplePath(p); ok {
+			resp.Stats.CtimeDroppedSample = append(resp.Stats.CtimeDroppedSample, sp)
+		}
+	}
+}
+
+// SamplePath bounds a path for the drift sample so that the Controller
+// keeps it (its valid_path: absolute, no Unicode control character, no
+// empty, "." or ".." segment): valid UTF-8, every control character
+// (C0, DEL, C1) replaced by '?', cut to MaxDriftSamplePathLen bytes on a
+// rune boundary, then a trailing "/", "/." or "/.." left by the cut
+// trimmed. ok is false when the result is still not a valid path.
+func SamplePath(p string) (string, bool) {
+	p = strings.ToValidUTF8(p, "?")
+	p = strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) {
+			return '?'
+		}
+		return c
+	}, p)
+	p = protocol.Truncate(p, protocol.MaxDriftSamplePathLen)
+	for {
+		t := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(p, "/.."), "/."), "/")
+		if t == p {
+			break
+		}
+		p = t
+	}
+	return p, protocol.ValidSamplePath(p)
 }
 
 func isAccess(err error) bool {

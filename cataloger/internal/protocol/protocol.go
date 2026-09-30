@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -80,6 +82,8 @@ const (
 // broker cut it silently.
 const (
 	MaxRequestBytes       = 64 * 1024
+	MaxDriftSample        = 20
+	MaxDriftSamplePathLen = 256
 	MaxResponseCeiling    = 64 * 1024 * 1024
 	MaxSubmounts          = 1024
 	MaxSubmountLen        = 4096
@@ -230,14 +234,30 @@ type OS struct {
 
 // Stats describe the scan (also on failure).
 type Stats struct {
-	Files             int64  `json:"files"`
-	Dirs              int64  `json:"dirs"`
-	Components        int64  `json:"components"`
-	DurationMS        int64  `json:"duration_ms"`
-	SyftVersion       string `json:"syft_version"`
-	WorkerVersion     string `json:"worker_version"`
-	EACCES            int64  `json:"eacces"`
-	CtimeDropped      int64  `json:"ctime_dropped"`
+	Files         int64  `json:"files"`
+	Dirs          int64  `json:"dirs"`
+	Components    int64  `json:"components"`
+	DurationMS    int64  `json:"duration_ms"`
+	SyftVersion   string `json:"syft_version"`
+	WorkerVersion string `json:"worker_version"`
+	EACCES        int64  `json:"eacces"`
+	CtimeDropped  int64  `json:"ctime_dropped"`
+	// CtimeDroppedEvidence + CtimeDroppedData = CtimeDropped once
+	// cataloging ran: the dropped entries that could have been package
+	// evidence (these make the SBOM partial) and plain runtime data.
+	CtimeDroppedEvidence int64 `json:"ctime_dropped_evidence"`
+	CtimeDroppedData     int64 `json:"ctime_dropped_data"`
+	// CtimeDroppedSample: up to MaxDriftSample dropped paths, evidence
+	// first, each at most MaxDriftSamplePathLen bytes.
+	CtimeDroppedSample []string `json:"ctime_dropped_sample,omitempty"`
+	// CtimeDroppedUnclassified: dropped entries counted as evidence
+	// without being judged (the glob matching ran past its budget); part
+	// of CtimeDroppedEvidence.
+	CtimeDroppedUnclassified int64 `json:"ctime_dropped_unclassified"`
+	// Reclaims: heap collections before a large file was read, and the
+	// time they took.
+	Reclaims          int64  `json:"reclaims"`
+	ReclaimMS         int64  `json:"reclaim_ms"`
 	MountSkipped      int64  `json:"mount_skipped"`
 	DepthLimited      int64  `json:"depth_limited"`
 	ComponentsDropped int64  `json:"components_dropped"`
@@ -331,6 +351,13 @@ func HasControl(s string) bool {
 func ValidPath(p string) bool {
 	return len(p) > 0 && len(p) <= MaxPathLen && p[0] == '/' && path.Clean(p) == p &&
 		utf8.ValidString(p) && !HasControl(p)
+}
+
+// ValidSamplePath is a drift sample path the Controller keeps: a
+// ValidPath of at most MaxDriftSamplePathLen bytes without any Unicode
+// control character (C1 included, as Rust's char::is_control).
+func ValidSamplePath(p string) bool {
+	return len(p) <= MaxDriftSamplePathLen && ValidPath(p) && strings.IndexFunc(p, unicode.IsControl) < 0
 }
 
 // Truncate cuts s to at most n bytes on a rune boundary.

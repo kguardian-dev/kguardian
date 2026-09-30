@@ -185,12 +185,19 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 			}
 			subs = append(subs, sub{name, st})
 		case unix.S_IFREG:
+			// Sniffed exactly as an indexed file would be, so a dropped
+			// file can be tested against the catalogers' MIME queries.
+			sniff := !r.opts.SniffExecutablesOnly || looksExecutable(name, uint32(st.Mode))
 			if r.late(&st) {
-				r.drop(p)
+				d := droppedFile{mode: uint32(st.Mode), size: int64(st.Size)}
+				if sniff {
+					d.mime, d.unsniffed = sniffQuiet(fd, name, &st)
+				}
+				r.drop(p, d)
 				continue
 			}
 			mime := ""
-			if !r.opts.SniffExecutablesOnly || looksExecutable(name, uint32(st.Mode)) {
+			if sniff {
 				mime = ix.sniff(fd, name, &st)
 			}
 			ref, err := ix.tree.AddFile(stereofile.Path(p))
@@ -201,7 +208,11 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 			r.Stats.Files.Add(1)
 		case unix.S_IFLNK:
 			if r.late(&st) {
-				r.drop(p)
+				d := droppedFile{mode: uint32(st.Mode)}
+				if target, err := readlinkat(fd, name); err == nil {
+					d.link = linkTarget(dirPath, target)
+				}
+				r.drop(p, d)
 				continue
 			}
 			target, err := readlinkat(fd, name)
@@ -281,6 +292,22 @@ func (ix *indexer) sniff(dirfd int, name string, st *unix.Statx_t) string {
 		return ""
 	}
 	return stereofile.MIMEType(fdReader(fd))
+}
+
+// sniffQuiet is sniff for a file being left out as drift: the same MIME
+// detection, but nothing is counted (the entry is not part of the scan).
+// unsniffed reports that it could not be read.
+func sniffQuiet(dirfd int, name string, st *unix.Statx_t) (mime string, unsniffed bool) {
+	fd, err := openat2(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_NOCTTY, resolveFlags)
+	if err != nil {
+		return "", true
+	}
+	defer func() { _ = unix.Close(fd) }()
+	fst, err := statx(fd, "")
+	if err != nil || fst.Mode&unix.S_IFMT != unix.S_IFREG || fst.Ino != st.Ino {
+		return "", true
+	}
+	return stereofile.MIMEType(fdReader(fd)), false
 }
 
 // fdReader reads an fd without taking ownership of it.

@@ -47,6 +47,8 @@ type Stats struct {
 	Swapped      atomic.Int64 // entries that changed type between stat and open
 	Special      atomic.Int64 // devices, FIFOs, sockets (never read)
 	FileBudget   atomic.Bool  // StopAtBudget hit MaxFiles
+	Reclaims     atomic.Int64 // heap collections before a large file
+	ReclaimNanos atomic.Int64 // time spent in them
 }
 
 // Root is a container root handed over as a directory fd.
@@ -59,7 +61,20 @@ type Root struct {
 	Stats Stats
 
 	mu      sync.Mutex
-	dropped map[string]struct{} // paths left out for ctime drift
+	dropped map[string]droppedFile // paths left out for ctime drift
+}
+
+// droppedFile is what the indexer saw of a runtime-changed entry before
+// leaving it out: enough to decide whether it could have been package
+// evidence (see Resolver.ClassifyDropped).
+type droppedFile struct {
+	mode uint32 // st_mode, type and permission bits
+	size int64
+	mime string // sniffed like an indexed file ("" when not sniffed)
+	link string // symlinks: the in-root target ("" when unreadable)
+	// unsniffed: the file should have been sniffed but could not be read.
+	unsniffed bool
+	atRead    bool // dropped when a cataloger went to read it
 }
 
 // Open wraps dirfd (which Root now owns and closes). It verifies the kernel
@@ -78,7 +93,7 @@ func Open(dirfd int, opts Options) (*Root, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return nil, errors.New("root fd is not a directory")
 	}
-	r := &Root{fd: dirfd, mntID: st.Mnt_id, opts: opts, subs: map[string]struct{}{}, dropped: map[string]struct{}{}}
+	r := &Root{fd: dirfd, mntID: st.Mnt_id, opts: opts, subs: map[string]struct{}{}, dropped: map[string]droppedFile{}}
 	for _, s := range opts.Submounts {
 		if c := path.Clean("/" + s); c != "/" {
 			r.subs[c] = struct{}{}
@@ -130,11 +145,14 @@ func (r *Root) late(st *unix.Statx_t) bool {
 		tsNanos(st.Ctime) > r.opts.CtimeCutoffNanos
 }
 
-func (r *Root) drop(p string) {
+func (r *Root) drop(p string, d droppedFile) {
 	r.mu.Lock()
-	if _, ok := r.dropped[p]; !ok {
-		r.dropped[p] = struct{}{}
+	if old, ok := r.dropped[p]; !ok {
+		r.dropped[p] = d
 		r.Stats.CtimeDropped.Add(1)
+	} else if d.atRead && !old.atRead {
+		old.atRead = true
+		r.dropped[p] = old
 	}
 	r.mu.Unlock()
 }
@@ -188,7 +206,7 @@ func (r *Root) OpenFile(p string) (*os.File, error) {
 	}
 	if r.late(&st) {
 		_ = unix.Close(fd)
-		r.drop(clean)
+		r.drop(clean, droppedFile{mode: uint32(st.Mode), size: int64(st.Size), atRead: true})
 		return nil, &os.PathError{Op: "open", Path: clean, Err: errors.New("changed after container start")}
 	}
 	// A regular file: blocking reads are fine now, and a blocking fd keeps
