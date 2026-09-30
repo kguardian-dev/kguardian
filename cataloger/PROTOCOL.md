@@ -211,7 +211,7 @@ means the Controller does not claim.
     "syft_version": "v1.52.0", "worker_version": "0.1.0",
     "eacces": 0, "ctime_dropped": 2, "ctime_dropped_evidence": 0,
     "ctime_dropped_data": 2, "ctime_dropped_sample": ["/run/app.pid", "/var/log/app.log"],
-    "mount_skipped": 3, "depth_limited": 0,
+    "mount_skipped": 3, "depth_limited": 0, "reclaims": 0, "reclaim_ms": 0,
     "components_dropped": 0, "attempts": 1, "caps_model": "i",
     "max_rss_bytes": 58720256,
     "budgets": { "max_files": 2000000, "max_components": 50000, "max_depth": 4096,
@@ -253,7 +253,7 @@ Top level:
 | `retry_reason` | string | Set when the first attempt failed and the `os_only` retry produced this response: `oom`, `too_many_files` or `too_many_components`. |
 | `scanner` | object | Maps to `ImageSBOM.scanner`. |
 | `os` | object | `{family, name}`: os-release `ID` and `VERSION_ID` (or `PRETTY_NAME` without one). Maps to the broker's `WireOs`. Omitted when no os-release was found, or when either value is over 64 bytes (the broker's limit) or holds control characters. |
-| `stats` | object | Always present, also on failure (what was measured before it). The runtime-drift fields are in §4.2. |
+| `stats` | object | Always present, also on failure (what was measured before it). The runtime-drift fields are in §4.2. `reclaims` / `reclaim_ms`: heap collections the scan ran before handing a cataloger a file of 32 MiB or more (only when the process held 192 MiB or more), and their total time. |
 | `components` | object[] | §4.3. |
 
 ### 4.2 Completeness
@@ -283,11 +283,16 @@ counts them). After cataloging, each is classified:
   - a file a cataloger went to read (its ctime moved during the scan);
   - executable-looking (an execute bit, or a `*.so*` name, also for a
     symlink), unless it is empty or its content sniffs as `text/*`;
+  - a symlink whose target resolves to a directory (it can reroute a
+    package database or any tree a cataloger walks: `lib/apk ->
+    ../data/apk`), or whose own path or resolved target matches a query
+    below; a dangling symlink or one to plain data is data;
   - a MIME type a cataloger asked for (ELF, Mach-O, PE), or a file that
     could not be sniffed while a cataloger asked for MIME types;
   - a path a cataloger asked for, also through a symlinked directory
     (`/lib/apk/db/installed` finds `/usr/lib/apk/db/installed`);
-  - a match for a glob a cataloger asked for: package databases, `*.jar`
+  - a match for a glob a cataloger asked for (including `<dir>/*` globs
+    such as the distroless `**/lib/dpkg/status.d/*`): package databases, `*.jar`
     `*.war` `*.ear` and the other Java archives, `*dist-info/METADATA`,
     `*egg-info/PKG-INFO`, `package.json`, `*.gemspec`, composer
     `installed.json`, `*.deps.json`, the binary classifier's names (`java`,
@@ -308,10 +313,34 @@ counts them). After cataloging, each is classified:
 Only evidence sets `ctime_dropped` (and so `partial`). A dropped file a
 package owns flags that package `files_truncated` either way (§4.3), which
 is a partial reason of its own. `stats.ctime_dropped_sample` lists up to
-20 dropped paths, evidence first, each group sorted; each path is valid
-UTF-8 with control characters replaced by `?`, at most 256 bytes (cut on a
-rune boundary). It is omitted when nothing was dropped. On a response that
-failed before cataloging, only `ctime_dropped` is set.
+20 dropped paths, evidence first, each group sorted. Each is made to pass
+the Controller's path check: valid UTF-8, every Unicode control character
+(C0, DEL, C1) replaced by `?`, at most 256 bytes (cut on a rune boundary),
+a trailing `/`, `/.` or `/..` left by the cut trimmed; a path that is
+still not absolute and clean is left out (the parent rejects the response
+otherwise). It is omitted when nothing was dropped. On a response that
+failed before cataloging, only `ctime_dropped` is set. If an entry is ever
+dropped after classification (nothing reads files then), it was not
+judged, and `ctime_dropped` is set for it.
+
+**Not covered by this rule: deletions.** A package database or package
+file deleted at runtime leaves no file with a new ctime (overlayfs records
+a whiteout, a 0:0 character device the worker never indexes, or marks the
+directory opaque), so the worker cannot see it. The Controller checks the
+container's upperdir before a scan: a write, a whiteout, a non-directory
+or an opaque directory on the way to the four OS databases
+(`lib/apk/db/installed`, `var/lib/dpkg/status`, `var/lib/rpm`,
+`usr/lib/sysimage/rpm`) refuses the scan as `drift`, and a whiteout or
+opaque directory in the system-wide language package directories
+(`usr/lib/python*/{site,dist}-packages`,
+`usr/local/lib/python*/{site,dist}-packages`, `usr/lib/node_modules`,
+`usr/local/lib/node_modules`, `usr/local/bundle/gems`,
+`var/lib/gems/*/gems`, `usr/local/lib/ruby/gems/*/gems`) makes the SBOM
+`partial` (`lang_whiteout`). Deletions anywhere else are not detected:
+the distroless dpkg database (`var/lib/dpkg/status.d/*`), a Go or Rust
+binary, a jar, and application-local trees such as `/app/node_modules`
+or a virtualenv. Such a package is simply absent from the SBOM (it is no
+longer in the container either).
 
 ### 4.3 Components
 

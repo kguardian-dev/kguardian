@@ -98,3 +98,58 @@ func TestListingEveryFileMakesEverythingEvidence(t *testing.T) {
 		t.Errorf("after: evidence %d data %d", d.Evidence, d.Data)
 	}
 }
+
+// "<dir>/*" globs (the distroless dpkg database, Nix store entries) are
+// matched: stereoscope's subdirectory search needs the parent directories
+// in the index (review probe).
+func TestSubdirectoryGlobs(t *testing.T) {
+	_, _, res := driftRoot(t, map[string]string{
+		"var/lib/dpkg/status.d/libssl3": "Package: libssl3\nVersion: 3.0\n",
+		"nix/store/abc-foo/bin/foo":     "#!/bin/sh\n",
+		"nix/store/abc-bar":             "plain",
+		"var/log/app.log":               "x",
+	}, nil)
+	_, _ = res.FilesByGlob("**/var/lib/dpkg/status.d/*")
+	_, _ = res.FilesByGlob(nixStoreGlobs...)
+	if d := res.ClassifyDropped(20); d.Evidence != 3 || d.Data != 1 {
+		t.Errorf("evidence %d data %d, sample %v", d.Evidence, d.Data, d.Sample)
+	}
+}
+
+// Dropped symlinks: to a directory, evidence (it can reroute a database
+// or any tree a cataloger walks); to a file, evidence when the link or
+// its target was asked for by glob or path; to plain data or nowhere,
+// data.
+func TestDroppedSymlinks(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"etc", "data/apk/db", "opt/pkg", "var/log", "lib"} {
+		must(t, os.MkdirAll(filepath.Join(root, d), 0o755))
+	}
+	must(t, os.WriteFile(filepath.Join(root, "etc/os-release"), []byte("ID=alpine\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "opt/pkg/package.json"), []byte("{}"), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "opt/blob"), []byte("x"), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "var/log/x.log"), []byte("x"), 0o644))
+	cut := time.Now().UnixNano()
+	time.Sleep(20 * time.Millisecond)
+	for link, target := range map[string]string{
+		"lib/apk":          "../data/apk",           // directory: evidence
+		"app/current.jar":  "/opt/blob",             // link path matches a glob: evidence
+		"app/lib/manifest": "/opt/pkg/package.json", // target matches a glob: evidence
+		"var/log/current":  "x.log",                 // plain data
+		"var/log/gone":     "/nonexistent",          // dangling
+	} {
+		must(t, os.MkdirAll(filepath.Join(root, filepath.Dir(link)), 0o755))
+		must(t, os.Symlink(target, filepath.Join(root, link)))
+	}
+	r, err := OpenPath(root, Options{CtimeCutoffNanos: cut})
+	must(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	res, err := NewResolver(r)
+	must(t, err)
+	_, _ = res.FilesByGlob("**/*.jar", "**/package.json")
+	d := res.ClassifyDropped(20)
+	want := []string{"/app/current.jar", "/app/lib/manifest", "/lib/apk", "/var/log/current", "/var/log/gone"}
+	if d.Evidence != 3 || d.Data != 2 || !slices.Equal(d.Sample, want) {
+		t.Errorf("evidence %d data %d sample %v", d.Evidence, d.Data, d.Sample)
+	}
+}

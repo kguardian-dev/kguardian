@@ -208,7 +208,11 @@ func (ix *indexer) walkDir(fd int, dirPath string, depth int) error {
 			r.Stats.Files.Add(1)
 		case unix.S_IFLNK:
 			if r.late(&st) {
-				r.drop(p, droppedFile{mode: uint32(st.Mode)})
+				d := droppedFile{mode: uint32(st.Mode)}
+				if target, err := readlinkat(fd, name); err == nil {
+					d.link = linkTarget(dirPath, target)
+				}
+				r.drop(p, d)
 				continue
 			}
 			target, err := readlinkat(fd, name)

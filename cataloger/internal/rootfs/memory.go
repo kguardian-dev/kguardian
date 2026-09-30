@@ -6,7 +6,10 @@ import (
 	"io"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
+	"slices"
 	"strings"
+	"time"
 )
 
 // Large binaries set the scan's memory peak (dev: 250 MiB Go binaries and
@@ -26,11 +29,39 @@ import (
 //     no result; it only skips the whole-file allocation.
 
 // LargeFileBytes: before a file this large is handed to a cataloger, the
-// heap is collected (reclaim).
+// heap is collected (reclaim), unless the process holds less than
+// reclaimAbove.
 const LargeFileBytes = 32 << 20
+
+// reclaimAbove: below this much memory held by the Go runtime (what the
+// child's watchdog measures: total mapped minus released), collecting is
+// not worth its time. A scan's fixed cost (Syft's license scanner, the
+// index) is 110 to 150 MiB.
+var reclaimAbove uint64 = 192 << 20
 
 // reclaim collects garbage and returns free memory to the kernel.
 var reclaim = debug.FreeOSMemory
+
+// heldMemory is the runtime's mapped memory minus what it released.
+func heldMemory() uint64 {
+	s := []metrics.Sample{{Name: "/memory/classes/total:bytes"}, {Name: "/memory/classes/heap/released:bytes"}}
+	metrics.Read(s)
+	if s[0].Value.Kind() != metrics.KindUint64 || s[1].Value.Kind() != metrics.KindUint64 {
+		return ^uint64(0)
+	}
+	return s[0].Value.Uint64() - s[1].Value.Uint64()
+}
+
+// maybeReclaim collects before a large file is read, and counts it.
+func (r *Resolver) maybeReclaim(size int64) {
+	if size < LargeFileBytes || heldMemory() < reclaimAbove {
+		return
+	}
+	start := time.Now()
+	reclaim()
+	r.root.Stats.Reclaims.Add(1)
+	r.root.Stats.ReclaimNanos.Add(int64(time.Since(start)))
+}
 
 // Callers the resolver treats specially, by package path prefix.
 const (
@@ -39,10 +70,27 @@ const (
 	// keeps only paths in a Nix store, so its listing is recorded as the
 	// store globs.
 	nixCataloger = "github.com/anchore/syft/syft/pkg/cataloger/nix."
-	// dotnetCataloger asks for ELF executables and shared libraries only
-	// to look for single-file bundles.
-	dotnetCataloger = "github.com/anchore/syft/syft/pkg/cataloger/dotnet."
+	// dotnetBundleSearch asks for ELF executables and shared libraries
+	// (exactly dotnetBundleTypes) only to look for single-file bundles.
+	// The filter applies to that caller and that query only: any other
+	// query, in that package or elsewhere, is answered in full.
+	dotnetBundleSearch = "github.com/anchore/syft/syft/pkg/cataloger/dotnet.findELFBundledDepsJSON"
 )
+
+var dotnetBundleTypes = []string{"application/x-executable", "application/x-sharedlib"}
+
+// isBundleSearch: the query is the .NET bundle search's, exactly.
+func isBundleSearch(caller string, types []string) bool {
+	if caller != dotnetBundleSearch || len(types) != len(dotnetBundleTypes) {
+		return false
+	}
+	for _, t := range dotnetBundleTypes {
+		if !slices.Contains(types, t) {
+			return false
+		}
+	}
+	return true
+}
 
 var nixStoreGlobs = []string{"**/nix/store/*", "**/nix/store/*/**"}
 

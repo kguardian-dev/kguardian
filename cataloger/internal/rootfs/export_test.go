@@ -21,3 +21,10 @@ func SetReclaim(f func()) func() {
 	reclaim = f
 	return func() { reclaim = old }
 }
+
+// SetReclaimAbove changes the held-memory floor for collecting.
+func SetReclaimAbove(n uint64) func() {
+	old := reclaimAbove
+	reclaimAbove = n
+	return func() { reclaimAbove = old }
+}

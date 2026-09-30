@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/anchore/syft/syft"
 	"golang.org/x/sys/unix"
 
 	"github.com/kguardian-dev/kguardian/cataloger/internal/protocol"
@@ -126,6 +128,7 @@ func TestDotnetBundleCheckKeepsResults(t *testing.T) {
 	})()
 	reclaims := 0
 	defer rootfs.SetReclaim(func() { reclaims++ })()
+	defer rootfs.SetReclaimAbove(0)()
 
 	on := scanRoot(t, dir)
 	if on.Status != protocol.StatusOK {
@@ -135,8 +138,8 @@ func TestDotnetBundleCheckKeepsResults(t *testing.T) {
 	if !reflect.DeepEqual(checked, want) {
 		t.Errorf("marker checks %v, want %v", checked, want)
 	}
-	if reclaims == 0 {
-		t.Error("no collection before the 40 MiB file")
+	if reclaims == 0 || on.Stats.Reclaims != int64(reclaims) {
+		t.Errorf("collections before the 40 MiB file: %d, stats %d", reclaims, on.Stats.Reclaims)
 	}
 	found := false
 	for _, c := range on.Components {
@@ -164,4 +167,42 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// The .NET bundle check applies to one query only: the one
+// dotnet.findELFBundledDepsJSON makes, for exactly ELF executables and
+// shared libraries. Any other MIME query from that package is answered in
+// full (the filter is keyed on the exact caller and types), so a Syft
+// that adds one loses no package; this fails so the filter is reviewed.
+func TestDotnetBundleQueryIsTheOnlyOneFromDotnet(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "etc/os-release"), []byte("ID=debian\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := rootfs.Open(fd, scan.RootOptions(protocol.ProfileFull, protocol.Budgets{}.Effective(), nil, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	src := rootfs.NewSource(r)
+	if _, err := syft.CreateSBOM(context.Background(), src, scan.SyftConfig(protocol.ProfileFull, "test")); err != nil {
+		t.Fatal(err)
+	}
+	const want = "github.com/anchore/syft/syft/pkg/cataloger/dotnet.findELFBundledDepsJSON: application/x-executable,application/x-sharedlib"
+	var fromDotnet []string
+	for _, q := range src.Resolver().MIMEQueries() {
+		if strings.HasPrefix(q, "github.com/anchore/syft/syft/pkg/cataloger/dotnet.") {
+			fromDotnet = append(fromDotnet, q)
+		}
+	}
+	if len(fromDotnet) != 1 || fromDotnet[0] != want {
+		t.Errorf("MIME queries from the .NET catalogers: %q, want only %q", fromDotnet, want)
+	}
 }

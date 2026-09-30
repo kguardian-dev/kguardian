@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -248,12 +250,16 @@ type Stats struct {
 	// CtimeDroppedSample: up to MaxDriftSample dropped paths, evidence
 	// first, each at most MaxDriftSamplePathLen bytes.
 	CtimeDroppedSample []string `json:"ctime_dropped_sample,omitempty"`
-	MountSkipped       int64    `json:"mount_skipped"`
-	DepthLimited       int64    `json:"depth_limited"`
-	ComponentsDropped  int64    `json:"components_dropped"`
-	Attempts           int      `json:"attempts"`
-	CapsModel          string   `json:"caps_model"`
-	MaxRSSBytes        int64    `json:"max_rss_bytes,omitempty"`
+	// Reclaims: heap collections before a large file was read, and the
+	// time they took.
+	Reclaims          int64  `json:"reclaims"`
+	ReclaimMS         int64  `json:"reclaim_ms"`
+	MountSkipped      int64  `json:"mount_skipped"`
+	DepthLimited      int64  `json:"depth_limited"`
+	ComponentsDropped int64  `json:"components_dropped"`
+	Attempts          int    `json:"attempts"`
+	CapsModel         string `json:"caps_model"`
+	MaxRSSBytes       int64  `json:"max_rss_bytes,omitempty"`
 	// DegradedMS: how long a degraded worker has been unavailable
 	// (worker_unavailable answers only).
 	DegradedMS int64   `json:"degraded_ms,omitempty"`
@@ -341,6 +347,13 @@ func HasControl(s string) bool {
 func ValidPath(p string) bool {
 	return len(p) > 0 && len(p) <= MaxPathLen && p[0] == '/' && path.Clean(p) == p &&
 		utf8.ValidString(p) && !HasControl(p)
+}
+
+// ValidSamplePath is a drift sample path the Controller keeps: a
+// ValidPath of at most MaxDriftSamplePathLen bytes without any Unicode
+// control character (C1 included, as Rust's char::is_control).
+func ValidSamplePath(p string) bool {
+	return len(p) <= MaxDriftSamplePathLen && ValidPath(p) && strings.IndexFunc(p, unicode.IsControl) < 0
 }
 
 // Truncate cuts s to at most n bytes on a rune boundary.

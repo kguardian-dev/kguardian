@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -361,6 +362,19 @@ func TestPossibleEvidenceMakesItPartial(t *testing.T) {
 		"usr/local/lib/ruby/gems/3.3.0/specifications/rack-3.0.gemspec":       {"Gem::Specification.new", 0o644},
 		"var/www/vendor/composer/installed.json":                              {"{\"packages\":[]}", 0o644},
 		"usr/share/java/release":                                              {"JAVA_VERSION=\"21\"\n", 0o644},
+		// The distroless dpkg database (a "<dir>/*" glob) and others the
+		// review probed.
+		"var/lib/dpkg/status.d/libssl3": {"Package: libssl3\nStatus: install ok installed\nVersion: 3.0.11-1\nArchitecture: amd64\n", 0o644},
+		"nix/store/abc-foo.drv":         {"Derive([])", 0o444},
+		"app/pkg.egg-info/PKG-INFO":     {"Name: x\nVersion: 1\n", 0o644},
+		"usr/local/bin/python3.12":      {"#!/bin/sh\n", 0o755},
+	}
+	// Every "<dir>/*" glob the pinned Syft asks for, made concrete.
+	globs, _, _, _ := catalogerQueries(t, protocol.ProfileFull)
+	for _, g := range globs {
+		if path.Base(g) == "*" {
+			cases[concrete(g)] = lateFile{"data", 0o644}
+		}
 	}
 	for p, f := range cases {
 		t.Run(p, func(t *testing.T) {
@@ -436,17 +450,7 @@ func TestDriftSampleIsBounded(t *testing.T) {
 // another such cataloger fails here.
 func TestCatalogerQueriesAreBounded(t *testing.T) {
 	for _, prof := range []string{protocol.ProfileFull, protocol.ProfileOSOnly} {
-		root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
-		fd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-		must(t, err)
-		r, err := rootfs.Open(fd, RootOptions(prof, protocol.Budgets{}.Effective(), nil, 0))
-		must(t, err)
-		src := rootfs.NewSource(r)
-		if _, err := syft.CreateSBOM(context.Background(), src, SyftConfig(prof, "test")); err != nil {
-			t.Fatal(err)
-		}
-		globs, _, mimes, all := src.Resolver().Queries()
-		_ = r.Close()
+		globs, _, mimes, all := catalogerQueries(t, prof)
 		if all {
 			t.Errorf("%s: a cataloger listed every file", prof)
 		}
@@ -454,7 +458,7 @@ func TestCatalogerQueriesAreBounded(t *testing.T) {
 			t.Errorf("%s: globs %v mimes %v", prof, globs, mimes)
 		}
 		if prof == protocol.ProfileFull {
-			for _, g := range []string{"**/*.jar", "**/*dist-info/METADATA", "**/package.json", "**/nix/store/*"} {
+			for _, g := range []string{"**/*.jar", "**/*dist-info/METADATA", "**/package.json", "**/nix/store/*", "**/lib/dpkg/status.d/*"} {
 				if !slices.Contains(globs, g) {
 					t.Errorf("full: %s not asked for", g)
 				}
@@ -463,16 +467,120 @@ func TestCatalogerQueriesAreBounded(t *testing.T) {
 	}
 }
 
+// Sample paths are made to pass the Controller's valid_path (absolute,
+// no Unicode control character, no empty, "." or ".." segment), or left
+// out.
 func TestSamplePath(t *testing.T) {
+	long := "/d/" + strings.Repeat("a", protocol.MaxDriftSamplePathLen-3) // exactly the limit
 	for in, want := range map[string]string{
 		"/var/log/a.log":               "/var/log/a.log",
 		"/tmp/a\nb\x7f":                "/tmp/a?b?",
 		"/tmp/\xff\xfe":                "/tmp/?",
+		"/tmp/a\u0085b\u009fc":         "/tmp/a?b?c", // C1 controls
 		"/" + strings.Repeat("é", 200): "/" + strings.Repeat("é", 127),
+		long[:255] + "/next":           long[:255], // the cut leaves a trailing "/"
+		long[:254] + "/.hidden":        long[:254], // ... a "." segment
+		long[:253] + "/..x":            long[:253], // ... a ".." segment
+		long + "b":                     long,       // a plain cut
+		"/a/b/../c":                    "",         // not clean: left out
+		"relative":                     "",         // not absolute: left out
+		"/":                            "",         // nothing left
 	} {
-		if got := SamplePath(in); got != want {
-			t.Errorf("SamplePath(%q) = %q, want %q", in, got, want)
+		got, ok := SamplePath(in)
+		if want == "" {
+			if ok {
+				t.Errorf("SamplePath(%q) = %q, want it left out", in, got)
+			}
+			continue
 		}
+		if !ok || got != want {
+			t.Errorf("SamplePath(%q) = %q %v, want %q", in, got, ok, want)
+		}
+		if !protocol.ValidSamplePath(got) {
+			t.Errorf("SamplePath(%q) = %q, not a valid sample path", in, got)
+		}
+	}
+}
+
+// catalogerQueries runs the pinned Syft over a small root and returns
+// what its catalogers asked the resolver for.
+func catalogerQueries(t *testing.T, prof string) (globs, paths, mimes []string, all bool) {
+	t.Helper()
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	fd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	must(t, err)
+	r, err := rootfs.Open(fd, RootOptions(prof, protocol.Budgets{}.Effective(), nil, 0))
+	must(t, err)
+	defer func() { _ = r.Close() }()
+	src := rootfs.NewSource(r)
+	if _, err := syft.CreateSBOM(context.Background(), src, SyftConfig(prof, "test")); err != nil {
+		t.Fatal(err)
+	}
+	return src.Resolver().Queries()
+}
+
+// concrete turns a glob into one path it matches: "**/" dropped, "{a,b}"
+// as a, "*" and "?" as x.
+func concrete(g string) string {
+	for {
+		i := strings.Index(g, "{")
+		if i < 0 {
+			break
+		}
+		j := strings.Index(g[i:], "}") + i
+		alt := strings.SplitN(g[i+1:j], ",", 2)[0]
+		g = g[:i] + alt + g[j+1:]
+	}
+	g = strings.ReplaceAll(g, "**/", "")
+	g = strings.NewReplacer("*", "x", "?", "x").Replace(g)
+	return strings.TrimPrefix(g, "/")
+}
+
+// A symlink created after start: to a directory it can reroute a package
+// database, so it is evidence (here the apk database is only reachable
+// through it: the answer must not be a terminal no_packages_found). To a
+// plain data file, or dangling, it is data.
+func TestRuntimeSymlinks(t *testing.T) {
+	root := apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	must(t, os.MkdirAll(filepath.Join(root, "data"), 0o755))
+	must(t, os.Rename(filepath.Join(root, "lib/apk"), filepath.Join(root, "data/apk")))
+	o := opts()
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"var/log/x.log": {"x", 0o644}})
+	must(t, os.Symlink("../data/apk", filepath.Join(root, "lib/apk")))
+	r := runDir(t, root, o)
+	if r.Reason != protocol.ReasonNoPackagesFound || r.Completeness != protocol.CompletenessPartial ||
+		!has(r.PartialReasons, protocol.PartialCtimeDropped) || r.Stats.CtimeDroppedEvidence != 1 {
+		t.Errorf("directory symlink: %s %s %v %+v", r.Reason, r.Completeness, r.PartialReasons, r.Stats)
+	}
+
+	root = apkRoot(t, []apkPkg{{"busybox", "1.0", map[string]os.FileMode{"bin/busybox": 0o755}}})
+	o.ContainerStartNanos = writeLate(t, root, map[string]lateFile{"var/log/x.log": {"x", 0o644}})
+	must(t, os.Symlink("x.log", filepath.Join(root, "var/log/current")))
+	must(t, os.Symlink("/nonexistent", filepath.Join(root, "var/log/gone")))
+	r = runDir(t, root, o)
+	if r.Completeness != protocol.CompletenessFull || r.Stats.CtimeDroppedData != 3 {
+		t.Errorf("data symlinks: %s %v %+v", r.Completeness, r.PartialReasons, r.Stats)
+	}
+}
+
+func TestDriftSafetyNet(t *testing.T) {
+	r := &protocol.Response{Completeness: protocol.CompletenessFull}
+	r.Stats.CtimeDropped, r.Stats.CtimeDroppedData = 3, 2
+	driftSafetyNet(r)
+	if r.Completeness != protocol.CompletenessPartial || !has(r.PartialReasons, protocol.PartialCtimeDropped) {
+		t.Errorf("unjudged drop: %s %v", r.Completeness, r.PartialReasons)
+	}
+	r = &protocol.Response{Completeness: protocol.CompletenessFull}
+	r.Stats.CtimeDropped, r.Stats.CtimeDroppedData = 2, 2
+	driftSafetyNet(r)
+	if r.Completeness != protocol.CompletenessFull || len(r.PartialReasons) != 0 {
+		t.Errorf("all judged: %s %v", r.Completeness, r.PartialReasons)
+	}
+	r = &protocol.Response{Status: protocol.StatusFailed}
+	r.Stats.CtimeDropped = 2
+	driftSafetyNet(r)
+	if r.Completeness != "" || len(r.PartialReasons) != 0 {
+		t.Errorf("failed before cataloging: %s %v", r.Completeness, r.PartialReasons)
 	}
 }
 

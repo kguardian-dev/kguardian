@@ -488,7 +488,12 @@ func TestValidateRejectsBadChildOutput(t *testing.T) {
 		"drift sample path too long": func(r *protocol.Response) {
 			r.Stats.CtimeDroppedSample = []string{"/" + strings.Repeat("x", protocol.MaxDriftSamplePathLen)}
 		},
-		"drift sample ctl": func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/a\nb"} },
+		"drift sample ctl":      func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/a\nb"} },
+		"drift sample c1":       func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/a\u0085b"} },
+		"drift sample dot":      func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/./a"} },
+		"drift sample dotdot":   func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/.."} },
+		"drift sample slash":    func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"/tmp/"} },
+		"drift sample relative": func(r *protocol.Response) { r.Stats.CtimeDroppedSample = []string{"tmp/a"} },
 	} {
 		r := good()
 		mut(r)

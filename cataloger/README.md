@@ -207,7 +207,8 @@ not path strings, keeps every access inside the root:
   `installed_not_observed`). The SBOM as a whole is `partial`
   (`ctime_dropped`) only when a dropped entry could have been package
   evidence the SBOM now misses: executable-looking and not empty or text,
-  a binary MIME type, or a path or glob one of the configured catalogers
+  a binary MIME type, a symlink to a directory, or a path or glob one of
+  the configured catalogers
   asked the resolver for (package databases, jars, `dist-info/METADATA`,
   `package.json`, ...). The resolver records those queries during the scan,
   so the rule follows the pinned Syft. Runtime data (logs, caches, `.pyc`
@@ -215,6 +216,13 @@ not path strings, keeps every access inside the root:
   partial. `stats` splits the count into `ctime_dropped_evidence` and
   `ctime_dropped_data` and samples up to 20 of the paths (PROTOCOL.md
   §4.2).
+- Runtime deletions leave no new ctime, so this rule cannot see them. The
+  Controller's upperdir check covers the four OS package databases
+  (a write, whiteout, replaced parent or opaque directory: `drift`) and
+  the system-wide Python, Node and Ruby package directories (a whiteout
+  or opaque directory: `lang_whiteout`). A deletion anywhere else (the
+  distroless `status.d` database, a Go binary, a jar, `/app/node_modules`)
+  is not detected; the package is just absent (PROTOCOL.md §4.2).
 
 ## What is sent
 
@@ -346,10 +354,11 @@ to `os_only`. The resolver now gives the .NET bundle search only ELF files
 that carry the bundle marker (streamed, 1 MiB at a time; without the
 marker Syft's search finds nothing, so no result changes), and collects
 the heap and returns it to the kernel before a cataloger opens any file
-of 32 MiB or more. A root with two 240 MiB Go binaries peaks at about
-175 MiB RSS instead of 585 MiB, one with a 600 MiB shared library at
-about 180 MiB instead of 600 MiB; a scan of an ordinary image stays
-around 200 MiB, most of it Syft's license scanner.
+of 32 MiB or more while the process holds 192 MiB or more (`stats.reclaims`
+and `reclaim_ms` count them). A root with two 240 MiB Go binaries peaks
+at about 185 MiB RSS instead of 585 MiB, one with a 600 MiB shared
+library at about 180 MiB instead of 600 MiB; a scan of an ordinary image
+stays around 200 MiB, most of it Syft's license scanner.
 
 **Memory, for the chart (PR 4).** The child fails on its own before the
 container limit: its heap watchdog reports `oom` at `CATALOG_MEMORY_LIMIT`,

@@ -47,6 +47,8 @@ type Stats struct {
 	Swapped      atomic.Int64 // entries that changed type between stat and open
 	Special      atomic.Int64 // devices, FIFOs, sockets (never read)
 	FileBudget   atomic.Bool  // StopAtBudget hit MaxFiles
+	Reclaims     atomic.Int64 // heap collections before a large file
+	ReclaimNanos atomic.Int64 // time spent in them
 }
 
 // Root is a container root handed over as a directory fd.
@@ -69,6 +71,7 @@ type droppedFile struct {
 	mode uint32 // st_mode, type and permission bits
 	size int64
 	mime string // sniffed like an indexed file ("" when not sniffed)
+	link string // symlinks: the in-root target ("" when unreadable)
 	// unsniffed: the file should have been sniffed but could not be read.
 	unsniffed bool
 	atRead    bool // dropped when a cataloger went to read it

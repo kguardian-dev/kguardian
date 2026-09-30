@@ -2,12 +2,14 @@ package rootfs
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	stereofile "github.com/anchore/stereoscope/pkg/file"
 	"github.com/anchore/stereoscope/pkg/filetree"
+	"github.com/bmatcuk/doublestar/v4"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,10 +24,19 @@ type queries struct {
 	paths map[string]struct{}
 	mimes map[string]struct{}
 	all   bool
+	// mimeCallers: every MIME query as "caller: type,type" (sorted types).
+	mimeCallers map[string]struct{}
 }
 
 func newQueries() *queries {
-	return &queries{globs: map[string]struct{}{}, paths: map[string]struct{}{}, mimes: map[string]struct{}{}}
+	return &queries{globs: map[string]struct{}{}, paths: map[string]struct{}{}, mimes: map[string]struct{}{},
+		mimeCallers: map[string]struct{}{}}
+}
+
+func (q *queries) mimeCall(caller string, types []string) {
+	t := slices.Clone(types)
+	sort.Strings(t)
+	q.add(q.mimeCallers, caller+": "+strings.Join(t, ","))
 }
 
 func (q *queries) add(m map[string]struct{}, vals ...string) {
@@ -92,13 +103,37 @@ func (r *Resolver) ClassifyDropped(sampleMax int) DriftSummary {
 	defer q.mu.Unlock()
 
 	evidence := map[string]bool{}
+	// names: each path a query could have found, and the dropped entries
+	// it stands for. A dropped entry stands for its own path; a dropped
+	// symlink also for its resolved target.
+	names := map[string][]string{}
 	for p, d := range dropped {
 		if q.all || d.atRead || executableEvidence(p, d) || mimeEvidence(q.mimes, d) {
 			evidence[p] = true
+			continue
+		}
+		names[p] = append(names[p], p)
+		if d.mode&unix.S_IFMT != unix.S_IFLNK || d.link == "" {
+			continue
+		}
+		// A symlink created after start that leads to a directory can
+		// reroute a package database or any tree a cataloger walks
+		// (lib/apk -> ../data/apk): evidence. One to a file counts when
+		// the file's path was asked for; a dangling one is data.
+		real, md, ok := r.Lookup(d.link)
+		if !ok {
+			continue
+		}
+		if md.IsDir() {
+			evidence[p] = true
+			continue
+		}
+		if real != p {
+			names[real] = append(names[real], p)
 		}
 	}
-	r.pathEvidence(q.paths, dropped, evidence)
-	globEvidence(q.globs, dropped, evidence)
+	r.pathEvidence(q.paths, names, evidence)
+	globEvidence(q.globs, names, evidence)
 
 	var s DriftSummary
 	var ev, data []string
@@ -153,61 +188,85 @@ func mimeEvidence(mimes map[string]struct{}, d droppedFile) bool {
 // path itself, or the path with its directory resolved through the index
 // (a query for /lib/apk/db/installed finds a dropped
 // /usr/lib/apk/db/installed when /lib links to usr/lib).
-func (r *Resolver) pathEvidence(paths map[string]struct{}, dropped map[string]droppedFile, evidence map[string]bool) {
+func (r *Resolver) pathEvidence(paths map[string]struct{}, names map[string][]string, evidence map[string]bool) {
 	byBase := map[string]bool{}
-	for p := range dropped {
-		byBase[path.Base(p)] = true
+	for n := range names {
+		byBase[path.Base(n)] = true
+	}
+	mark := func(n string) {
+		for _, p := range names[n] {
+			evidence[p] = true
+		}
 	}
 	for qp := range paths {
-		if _, ok := dropped[qp]; ok {
-			evidence[qp] = true
-			continue
-		}
 		if !byBase[path.Base(qp)] {
 			continue
 		}
-		dir, _, ok := r.Lookup(path.Dir(qp))
-		if !ok {
-			continue
-		}
-		if p := path.Join(dir, path.Base(qp)); p != qp {
-			if _, ok := dropped[p]; ok {
-				evidence[p] = true
+		mark(qp)
+		if dir, _, ok := r.Lookup(path.Dir(qp)); ok {
+			if n := path.Join(dir, path.Base(qp)); n != qp {
+				mark(n)
 			}
 		}
 	}
 }
 
-// globEvidence runs every recorded glob over a tree of just the dropped
-// entries, with the stereoscope search the resolver itself uses, so a
-// dropped path matches exactly when it would have been found.
-func globEvidence(globs map[string]struct{}, dropped map[string]droppedFile, evidence map[string]bool) {
-	if len(globs) == 0 {
+// globEvidence runs every recorded glob over a tree of just the candidate
+// names (and their ancestor directories, which stereoscope's
+// subdirectory search looks up in the index), with the search the
+// resolver itself uses, so a name matches exactly when it would have been
+// found. A glob ending in "/*" is also matched directly with doublestar,
+// as a second line.
+func globEvidence(globs map[string]struct{}, names map[string][]string, evidence map[string]bool) {
+	if len(globs) == 0 || len(names) == 0 {
 		return
+	}
+	mark := func(n string) {
+		for _, p := range names[n] {
+			evidence[p] = true
+		}
 	}
 	tree := filetree.New()
 	index := filetree.NewIndex()
-	for p, d := range dropped {
-		if evidence[p] {
-			continue
+	dirs := map[string]bool{"/": true}
+	for n := range names {
+		for d := path.Dir(n); !dirs[d]; d = path.Dir(d) {
+			dirs[d] = true
 		}
-		// Every entry as a regular file: only its name has to match, and
-		// a symlink's target is not in this tree to follow.
-		ref, err := tree.AddFile(stereofile.Path(p))
+	}
+	sorted := make([]string, 0, len(dirs))
+	for d := range dirs {
+		sorted = append(sorted, d)
+	}
+	sort.Strings(sorted)
+	for _, d := range sorted {
+		if ref, err := tree.AddDir(stereofile.Path(d)); err == nil && ref != nil {
+			index.Add(*ref, stereofile.Metadata{Path: d, Type: stereofile.TypeDirectory})
+		}
+	}
+	for n := range names {
+		// Every name as a regular file: only the name has to match, and a
+		// symlink's target is not in this tree to follow.
+		ref, err := tree.AddFile(stereofile.Path(n))
 		if err != nil || ref == nil {
-			evidence[p] = true // cannot test it: count it
+			mark(n) // cannot test it: count it
 			continue
 		}
-		index.Add(*ref, stereofile.Metadata{Path: p, Type: stereofile.TypeRegular, MIMEType: d.mime})
+		index.Add(*ref, stereofile.Metadata{Path: n, Type: stereofile.TypeRegular})
 	}
 	search := filetree.NewSearchContext(tree, index)
 	for g := range globs {
-		res, err := search.SearchByGlob(g)
-		if err != nil {
-			continue
+		if res, err := search.SearchByGlob(g); err == nil {
+			for _, rv := range res {
+				mark(string(rv.RealPath))
+			}
 		}
-		for _, rv := range res {
-			evidence[string(rv.RealPath)] = true
+		if path.Base(g) == "*" {
+			for n := range names {
+				if ok, _ := doublestar.Match(g, n); ok {
+					mark(n)
+				}
+			}
 		}
 	}
 }
@@ -227,4 +286,17 @@ func (r *Resolver) Queries() (globs, paths, mimes []string, all bool) {
 		return out
 	}
 	return keys(q.globs), keys(q.paths), keys(q.mimes), q.all
+}
+
+// MIMEQueries returns every MIME query so far as "caller: type,type".
+func (r *Resolver) MIMEQueries() []string {
+	q := r.q
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]string, 0, len(q.mimeCallers))
+	for k := range q.mimeCallers {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

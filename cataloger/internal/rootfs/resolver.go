@@ -128,12 +128,14 @@ func (r *Resolver) FilesByGlob(patterns ...string) ([]file.Location, error) {
 func (r *Resolver) FilesByMIMEType(types ...string) ([]file.Location, error) {
 	seen := stereofile.NewFileReferenceSet()
 	out := make([]file.Location, 0)
+	caller := catalogerCaller()
 	r.q.add(r.q.mimes, types...)
+	r.q.mimeCall(caller, types)
 	refVias, err := r.search.SearchByMIMEType(types...)
 	if err != nil {
 		return nil, err
 	}
-	bundleSearch := bundleFilter && strings.HasPrefix(catalogerCaller(), dotnetCataloger)
+	bundleSearch := bundleFilter && isBundleSearch(caller, types)
 	for _, rv := range refVias {
 		if !rv.HasReference() || seen.Contains(*rv.Reference) {
 			continue
@@ -169,8 +171,8 @@ func (r *Resolver) FileContentsByLocation(loc file.Location) (io.ReadCloser, err
 	if entry.Type == stereofile.TypeDirectory {
 		return nil, fmt.Errorf("cannot read contents of non-file %q", loc.RealPath)
 	}
-	if entry.FileInfo != nil && entry.Size() >= LargeFileBytes {
-		reclaim()
+	if entry.FileInfo != nil {
+		r.maybeReclaim(entry.Size())
 	}
 	return r.root.OpenFile(loc.RealPath)
 }

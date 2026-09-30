@@ -646,8 +646,8 @@ func Validate(r *protocol.Response, b protocol.Budgets) error {
 		return errors.New("drift sample too long")
 	}
 	for _, p := range r.Stats.CtimeDroppedSample {
-		if len(p) > protocol.MaxDriftSamplePathLen || protocol.HasControl(p) {
-			return errors.New("drift sample path too long")
+		if !protocol.ValidSamplePath(p) {
+			return fmt.Errorf("drift sample path %q", protocol.Truncate(p, 64))
 		}
 	}
 	if int64(len(r.Components)) > b.MaxComponents {
