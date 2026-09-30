@@ -17,6 +17,7 @@ mod ip;
 pub mod leader;
 mod maintenance;
 mod netpol;
+pub mod node_catalog;
 mod node_status;
 mod peer;
 mod pod_security;

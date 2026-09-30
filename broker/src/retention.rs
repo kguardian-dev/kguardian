@@ -2594,6 +2594,11 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     if !crate::leader::still_leader("supply-chain pass") {
         return;
     }
+    // 2a. Node catalog: priorities, gauges and retention (node_catalog.rs).
+    run_node_catalog_pass(pool, batch).await;
+    if !crate::leader::still_leader("supply-chain pass") {
+        return;
+    }
     // 3. Payloads of images nothing runs.
     if days == 0 {
         return;
@@ -2610,6 +2615,61 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
         );
     } else {
         debug!("supply-chain retention: nothing to remove");
+    }
+}
+
+/// The node catalog's share of the supply-chain pass. Nothing at all runs
+/// until some node has offered (an install that never uses the catalog
+/// pays one EXISTS query). Then: claim priorities from the running
+/// inventory, the queue and coverage gauges, and deletion of claims, node
+/// SBOMs and flags `NODE_CATALOG_RETENTION_DAYS` (default 14; 0 keeps
+/// them) after the digest left the inventory (`images.last_seen`).
+async fn run_node_catalog_pass(pool: &DbPool, batch: i64) {
+    use crate::node_catalog as nc;
+    let window = crate::image_inventory::running_window_secs();
+    let p = pool.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<bool, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        if !nc::in_use(&mut conn).map_err(RetentionError::Diesel)? {
+            return Ok(false);
+        }
+        nc::refresh_priorities(&mut conn, window).map_err(RetentionError::Diesel)?;
+        nc::refresh_gauges(&mut conn, window).map_err(RetentionError::Diesel)?;
+        Ok(true)
+    })
+    .await;
+    match r {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return,
+        Ok(Err(e)) => {
+            warn!(error = %e, "node catalog refresh failed");
+            return;
+        }
+        Err(e) => {
+            warn!(error = %e, "node catalog refresh panicked");
+            return;
+        }
+    }
+    let days = nc::CatalogConfig::global().retention_days;
+    if days == 0 {
+        return;
+    }
+    let removed =
+        run_supplychain_steps(pool, move |conn| nc::retention_batch(conn, days, batch)).await;
+    let p = pool.clone();
+    let nodes = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        nc::prune_platforms(&mut conn, days).map_err(RetentionError::Diesel)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(0);
+    if removed > 0 || nodes > 0 {
+        info!(
+            digests = removed,
+            nodes, "node catalog retention removed digests and nodes no longer seen"
+        );
     }
 }
 

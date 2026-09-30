@@ -40,6 +40,7 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `BROKER_TOKEN_READ` | unset | Token with the `read` scope (frontend proxy, llm-bridge, CLI) |
 | `BROKER_TOKEN_INGEST` | unset | Token with `ingest` + `read` (controller) |
 | `BROKER_TOKEN_SUPPLYCHAIN` | unset | Token with `supplychain` + `read` (supply-chain writes) |
+| `BROKER_TOKEN_CATALOG` | unset | Token with the `catalog` scope only (the Controller's node catalog claims and SBOM uploads). Without it the catalog writes answer `503` |
 | `BROKER_TOKEN_ADMIN` | unset | Token with every scope (operators) |
 | `BROKER_AUTH_TOKEN` | unset | Shared token from before scopes existed: `read` + `ingest` |
 | `EVALUATOR_URL` | unset | Enables audit-evaluator forwarding when set |
@@ -71,6 +72,10 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `BROKER_MAINTENANCE_VACUUM_ENABLED` | `true` | Leader-only `VACUUM (ANALYZE)` of the small high-churn tables when autovacuum falls behind (see below); `false` disables |
 | `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` | `300` | How often the leader checks those tables' dead tuples (min 60). One schedule across replicas, like the retention loops (`leader_task_runs`) |
 | `BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES` | `10000` | Dead tuples (heap + TOAST) a table needs, and at least a fifth of its live rows, before it is vacuumed (min 1000) |
+| `NODE_CATALOG_GRANTS` | `true` | `false` stops every node catalog grant (the kill switch); uploads under a live lease still complete |
+| `NODE_CATALOG_MAX_EPOCH` | `1000` | Highest catalog epoch accepted on claims and uploads (`422` above) |
+| `NODE_CATALOG_MAX_HOLD_SECS` | `7200` | A claim held longer is not renewed (`409`); at least the 15 minute lease |
+| `NODE_CATALOG_RETENTION_DAYS` | `14` | Delete node catalog claims, node SBOMs and package flags this many days after the digest left the image inventory (`images.last_seen`); `0` keeps them |
 | `RUST_LOG` | `info` | Log level |
 
 ### Running more than one replica
@@ -133,6 +138,58 @@ off, doubling up to an hour. `/metrics`:
 - `broker_maintenance_vacuum_last_success_timestamp_seconds`: the last pass
   that checked every table without a failure (0 on followers). Steady
   `vacuumed` counts mean autovacuum is not doing its job on this database.
+
+### Node catalog
+
+Each node's Controller offers the image digests it runs, and the Broker grants
+each digest to exactly one node that runs it (a live pod on that node, by
+`pod_details` and the image inventory). The node catalogs the image and posts
+the SBOM, stored as SBOM source `node` with trust `scanned`. The design is in
+[`docs/design/node-catalog.md`](../docs/design/node-catalog.md); the code is
+`src/node_catalog.rs`.
+
+| Route | Scope | |
+|---|---|---|
+| `POST /catalog/claims` | `catalog` | `{node, platform, epoch, offer[]}`: at most one grant, `{grantsEnabled, grant: {digest, claimToken, leaseExpiresAt, leaseSeconds} \| null}` |
+| `PUT /catalog/claims/{digest}` | `catalog` | `X-Kguardian-Claim` token; `{action: renew\|fail\|skip, node, reason}` |
+| `POST /catalog/images/{digest}/sbom` | `catalog` | `X-Kguardian-Claim` token; an `ImageSBOM` v1 (paged, gzip, at most 8 MiB compressed) plus `epoch`, `completeness`, `partial_reasons`, `stats` and per component `files_truncated` / `interpreted_content`; up to 4096 file paths per component |
+| `GET /catalog/coverage` | `read` | running images with a trusted SBOM (Trivy Operator or node), claims by state, completeness and reason |
+| `GET /catalog/status?node=` | `read` | one node's platform, held claims, cataloged count and releases by reason |
+
+The three writes answer `503` until `BROKER_TOKEN_CATALOG` is set. A claim
+token that no longer holds its digest (released, re-granted, lease expired),
+or an upload `epoch` below the one the claim was granted under, gets `409`
+and writes nothing. A grant never moves the digest's epoch; only a stored
+SBOM does, and a higher epoch replaces the stored SBOM whatever the scan
+times. At most 16 uploads are read or queued at once (the node share of the
+ingest queue is half of it, and of the SBOM page staging ceiling); beyond
+that `503` with `Retry-After`, before the body is read. The node name in a
+claim is self-asserted: one catalog token serves every node, so a stolen one
+can claim any digest running on some node, and nothing else. It can also pin
+a digest's epoch at the ceiling by uploading at `NODE_CATALOG_MAX_EPOCH`;
+recover by deleting that digest's `node_catalog_claims` row, or by raising
+`NODE_CATALOG_MAX_EPOCH` and bumping the Controller's epoch above it. A
+lease lasts 15 minutes; `timeout`, `oom` and `error` back off 1 h, 6 h, then
+24 h; `pid_gone` and `drift` release the digest to other nodes at once, at
+most 3 times per node in 24 h before that node is skipped for 24 h; the
+per-node reasons (`lsm_denied`, `sandboxed`, ...) skip the node for 24 h.
+`GET /images` items gain `sbomSources` and `nodeCatalog {state, reason,
+platform, completeness, catalogedAt}`, both left out when empty. `GET
+/images/{digest}/sbom` returns at most 16 `filePaths` per component, with
+`filePathsTotal` when there are more (a node SBOM keeps up to 4096 for the
+in-use match). A node SBOM links only to the digest it was claimed for, and
+feeds no in-use verdict yet.
+
+`/metrics`:
+
+- `kguardian_node_catalog_granted_total{reason}`: grants, by why the digest was claimable (`pending`, `backoff_elapsed`, `lease_expired`, `epoch`)
+- `kguardian_node_catalog_cataloged_total{reason}`: completed claims by completeness (`full`, `partial`, `os_only`), or `no_packages_found` / `superseded`
+- `kguardian_node_catalog_failed_total{reason}`: claims released by `timeout`, `oom`, `error`, `pid_gone`, `drift`, `exited_before_catalog`
+- `kguardian_node_catalog_skipped_total{reason}`: nodes skipped for a digest, by per-node reason or `retry_cap`
+- `kguardian_node_catalog_scan_duration_seconds`: histogram of the cataloger's reported scan time
+- `kguardian_node_catalog_grants_enabled`: 0 while `NODE_CATALOG_GRANTS=false`
+- `kguardian_node_catalog_token_missing`: 1 while `BROKER_TOKEN_CATALOG` is not set
+- `kguardian_node_catalog_queue_depth`, `kguardian_node_catalog_coverage_ratio`: offered digests not yet cataloged, and the share of running digests with a trusted SBOM; computed by the leader's supply-chain pass, so only the leader reports them
 
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
 natively in CI and the broker image is smoke-executed on both amd64 and arm64

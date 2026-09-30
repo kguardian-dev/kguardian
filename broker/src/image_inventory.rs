@@ -857,6 +857,43 @@ pub struct ImageSummary {
     /// retention prunes it.
     #[diesel(sql_type = BigInt)]
     pub running_containers: i64,
+    /// Sources with an SBOM linked to this digest (`trivy-operator`,
+    /// `registry`, `node`, ...). Left out when there is none.
+    #[diesel(sql_type = Array<Text>)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sbom_sources: Vec<String>,
+    /// The node catalog's state for this digest. Left out when no node
+    /// has offered it.
+    #[diesel(embed)]
+    #[serde(skip_serializing_if = "NodeCatalogState::is_absent")]
+    pub node_catalog: NodeCatalogState,
+}
+
+/// `nodeCatalog` on a `GET /images` item (node_catalog.rs).
+#[derive(Debug, Clone, QueryableByName, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeCatalogState {
+    /// pending | claimed | done | failed
+    #[diesel(sql_type = Nullable<Text>, column_name = nc_state)]
+    pub state: Option<String>,
+    #[diesel(sql_type = Nullable<Text>, column_name = nc_reason)]
+    pub reason: Option<String>,
+    #[diesel(sql_type = Nullable<Text>, column_name = nc_platform)]
+    pub platform: Option<String>,
+    /// full | partial | os_only
+    #[diesel(sql_type = Nullable<Text>, column_name = nc_completeness)]
+    pub completeness: Option<String>,
+    #[diesel(
+        sql_type = Nullable<diesel::sql_types::Timestamptz>,
+        column_name = nc_cataloged_at
+    )]
+    pub cataloged_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl NodeCatalogState {
+    pub fn is_absent(&self) -> bool {
+        self.state.is_none()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -871,8 +908,15 @@ const IMAGES_LIST_SQL: &str = concat!(
     "SELECT i.digest, i.repository, i.tags, i.digest_kind, i.first_seen, i.last_seen, \
     (SELECT count(*) FROM workload_containers wc WHERE wc.image_digest = i.digest AND ",
     running_sql!("$5"),
-    ") AS running_containers \
+    ") AS running_containers, \
+    COALESCE((SELECT array_agg(DISTINCT l.source ORDER BY l.source) \
+        FROM supplychain_image_links l JOIN vuln_sources vs ON vs.digest = l.digest \
+            AND vs.source = l.source AND vs.kind = 'sbom' \
+        WHERE l.image_digest = i.digest), '{}') AS sbom_sources, \
+    nc.state AS nc_state, nc.reason AS nc_reason, nc.platform AS nc_platform, \
+    nc.completeness AS nc_completeness, nc.cataloged_at AS nc_cataloged_at \
 FROM images i \
+LEFT JOIN node_catalog_claims nc ON nc.inventory_digest = i.digest \
 WHERE ($1::text IS NULL OR i.digest > $1) \
   AND ($2::text IS NULL OR EXISTS (SELECT 1 FROM workload_containers wc \
         WHERE wc.image_digest = i.digest AND wc.pod_namespace = $2)) \

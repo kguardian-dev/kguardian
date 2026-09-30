@@ -9,16 +9,22 @@
 //! | `read`        | frontend proxy, llm-bridge, CLI      | read                       |
 //! | `ingest`      | controller                           | ingest + read              |
 //! | `supplychain` | supply-chain component (vuln/attest) | supplychain + read         |
+//! | `catalog`     | controller node catalog (node SBOMs) | catalog                    |
 //! | `admin`       | operators, break-glass               | everything                 |
 //!
 //! `supplychain` is its own token so a compromised pod holding the
 //! ingest (or read) token can't post a forged "clean" scan result.
+//! `catalog` is its own token for the same reason, and carries nothing
+//! else. The node a claim names is self-asserted (one token serves every
+//! node), so a stolen one can post node SBOMs for any digest the
+//! inventory sees running on some node, under a grant, and nothing else:
+//! no other source, no read (node_catalog.rs).
 //!
 //! Tokens come from the environment (the chart mounts them from one
 //! Secret with a key per scope):
 //!
 //! - `BROKER_TOKEN_READ`, `BROKER_TOKEN_INGEST`,
-//!   `BROKER_TOKEN_SUPPLYCHAIN`, `BROKER_TOKEN_ADMIN`
+//!   `BROKER_TOKEN_SUPPLYCHAIN`, `BROKER_TOKEN_CATALOG`, `BROKER_TOKEN_ADMIN`
 //! - `BROKER_AUTH_TOKEN`: the pre-scopes single shared token. Grants
 //!   read + ingest, i.e. what it granted before scopes existed.
 //!
@@ -52,6 +58,8 @@ pub enum Scope {
     Ingest,
     SupplyChain,
     Admin,
+    /// Node catalog claims and node SBOM uploads (node_catalog.rs).
+    Catalog,
 }
 
 impl Scope {
@@ -61,6 +69,7 @@ impl Scope {
             Scope::Ingest => 2,
             Scope::SupplyChain => 4,
             Scope::Admin => 8,
+            Scope::Catalog => 16,
         }
     }
 
@@ -70,6 +79,7 @@ impl Scope {
             Scope::Ingest => "ingest",
             Scope::SupplyChain => "supplychain",
             Scope::Admin => "admin",
+            Scope::Catalog => "catalog",
         }
     }
 }
@@ -105,6 +115,7 @@ const READ: Access = Access::Requires(Scope::Read);
 const INGEST: Access = Access::Requires(Scope::Ingest);
 const SUPPLYCHAIN: Access = Access::Requires(Scope::SupplyChain);
 const ADMIN: Access = Access::Requires(Scope::Admin);
+const CATALOG: Access = Access::Requires(Scope::Catalog);
 
 /// Every broker route and the access it needs. Keep sorted by area.
 pub const ROUTES: &[RouteRule] = &[
@@ -224,6 +235,13 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/attestations/policy", READ),
     // ImageTrustPolicy results, from the evaluator (#1533).
     rule("GET", "/image-trust", READ),
+    // Node catalog (docs/design/node-catalog.md). Claims and uploads take
+    // the catalog token, which nothing else carries; the reports are reads.
+    rule("POST", "/catalog/claims", CATALOG),
+    rule("PUT", "/catalog/claims/{digest}", CATALOG),
+    rule("POST", "/catalog/images/{digest}/sbom", CATALOG),
+    rule("GET", "/catalog/coverage", READ),
+    rule("GET", "/catalog/status", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.
@@ -242,9 +260,16 @@ const TOKEN_SOURCES: &[(&str, &[Scope])] = &[
         "BROKER_TOKEN_SUPPLYCHAIN",
         &[Scope::SupplyChain, Scope::Read],
     ),
+    ("BROKER_TOKEN_CATALOG", &[Scope::Catalog]),
     (
         "BROKER_TOKEN_ADMIN",
-        &[Scope::Admin, Scope::Read, Scope::Ingest, Scope::SupplyChain],
+        &[
+            Scope::Admin,
+            Scope::Read,
+            Scope::Ingest,
+            Scope::SupplyChain,
+            Scope::Catalog,
+        ],
     ),
     // Pre-scopes shared token: exactly what it granted before.
     ("BROKER_AUTH_TOKEN", &[Scope::Read, Scope::Ingest]),
@@ -323,6 +348,11 @@ impl AuthConfig {
     /// Env var names that configured a token (never the tokens).
     pub fn sources(&self) -> &[&'static str] {
         &self.sources
+    }
+
+    /// Whether the env var `var` supplied a token.
+    pub fn configured_by(&self, var: &str) -> bool {
+        self.sources.contains(&var)
     }
 
     /// Union of scopes for `presented`, or `None` if it matches no token.
@@ -509,12 +539,14 @@ mod tests {
     const INGEST_TOK: &str = "ingest-token-0123456789";
     const SC_TOK: &str = "supplychain-token-0123456789";
     const ADMIN_TOK: &str = "admin-token-0123456789";
+    const CAT_TOK: &str = "catalog-token-0123456789";
 
     fn scoped() -> AuthConfig {
         AuthConfig::from_lookup(lookup(&[
             ("BROKER_TOKEN_READ", READ_TOK),
             ("BROKER_TOKEN_INGEST", INGEST_TOK),
             ("BROKER_TOKEN_SUPPLYCHAIN", SC_TOK),
+            ("BROKER_TOKEN_CATALOG", CAT_TOK),
             ("BROKER_TOKEN_ADMIN", ADMIN_TOK),
         ]))
         .unwrap()
@@ -548,7 +580,10 @@ mod tests {
         assert_eq!(s(READ_TOK), Scope::Read.bit());
         assert_eq!(s(INGEST_TOK), Scope::Ingest.bit() | Scope::Read.bit());
         assert_eq!(s(SC_TOK), Scope::SupplyChain.bit() | Scope::Read.bit());
-        assert_eq!(s(ADMIN_TOK), 0b1111);
+        assert_eq!(s(CAT_TOK), Scope::Catalog.bit());
+        assert_eq!(s(ADMIN_TOK), 0b11111);
+        assert!(cfg.configures(Scope::Catalog));
+        assert!(cfg.configured_by("BROKER_TOKEN_CATALOG"));
         assert_eq!(cfg.scopes_for(b"nope"), None);
         assert_eq!(cfg.scopes_for(b""), None);
     }
@@ -837,6 +872,7 @@ mod tests {
             let read = status_of!(app, r.method, &path, Some(READ_TOK));
             let ingest = status_of!(app, r.method, &path, Some(INGEST_TOK));
             let sc = status_of!(app, r.method, &path, Some(SC_TOK));
+            let cat = status_of!(app, r.method, &path, Some(CAT_TOK));
             let admin = status_of!(app, r.method, &path, Some(ADMIN_TOK));
             let label = format!("{} {}", r.method, r.pattern);
             match r.access {
@@ -867,6 +903,11 @@ mod tests {
                         allowed(sc),
                         expect(&[Scope::SupplyChain, Scope::Read]),
                         "{label}: supplychain token got {sc}"
+                    );
+                    assert_eq!(
+                        allowed(cat),
+                        expect(&[Scope::Catalog]),
+                        "{label}: catalog token got {cat}"
                     );
                     if !allowed(read) {
                         assert_eq!(
@@ -904,6 +945,10 @@ mod tests {
             ("DELETE", "/seccomp/%63rs/a/b"),
             ("POST", "/images/x/%76ulnerabilities"),
             ("POST", "/images/x/%73bom"),
+            ("POST", "/catalog/%63laims"),
+            ("PUT", "/catalog/claims/%78"),
+            ("POST", "/catalog/images/x/%73bom"),
+            ("POST", "/%63atalog/images/x/sbom"),
         ];
         for (method, path) in cases {
             let read = status_of!(app, method, path, Some(READ_TOK));
@@ -982,11 +1027,13 @@ mod tests {
         let app = app!(AuthConfig::default());
         for r in ROUTES {
             let s = status_of!(app, r.method, &concrete(r.pattern), None);
-            if r.access == SUPPLYCHAIN {
+            if r.access == SUPPLYCHAIN || r.access == CATALOG {
                 // The one deliberate exception: supply-chain ingest refuses
                 // to run without scoped auth (supplychain::not_scoped), so
                 // an open broker can't be fed forged scan results. 503, not
-                // 403: the component keeps the payload and retries.
+                // 403: the component keeps the payload and retries. The
+                // node catalog's writes refuse the same way until its own
+                // token is configured (node_catalog::catalog_allowed).
                 assert_eq!(
                     s,
                     StatusCode::SERVICE_UNAVAILABLE,
