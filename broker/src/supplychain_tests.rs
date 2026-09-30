@@ -3852,3 +3852,159 @@ fn live_database_cve_summary_rebuild_names_every_column() {
     written.sort();
     assert_eq!(written, table);
 }
+
+/// Node catalog SBOMs (source `node`) feed no in-use verdict until the
+/// guard of design section 5 lands: the dlopen fixture above, with its
+/// SBOM from the node catalog and its findings matched from it, under
+/// full coverage. Nothing is loaded or installed-not-observed, no VEX
+/// statement is drafted, and the packages, findings and CycloneDX export
+/// are all still there. The same SBOM from Trivy Operator restores both
+/// verdicts, so the guard is on the source alone.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_node_sbom_produces_no_in_use_verdict() {
+    use crate::in_use_store::{self as iu, VexOutcome};
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let mut conn = live_conn();
+    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+            runtime_in_use_coverage, workload_network_exposure;",
+    );
+    crate::runtime_inventory::restore_coverage_function(&mut conn);
+    let img = d(79);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    let lib = |n: &str| format!("/usr/lib/x86_64-linux-gnu/lib{n}.so.1");
+    let sbom = |source: &str| {
+        let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+        s["source"] = json!(source);
+        s["components"] = json!([
+            {"name": "libfoo1", "version": "1.2.3-1", "purl": "pkg:deb/debian/libfoo1@1.2.3-1",
+             "type": "debian", "file_paths": [lib("foo")]},
+            {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
+             "type": "debian", "file_paths": [lib("bar")]},
+        ]);
+        s
+    };
+    let p = normalise_sbom_from(
+        &img,
+        serde_json::from_value(sbom(NODE_SOURCE)).unwrap(),
+        Utc::now(),
+        |s| s == NODE_SOURCE,
+        NODE_SOURCE,
+        MAX_FILE_PATHS,
+    )
+    .unwrap();
+    store_sbom(&mut conn, p).unwrap();
+    // The matcher's findings, matched from the node SBOM.
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0001", "HIGH", Some("1.2.4")),
+            ("CVE-2026-0002", "HIGH", Some("4.6")),
+        ],
+    );
+    v["source"] = json!("grype");
+    v["sbom_source"] = json!(["node"]);
+    v["sbom_trust"] = json!("scanned");
+    v["observed_in"] = json!([]);
+    for (i, (name, ver)) in [("libfoo1", "1.2.3-1"), ("libbar1", "4.5-2")]
+        .iter()
+        .enumerate()
+    {
+        v["vulnerabilities"][i]["package"] = json!({"name": name, "version": ver, "type": "debian",
+            "purl": format!("pkg:deb/debian/{name}@{ver}")});
+        v["vulnerabilities"][i]["class"] = json!("os-pkgs");
+        v["vulnerabilities"][i]["file_paths"] = json!([]);
+    }
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', \
+                '/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3', 'ebpf', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+        ),
+    );
+    let whole = iu::UseEvidence {
+        complete: true,
+        truncated: vec![],
+    };
+    let t = crate::in_use::TierSettings::default();
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let refresh = |conn: &mut PgConnection| {
+        exec(conn, "TRUNCATE runtime_package_use, runtime_unowned_paths");
+        iu::refresh_package_use_batch(conn, None, 10).unwrap();
+        iu::refresh_coverage(conn, &t, &whole).unwrap();
+        iu::refresh_exposure(conn, 168).unwrap();
+    };
+    let states = |conn: &mut PgConnection| {
+        let p = image_vulnerabilities_filtered(conn, &img, None, &ListFilters::default(), None, 50)
+            .unwrap();
+        let mut s: Vec<(String, &'static str)> = p
+            .items
+            .iter()
+            .map(|f| (f.package.name.clone(), f.in_use_state))
+            .collect();
+        s.sort();
+        s
+    };
+    let _stub = CoverageStub::install(&mut conn);
+    refresh(&mut conn);
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM runtime_package_use"),
+        0,
+        "no package is marked in use from a node SBOM"
+    );
+    assert_eq!(
+        states(&mut conn),
+        [
+            ("libbar1".to_string(), "unknown"),
+            ("libfoo1".to_string(), "unknown"),
+        ],
+        "both findings listed, neither with a verdict"
+    );
+    assert!(!matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Draft(ref d) if d.statements > 0
+    ));
+    // Packages and the export are unaffected.
+    assert_eq!(component_names(&mut conn, &img), ["libfoo1", "libbar1"]);
+    match crate::supplychain_read::cyclonedx_for(&mut conn, &img, 100).unwrap() {
+        crate::supplychain_read::CycloneDx::Doc(doc, report, n) => {
+            assert_eq!((report.source.as_str(), n), ("node", 2));
+            let doc = serde_json::to_value(&doc).unwrap();
+            assert_eq!(doc["components"].as_array().unwrap().len(), 2);
+        }
+        _ => panic!("expected the node SBOM as CycloneDX"),
+    }
+    // The same SBOM from Trivy Operator: the verdicts are back.
+    store_s(&mut conn, sbom("trivy-operator")).unwrap();
+    relink_batch(&mut conn, None, 100).unwrap();
+    refresh(&mut conn);
+    assert_eq!(
+        states(&mut conn),
+        [
+            ("libbar1".to_string(), "installed_not_observed"),
+            ("libfoo1".to_string(), "loaded"),
+        ]
+    );
+}

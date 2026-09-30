@@ -112,6 +112,10 @@ RETURNING inventory_digest, claim_token, lease_expires_at;
   `exited_before_catalog`; per node `sandboxed`, `lazy_snapshotter`, `unsupported_rootfs`,
   `kernel_unsupported`, `lsm_denied`, `caps_unavailable`, `deferred_pressure`, `worker_unavailable`,
   `no_cataloger`; terminal `no_packages_found`. Anything else is refused (422).
+- **In-use withheld until PR 6:** `kg_pkg_in_use` (redefined in the same migration) and
+  `in_use_store::refresh_package_use_batch` ignore `source = 'node'`, so a node SBOM yields no
+  `executed`/`loaded`/`installed_not_observed` verdict and no VEX statement. Its packages, findings
+  and CycloneDX export are unaffected. PR 6 drops the exclusion together with the section 5 guard.
 - **Token:** the catalog writes need `BROKER_TOKEN_CATALOG` itself to be set (an admin token alone
   does not enable them, since the Controller would have nothing to post with); the catalog token
   carries only `catalog`, not `read`.

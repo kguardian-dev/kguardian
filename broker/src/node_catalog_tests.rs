@@ -1285,8 +1285,21 @@ fn live_database_migration_is_reversible_and_idempotent() {
         ),
         0
     );
+    let guarded = |conn: &mut PgConnection| {
+        count(
+            conn,
+            "SELECT count(*) AS n FROM pg_proc WHERE proname = 'kg_pkg_in_use' \
+             AND prosrc LIKE '%sc.source <> ''node''%'",
+        )
+    };
+    assert_eq!(
+        guarded(&mut conn),
+        0,
+        "down restores the unguarded function"
+    );
     conn.run_pending_migrations(TEST_MIGRATIONS).unwrap();
     assert_eq!(tables(&mut conn), 3);
+    assert_eq!(guarded(&mut conn), 1);
     conn.batch_execute(up).unwrap();
     assert!(conn.pending_migrations(TEST_MIGRATIONS).unwrap().is_empty());
 }

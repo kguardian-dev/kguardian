@@ -251,10 +251,12 @@ pub(crate) fn refresh_image_use_capped(
         #[diesel(sql_type = Bool)]
         has: bool,
     }
+    // Node catalog SBOMs (source 'node') feed no in-use verdict until the
+    // platform / completeness / flag guard lands (design section 5, PR 6).
     let has_sbom = sql_query(
         "SELECT EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
              ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-         WHERE l.image_digest = $1) AS has",
+         WHERE l.image_digest = $1 AND l.source <> 'node') AS has",
     )
     .bind::<Text, _>(image)
     .get_result::<Has>(conn)?
@@ -266,7 +268,8 @@ pub(crate) fn refresh_image_use_capped(
             "SELECT DISTINCT c.name, COALESCE(c.version, '') AS version, c.file_paths \
              FROM supplychain_image_links l \
              JOIN image_sbom_components c ON c.digest = l.digest AND c.source = l.source \
-             WHERE l.image_digest = $1 AND c.file_paths && $2::text[]",
+             WHERE l.image_digest = $1 AND l.source <> 'node' \
+               AND c.file_paths && $2::text[]",
         )
         .bind::<Text, _>(image)
         .bind::<Array<Text>, _>(&cands)
