@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.0...cataloger/v0.1.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **cataloger:** stop flagging packaging metadata and data files as interpreted content ([#1859](https://github.com/kguardian-dev/kguardian/issues/1859)) ([535f85a](https://github.com/kguardian-dev/kguardian/commit/535f85ae250311a2923b30c9ccbda1d27490e4f4))
+
 ## 0.1.0 (2026-09-30)
 
 
