@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.5.1...evaluator/v0.5.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/cataloger docker tag to v0.1.1 ([#1870](https://github.com/kguardian-dev/kguardian/issues/1870)) ([7603613](https://github.com/kguardian-dev/kguardian/commit/7603613c65109817762fb57126c2952fe42eaf2f))
+
 ## [0.5.1](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.5.0...evaluator/v0.5.1) (2026-09-27)
 
 

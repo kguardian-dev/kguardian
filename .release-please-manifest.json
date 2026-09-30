@@ -5,7 +5,7 @@
   "advisor": "1.11.4",
   "charts/kguardian": "1.29.0",
   "llm-bridge": "1.13.1",
-  "evaluator": "0.5.1",
+  "evaluator": "0.5.2",
   "supplychain": "0.2.2",
   "supplychain-matcher": "0.1.2",
   "cataloger": "0.1.3"
