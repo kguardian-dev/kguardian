@@ -1288,6 +1288,12 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
+      # Race builds run the scan child without RLIMIT_DATA (ThreadSanitizer
+      # maps a large shadow region), so the hard memory limit and the
+      # burst-allocation test only run in a normal build.
+      - name: go test (no race detector)
+        run: CGO_ENABLED=0 go test -count=1 ./internal/sandbox ./internal/server
+
       # Models (i) and (ii) as the chart will run them: uid 0, cap-drop
       # ALL plus the capabilities under test, no-new-privileges, Docker's
       # default seccomp profile.
