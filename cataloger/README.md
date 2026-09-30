@@ -21,7 +21,7 @@ module is not deployed by the chart yet).
 - **No token, no network, no host view.** The worker has no Broker token
   and no service-account token (the chart shadows the token mount with an
   empty directory), no host mounts and no hostPath `/proc`. The scan child
-  may open `AF_UNIX` sockets only.
+  may open no socket at all: its one channel, fd 4, is already connected.
 - **One root per scan.** Everything a scan knows comes from the one fd it
   was handed and the request's budgets.
 - **Parses in a throwaway process.** Image content is parsed only by a
@@ -59,6 +59,11 @@ token. It cannot even signal its children with a plain `kill`; it
 borrows the scan uid as its effective uid on one locked thread for the
 `pidfd_send_signal` (which `CAP_SETUID` allows).
 
+The parent starts every child as the leader of its own process group,
+and its SIGKILL (on the deadline, on a Controller hang-up, or at once if
+the deadline fires before `Start` returns) goes to the pinned pidfd and to
+the whole group.
+
 **The startup probe.** Before listening, the parent starts a `probe-caps`
 child exactly as it starts scans and reads back its uid and capability
 sets. If the child is uid 2000000000 with exactly `CAP_DAC_READ_SEARCH`
@@ -74,6 +79,14 @@ Every scan child re-checks its capabilities before reading anything: a
 set that differs from what the probe established fails the scan with
 `caps_unavailable`.
 
+The two helper children, `probe-caps` (at startup) and `clean-tmp` (after
+a killed scan), run as the scan uid with the same capabilities but
+without the seccomp filter and hardening. That is deliberate and safe:
+neither receives a container root or reads image content (`probe-caps`
+reports its own uid, capabilities and descriptors; `clean-tmp` removes
+`kg-scan-*` directories under the temp dir, which only the scan uid can
+own), and both are short-lived and bounded by a timeout.
+
 Both models are exercised by `hack/privileged-tests.sh` in containers set
 up as above (uid 0, `--cap-drop ALL`, the capabilities under test,
 no-new-privileges, Docker's default seccomp profile).
@@ -83,11 +96,18 @@ no-new-privileges, Docker's default seccomp profile).
 In this order, before the first byte of the container is read:
 
 1. Close every inherited descriptor except the root fd, the socketpair and
-   stdio (the Go runtime's own epoll and eventfd are kept).
-2. `nice 19`, idle I/O class, `GOMAXPROCS=1`, `GOMEMLIMIT` (85 % of
-   `CATALOG_MEMORY_LIMIT`), `RLIMIT_NOFILE=4096`, `RLIMIT_CORE=0`, and
-   `RLIMIT_FSIZE=CATALOG_TMP_LIMIT` (a temp file past the budget fails with
-   `EFBIG` instead of filling the memory-backed `/tmp`).
+   stdio (the Go runtime's own epoll, eventfd and cgroup CPU files are
+   kept).
+2. `oom_score_adj` 1000 (the child is the kernel OOM killer's first
+   choice, never the parent), `nice 19`, idle I/O class, `GOMAXPROCS=1`,
+   `GOMEMLIMIT` (85 % of `CATALOG_MEMORY_LIMIT`), a hard `RLIMIT_DATA` of
+   `CATALOG_MEMORY_LIMIT` + 64 MiB (a single burst allocation fails inside
+   the child with the Go runtime's out-of-memory abort, reported as `oom`,
+   before the cgroup limit is reached), `RLIMIT_NOFILE=4096`,
+   `RLIMIT_CORE=0`, `RLIMIT_FSIZE=CATALOG_TMP_LIMIT` (a temp file past the
+   budget fails with `EFBIG` instead of filling the memory-backed `/tmp`),
+   and `PR_SET_DUMPABLE` 0 (its `/proc/<pid>` turns root-owned, so no other
+   process of the scan uid can read its descriptors or memory).
 3. Verify uid and capabilities (above).
 4. `no_new_privs` and a pure-Go seccomp filter on every thread
    (`SECCOMP_FILTER_FLAG_TSYNC`), then prove it is live (`unshare(0)` must
@@ -96,10 +116,15 @@ In this order, before the first byte of the container is read:
    `umount2`, `unshare`, `setns`, `chroot`, `pivot_root`, the new mount API,
    `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `add_key`,
    `request_key`, `kexec_*`, `init_module`/`finit_module`/`delete_module`,
-   `fanotify_init`, `io_uring_*`, `execve`/`execveat`, and host
-   administration calls; `socket`/`socketpair` for anything but `AF_UNIX`;
-   `clone` with namespace flags. `clone3` returns `ENOSYS`. A foreign
-   architecture (and x32 on amd64) kills the process.
+   `fanotify_init`, `io_uring_*`, `execve`/`execveat`, `fork`/`vfork`
+   (amd64) and `setsid`, `socket`/`socketpair` of every family (the
+   Controller pod is `hostNetwork`, so even `AF_UNIX` would reach host
+   abstract sockets), and host administration calls. `clone` is allowed
+   only for threads (`CLONE_THREAD` set, no namespace flags), so the child
+   cannot create a process that would outlive its SIGKILL. `clone3`
+   returns `ENOSYS` (its flags are in memory the filter cannot read; the Go
+   runtime creates threads with `clone`). x32 syscalls on amd64 return
+   `EPERM`; a foreign architecture kills the process.
 5. A watchdog ends the scan with `oom` if the heap passes
    `CATALOG_MEMORY_LIMIT` or the temp dir passes `CATALOG_TMP_LIMIT` (or
    Syft reports `ENOSPC`/`EFBIG`); the parent retries once with the
@@ -207,11 +232,16 @@ gives the attacker code execution:
 - Waste resources up to its budgets: a hard deadline (SIGKILL), a heap
   watchdog under the pod's memory limit, a temp-size cap, idle priority.
 
-It cannot reach the network (`AF_UNIX` only, no DNS), execute anything
-(`execve` denied), create namespaces or mounts, load kernel code, attach
-to or read other processes, gain privileges (no_new_privs, non-root uid,
-no file capabilities honoured), or affect the next scan (fresh process;
-its temp dir is removed by a same-uid cleaner if it is killed).
+It cannot open any socket (no network, no DNS, no host abstract sockets),
+execute anything (`execve` denied), fork a process that outlives its
+SIGKILL (`clone` is threads only, `fork`/`vfork`/`setsid` denied, and the
+kill covers its process group), create namespaces or mounts, load kernel
+code, attach to or read other processes (and, being non-dumpable, cannot
+be read by a later child either), gain privileges (no_new_privs, non-root
+uid, no file capabilities honoured), exhaust the node's memory
+(`RLIMIT_DATA`, the heap watchdog, `oom_score_adj` 1000), or affect the
+next scan (fresh process; its temp dir is removed by a same-uid cleaner if
+it is killed).
 
 **What a compromised parent could do:** the parent parses nothing, but if
 it were compromised it would hold uid 0 with `CAP_DAC_READ_SEARCH`,
@@ -236,7 +266,27 @@ contents never leave it, only package metadata does).
 | `LOG_LEVEL` | `info` | `debug` also forwards Syft's debug logs from children. |
 
 `CATALOG_MEMORY_LIMIT` plus `CATALOG_TMP_LIMIT` plus the parent must fit
-the container's memory limit: the tmpfs counts against it. Budgets (files,
+the container's memory limit: the tmpfs counts against it.
+
+**Memory, for the chart (PR 4).** The child fails on its own before the
+container limit: its heap watchdog reports `oom` at `CATALOG_MEMORY_LIMIT`,
+and `RLIMIT_DATA` stops a single burst just above it. Two things only the
+pod spec can guarantee:
+
+- The `/tmp` emptyDir (`medium: Memory`) needs `sizeLimit` equal to
+  `CATALOG_TMP_LIMIT`. Tmpfs pages are charged to the container and are
+  not the child's own mapping, so neither `RLIMIT_DATA` nor
+  `RLIMIT_FSIZE` (per file) bounds the total; the watchdog and the size
+  limit do.
+- On cgroup v2 kubelet sets `memory.oom.group=1` for each container, so a
+  cgroup OOM kill takes every process in it, the parent included, and the
+  next scan on another node may do the same. `oom_score_adj` 1000 only
+  picks the victim when the group kill is off: with kubelet's
+  `singleProcessOOMKill: true` (Kubernetes 1.32 and later) the kernel
+  kills just the child. Size the container limit so the child's own
+  limits always trip first (`CATALOG_MEMORY_LIMIT` + 64 MiB +
+  `CATALOG_TMP_LIMIT` + about 64 MiB for the parent), and prefer nodes
+  with `singleProcessOOMKill` where available. Budgets (files,
 components, depth, timeout, paths, response size) come per request from
 the Controller (PROTOCOL.md §3.2).
 
@@ -244,7 +294,8 @@ Pod settings the chart must set (PR 4): `runAsUser: 0`, `runAsNonRoot:
 false`, `capabilities: {drop: [ALL], add: [DAC_READ_SEARCH, SETUID,
 SETGID]}`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem:
 true`, `seccompProfile: RuntimeDefault`, the SELinux options above, a
-memory-backed emptyDir on `/tmp`, the shared socket emptyDir on
+memory-backed emptyDir on `/tmp` with `sizeLimit: CATALOG_TMP_LIMIT`,
+the shared socket emptyDir on
 `/run/kguardian/catalog`, and an empty emptyDir over
 `/var/run/secrets/kubernetes.io/serviceaccount`.
 

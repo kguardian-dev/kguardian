@@ -462,3 +462,66 @@ func TestValidateRejectsBadChildOutput(t *testing.T) {
 		}
 	}
 }
+
+// childProcesses lists live processes started from the child binary.
+func childProcesses(t *testing.T, bin string) []string {
+	t.Helper()
+	ents, _ := os.ReadDir("/proc")
+	var out []string
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		cmd, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || !strings.HasPrefix(string(cmd), bin+"\x00") || !strings.Contains(string(cmd), "scan-child") {
+			continue
+		}
+		// Zombies still waiting to be reaped are not running.
+		if st, err := os.ReadFile("/proc/" + e.Name() + "/stat"); err == nil && strings.Contains(string(st), ") Z ") {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// A deadline that fires right after the child starts must still kill it
+// (the kill may run before Start has returned, and must never fall back
+// to a plain kill that a uid-0 parent without CAP_KILL cannot send).
+func TestImmediateDeadlineKillsTheChild(t *testing.T) {
+	e := newServer(t, nil, "KG_TEST_CHILD_SLEEP_MS=60000")
+	r := req("instant")
+	r.Budgets.ScanTimeoutMS = 1
+	start := time.Now()
+	resp, err := e.controller(t, r, rootFD(t, alpineRoot(t, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Reason != protocol.ReasonTimeout || time.Since(start) > 15*time.Second {
+		t.Fatalf("%s after %s", resp.Reason, time.Since(start))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		left := childProcesses(t, e.srv.cfg.ChildPath)
+		if len(left) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scan children still running after the deadline: %v", left)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestRuntimeOutOfMemoryAbortIsOOM(t *testing.T) {
+	head := "runtime: out of memory: cannot allocate 1073741824-byte block (4194304 in use)\nfatal error: out of memory\n"
+	buf := &stderrBuffer{headMax: 4 * 1024, tailMax: 12 * 1024}
+	_, _ = buf.Write([]byte(head + strings.Repeat("goroutine 1 [running]:\n\tmain.go:1\n", 5000)))
+	r := childResult{stderr: buf.String(), state: &os.ProcessState{}}
+	if !oomExit(r) {
+		t.Fatal("the headline of a long crash dump was lost")
+	}
+	if l := crashLine(buf.String()); !strings.Contains(l, "out of memory") {
+		t.Errorf("crash line %q", l)
+	}
+}

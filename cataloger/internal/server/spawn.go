@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,27 +37,42 @@ type Model struct {
 	Why string
 }
 
-// tailBuffer keeps the last max bytes written (the child's stderr).
-type tailBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
+// stderrBuffer keeps the first head and the last tail bytes of the
+// child's stderr. A Go crash puts its headline ("fatal error: runtime: out
+// of memory", "panic: ...") first and goroutine dumps after it, so both
+// ends matter and the middle does not.
+type stderrBuffer struct {
+	mu         sync.Mutex
+	head, tail []byte
+	headMax    int
+	tailMax    int
+	dropped    bool
 }
 
-func (t *tailBuffer) Write(p []byte) (int, error) {
+func (t *stderrBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > t.max {
-		t.buf = append([]byte(nil), t.buf[len(t.buf)-t.max:]...)
+	n := len(p)
+	if room := t.headMax - len(t.head); room > 0 {
+		k := min(room, len(p))
+		t.head = append(t.head, p[:k]...)
+		p = p[k:]
 	}
-	return len(p), nil
+	t.tail = append(t.tail, p...)
+	if len(t.tail) > t.tailMax {
+		t.tail = append([]byte(nil), t.tail[len(t.tail)-t.tailMax:]...)
+		t.dropped = true
+	}
+	return n, nil
 }
 
-func (t *tailBuffer) String() string {
+func (t *stderrBuffer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return string(t.buf)
+	if t.dropped {
+		return string(t.head) + "\n[...]\n" + string(t.tail)
+	}
+	return string(t.head) + string(t.tail)
 }
 
 // childResult is one child run.
@@ -91,7 +105,11 @@ func (s *Server) command(ctx context.Context, arg string, m Model, root *os.File
 	cmd.Env = append(cmd.Env, s.cfg.ChildEnv...)
 	cmd.ExtraFiles = []*os.File{root, peer}
 	cmd.Stderr = stderr
-	attr := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	// Setpgid: the child leads its own process group, which the kill
+	// covers too. Pdeathsig fires when the forking thread exits, not the
+	// process (a Linux rule); the child also dies with the parent's socket
+	// and deadline, so this is a backstop for a crashed parent.
+	attr := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 	if m.SetUID {
 		attr.Credential = &syscall.Credential{Uid: ScanUID, Gid: ScanUID, Groups: []uint32{}}
 	}
@@ -118,31 +136,27 @@ func (s *Server) run(ctx context.Context, arg string, m Model, root *os.File, ms
 		root, _ = os.Open(os.DevNull)
 		defer func() { _ = root.Close() }()
 	}
-	stderr := &tailBuffer{max: 16 * 1024}
+	stderr := &stderrBuffer{headMax: 4 * 1024, tailMax: 12 * 1024}
 	cmd := s.command(ctx, arg, m, root, peer, stderr)
-	var pidfd atomic.Int32
-	pidfd.Store(-1)
-	cmd.Cancel = func() error {
-		fd := int(pidfd.Load())
-		if fd < 0 {
-			return cmd.Process.Kill()
-		}
-		uid := -1
-		if m.SetUID {
-			uid = ScanUID
-		}
-		return killAs(fd, uid)
+	uid := -1
+	if m.SetUID {
+		uid = ScanUID
 	}
+	killer := newChildKiller(uid, func() int {
+		if cmd.Process == nil {
+			return 0
+		}
+		return cmd.Process.Pid
+	})
+	defer killer.close()
+	cmd.Cancel = killer.kill
 	err = cmd.Start()
 	_ = peer.Close()
 	if err != nil {
 		return childResult{startErr: err}
 	}
 	// Not reaped until Wait, so the pid still names our child here.
-	if fd, err := unix.PidfdOpen(cmd.Process.Pid, 0); err == nil {
-		pidfd.Store(int32(fd))
-		defer func() { _ = unix.Close(fd) }()
-	}
+	killer.started()
 
 	var res childResult
 	done := make(chan struct{})

@@ -24,6 +24,14 @@ type Limits struct {
 	MaxFileSize int64
 	// OnFileTooLarge runs when a write hits MaxFileSize (nil: ignore).
 	OnFileTooLarge func()
+	// DataLimit is a hard cap on the process's writable private memory
+	// (RLIMIT_DATA; 0: leave it). The Go heap is committed by mapping
+	// reserved arenas writable, which counts here, while the reservations
+	// themselves (PROT_NONE) do not. Past it, allocation fails and the Go
+	// runtime aborts with "out of memory": the child dies on its own
+	// instead of pushing the container into the cgroup OOM killer, which
+	// (memory.oom.group) would take the parent with it.
+	DataLimit int64
 }
 
 const (
@@ -33,13 +41,19 @@ const (
 )
 
 // Harden applies the process-wide limits the child needs before it reads
-// anything: closes every descriptor it was not meant to have, lowest CPU
-// and idle I/O priority, one P, a soft memory limit, RLIMIT_NOFILE 4096,
-// no core dumps, and a cap on written file size (EFBIG, not SIGXFSZ).
+// anything: closes every descriptor it was not meant to have, oom_score_adj
+// 1000, lowest CPU and idle I/O priority, one P, a soft memory limit and a
+// hard one (RLIMIT_DATA), RLIMIT_NOFILE 4096, no core dumps, a cap on
+// written file size (EFBIG, not SIGXFSZ), and not dumpable.
 // It must run first in the child, before anything opens a file.
 func Harden(l Limits) error {
 	if err := closeInherited(l.KeepFDs); err != nil {
 		return fmt.Errorf("close fds: %w", err)
+	}
+	// First in line for the kernel OOM killer: if memory still runs out,
+	// the scan child goes, not the worker parent or the Controller.
+	if err := os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0); err != nil {
+		return fmt.Errorf("oom_score_adj: %w", err)
 	}
 	// Both are per thread on Linux: apply to every runtime thread (threads
 	// started later inherit them).
@@ -59,7 +73,11 @@ func Harden(l Limits) error {
 	}{
 		{unix.RLIMIT_NOFILE, 4096},
 		{unix.RLIMIT_CORE, 0},
+		{unix.RLIMIT_DATA, uint64(max(l.DataLimit, 0))},
 	} {
+		if rl.res == unix.RLIMIT_DATA && rl.v == 0 {
+			continue
+		}
 		if err := unix.Setrlimit(rl.res, &unix.Rlimit{Cur: rl.v, Max: rl.v}); err != nil {
 			return fmt.Errorf("setrlimit %d: %w", rl.res, err)
 		}
@@ -84,6 +102,13 @@ func Harden(l Limits) error {
 		if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: v, Max: v}); err != nil {
 			return fmt.Errorf("setrlimit fsize: %w", err)
 		}
+	}
+	// Not dumpable: /proc/<pid> becomes root-owned, so no other process of
+	// the scan uid (a later scan child, or anything that escaped this one)
+	// can read this child's descriptors (its container root) or memory.
+	// Last: it also closes /proc/self to this process's own writes.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("dumpable: %w", err)
 	}
 	return nil
 }

@@ -35,6 +35,13 @@ var deniedCommon = []uint32{
 	unix.SYS_IO_URING_SETUP, unix.SYS_IO_URING_ENTER, unix.SYS_IO_URING_REGISTER,
 	// Running anything: the child never executes after it starts.
 	unix.SYS_EXECVE, unix.SYS_EXECVEAT,
+	// New processes and sessions: a forked grandchild would outlive the
+	// scan's SIGKILL (clone is restricted to threads below).
+	unix.SYS_SETSID,
+	// Sockets of any family: the child's only channel is fd 4, already
+	// connected. Even AF_UNIX would reach host abstract sockets from the
+	// Controller's hostNetwork pod (the CVE-2020-15257 class).
+	unix.SYS_SOCKET, unix.SYS_SOCKETPAIR,
 	// Host administration.
 	unix.SYS_ACCT, unix.SYS_SWAPON, unix.SYS_SWAPOFF, unix.SYS_REBOOT,
 	unix.SYS_QUOTACTL, unix.SYS_SETTIMEOFDAY, unix.SYS_CLOCK_SETTIME,
@@ -73,9 +80,12 @@ const (
 )
 
 // Filter builds the scan child's seccomp program: kill on a foreign
-// architecture; EPERM for the denied syscalls; socket/socketpair only for
-// AF_UNIX; clone without namespace flags; clone3 ENOSYS (so nothing can
-// pass flags the filter cannot inspect); everything else allowed.
+// architecture; EPERM for x32 syscalls and the denied syscalls (including
+// every socket and fork); clone only for threads (CLONE_THREAD set, no
+// namespace flags); clone3 ENOSYS (its flags live in memory the filter
+// cannot read, and ENOSYS makes callers fall back to clone; the Go runtime
+// creates threads with clone, and only exec uses clone3); everything else
+// allowed.
 func Filter() []unix.SockFilter {
 	p := []unix.SockFilter{
 		stmt(ldAbsW, offArch),
@@ -91,21 +101,14 @@ func Filter() []unix.SockFilter {
 		p = append(p, jump(jeqK, nr, 0, 1), stmt(retK, retErrno(unix.EPERM)))
 	}
 	p = append(p, jump(jeqK, unix.SYS_CLONE3, 0, 1), stmt(retK, retErrno(unix.ENOSYS)))
-	for _, nr := range []uint32{unix.SYS_SOCKET, unix.SYS_SOCKETPAIR} {
-		p = append(p,
-			jump(jeqK, nr, 0, 4),
-			stmt(ldAbsW, offArg0),
-			jump(jeqK, unix.AF_UNIX, 1, 0),
-			stmt(retK, retErrno(unix.EPERM)),
-			stmt(retK, retAllow),
-		)
-	}
+	// clone: allowed only for a thread without namespace flags.
 	p = append(p,
-		jump(jeqK, unix.SYS_CLONE, 0, 4),
+		jump(jeqK, unix.SYS_CLONE, 0, 5),
 		stmt(ldAbsW, offArg0+cloneFlagsArg*8),
-		jump(jsetK, cloneNamespaceFlags, 0, 1),
-		stmt(retK, retErrno(unix.EPERM)),
+		jump(jsetK, cloneNamespaceFlags, 2, 0),
+		jump(jsetK, unix.CLONE_THREAD, 0, 1),
 		stmt(retK, retAllow),
+		stmt(retK, retErrno(unix.EPERM)),
 	)
 	p = append(p, stmt(retK, retAllow))
 	return p

@@ -26,7 +26,7 @@ run() { # model caps...
     -e KG_EXPECT_MODEL="$model" -v "$out:/t:ro")
   for c in "$@"; do args+=(--cap-add "$c"); done
   echo "== model ($model): caps $*"
-  docker run "${args[@]}" "$image" /t/server.test -test.v -test.count=1 -test.run 'TestCapsModel|TestScanRoundTrip|TestTimeout|TestBusy|TestClosing|TestOOM|TestTempSpace|TestFileBudget|TestComponentBudget|TestNoPackages'
+  docker run "${args[@]}" "$image" /t/server.test -test.v -test.count=1 -test.run 'TestCapsModel|TestScanRoundTrip|TestTimeout|TestImmediate|TestBusy|TestClosing|TestOOM|TestTempSpace|TestFileBudget|TestComponentBudget|TestNoPackages|TestChildrenInherit'
 }
 
 run i DAC_READ_SEARCH SETUID SETGID

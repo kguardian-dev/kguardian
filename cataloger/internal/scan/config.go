@@ -44,7 +44,7 @@ var osOnlyCatalogers = []string{
 //   - Metadata only: no file digests, no file metadata or content
 //     cataloging, no license text, no CPE generation.
 //   - No network, ever: every remote lookup is off (and the seccomp
-//     filter allows AF_UNIX sockets only).
+//     filter allows no socket at all).
 func SyftConfig(profile string, version string) *syft.CreateSBOMConfig {
 	cfg := syft.DefaultCreateSBOMConfig().
 		WithTool("kguardian-cataloger", version).

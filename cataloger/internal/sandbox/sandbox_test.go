@@ -21,6 +21,8 @@ func TestMain(m *testing.M) {
 		os.Exit(seccompChild())
 	case "harden":
 		os.Exit(hardenChild())
+	case "burst":
+		os.Exit(burstChild())
 	}
 	os.Exit(m.Run())
 }
@@ -110,13 +112,24 @@ func seccompChild() int {
 	// CLONE_THREAD without CLONE_SIGHAND is EINVAL from the kernel, so a
 	// broken filter cannot actually fork here.
 	probe("clone(NEWUSER)", sys(unix.SYS_CLONE, unix.CLONE_NEWUSER|unix.CLONE_THREAD))
+	// A process (no CLONE_THREAD), as fork(2) would make it. CLONE_SIGHAND
+	// without CLONE_VM is EINVAL from the kernel, so a broken filter
+	// cannot actually fork here either.
+	probe("clone(SIGCHLD)", sys(unix.SYS_CLONE, uintptr(unix.SIGCHLD)|unix.CLONE_SIGHAND))
+	// A thread is still allowed: the filter passes it and the kernel then
+	// refuses the bad flag combination with EINVAL.
+	probe("clone(THREAD) passes the filter", sys(unix.SYS_CLONE, unix.CLONE_THREAD))
+	probe("setsid", sys(unix.SYS_SETSID))
+	for name, nr := range forkSyscalls {
+		probe(name, forkProbe(nr))
+	}
 	probe("clone3", sys(unix.SYS_CLONE3, 0, 0))
 	probe("socket(AF_INET)", sys(unix.SYS_SOCKET, unix.AF_INET, unix.SOCK_STREAM, 0))
 	probe("socket(AF_INET6)", sys(unix.SYS_SOCKET, unix.AF_INET6, unix.SOCK_DGRAM, 0))
 	probe("socket(AF_NETLINK)", sys(unix.SYS_SOCKET, unix.AF_NETLINK, unix.SOCK_RAW, 0))
 	probe("socket(AF_PACKET)", sys(unix.SYS_SOCKET, unix.AF_PACKET, unix.SOCK_RAW, 0))
 	probe("socketpair(AF_INET)", sys(unix.SYS_SOCKETPAIR, unix.AF_INET, unix.SOCK_STREAM, 0, 0))
-	// Allowed.
+	// No socket at all, AF_UNIX included (host abstract sockets).
 	probe("socket(AF_UNIX)", sys(unix.SYS_SOCKET, unix.AF_UNIX, unix.SOCK_STREAM, 0))
 	var sv [2]int32
 	probe("socketpair(AF_UNIX)", sys(unix.SYS_SOCKETPAIR, unix.AF_UNIX, unix.SOCK_STREAM, 0, uintptr(unsafe.Pointer(&sv))))
@@ -136,6 +149,11 @@ func TestSeccompDenials(t *testing.T) {
 	if err := json.Unmarshal(reexec(t, "seccomp"), &got); err != nil {
 		t.Fatal(err)
 	}
+	for name := range forkSyscalls {
+		if got[name] != int(unix.EPERM) {
+			t.Errorf("%s: errno %d, want EPERM", name, got[name])
+		}
+	}
 	eperm := int(unix.EPERM)
 	for name, want := range map[string]int{
 		"pre-existing thread unshare(0)": eperm,
@@ -149,7 +167,9 @@ func TestSeccompDenials(t *testing.T) {
 		"clone3":          int(unix.ENOSYS),
 		"socket(AF_INET)": eperm, "socket(AF_INET6)": eperm, "socket(AF_NETLINK)": eperm,
 		"socket(AF_PACKET)": eperm, "socketpair(AF_INET)": eperm,
-		"socket(AF_UNIX)": 0, "socketpair(AF_UNIX)": 0, "read file": 0, "no_new_privs": 1,
+		"socket(AF_UNIX)": eperm, "socketpair(AF_UNIX)": eperm,
+		"clone(SIGCHLD)": eperm, "setsid": eperm, "clone(THREAD) passes the filter": int(unix.EINVAL),
+		"read file": 0, "no_new_privs": 1,
 	} {
 		v, ok := got[name]
 		if !ok {
@@ -165,7 +185,7 @@ func TestSeccompDenials(t *testing.T) {
 // hardenChild applies Harden with fds 3 and 4 open and fd 5 extra, and
 // reports what is left.
 func hardenChild() int {
-	if err := Harden(Limits{KeepFDs: 5, MemoryLimit: 64 << 20, MaxFileSize: 1 << 20}); err != nil {
+	if err := Harden(Limits{KeepFDs: 5, MemoryLimit: 64 << 20, MaxFileSize: 1 << 20, DataLimit: 1 << 30}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -181,6 +201,10 @@ func hardenChild() int {
 	_ = unix.Getrlimit(unix.RLIMIT_CORE, &core)
 	_ = unix.Getrlimit(unix.RLIMIT_FSIZE, &fsize)
 	nice, _ := unix.Getpriority(unix.PRIO_PROCESS, 0)
+	adj, _ := os.ReadFile("/proc/self/oom_score_adj")
+	dumpable, _ := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+	var data unix.Rlimit
+	_ = unix.Getrlimit(unix.RLIMIT_DATA, &data)
 	ioprio, _, _ := unix.Syscall(unix.SYS_IOPRIO_GET, ioprioWhoProcess, 0, 0)
 	// A write past RLIMIT_FSIZE must fail with EFBIG, not kill us.
 	f, _ := os.CreateTemp("", "fsize")
@@ -190,7 +214,10 @@ func hardenChild() int {
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"fds": fds, "nofile": nofile.Cur, "core": core.Cur, "fsize": fsize.Cur, "nice": nice,
 		"ioprio_class": ioprio >> ioprioClassShift, "gomaxprocs": runtime.GOMAXPROCS(0),
-		"efbig": werr != nil && strings.Contains(werr.Error(), "file too large"),
+		"efbig":         werr != nil && strings.Contains(werr.Error(), "file too large"),
+		"oom_score_adj": strings.TrimSpace(string(adj)),
+		"dumpable":      dumpable,
+		"data":          data.Cur,
 	})
 	return 0
 }
@@ -214,6 +241,9 @@ func TestHarden(t *testing.T) {
 		IoprioClass int    `json:"ioprio_class"`
 		GOMAXPROCS  int    `json:"gomaxprocs"`
 		EFBIG       bool   `json:"efbig"`
+		OOMScoreAdj string `json:"oom_score_adj"`
+		Dumpable    int    `json:"dumpable"`
+		Data        uint64 `json:"data"`
 	}
 	if err := json.Unmarshal(reexec(t, "harden", files...), &got); err != nil {
 		t.Fatal(err)
@@ -229,6 +259,9 @@ func TestHarden(t *testing.T) {
 		got.IoprioClass != ioprioClassIdle || (got.Nice != 19 && got.Nice != 1) {
 		t.Errorf("limits %+v", got)
 	}
+	if got.OOMScoreAdj != "1000" || got.Dumpable != 0 || got.Data != 1<<30 {
+		t.Errorf("oom_score_adj %q dumpable %d RLIMIT_DATA %d", got.OOMScoreAdj, got.Dumpable, got.Data)
+	}
 }
 
 func TestFilterShape(t *testing.T) {
@@ -239,4 +272,47 @@ func TestFilterShape(t *testing.T) {
 	if f[len(f)-1].Code != retK || f[len(f)-1].K != retAllow {
 		t.Error("filter must end in allow")
 	}
+}
+
+// burstChild hardens with a 128 MiB data limit and then asks for 1 GiB in
+// one allocation: the watchdog could never see that coming, so the hard
+// limit must stop it with the runtime's out-of-memory abort (which the
+// parent maps to oom) instead of the cgroup OOM killer.
+func burstChild() int {
+	if err := Harden(Limits{KeepFDs: 3, MemoryLimit: 96 << 20, DataLimit: 128 << 20}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	b := make([]byte, 1<<30)
+	for i := 0; i < len(b); i += 4096 {
+		b[i] = 1
+	}
+	fmt.Println("allocated", len(b))
+	return 0
+}
+
+func TestBurstAllocationHitsTheDataLimit(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "KG_SANDBOX_CHILD=burst")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil || strings.Contains(string(out), "allocated") {
+		t.Fatalf("a 1 GiB burst under a 128 MiB RLIMIT_DATA succeeded: %s", out)
+	}
+	// Either phrasing, depending on where the runtime's mmap failed; the
+	// parent maps both to oom (server.oomExit).
+	if msg := stderr.String(); !strings.Contains(msg, "out of memory") && !strings.Contains(msg, "cannot allocate memory") {
+		t.Errorf("expected the Go runtime's out-of-memory abort, got: %.300s", stderr.String())
+	}
+}
+
+// forkProbe calls fork or vfork. If the filter failed and a child was
+// created, the child exits at once so the probe cannot run twice.
+func forkProbe(nr uintptr) unix.Errno {
+	r, _, e := unix.RawSyscall(nr, 0, 0, 0)
+	if e == 0 && r == 0 {
+		unix.RawSyscall(unix.SYS_EXIT_GROUP, 0, 0, 0)
+	}
+	return e
 }

@@ -419,8 +419,9 @@ distro as its `operating-system` component.
   links (`RESOLVE_NO_MAGICLINKS`), and never reads a non-regular file.
 - The scan child runs as uid/gid 2000000000 with at most
   `CAP_DAC_READ_SEARCH`, `no_new_privs`, a seccomp filter (no handle-based
-  opens, no `ptrace`, no namespaces, no mounts, no `execve`, `AF_UNIX`
-  sockets only), a fresh process per scan, and a hard deadline.
+  opens, no `ptrace`, no namespaces, no mounts, no `execve`, no fork, no
+  socket of any family), a hard memory limit, a fresh process per scan,
+  and a hard deadline that kills its whole process group.
 - The response is untrusted input nonetheless: a fully compromised child
   can return any JSON within the limits above. The Controller validates it
   (sizes, UTF-8, absolute paths) before posting, as the design requires.

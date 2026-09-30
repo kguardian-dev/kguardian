@@ -99,8 +99,16 @@ func Main() int {
 	memLimit := envInt(EnvMemoryLimit)
 	tmpLimit := envInt(EnvTmpLimit)
 	soft := memLimit * 85 / 100
+	// Three memory lines: GOMEMLIMIT (85 %) makes the GC work harder, the
+	// watchdog below reports oom at the limit, and RLIMIT_DATA (limit plus
+	// 64 MiB for the runtime's own mappings) stops a single burst the
+	// watchdog cannot see in time, before the cgroup OOM killer would.
+	var dataLimit int64
+	if memLimit > 0 {
+		dataLimit = memLimit + 64<<20
+	}
 	if err := sandbox.Harden(sandbox.Limits{KeepFDs: FDConn + 1, MemoryLimit: soft, MaxFileSize: tmpLimit,
-		OnFileTooLarge: func() { scan.NoSpaceSeen.Store(true) }}); err != nil {
+		DataLimit: dataLimit, OnFileTooLarge: func() { scan.NoSpaceSeen.Store(true) }}); err != nil {
 		fmt.Fprintln(os.Stderr, "harden:", err)
 		return 3
 	}

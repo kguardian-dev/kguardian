@@ -9,4 +9,5 @@ const (
 	cloneFlagsArg = 0
 )
 
-var deniedArch = []uint32{unix.SYS_IOPL, unix.SYS_IOPERM, unix.SYS_MODIFY_LDT}
+// fork and vfork exist only on amd64 (arm64 forks through clone).
+var deniedArch = []uint32{unix.SYS_IOPL, unix.SYS_IOPERM, unix.SYS_MODIFY_LDT, unix.SYS_FORK, unix.SYS_VFORK}
