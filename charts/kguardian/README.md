@@ -106,7 +106,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.19.7"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.20.0"` | Broker version tag (auto-updated by release-please) |
 | broker.imageInventory.retention | object | `{"batchSize":5000,"days":30,"intervalSeconds":3600}` | Retention for the image inventory: `images` (one row per image digest) and `workload_containers` (one row per workload, container and digest, with its securityContext). Running pods refresh their rows continuously, so only digests no running pod has reported for `days` are pruned (a finished rollout's old image, a deleted workload), followed by images nothing references any more. The tables are sized by what runs, not by time. |
 | broker.imageInventory.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. Same [100, 100000] clamp as `broker.audit.retention.batchSize`, for the same reason. |
 | broker.imageInventory.retention.days | int | `30` | Prune inventory rows no running pod has refreshed for this many days. Set to 0 to disable pruning (rows of deleted workloads are then kept forever). |
@@ -216,7 +216,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.16.2"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.17.0"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Init container image pull policy. `IfNotPresent`, not `Always`: this init container runs on every node, and `Always` forces a registry manifest request on every pod start even when the image is already cached locally. Those requests count against Docker Hub's anonymous pull limit, which is per source IP, so a NATed cluster shares one bucket across the whole fleet. A throttled pull leaves the init container in ImagePullBackOff and the agent never starts on that node, so its pods are never observed and the generated policy silently omits their rules. |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -335,7 +335,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.20.8"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.21.0"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.apiPath | bool | `true` | Also route /api on the same host to the Broker. The Broker serves bare paths (/pod/info, /pod/traffic), so this only works behind an ingress controller that strips the prefix, such as nginx with rewrite-target. Controllers that pass the path through unchanged (AWS ALB, for example) make every /api request a 404. The UI image proxies /api to the Broker itself, so setting this to false serves the whole application from the UI Service and works on any controller. |
@@ -394,7 +394,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.12.5"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.13.0"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
@@ -435,7 +435,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
-| nodeCatalog.enabled | bool | `false` | Catalog node SBOMs. Upgrade with `-f <values>` or `--reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`, which keeps the previous chart's defaults (every key below then falls back to the chart's built-in default, the same as listed here). With `--set`, use `--set-string` for a numeric-looking image tag or Secret key name. Requires `broker.auth.enabled=true` with `broker.auth.mode=scoped` and a `catalog` key in the auth Secret (key name `broker.auth.keys.catalog`). Enabling restarts the Controller DaemonSet and the Broker once. A missing key does not crash anything: the Broker answers the catalog routes 503 and the Controller idles. Needs Broker and Controller releases with the node catalog (after 1.19.7 and 1.16.2); older ones ignore it. |
+| nodeCatalog.enabled | bool | `false` | Catalog node SBOMs. Upgrade with `-f <values>` or `--reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`, which keeps the previous chart's defaults (every key below then falls back to the chart's built-in default, the same as listed here). With `--set`, use `--set-string` for a numeric-looking image tag or Secret key name. Requires `broker.auth.enabled=true` with `broker.auth.mode=scoped` and a `catalog` key in the auth Secret (key name `broker.auth.keys.catalog`). Enabling restarts the Controller DaemonSet and the Broker once. A missing key does not crash anything: the Broker answers the catalog routes 503 and the Controller idles. Needs Broker 1.20.0 and Controller 1.17.0 or later (the chart's defaults); older ones ignore it. |
 | nodeCatalog.epoch | int | `1` | Catalog generation (`NODE_CATALOG_EPOCH`). Raising it re-catalogs every digest once, for example after a cataloger fix. 1 to `maxEpoch`. |
 | nodeCatalog.grants | bool | `true` | Broker kill switch (`NODE_CATALOG_GRANTS`). `false` stops every new grant at once; uploads under a live lease still complete. |
 | nodeCatalog.maxComponents | int | `50000` | Components per SBOM (`NODE_CATALOG_MAX_COMPONENTS`), at most 50000. |
@@ -452,7 +452,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | nodeCatalog.worker.image.pullPolicy | string | `"IfNotPresent"` | Cataloger image pull policy |
 | nodeCatalog.worker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/cataloger"` | Cataloger image repository |
 | nodeCatalog.worker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| nodeCatalog.worker.image.tag | string | `"v0.1.0"` | Cataloger version tag |
+| nodeCatalog.worker.image.tag | string | `"v0.1.1"` | Cataloger version tag |
 | nodeCatalog.worker.logLevel | string | `"info"` | Worker log level (`LOG_LEVEL`): `info` or `debug`. |
 | nodeCatalog.worker.memoryLimit | string | `"640Mi"` | Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes (a number or a string) or a whole number of `Ki`, `Mi`, `Gi` or `Ti`; the chart hands the worker bytes. The worker reports `oom` and retries OS packages only when a scan passes it. |
 | nodeCatalog.worker.resources | object | `{"limits":{"cpu":"500m","memory":"1Gi"},"requests":{"cpu":"50m","memory":"512Mi"}}` | Worker resources. The memory limit must hold `memoryLimit` + `tmpLimit` + 128Mi (the child's burst margin and the parent), so the worker's own limits always trip before a cgroup OOM kill, which on cgroup v2 takes the whole container (kubelet sets `memory.oom.group`; `singleProcessOOMKill: true` on Kubernetes 1.32+ kills only the child). The chart refuses a smaller limit. The request (512Mi, half the limit) is reserved on every node, since this runs in a DaemonSet. Under node memory pressure the kubelet evicts pods using more than their request first, and this pod is the Controller's. Lowering it saves that reservation per node but makes the Controller pod an earlier eviction candidate while a large scan runs; raising it to the limit (1Gi) takes it off that list at the cost of 1Gi per node. Override the keys you change; null restores this default rather than removing the resources. |
@@ -493,7 +493,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
 | supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |
 | supplychain.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| supplychain.image.tag | string | `"v0.1.1"` | Supplychain version tag |
+| supplychain.image.tag | string | `"v0.2.0"` | Supplychain version tag |
 | supplychain.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | supplychain.logLevel | string | `"info"` | Log level (panic|fatal|error|warn|info|debug|trace) |
 | supplychain.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator |
@@ -523,7 +523,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.signatureDiscovery.skipSCT | bool | `false` | Drop the certificate-transparency (SCT) requirement, for a private Fulcio without a CT log. |
 | supplychain.signatureDiscovery.trustedRoot | string | `""` | trusted_root.json (Sigstore protobuf-specs TrustedRoot) for a private Sigstore or an air-gapped cluster. Empty uses the public-good instance over TUF. |
 | supplychain.signatureDiscovery.workers | int | `2` | Digests verified concurrently (1-16). |
-| supplychain.sources.node.enabled | bool | `nil` | Match the node catalog's SBOMs (source `node`, stored in the broker by the Controller's cataloger sidecar) with Grype (`NODE_SBOM_ENABLED`). Unset (null) follows `nodeCatalog.enabled`; true or false overrides it. Needs `grype.enabled`: without the matcher the component ignores it (with a warning). Reads the broker's image inventory and node SBOMs with this component's own token (the supplychain scope includes read). Needs a supplychain release after 0.1.1; older ones ignore it. |
+| supplychain.sources.node.enabled | bool | `nil` | Match the node catalog's SBOMs (source `node`, stored in the broker by the Controller's cataloger sidecar) with Grype (`NODE_SBOM_ENABLED`). Unset (null) follows `nodeCatalog.enabled`; true or false overrides it. Needs `grype.enabled`: without the matcher the component ignores it (with a warning). Reads the broker's image inventory and node SBOMs with this component's own token (the supplychain scope includes read). Needs supplychain 0.2.0 or later (the chart's default); older ones ignore it. |
 | supplychain.sources.node.interval | string | `"5m"` | How often to list running images for new or changed node SBOMs (`NODE_SBOM_INTERVAL`, a Go duration above zero; the chart refuses anything else). Rendered only when the node source is on. |
 | supplychain.sources.registry.enabled | bool | `false` | Fetch SBOMs that publishers attach to running images in their registry: OCI referrers (cosign v3 bundles, in-toto), cosign .att/.sbom tags and BuildKit attestations. Anonymous only (never pull secrets), through the same address guard as registryLookup (allowPrivateRegistries applies). Running digests come from the broker's image inventory. Off by default and independent of brokerIngest.enabled: turn it on explicitly. Registry SBOMs are UNVERIFIED: no signature is checked, so anyone who can push to a repository can attach one. They are therefore only ever ADDED to what Trivy found (a union), never used to replace or shrink it; empty SBOMs and in-toto statements whose subject is not the running image are rejected. Egress: HTTPS to the registries of your running images. |
 | supplychain.sources.registry.interval | string | `"15m"` | How often to list running images. Each digest is looked up at most once a day whatever the interval. |
