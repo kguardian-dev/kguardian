@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.17.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.17.1...controller/v1.17.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* **broker:** update Rust dependencies with known advisories and replace dotenv ([#1893](https://github.com/kguardian-dev/kguardian/issues/1893)) ([1eaf7bb](https://github.com/kguardian-dev/kguardian/commit/1eaf7bb7a559e617702a1a51be6917723b456f26))
+* **controller:** trim runtime images of packages that only carry CVEs ([#1892](https://github.com/kguardian-dev/kguardian/issues/1892)) ([c637532](https://github.com/kguardian-dev/kguardian/commit/c6375324637b2dfa5ac3734153c0779774292c2d))
+
 ## [1.17.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.17.0...controller/v1.17.1) (2026-09-30)
 
 
