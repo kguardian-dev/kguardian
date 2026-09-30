@@ -321,7 +321,7 @@ queryable, alertable replacement for "grep dmesg on every node."
 Check the CR before promoting:
 
 ```bash
-kubectl -n prod get seccompprofile deployment-web -o json | jq '{denialsObserved: (.status.conditions[] | select(.type=="DenialsObserved")), denials: .status.denials}'
+kubectl -n prod get seccompprofile deployment-web -o json | jq '{denialsObserved: ((.status.conditions // [])[] | select(.type=="DenialsObserved")), denials: .status.denials}'
 ```
 
 **Clear to promote** — the broker checked this workload and found nothing in
