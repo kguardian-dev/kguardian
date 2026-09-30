@@ -182,11 +182,25 @@ pub fn retain_pods(live: &HashSet<String>) {
 #[derive(Debug, Default)]
 pub struct Inventory {
     pods: HashMap<String, Vec<RunningContainer>>,
+    /// The Controller's own pod (the Controller and the cataloger
+    /// sidecar), never offered: its containers are in the Controller's
+    /// own cgroup, where the identity check cannot name them, so every
+    /// grant of those digests would fail `pid_gone` on every node.
+    own_pod: Option<String>,
 }
 
 impl Inventory {
+    /// An inventory that ignores the pod `own_pod`.
+    pub fn excluding(own_pod: Option<String>) -> Self {
+        Self {
+            pods: HashMap::new(),
+            own_pod,
+        }
+    }
+
     pub fn apply(&mut self, msg: FeedMsg) {
         match msg {
+            FeedMsg::Pod { uid, .. } if self.own_pod.as_deref() == Some(uid.as_str()) => {}
             FeedMsg::Pod { uid, containers } if containers.is_empty() => {
                 self.pods.remove(&uid);
             }
@@ -230,6 +244,69 @@ impl Inventory {
             .map(|c| c.digest.as_str())
             .collect()
     }
+}
+
+/// An RFC 4122 pod UID (the form `metadata.uid` and the kubelet's pod
+/// directories use).
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// The pod UID in a kubelet pod directory path
+/// (`.../pods/<uid>/etc-hosts`, `.../pods/<uid>/containers/...`).
+fn uid_in_pod_dir(path: &[u8]) -> Option<String> {
+    let p = std::str::from_utf8(path).ok()?;
+    let segs: Vec<&str> = p.split('/').collect();
+    segs.windows(2)
+        .find(|w| w[0] == "pods" && is_uuid(w[1]))
+        .map(|w| w[1].to_ascii_lowercase())
+}
+
+/// Where the Controller's own pod UID came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnPodSource {
+    /// `POD_UID` (downward API `metadata.uid`).
+    Env,
+    /// The kubelet's `/etc/hosts` or termination-log bind mounts, which
+    /// every pod gets from `<kubelet root>/pods/<uid>/`.
+    Mountinfo,
+    /// A host-view kubepods cgroup path (host cgroup namespace only).
+    Cgroup,
+}
+
+/// The Controller's own pod UID, from the first source that names one.
+/// Inputs are the raw `POD_UID`, and the bodies of the Controller's own
+/// `/proc/self/mountinfo` and `/proc/self/cgroup`.
+pub fn own_pod_uid(
+    env: Option<&str>,
+    mountinfo: Option<&str>,
+    cgroup: Option<&str>,
+) -> Option<(String, OwnPodSource)> {
+    if let Some(u) = env.map(str::trim).filter(|u| is_uuid(u)) {
+        return Some((u.to_ascii_lowercase(), OwnPodSource::Env));
+    }
+    if let Some(body) = mountinfo {
+        let found = super::mountinfo::parse(body)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e.mount_point.as_slice(),
+                    b"/etc/hosts" | b"/dev/termination-log"
+                )
+            })
+            .find_map(|e| uid_in_pod_dir(&e.root));
+        if let Some(u) = found {
+            return Some((u, OwnPodSource::Mountinfo));
+        }
+    }
+    let path = cgroup?.lines().find_map(|l| l.strip_prefix("0::"))?;
+    crate::early_capture::parse_kubepods_cgroup_path(path.trim())
+        .map(|id| (id.pod_uid, OwnPodSource::Cgroup))
 }
 
 /// Digests this node recently finished with, kept out of offers for a
@@ -500,6 +577,75 @@ mod tests {
         let o = offer(&inv, &Cooldown::default(), Instant::now());
         assert_eq!(o.len(), MAX_OFFER);
         assert!(o.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    const OWN: &str = "5d7c1c2e-1f2a-4b3c-9d8e-0a1b2c3d4e5f";
+
+    #[test]
+    fn the_controllers_own_pod_is_never_offered() {
+        let mut inv = Inventory::excluding(Some(OWN.into()));
+        // The Controller and its cataloger sidecar.
+        inv.apply(FeedMsg::Pod {
+            uid: OWN.into(),
+            containers: running_containers(&pod(
+                OWN,
+                vec![
+                    status("controller", "c1", &digest('c'), true),
+                    status("cataloger", "c2", &digest('d'), true),
+                ],
+                vec![],
+            )),
+        });
+        inv.apply(FeedMsg::Pod {
+            uid: "other".into(),
+            containers: running_containers(&pod(
+                "other",
+                vec![status("web", "c3", &digest('a'), true)],
+                vec![],
+            )),
+        });
+        assert_eq!(
+            offer(&inv, &Cooldown::default(), Instant::now()),
+            vec![digest('a')]
+        );
+        assert!(inv.candidates(&digest('c')).is_empty());
+        assert_eq!(inv.containers(), 1);
+    }
+
+    #[test]
+    fn the_own_pod_uid_comes_from_env_then_mountinfo_then_cgroup() {
+        // Downward API wins.
+        assert_eq!(
+            own_pod_uid(Some(&format!(" {} ", OWN.to_uppercase())), None, None),
+            Some((OWN.to_string(), OwnPodSource::Env))
+        );
+        // Garbage in POD_UID is ignored, not trusted.
+        let mi = format!(
+            "1893 1735 0:412 / / rw - overlay overlay rw,upperdir=/u/fs\n\
+             1901 1893 259:3 /var/lib/kubelet/pods/{OWN}/etc-hosts /etc/hosts rw - xfs /dev/nvme1n1p1 rw\n"
+        );
+        assert_eq!(
+            own_pod_uid(Some("not-a-uid"), Some(&mi), None),
+            Some((OWN.to_string(), OwnPodSource::Mountinfo))
+        );
+        // A kubelet root on its own filesystem shows a shorter root field.
+        let mi2 = format!(
+            "1902 1893 259:4 /lib/kubelet/pods/{OWN}/containers/controller/0b1f /dev/termination-log rw - xfs /dev/nvme2 rw\n"
+        );
+        assert_eq!(own_pod_uid(None, Some(&mi2), None).unwrap().0, OWN);
+        // A volume from some other pod dir mounted elsewhere is not used.
+        let mi3 = format!(
+            "1903 1893 259:3 /var/lib/kubelet/pods/{OWN}/volumes/x /data rw - xfs /dev/nvme1n1p1 rw\n"
+        );
+        assert_eq!(own_pod_uid(None, Some(&mi3), None), None);
+        // Host cgroup namespace.
+        let cg = "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod5d7c1c2e_1f2a_4b3c_9d8e_0a1b2c3d4e5f.slice/cri-containerd-aaaa.scope\n";
+        assert_eq!(
+            own_pod_uid(None, None, Some(cg)),
+            Some((OWN.to_string(), OwnPodSource::Cgroup))
+        );
+        // Private cgroup namespace and nothing else: unknown.
+        assert_eq!(own_pod_uid(None, Some(""), Some("0::/\n")), None);
     }
 
     #[test]

@@ -96,6 +96,9 @@ pub struct Config {
     pub max_pressure_defer: Duration,
     /// `NODE_CATALOG_PEER_UIDS` (`0`): uids the worker may run as.
     pub peer_uids: Vec<u32>,
+    /// `POD_UID` (downward API `metadata.uid`): the Controller's own pod,
+    /// never offered. Found from mountinfo or the cgroup when unset.
+    pub pod_uid: Option<String>,
 }
 
 impl Default for Config {
@@ -116,6 +119,7 @@ impl Default for Config {
             pressure_threshold: 40.0,
             max_pressure_defer: Duration::from_secs(1800),
             peer_uids: vec![0],
+            pod_uid: None,
         }
     }
 }
@@ -192,6 +196,9 @@ impl Config {
             ),
             max_pressure_defer: secs("NODE_CATALOG_MAX_PRESSURE_DEFER_SECS", d.max_pressure_defer),
             peer_uids,
+            pod_uid: get("POD_UID")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 
@@ -249,7 +256,8 @@ pub fn start(config: Config, node: String, broker_url: String) -> Option<JoinHan
         ro_clone = config.ro_clone,
         "node catalog: on"
     );
-    let inventory = Arc::new(Mutex::new(Inventory::default()));
+    let own_pod = own_pod(&config);
+    let inventory = Arc::new(Mutex::new(Inventory::excluding(own_pod)));
     tokio::spawn(drain_feed(rx, Arc::clone(&inventory)));
     let broker = Arc::new(HttpBroker::new(broker_url, &token));
     let ctx = Arc::new(LoopCtx {
@@ -273,6 +281,32 @@ pub fn start(config: Config, node: String, broker_url: String) -> Option<JoinHan
             }
         }
     }))
+}
+
+/// The Controller's own pod UID, so its digests are never offered.
+fn own_pod(config: &Config) -> Option<String> {
+    let read = |f: &str| std::fs::read_to_string(config.host_proc.join("self").join(f)).ok();
+    match feed::own_pod_uid(
+        config.pod_uid.as_deref(),
+        read("mountinfo").as_deref(),
+        read("cgroup").as_deref(),
+    ) {
+        Some((uid, source)) => {
+            info!(
+                pod_uid = uid,
+                ?source,
+                "node catalog: excluding the Controller's own pod"
+            );
+            Some(uid)
+        }
+        None => {
+            warn!(
+                "node catalog: cannot tell the Controller's own pod (set POD_UID from \
+                 metadata.uid); its images may be offered and fail pid_gone"
+            );
+            None
+        }
+    }
 }
 
 fn lock(inv: &Mutex<Inventory>) -> std::sync::MutexGuard<'_, Inventory> {
@@ -348,7 +382,16 @@ fn host_pressure(host_proc: &Path) -> Option<f64> {
 
 /// Is the worker there and answering? `ping` before claiming, so a
 /// missing sidecar never holds a lease (PROTOCOL.md 3.3).
-async fn ping(cfg: &Config) -> Result<(), String> {
+/// Why a ping did not come back `ok`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PingError {
+    /// The peer can never be verified on this node (kernel < 6.5 without
+    /// hostPID). Permanent: the loop switches to [`degraded`].
+    Unsupported(String),
+    Other(String),
+}
+
+async fn ping(cfg: &Config) -> Result<(), PingError> {
     let path = cfg.socket.clone();
     let uids = cfg.peer_uids.clone();
     let host_proc = cfg.host_proc.clone();
@@ -364,15 +407,102 @@ async fn ping(cfg: &Config) -> Result<(), String> {
             worker::PING_TIMEOUT,
             &AtomicBool::new(false),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            worker::WorkerError::PeerUnsupported(m) => PingError::Unsupported(m),
+            e => PingError::Other(e.to_string()),
+        })?;
         if r.status == "ok" && r.scan_id == id {
             Ok(())
         } else {
-            Err(format!("ping answered {} {}", r.status, r.reason))
+            Err(PingError::Other(format!(
+                "ping answered {} {}",
+                r.status, r.reason
+            )))
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| PingError::Other(e.to_string()))?
+}
+
+/// At most one event per `every`.
+#[derive(Debug)]
+pub struct RateLimit {
+    every: Duration,
+    last: Option<Instant>,
+}
+
+impl RateLimit {
+    pub fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    /// Starts as if an event had just happened (the first `allow` is one
+    /// period away).
+    pub fn starting(every: Duration, now: Instant) -> Self {
+        Self {
+            every,
+            last: Some(now),
+        }
+    }
+
+    pub fn allow(&mut self, now: Instant) -> bool {
+        match self.last {
+            Some(l) if now.saturating_duration_since(l) < self.every => false,
+            _ => {
+                self.last = Some(now);
+                true
+            }
+        }
+    }
+}
+
+/// How often the degraded mode repeats its warning.
+const DEGRADED_WARN_EVERY: Duration = Duration::from_secs(3600);
+
+/// Cataloging cannot run on this node: the worker can never be verified
+/// (see [`worker::WorkerError::PeerUnsupported`]). Fail closed, visibly:
+///
+/// * one `error` line naming the cause and the fix;
+/// * an empty offer every `every`: the Broker records the node and its
+///   platform (`node_catalog_platforms.seen_at`) but it never claims,
+///   so "offering, no claims" is the operator-visible signal, and no
+///   grant is ever taken that could not be served;
+/// * a `warn` at most once an hour after that.
+///
+/// Never returns and never retries hot. The kernel does not change under
+/// a running process, so the worker is not pinged again.
+async fn degraded<B: Broker>(ctx: &LoopCtx, broker: &B, why: &str, every: Duration) {
+    error!(
+        cause = why,
+        kernel_min = worker::PEERPIDFD_KERNEL,
+        "node catalog: cannot verify the cataloger worker on this node, so it catalogs nothing \
+         here. It keeps offering an empty set, so the Broker sees this node with no claims. \
+         Needs a kernel with SO_PEERPIDFD (Linux 6.5 or later)"
+    );
+    let mut warn_limit = RateLimit::starting(DEGRADED_WARN_EVERY, Instant::now());
+    loop {
+        let req = ClaimRequest {
+            node: ctx.node.clone(),
+            platform: ctx.platform.clone(),
+            epoch: ctx.config.epoch,
+            offer: Vec::new(),
+        };
+        let answer = broker.claim(&req).await;
+        if let Answer::Ok(api::ClaimResponse { grant: Some(g), .. }) = &answer {
+            // An empty offer cannot be granted anything; never scan here.
+            warn!(
+                digest = g.digest,
+                "node catalog: ignoring a grant in degraded mode"
+            );
+        }
+        if warn_limit.allow(Instant::now()) {
+            warn!(
+                cause = why,
+                "node catalog: still not cataloging on this node (worker cannot be verified)"
+            );
+        }
+        tokio::time::sleep(every).await;
+    }
 }
 
 /// How long a digest stays out of this node's offers after a grant.
@@ -443,7 +573,12 @@ async fn claim_loop<B: Broker + 'static>(
         }
         deferred_since = None;
 
-        if let Err(e) = ping(cfg).await {
+        let pinged = ping(cfg).await;
+        if let Err(PingError::Unsupported(why)) = &pinged {
+            degraded(&ctx, broker.as_ref(), why, cfg.idle).await;
+            return;
+        }
+        if let Err(PingError::Other(e)) = pinged {
             stats.worker_unavailable += 1;
             if !worker_down_logged {
                 warn!(error = e, "node catalog: worker unavailable; not claiming");
@@ -696,7 +831,8 @@ fn scan_one(
             return failed(FailReason::Timeout, "no answer in time")
         }
         Err(e @ worker::WorkerError::Unavailable(_))
-        | Err(e @ worker::WorkerError::PeerRejected(_)) => {
+        | Err(e @ worker::WorkerError::PeerRejected(_))
+        | Err(e @ worker::WorkerError::PeerUnsupported(_)) => {
             error!(error = %e, "node catalog: cannot hand off to the worker");
             return failed(FailReason::WorkerUnavailable, e.to_string());
         }
@@ -869,6 +1005,86 @@ mod tests {
         assert_eq!(c.peer_uids, vec![0, 2_000_000_000]);
         assert_eq!(c.max_files, 2_000_000);
         assert_eq!(c.budgets().scan_timeout_ms, 1_800_000);
+    }
+
+    /// A Broker that only records claims (degraded mode sends nothing
+    /// else).
+    #[derive(Default)]
+    struct ClaimRecorder {
+        offers: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Broker for ClaimRecorder {
+        async fn claim(&self, r: &ClaimRequest) -> Answer<api::ClaimResponse> {
+            self.offers.lock().unwrap().push(r.offer.clone());
+            Answer::Ok(api::ClaimResponse {
+                grants_enabled: true,
+                grant: Some(api::Grant {
+                    digest: "sha256:x".into(),
+                    claim_token: "t".into(),
+                    lease_expires_at: None,
+                    lease_seconds: None,
+                }),
+            })
+        }
+        async fn update(
+            &self,
+            _: &str,
+            _: &str,
+            _: &api::ClaimUpdate,
+        ) -> Answer<api::ClaimUpdateResponse> {
+            panic!("degraded mode never touches a claim")
+        }
+        async fn upload(&self, _: &str, _: &str, _: &api::SbomPage) -> Answer<serde_json::Value> {
+            panic!("degraded mode never uploads")
+        }
+    }
+
+    /// Kernel < 6.5 without hostPID: offer nothing, claim nothing, at the
+    /// idle cadence, forever; even a (bogus) grant is not acted on.
+    #[tokio::test(start_paused = true)]
+    async fn degraded_mode_offers_nothing_at_the_idle_cadence() {
+        let ctx = LoopCtx {
+            config: Config::default(),
+            node: "n1".into(),
+            platform: "linux/amd64".into(),
+        };
+        let b = ClaimRecorder::default();
+        let every = Duration::from_secs(600);
+        let r = tokio::time::timeout(
+            Duration::from_secs(1500),
+            degraded(&ctx, &b, "no SO_PEERPIDFD", every),
+        )
+        .await;
+        assert!(r.is_err(), "degraded mode never returns");
+        let offers = b.offers.lock().unwrap().clone();
+        assert_eq!(offers.len(), 3, "t=0, 10 min, 20 min; never hot");
+        assert!(offers.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn rate_limit_allows_one_per_period() {
+        let t0 = Instant::now();
+        let mut r = RateLimit::new(Duration::from_secs(3600));
+        assert!(r.allow(t0));
+        assert!(!r.allow(t0 + Duration::from_secs(10)));
+        assert!(r.allow(t0 + Duration::from_secs(3600)));
+        let mut s = RateLimit::starting(Duration::from_secs(60), t0);
+        assert!(!s.allow(t0));
+        assert!(s.allow(t0 + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn pod_uid_is_read_only_when_on() {
+        let c = Config::from_lookup(|k| match k {
+            "NODE_CATALOG" => Some("on".into()),
+            "POD_UID" => Some(" 5d7c1c2e-1f2a-4b3c-9d8e-0a1b2c3d4e5f ".into()),
+            _ => None,
+        });
+        assert_eq!(
+            c.pod_uid.as_deref(),
+            Some("5d7c1c2e-1f2a-4b3c-9d8e-0a1b2c3d4e5f")
+        );
     }
 
     #[test]

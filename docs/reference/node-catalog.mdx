@@ -1,0 +1,64 @@
+---
+title: "Node catalog"
+description: "The Controller's NODE_CATALOG_* env vars, the kernel it needs, and how a node that cannot catalog shows up"
+icon: "box-archive"
+---
+
+Reference for node SBOM cataloging: the Controller opens each running
+container's root filesystem and hands it to the `cataloger` sidecar, which
+returns the image's packages. The feature is off by default. The Helm values
+that render these variables arrive with the chart change; until then, set
+them on the Controller DaemonSet directly.
+
+## Environment variables
+
+**Controller** (`kguardian-controller` DaemonSet)
+
+With `NODE_CATALOG` unset or off, the Controller reads no other variable in
+this table and starts nothing: no task, no socket, no Broker call.
+
+| Env | Default | Description |
+|---|---|---|
+| `NODE_CATALOG` | off | `on` / `true` / `1` turns cataloging on. |
+| `BROKER_TOKEN_CATALOG` | unset | The Broker's `catalog` token. Without it the Controller logs once and catalogs nothing. |
+| `NODE_CATALOG_SOCKET` | `/run/kguardian/catalog/worker.sock` | The worker's Unix socket, on the `emptyDir` both containers mount. |
+| `NODE_CATALOG_EPOCH` | `1` | Catalog generation. Raising it re-catalogs every digest. |
+| `NODE_CATALOG_RO_CLONE` | off | Pass the worker a read-only, submount-free `open_tree` clone of the root instead of the plain `O_PATH` handle. Falls back to the handle when the kernel refuses. |
+| `NODE_CATALOG_HOST_PROC` | `/proc` | Where the host's `/proc` is mounted. |
+| `NODE_CATALOG_SCAN_TIMEOUT_SECS` | `600` | Worker scan deadline, 10 to 1800. |
+| `NODE_CATALOG_MAX_FILES` | `2000000` | Filesystem entries the worker indexes. |
+| `NODE_CATALOG_MAX_COMPONENTS` | `50000` | Components per SBOM (at most 50 000). |
+| `NODE_CATALOG_MAX_RESPONSE_BYTES` | `33554432` | Largest worker response accepted (at most 64 MiB). |
+| `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS` | `30` | Minimum gap between claims (at least 30). |
+| `NODE_CATALOG_IDLE_SECS` | `600` | An unchanged offer that got no grant is re-sent after this. |
+| `NODE_CATALOG_STARTUP_JITTER_SECS` | `120` | The first claim waits a random time up to this, so a fleet restart does not arrive at once. |
+| `NODE_CATALOG_PRESSURE_THRESHOLD` | `40` | Host PSI `some avg10` percent (cpu, io or memory) above which scans wait. |
+| `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS` | `1800` | Longest a scan waits for pressure to drop. |
+| `NODE_CATALOG_PEER_UIDS` | `0` | Comma-separated uids the worker process may run as. |
+| `POD_UID` | unset | The Controller pod's own `metadata.uid` (downward API). Its images are never offered. Without it the Controller reads the UID from its kubelet mounts. |
+
+## Kernel requirements
+
+| Need | Kernel | Without it |
+|---|---|---|
+| `SO_PEERPIDFD`, to pin the worker process before checking its cgroup | Linux 6.5 | The Controller cannot verify the worker and catalogs nothing on that node (below). |
+| `openat2` with `RESOLVE_IN_ROOT`, for the drift check | Linux 5.6 | Drift is unknown; SBOMs from the node are `partial`. |
+| `open_tree` / `mount_setattr`, only for `NODE_CATALOG_RO_CLONE` | Linux 5.12 | Falls back to the plain root handle. |
+
+The worker runs in its own container, so the Controller sees it in a
+different pid namespace. `SO_PEERCRED` therefore reports pid 0, and only
+`SO_PEERPIDFD` identifies the worker process. The Controller does not fall
+back to trusting the uid alone.
+
+## A node that cannot catalog
+
+On a kernel older than 6.5 (and without `hostPID`), the Controller:
+
+- logs one `error` naming the cause (`SO_PEERPIDFD`, Linux 6.5), then a
+  `warn` at most once an hour;
+- keeps sending an empty offer every `NODE_CATALOG_IDLE_SECS`, so the Broker
+  records the node and its platform, but the node never claims a digest;
+- never restarts, and never retries the worker.
+
+`GET /catalog/status?node=<name>` on such a node shows the node as seen
+recently, with no claims.

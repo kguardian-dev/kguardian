@@ -104,6 +104,11 @@ pub enum WorkerError {
     /// The peer is not the cataloger sidecar of this pod. Nothing was
     /// sent to it.
     PeerRejected(String),
+    /// The peer cannot be verified on this node at all: the kernel has no
+    /// `SO_PEERPIDFD` (Linux < 6.5) and the Controller does not share the
+    /// worker's pid namespace. Nothing was sent. Permanent for the life of
+    /// the process; the claim loop stops claiming (see `catalog::degraded`).
+    PeerUnsupported(String),
     /// A framing or deadline violation by the peer, or I/O failing
     /// mid-exchange. The connection is closed (which cancels the scan).
     Protocol(String),
@@ -118,6 +123,7 @@ impl std::fmt::Display for WorkerError {
         match self {
             WorkerError::Unavailable(e) => write!(f, "worker unavailable: {e}"),
             WorkerError::PeerRejected(m) => write!(f, "worker peer rejected: {m}"),
+            WorkerError::PeerUnsupported(m) => write!(f, "worker peer cannot be verified: {m}"),
             WorkerError::Protocol(m) => write!(f, "worker protocol error: {m}"),
             WorkerError::Timeout => write!(f, "worker did not answer before the deadline"),
             WorkerError::Cancelled => write!(f, "scan cancelled"),
@@ -126,6 +132,53 @@ impl std::fmt::Display for WorkerError {
 }
 
 // ---- Peer verification --------------------------------------------------
+
+/// Why a peer was not accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerError {
+    /// This peer is not the cataloger sidecar of this pod.
+    Rejected(String),
+    /// No peer can be verified on this node (see
+    /// [`WorkerError::PeerUnsupported`]).
+    Unsupported(String),
+}
+
+impl From<String> for PeerError {
+    fn from(m: String) -> Self {
+        PeerError::Rejected(m)
+    }
+}
+
+impl From<&str> for PeerError {
+    fn from(m: &str) -> Self {
+        PeerError::Rejected(m.to_string())
+    }
+}
+
+/// The minimum kernel for [`peer_pidfd`], named in logs and docs.
+pub const PEERPIDFD_KERNEL: &str = "Linux 6.5";
+
+/// With `SO_PEERPIDFD` refused by `err`: the peer pid to fall back on,
+/// or why there is none. The fallback (`SO_PEERCRED`'s pid) is only
+/// meaningful when the host procfs is in the Controller's own pid
+/// namespace (`hostPID`); otherwise that pid is 0, or a number in a
+/// namespace the procfs does not show. Fails closed either way.
+pub fn without_pidfd(err: &io::Error, same_pid_ns: bool, peer_pid: i32) -> Result<i32, PeerError> {
+    if same_pid_ns && peer_pid > 0 {
+        return Ok(peer_pid);
+    }
+    match err.raw_os_error() {
+        // What a kernel without the option answers at SOL_SOCKET.
+        Some(libc::ENOPROTOOPT) | Some(libc::EINVAL) => Err(PeerError::Unsupported(format!(
+            "the kernel has no SO_PEERPIDFD ({err}; needs {PEERPIDFD_KERNEL} or later) and the \
+             Controller does not share the worker's pid namespace, so the worker's process \
+             cannot be pinned for the cgroup check"
+        ))),
+        _ => Err(PeerError::Rejected(format!(
+            "cannot pin the peer process (SO_PEERPIDFD: {err}; peer pid {peer_pid})"
+        ))),
+    }
+}
 
 /// `SO_PEERCRED` of a connected socket.
 pub fn peer_cred(sock: RawFd) -> io::Result<libc::ucred> {
@@ -255,7 +308,7 @@ pub trait PeerProc {
     fn own_cgroup(&self) -> io::Result<String>;
     /// The peer's cgroup body, pid-reuse safe, or an error when the
     /// peer's process cannot be pinned.
-    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, String>;
+    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, PeerError>;
 }
 
 /// The real lookups, through the host procfs.
@@ -281,7 +334,7 @@ impl PeerProc for HostPeerProc {
         std::fs::read_to_string(self.host_proc.join("self/cgroup"))
     }
 
-    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, String> {
+    fn peer_cgroup(&self, sock: RawFd, cred: &libc::ucred) -> Result<String, PeerError> {
         // The worker is in another pid namespace (its own container), so
         // SO_PEERCRED's pid is 0 here. SO_PEERPIDFD pins the peer, and
         // its fdinfo, read through the host procfs, names it in the host
@@ -306,17 +359,16 @@ impl PeerProc for HostPeerProc {
                 }
                 Ok(cg)
             }
-            Err(e) if self.same_pid_ns() && cred.pid > 0 => {
-                // A kernel without SO_PEERPIDFD, but a shared pid
-                // namespace makes SO_PEERCRED's pid usable.
+            Err(e) => {
+                // A kernel without SO_PEERPIDFD: usable only when a shared
+                // pid namespace makes SO_PEERCRED's pid meaningful.
+                let pid = without_pidfd(&e, self.same_pid_ns(), cred.pid)?;
                 tracing::debug!(error = %e, "SO_PEERPIDFD unavailable; using SO_PEERCRED pid");
-                std::fs::read_to_string(self.host_proc.join(format!("{}/cgroup", cred.pid)))
-                    .map_err(|e| format!("peer cgroup: {e}"))
+                Ok(
+                    std::fs::read_to_string(self.host_proc.join(format!("{pid}/cgroup")))
+                        .map_err(|e| format!("peer cgroup: {e}"))?,
+                )
             }
-            Err(e) => Err(format!(
-                "cannot pin the peer process (SO_PEERPIDFD: {e}; peer pid {}); refusing",
-                cred.pid
-            )),
         }
     }
 }
@@ -324,17 +376,21 @@ impl PeerProc for HostPeerProc {
 /// `SO_PEERCRED` uid in the allowed set, and the peer a sibling
 /// container of this pod. Fails closed: any lookup that does not work
 /// rejects the peer.
-pub fn verify_peer<P: PeerProc>(sock: RawFd, allowed_uids: &[u32], proc: &P) -> Result<(), String> {
+pub fn verify_peer<P: PeerProc>(
+    sock: RawFd,
+    allowed_uids: &[u32],
+    proc: &P,
+) -> Result<(), PeerError> {
     let cred = peer_cred(sock).map_err(|e| format!("SO_PEERCRED: {e}"))?;
     if !allowed_uids.contains(&cred.uid) {
-        return Err(format!("peer uid {} is not allowed", cred.uid));
+        return Err(format!("peer uid {} is not allowed", cred.uid).into());
     }
     let own = proc.own_cgroup().map_err(|e| format!("own cgroup: {e}"))?;
     let peer = proc.peer_cgroup(sock, &cred)?;
     let (Some(o), Some(p)) = (v2_path(&own), v2_path(&peer)) else {
         return Err("no cgroup v2 path to compare".into());
     };
-    same_pod_sibling(o, p)
+    Ok(same_pod_sibling(o, p)?)
 }
 
 // ---- Transport ------------------------------------------------------------
@@ -535,7 +591,10 @@ pub fn exchange<P: PeerProc>(
 ) -> Result<Response, WorkerError> {
     // The fd is not sent to a peer that fails verification; dropping
     // `root` on that path closes it.
-    verify_peer(sock.as_raw_fd(), allowed_uids, peer).map_err(WorkerError::PeerRejected)?;
+    verify_peer(sock.as_raw_fd(), allowed_uids, peer).map_err(|e| match e {
+        PeerError::Rejected(m) => WorkerError::PeerRejected(m),
+        PeerError::Unsupported(m) => WorkerError::PeerUnsupported(m),
+    })?;
     let payload = serde_json::to_vec(req).map_err(|e| WorkerError::Protocol(e.to_string()))?;
     if payload.len() > MAX_REQUEST_BYTES {
         return Err(WorkerError::Protocol(format!(
@@ -611,8 +670,12 @@ mod tests {
         fn own_cgroup(&self) -> io::Result<String> {
             Ok(self.own.to_string())
         }
-        fn peer_cgroup(&self, _: RawFd, _: &libc::ucred) -> Result<String, String> {
-            self.peer.map(str::to_string).map_err(str::to_string)
+        fn peer_cgroup(&self, _: RawFd, _: &libc::ucred) -> Result<String, PeerError> {
+            match self.peer {
+                Ok(p) => Ok(p.to_string()),
+                Err(m) if m.starts_with("unsupported") => Err(PeerError::Unsupported(m.into())),
+                Err(m) => Err(PeerError::Rejected(m.into())),
+            }
         }
     }
 
@@ -987,6 +1050,55 @@ mod tests {
         assert!(matches!(e, WorkerError::Unavailable(_)));
     }
 
+    /// Kernels before 6.5 answer SO_PEERPIDFD with ENOPROTOOPT. Without
+    /// hostPID that is a typed, permanent "cannot verify", never a
+    /// fallback to SO_PEERCRED's meaningless pid.
+    #[test]
+    fn without_pidfd_fails_closed_and_names_the_kernel() {
+        let old_kernel = io::Error::from_raw_os_error(libc::ENOPROTOOPT);
+        match without_pidfd(&old_kernel, false, 0) {
+            Err(PeerError::Unsupported(m)) => {
+                assert!(m.contains("SO_PEERPIDFD") && m.contains("6.5"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // A non-zero pid from another namespace is not trusted either.
+        assert!(matches!(
+            without_pidfd(&old_kernel, false, 4242),
+            Err(PeerError::Unsupported(_))
+        ));
+        // Any other failure rejects this peer only.
+        assert!(matches!(
+            without_pidfd(&io::Error::from_raw_os_error(libc::EBADF), false, 0),
+            Err(PeerError::Rejected(_))
+        ));
+        // hostPID: SO_PEERCRED's pid is a real, host-procfs pid.
+        assert_eq!(without_pidfd(&old_kernel, true, 4242), Ok(4242));
+        assert!(without_pidfd(&old_kernel, true, 0).is_err());
+    }
+
+    #[test]
+    fn an_unverifiable_peer_is_a_typed_error_and_gets_nothing() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let e = exchange(
+            ours,
+            &[me()],
+            &FakePeer {
+                own: OWN_PRIVATE_NS,
+                peer: Err("unsupported: no SO_PEERPIDFD"),
+            },
+            &scan_request(),
+            Some(root_fd()),
+            1 << 20,
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        )
+        .expect_err("unverifiable");
+        assert!(matches!(e, WorkerError::PeerUnsupported(_)), "{e}");
+        let mut buf = [0u8; 1];
+        assert_eq!((&theirs).read(&mut buf).unwrap(), 0);
+    }
+
     /// The real peer lookups against a real listener in this process:
     /// the peer is ourselves, so it is rejected as the Controller's own
     /// container — which proves the lookups ran and resolved the peer.
@@ -1003,11 +1115,12 @@ mod tests {
             host_proc: PathBuf::from("/proc"),
         };
         let r = verify_peer(sock.as_raw_fd(), &[me()], &proc);
-        let err = r.expect_err("our own process is not a sibling container");
-        assert!(
-            err.contains("own container") || err.contains("SO_PEERPIDFD"),
-            "{err}"
-        );
+        // Our own process: rejected as the Controller's own container on
+        // a >= 6.5 kernel, or (same pid namespace here) via the fallback.
+        match r.expect_err("our own process is not a sibling container") {
+            PeerError::Rejected(m) => assert!(m.contains("own container"), "{m}"),
+            PeerError::Unsupported(m) => panic!("same pid namespace must fall back: {m}"),
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

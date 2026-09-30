@@ -518,6 +518,30 @@ mod tests {
         assert!(s.stats.get("nested").is_none());
     }
 
+    /// The Broker keeps a partial reason only when it is 1..=64 bytes of
+    /// `[A-Za-z0-9_.-]` (node_catalog.rs `clean_short`, no closed set).
+    /// Every reason the Controller adds must pass, `drift_unknown` first.
+    #[test]
+    fn the_controllers_own_partial_reasons_pass_the_broker_filter() {
+        let broker_keeps = |r: &str| {
+            !r.is_empty()
+                && r.len() <= 64
+                && r.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        };
+        let mut r = resp(vec![
+            comp("a", vec!["relative".into()]),
+            comp(&"n".repeat(300), vec![]),
+        ]);
+        r.completeness = "full".into();
+        let s = sbom(validate(r, "s", 2, true).unwrap());
+        assert_eq!(
+            s.partial_reasons,
+            vec!["components_dropped", "files_truncated", "drift_unknown"]
+        );
+        assert!(s.partial_reasons.iter().all(|r| broker_keeps(r)));
+    }
+
     fn subject() -> Subject {
         Subject {
             digest: format!("sha256:{}", "a".repeat(64)),

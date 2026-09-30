@@ -27,6 +27,9 @@ pub const MAX_SUBMOUNT_LEN: usize = 4096;
 pub struct MountEntry {
     pub mount_id: u64,
     pub parent_id: u64,
+    /// The root of the mount within its source filesystem (field 4),
+    /// unescaped: for a kubelet bind mount, the pod directory path.
+    pub root: Vec<u8>,
     /// Mount point, unescaped. Raw bytes: a mount point need not be UTF-8.
     pub mount_point: Vec<u8>,
     pub fs_type: String,
@@ -118,6 +121,7 @@ pub fn parse_line(line: &str) -> Option<MountEntry> {
     }
     let mount_id = fields[0].parse().ok()?;
     let parent_id = fields[1].parse().ok()?;
+    let root = unescape(fields[3])?;
     let mount_point = unescape(fields[4])?;
     let fs_type = String::from_utf8(unescape(fields[sep + 1])?).ok()?;
     let source = unescape(fields[sep + 2])?;
@@ -134,6 +138,7 @@ pub fn parse_line(line: &str) -> Option<MountEntry> {
     Some(MountEntry {
         mount_id,
         parent_id,
+        root,
         mount_point,
         fs_type,
         source,
