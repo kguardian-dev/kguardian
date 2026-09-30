@@ -64,7 +64,7 @@ type DbPool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>;
 /// rows, so a VACUUM of it takes seconds even when it is badly bloated.
 /// A table missing from the schema is skipped. Never add one of
 /// [`NEVER_VACUUMED`] (a unit test enforces it).
-pub const TABLES: [&str; 6] = [
+pub const TABLES: [&str; 7] = [
     // One row per live container, upserted every 5 s; a TOAST table.
     "pod_compute_latest",
     // One row per node, upserted with every compute batch.
@@ -75,6 +75,10 @@ pub const TABLES: [&str; 6] = [
     "seccomp_denial_nodes",
     // Deleted and rebuilt whole by every in-use refresh.
     "runtime_in_use_coverage",
+    // One row per container of an image with a node SBOM, refreshed by
+    // every in-use refresh (rows whose guard changed are updated, gone
+    // ones deleted).
+    "runtime_node_sbom_guard",
     // One row per workload container and digest, refreshed on a throttle.
     "workload_containers",
 ];

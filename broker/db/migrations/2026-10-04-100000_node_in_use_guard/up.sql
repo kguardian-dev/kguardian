@@ -12,9 +12,10 @@
 -- naive UTC, like runtime_coverage.
 
 -- kg_node_sbom_guard (below) per workload container whose image has a
--- node SBOM linked, rebuilt whole by every in-use refresh
+-- node SBOM linked, refreshed in place by every in-use refresh
 -- (in_use_store::refresh_coverage, in the same transaction and with the
--- same window as runtime_in_use_coverage), so kg_pkg_in_use evaluates it
+-- same window as runtime_in_use_coverage: a row is written only when its
+-- reason changes; on the maintenance VACUUM list), so kg_pkg_in_use evaluates it
 -- once per container rather than once per package. reason NULL = passes.
 -- A container with no row here fails closed (sbom_incomplete).
 CREATE TABLE IF NOT EXISTS runtime_node_sbom_guard (

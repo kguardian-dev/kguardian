@@ -114,8 +114,8 @@ elects normally. `/metrics` shows the state:
 
 A few tables are rewritten every few seconds but stay small:
 `pod_compute_latest` (every live container, every 5 s), `node_compute_latest`,
-`seccomp_crs`, `seccomp_denial_nodes`, `runtime_in_use_coverage` and
-`workload_containers`. Autovacuum normally keeps them clean (the migrations
+`seccomp_crs`, `seccomp_denial_nodes`, `runtime_in_use_coverage`,
+`runtime_node_sbom_guard` and `workload_containers`. Autovacuum normally keeps them clean (the migrations
 give the compute tables aggressive per-table settings), but the broker does
 not depend on it: with autovacuum stopped on a shared cluster,
 `pod_compute_latest` once grew to about 1 GB an hour.

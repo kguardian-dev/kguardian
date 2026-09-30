@@ -181,8 +181,9 @@ existing altered; its down restores the PR 1 `kg_pkg_in_use` byte for byte):
   claim's `platform`, or the claim has none). "In the window" is `kg_runtime_coverage`'s rule (a
   heartbeat within `window_hours`). Platforms compare as exact strings.
 - **`runtime_node_sbom_guard`**: `kg_node_sbom_guard` once per workload container of an image
-  with a node SBOM, rebuilt by `refresh_coverage` in the same transaction and window as
-  `runtime_in_use_coverage`, so `kg_pkg_in_use` does not re-evaluate it per package. A container
+  with a node SBOM, refreshed in place by `refresh_coverage` (a row written only when its reason
+  changes, deleted when its container no longer qualifies; on the maintenance VACUUM list) in the
+  same transaction and window as `runtime_in_use_coverage`, so `kg_pkg_in_use` does not re-evaluate it per package. A container
   without a row fails closed (`sbom_incomplete`). A live reference (the first, per-call version,
   `test/fixtures/node_guard_per_call.sql`) is compared with it after every refresh in the tests.
 - **`kg_node_pkg_flags(image, pkg)`**: the package's flags over every version the SBOM lists:

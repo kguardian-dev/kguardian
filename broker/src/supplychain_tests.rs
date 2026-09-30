@@ -4155,6 +4155,42 @@ fn live_database_node_sbom_in_use_guard() {
 
     // Every guard passes.
     assert_eq!(node_guard_coverage(&mut conn), (true, None));
+    // The guard table is updated in place: an unchanged refresh rewrites
+    // no row (same xmin), a changed reason rewrites only that row.
+    let guard_rows = |conn: &mut PgConnection| {
+        #[derive(QueryableByName)]
+        struct G {
+            #[diesel(sql_type = Text)]
+            x: String,
+            #[diesel(sql_type = Nullable<Text>)]
+            reason: Option<String>,
+        }
+        sql_query("SELECT xmin::text AS x, reason FROM runtime_node_sbom_guard")
+            .load::<G>(conn)
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.x, g.reason))
+            .collect::<Vec<_>>()
+    };
+    let first = guard_rows(&mut conn);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].1, None);
+    node_guard_refresh(&mut conn);
+    assert_eq!(guard_rows(&mut conn), first, "unchanged: not rewritten");
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'partial'",
+    );
+    node_guard_refresh(&mut conn);
+    let changed = guard_rows(&mut conn);
+    assert_eq!(changed[0].1.as_deref(), Some("sbom_incomplete"));
+    assert_ne!(changed[0].0, first[0].0);
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET completeness = 'full'",
+    );
+    node_guard_refresh(&mut conn);
+    assert_eq!(guard_rows(&mut conn)[0].1, None);
     assert_eq!(
         node_guard_states(&mut conn, &img),
         [

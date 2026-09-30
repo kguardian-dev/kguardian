@@ -558,19 +558,35 @@ pub fn refresh_coverage(
         sql_query("DELETE FROM runtime_in_use_coverage").execute(conn)?;
         // The node SBOM guard, once per container of an image with a node
         // SBOM linked (kg_pkg_in_use reads it per package), over the same
-        // window as the coverage below.
-        sql_query("DELETE FROM runtime_node_sbom_guard").execute(conn)?;
+        // window as the coverage below. Updated in place: a row is written
+        // only when its reason changed, and deleted only when its
+        // container no longer qualifies, so a steady state leaves no dead
+        // tuples (it is also on the maintenance VACUUM list).
         sql_query(
-            "INSERT INTO runtime_node_sbom_guard (cluster_id, pod_namespace, workload_kind, \
-                 workload_name, container_name, image_digest, reason) \
-             SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
-                 wc.container_name, wc.image_digest, \
-                 kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
-                     wc.workload_name, wc.container_name, wc.image_digest, $1) \
-             FROM workload_containers wc \
-             WHERE EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
-                 ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-                 WHERE l.image_digest = wc.image_digest AND l.source = 'node')",
+            "WITH want AS ( \
+                 SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
+                     wc.container_name, wc.image_digest, \
+                     kg_node_sbom_guard(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                         wc.workload_name, wc.container_name, wc.image_digest, $1) AS reason \
+                 FROM workload_containers wc \
+                 WHERE EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
+                     ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
+                     WHERE l.image_digest = wc.image_digest AND l.source = 'node')), \
+             gone AS ( \
+                 DELETE FROM runtime_node_sbom_guard g WHERE NOT EXISTS ( \
+                     SELECT 1 FROM want w WHERE w.cluster_id = g.cluster_id \
+                       AND w.pod_namespace = g.pod_namespace \
+                       AND w.workload_kind = g.workload_kind \
+                       AND w.workload_name = g.workload_name \
+                       AND w.container_name = g.container_name \
+                       AND w.image_digest = g.image_digest)) \
+             INSERT INTO runtime_node_sbom_guard AS g (cluster_id, pod_namespace, \
+                 workload_kind, workload_name, container_name, image_digest, reason) \
+             SELECT * FROM want \
+             ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, \
+                 container_name, image_digest) \
+             DO UPDATE SET reason = EXCLUDED.reason \
+             WHERE g.reason IS DISTINCT FROM EXCLUDED.reason",
         )
         .bind::<Integer, _>(s.min_window_hours as i32)
         .execute(conn)?;
