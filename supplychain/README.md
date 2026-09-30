@@ -395,7 +395,8 @@ SBOMs for them on every pass (each minute). Trivy's tracker answers from
 memory, handing back the SBOM it holds straight to the matcher, so it is
 asked every time. A registry SBOM costs a lookup, so it is asked at most
 once per SBOM per window (10 min, Trivy's resync period, doubling up to a
-day; restarted once the group has matched with it again), then looked up
+day, also across matches, so repeated drops never become a lookup per
+pass and cannot trip registry rate limits for normal lookups), then looked up
 on the source's next pass and, if unchanged, emitted match-only. Refetches
 are counted in `kguardian_supplychain_grype_refetches_total{source,result}`.
 Dropping a group asks nothing, and neither answer reaches the broker
@@ -412,7 +413,11 @@ The wait is capped at `GRYPE_NODE_GROUP_MAX_WAIT` (30 min), counted from
 the later of the start of the wait and the last registry refetch (so an
 SBOM asked for late still has the full cap to arrive), and never more than
 twice the cap from the start, so the wait always ends. Expiries are
-counted in `kguardian_supplychain_grype_node_group_wait_expired_total`. At the cap
+counted in `kguardian_supplychain_grype_node_group_wait_expired_total`, and
+a warning is logged at most once an hour. **Both are the signal that
+`GRYPE_SBOM_BUDGET_MIB` is too small for the node groups: raise it** (and
+the container's memory limit, `supplychain.resources.limits.memory` in the
+chart, with it) so their SBOMs stay held. At the cap
 the group is matched with what it holds, under the union rules above: a
 group without its Trivy SBOM then carries no Trivy-derived findings until
 Trivy's SBOM is back (and likewise for a registry SBOM). A waiting group's

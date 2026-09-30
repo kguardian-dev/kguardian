@@ -272,6 +272,9 @@ type Coordinator struct {
 	refetchers   map[string]Refetcher
 	refetchQueue []refetchRequest
 	refetchState map[refetchRequest]refetchBackoff
+	// budgetWarned: when the "budget too small" warning was last logged
+	// (at most hourly).
+	budgetWarned time.Time
 	// nodeHeld counts the digests with a node SBOM held; 0 (node source
 	// off) short-cuts every node check. nodeSeen: a node SBOM was ever
 	// offered; until then no match keeps groupState.lastOthers.
@@ -656,6 +659,11 @@ func (c *Coordinator) waitLocked(key string) int {
 		}
 		if c.Log != nil {
 			c.Log.WithField("digest", key).Info("SBOMs of a group's last match did not come back in time; matching what is held")
+			if now.Sub(c.budgetWarned) >= time.Hour {
+				c.budgetWarned = now
+				c.Log.Warn("groups with node SBOMs are being matched without SBOMs dropped to stay within the SBOM budget; " +
+					"raise GRYPE_SBOM_BUDGET_MIB (see kguardian_supplychain_grype_node_group_wait_expired_total)")
+			}
 		}
 		return matchReady
 	}
@@ -686,13 +694,10 @@ func (c *Coordinator) recordMatchLocked(key string, gs *groupState, in *union) {
 		}
 	}
 	gs.nodeWaitSince, gs.othersWaitSince, gs.lastRefetch = time.Time{}, time.Time{}, time.Time{}
-	// Matched with these SBOMs: a later wait for one starts its refetch
-	// backoff afresh.
-	for d, srcs := range in.others {
-		for src := range srcs {
-			delete(c.refetchState, refetchRequest{src, d})
-		}
-	}
+	// The refetch backoff is not reset here: registry refetches keep
+	// their doubling window across matches, so a group dropped over and
+	// over cannot turn into a lookup per pass (and trip registry rate
+	// limits for everything else). In-memory refetches are never limited.
 	if len(in.nodes) == 0 {
 		// Kept (once any node SBOM has been seen) so that a node SBOM
 		// joining this group later cannot be matched without them.

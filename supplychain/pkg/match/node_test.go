@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"math/rand"
 	"reflect"
@@ -869,12 +870,14 @@ func TestTrivyRefetchIsRetriedAndNeverLimited(t *testing.T) {
 	}
 }
 
-// A successful match with an SBOM resets its refetch backoff: the next
-// wait asks for it at once.
-func TestRefetchBackoffResetsAfterAMatch(t *testing.T) {
+// A registry refetch keeps its doubling window across a successful match:
+// a group dropped again soon after waits for the window, so repeated drops
+// cannot become a lookup per pass.
+func TestRegistryRefetchBackoffSurvivesAMatch(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m := &mockMatcher{built: time.Unix(100, 0)}
-	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet()}
+	met := metrics.New()
+	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: quiet(), Metrics: met}
 	c.now = func() time.Time { return now }
 	reg := &recordingRefetcher{}
 	c.SetRefetcher(types.SourceRegistry, reg)
@@ -886,12 +889,48 @@ func TestRefetchBackoffResetsAfterAMatch(t *testing.T) {
 	pass(c) // refetch 1; window now 10m
 	advance(c, &now, time.Minute)
 	c.Offer(registrySBOM("sha256:d", "", "musl")) // the source re-emits it
-	pass(c)                                       // matched: backoff reset
+	pass(c)                                       // matched
 	evictAll(c)
 	c.Offer(nodeSBOM("sha256:d", "linux/arm64", "libc6", "b"))
 	pass(c)
+	if reg.calls() != 1 {
+		t.Errorf("%d refetches, want 1: the window survives the match", reg.calls())
+	}
+	advance(c, &now, 10*time.Minute)
 	if reg.calls() != 2 {
-		t.Errorf("%d refetches, want 2: the second wait asks at once", reg.calls())
+		t.Errorf("%d refetches after the window, want 2", reg.calls())
+	}
+}
+
+// Wait-cap expiries warn, at most hourly, that the SBOM budget is too
+// small, naming the setting to raise.
+func TestWaitCapExpiryWarnsAboutTheBudget(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := &mockMatcher{built: time.Unix(100, 0)}
+	log, hook := logtest.NewNullLogger()
+	c := &Coordinator{Matcher: m, Sink: &sink{}, Log: log}
+	c.now = func() time.Time { return now }
+	warnings := func() int {
+		n := 0
+		for _, e := range hook.AllEntries() {
+			if e.Level == logrus.WarnLevel && strings.Contains(e.Message, "GRYPE_SBOM_BUDGET_MIB") {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 3; i++ {
+		d := fmt.Sprintf("sha256:%d", i)
+		c.Offer(trivySBOM(d, "openssl"))
+		c.Offer(nodeSBOM(d, "linux/arm64", "libc6"))
+		pass(c)
+		evictAll(c)
+		c.Offer(nodeSBOM(d, "linux/arm64", "libc6", "x"))
+		pass(c)
+		advance(c, &now, 31*time.Minute) // Trivy never back: the cap expires
+	}
+	if warnings() != 2 { // expiries at 31, 62 and 93 minutes: warned at 31 and 93
+		t.Errorf("%d budget warnings, want 2", warnings())
 	}
 }
 
