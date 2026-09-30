@@ -51,6 +51,11 @@ jobs:
           filters: |
             controller:
               - 'controller/**'
+              # The controller's build and test jobs are defined here, so a
+              # change to this file has to re-run them: otherwise an edit to
+              # how the controller is built ships without that build ever
+              # running. Same reason the supplychain filters below list it.
+              - '.github/workflows/pr-build.yaml'
             broker:
               - 'broker/**'
               # The broker's NetworkPolicy generator (broker/src/netpol) is
