@@ -2153,7 +2153,7 @@ supplychain:
     # -- Supplychain image pull policy
     pullPolicy: IfNotPresent
     # -- Supplychain version tag
-    tag: "v0.2.0"
+    tag: "v0.2.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
