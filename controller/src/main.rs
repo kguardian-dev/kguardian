@@ -63,6 +63,17 @@ async fn main() -> Result<(), Error> {
         broker_url.clone(),
     ));
 
+    // Node SBOM cataloging (NODE_CATALOG, default off). Off, this reads
+    // that one variable and returns: no task, no socket, no HTTP. On, it
+    // is unsupervised for the same reason as node facts above — a
+    // catalog failure must never take capture down — and restarts its
+    // own claim loop after a panic.
+    let _node_catalog = kguardian::catalog::start(
+        kguardian::catalog::Config::from_env(),
+        node_name.clone(),
+        broker_url.clone(),
+    );
+
     let excluded_namespaces: Vec<String> = kguardian::pod_watcher::parse_excluded_namespaces(
         &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
     );

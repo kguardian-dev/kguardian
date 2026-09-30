@@ -28,7 +28,7 @@ pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// node facts were never stored. A default header cannot be forgotten
 /// by the next caller. It is marked sensitive so it stays out of debug
 /// output, and reqwest drops it on a cross-host redirect.
-fn build_http_client(
+pub(crate) fn build_http_client(
     request_timeout: std::time::Duration,
     connect_timeout: std::time::Duration,
     token: Option<&str>,
