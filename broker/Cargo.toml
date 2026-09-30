@@ -23,7 +23,7 @@ path = "src/lib.rs"
 bench = false
 
 [dependencies]
-dotenv = "0.15"
+dotenvy = "0.15.7"
 actix-web = "4.11"
 actix-cors = "0.7"
 diesel = { version = "2.3.6", features = ["postgres","chrono","serde_json","r2d2","64-column-tables"] }
