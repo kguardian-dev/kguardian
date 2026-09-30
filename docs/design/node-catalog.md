@@ -92,9 +92,11 @@ RETURNING inventory_digest, claim_token, lease_expires_at;
   `<running state>` is the inventory's own rule (`running`, or `waiting` in `CrashLoopBackOff`, or a
   NULL state from an older Controller), and the window is `IMAGE_INVENTORY_RUNNING_WINDOW_SECS`.
   Limit: during a rollout that runs two digests of one container on different nodes, a node running
-  either passes for both. The Controller only offers local digests, so this bounds a stolen catalog
-  token to digests of workloads with a live pod on that node. Pod-level digest rows would close it
-  but change `/pod/spec` ingest for every install.
+  either passes for both. The node name is self-asserted (one catalog token serves every node), so
+  the check is not identity: it keeps an honest Controller to digests it can reach, and bounds a
+  stolen catalog token to digests running on some node (by naming that node). Pod-level digest rows
+  would tighten the rollout case but change `/pod/spec` ingest for every install; node identity
+  would need per-node tokens (out of scope).
 - **Claim SQL as shipped** (`GRANT_SQL`): the design's statement, with the `LIMIT 1 FOR UPDATE SKIP
   LOCKED` subquery in `FROM` so the grant can return which clause made the row claimable (the
   `granted_total{reason}` label); `skipped_nodes` holds `{node: timestamp}` compared with `now() -
@@ -116,6 +118,14 @@ RETURNING inventory_digest, claim_token, lease_expires_at;
   `in_use_store::refresh_package_use_batch` ignore `source = 'node'`, so a node SBOM yields no
   `executed`/`loaded`/`installed_not_observed` verdict and no VEX statement. Its packages, findings
   and CycloneDX export are unaffected. PR 6 drops the exclusion together with the section 5 guard.
+- **Review changes (PR 1):** the grant records `grant_epoch` and `claimed_at` and never raises
+  `epoch`, which only a stored SBOM sets (to the upload's epoch); epochs above
+  `NODE_CATALOG_MAX_EPOCH` (1000) are refused; a done row with its node SBOM collected is claimable
+  again (`sbom_missing`); a node SBOM links only to its claimed digest, and coverage counts only done
+  claims; component reads return at most 16 paths plus `filePathsTotal`; uploads take one of 16 slots
+  before the body is read, and node traffic gets half the ingest queue and half the page staging
+  ceiling; renew is refused after `NODE_CATALOG_MAX_HOLD_SECS` (2 h); priorities refresh in
+  200-row `SKIP LOCKED` batches.
 - **Token:** the catalog writes need `BROKER_TOKEN_CATALOG` itself to be set (an admin token alone
   does not enable them, since the Controller would have nothing to post with); the catalog token
   carries only `catalog`, not `read`.
@@ -171,7 +181,7 @@ RETURNING inventory_digest, claim_token, lease_expires_at;
 - Worker: uid 2000000000, runAsNonRoot, RO root fs, drop ALL + `DAC_READ_SEARCH`, RuntimeDefault + in-process seccomp; fds closed to root handle and pipe; no network (AF_UNIX only), no token (SA token shadowed), no host mounts; kernel-confined resolution. A fully compromised worker reads only the one image root it was handed and returns an SBOM the controller size-checks.
 - Data sent: package metadata and package-owned executable paths only.
 - Crafted images: Syft depth limits; memory/time/file caps; fresh child per scan; panic → `error`.
-- Stolen catalog token: only claimed `node` SBOMs, for digests the broker sees running on that node; cannot override Trivy.
+- Stolen catalog token: only claimed `node` SBOMs, for digests the broker sees running on some node (the node name is self-asserted, see 2a); cannot override Trivy.
 - Supply chain: syft lock-step with grype; signed; SLSA.
 
 ## 7. Rollout, release, operations

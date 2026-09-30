@@ -1571,20 +1571,22 @@ fn replace_components_from_json(
 }
 
 /// Drop staged pages of other sets for this key that are no newer than
-/// `scanned_at` (superseded).
+/// `scanned_at` (superseded), or of every other set with `any_time`.
 fn drop_superseded_pages(
     conn: &mut PgConnection,
     h: &Header,
     keep_set: Option<&str>,
+    any_time: bool,
 ) -> QueryResult<usize> {
     sql_query(
         "DELETE FROM image_sbom_pages WHERE digest = $1 AND source = $2 \
-         AND ($3::text IS NULL OR set_id <> $3) AND scanned_at <= $4",
+         AND ($3::text IS NULL OR set_id <> $3) AND ($5 OR scanned_at <= $4)",
     )
     .bind::<Text, _>(&h.digest)
     .bind::<Text, _>(&h.source)
     .bind::<Nullable<Text>, _>(keep_set)
     .bind::<Timestamp, _>(h.scanned_at)
+    .bind::<Bool, _>(any_time)
     .execute(conn)
 }
 
@@ -1606,7 +1608,17 @@ struct Staging {
     sets: i64,
     #[diesel(sql_type = BigInt)]
     bytes: i64,
+    #[diesel(sql_type = BigInt)]
+    node_sets: i64,
+    #[diesel(sql_type = BigInt)]
+    node_bytes: i64,
 }
+
+/// The node catalog's share of the staging ceiling: at most half the sets
+/// and half the bytes, so node traffic can never take the room the
+/// supply-chain sources had before it existed.
+pub const MAX_STAGED_SETS_NODE: i64 = MAX_STAGED_SETS / 2;
+pub const MAX_STAGED_BYTES_NODE: i64 = MAX_STAGED_BYTES / 2;
 
 /// The global staging ceiling ([`MAX_STAGED_SETS`], [`MAX_STAGED_BYTES`])
 /// refused a new page set. Surfaces as 429.
@@ -1634,7 +1646,7 @@ struct SetShape {
 
 /// Store an SBOM or one page of it; see the module docs.
 pub fn store_sbom(conn: &mut PgConnection, p: SbomPayload) -> Result<Outcome, DbError> {
-    store_sbom_with(conn, p, &mut |_, _| Ok(()))
+    store_sbom_with(conn, p, false, &mut |_, _| Ok(()))
 }
 
 /// The components that just replaced what was stored, handed to the
@@ -1649,9 +1661,15 @@ pub(crate) enum Assembled<'a> {
 /// [`store_sbom`] with a hook that runs once the new components are in
 /// place, in the same transaction and before the staged pages are
 /// deleted. Only a payload that replaces what is stored reaches it.
+///
+/// `supersedes` (the node catalog, for a set from a higher catalog epoch
+/// than the stored one) replaces what is stored or staged whatever the
+/// scan times, so a node whose clock is behind can still re-catalog.
+/// Every other caller passes `false`: the scan-time rules as documented.
 pub(crate) fn store_sbom_with(
     conn: &mut PgConnection,
     mut p: SbomPayload,
+    supersedes: bool,
     on_assembled: &mut dyn FnMut(&mut PgConnection, Assembled<'_>) -> Result<(), DbError>,
 ) -> Result<Outcome, DbError> {
     let rows_json = serde_json::to_string(&p.rows)?;
@@ -1671,7 +1689,7 @@ pub(crate) fn store_sbom_with(
             }
             // Different content replaces only from a strictly newer scan
             // (see store_vulnerabilities).
-            if p.header.scanned_at <= e.scanned_at {
+            if !supersedes && p.header.scanned_at <= e.scanned_at {
                 return Ok(Outcome::Stale {
                     stored_scanned_at: e.scanned_at,
                 });
@@ -1686,7 +1704,7 @@ pub(crate) fn store_sbom_with(
         .bind::<Text, _>(&p.header.source)
         .bind::<Text, _>(&p.header.content_hash)
         .get_result(conn)?;
-        if let Some(n) = newest.newest {
+        if let (Some(n), false) = (newest.newest, supersedes) {
             // Ties go to the set already staging, so two sets with one
             // scan time cannot evict each other page by page.
             if n >= p.header.scanned_at {
@@ -1701,20 +1719,33 @@ pub(crate) fn store_sbom_with(
             on_assembled(conn, Assembled::Whole(&rows_json))?;
             p.header.item_count = n as i32;
             upsert_header(conn, &p.header)?;
-            drop_superseded_pages(conn, &p.header, None)?;
+            drop_superseded_pages(conn, &p.header, None, supersedes)?;
             relink(conn, &p.header.digest, &p.header.source)?;
             return Ok(Outcome::Stored { items: n });
         };
 
-        drop_superseded_pages(conn, &p.header, Some(&page.set_id))?;
+        drop_superseded_pages(conn, &p.header, Some(&page.set_id), supersedes)?;
         if page.total > 1 && !set_is_staged(conn, &p.header, &page.set_id)? {
             // A new set: check the global ceiling first.
             let st: Staging = sql_query(
                 "SELECT count(DISTINCT (digest, source, set_id)) AS sets, \
-                     COALESCE(sum(pg_column_size(components)), 0)::bigint AS bytes \
+                     COALESCE(sum(pg_column_size(components)), 0)::bigint AS bytes, \
+                     count(DISTINCT (digest, source, set_id)) FILTER (WHERE source = 'node') \
+                         AS node_sets, \
+                     COALESCE(sum(pg_column_size(components)) FILTER (WHERE source = 'node'), 0) \
+                         ::bigint AS node_bytes \
                  FROM image_sbom_pages",
             )
             .get_result(conn)?;
+            let node_full = p.header.source == NODE_SOURCE
+                && (st.node_sets >= MAX_STAGED_SETS_NODE || st.node_bytes >= MAX_STAGED_BYTES_NODE);
+            if node_full {
+                STAGED_SETS_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(Box::new(StagingFull(format!(
+                    "{} node SBOM page sets ({} bytes) are already being assembled; retry later",
+                    st.node_sets, st.node_bytes
+                ))));
+            }
             if st.sets >= MAX_STAGED_SETS || st.bytes >= MAX_STAGED_BYTES {
                 STAGED_SETS_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Err(Box::new(StagingFull(format!(
@@ -1862,6 +1893,11 @@ pub const JOIN_WORKLOAD_TAG: &str = "workload_tag";
 /// BuildKit attaches an SBOM to one platform manifest, the matcher
 /// reports under the index, and a node may run another platform of it,
 /// so the SBOM a report came from is served wherever the report is.
+///
+/// A node catalog SBOM (source `node`) links only by the first rule: it
+/// was cataloged for exactly the inventory digest it was claimed under,
+/// and its payload's own manifest list or workloads are not trusted to
+/// attach it anywhere else.
 const WANTED_LINKS_CTE: &str = "\
 WITH hdr AS ( \
     SELECT kind, index_digest, manifest_digests, norm_repository, tag, observed_in FROM vuln_sources \
@@ -1871,13 +1907,14 @@ WITH hdr AS ( \
     FROM images i WHERE i.digest = $1 AND EXISTS (SELECT 1 FROM hdr) \
     UNION ALL \
     SELECT i.digest, 'platform_manifest'::text, 2::smallint FROM images i \
-    WHERE i.digest <> $1 AND i.digest IN (SELECT unnest(h.manifest_digests) FROM hdr h) \
+    WHERE i.digest <> $1 AND $2 <> 'node' \
+      AND i.digest IN (SELECT unnest(h.manifest_digests) FROM hdr h) \
     UNION ALL \
     SELECT l.image_digest, l.join_kind, l.join_rank FROM hdr h \
     JOIN vuln_sources v ON v.kind = 'vulnerabilities' AND $2 = ANY(v.sbom_sources) \
         AND (v.digest = $1 OR v.digest = h.index_digest) \
     JOIN supplychain_image_links l ON l.digest = v.digest AND l.source = v.source AND l.join_rank < 3 \
-    WHERE h.kind = 'sbom' \
+    WHERE h.kind = 'sbom' AND $2 <> 'node' \
 ), tagged AS ( \
     SELECT DISTINCT wc.image_digest, 'workload_tag'::text AS join_kind, 3::smallint AS join_rank \
     FROM hdr h \
@@ -1885,7 +1922,7 @@ WITH hdr AS ( \
     JOIN workload_containers wc ON wc.pod_namespace = o->>'namespace' \
         AND wc.container_name = o->>'container' \
     JOIN images i ON i.digest = wc.image_digest \
-    WHERE NOT EXISTS (SELECT 1 FROM exact) \
+    WHERE NOT EXISTS (SELECT 1 FROM exact) AND $2 <> 'node' \
       AND NOT EXISTS (SELECT 1 FROM supplychain_image_links x \
           WHERE x.image_digest = wc.image_digest AND x.join_rank < 3) \
       AND h.tag IS NOT NULL AND h.norm_repository IS NOT NULL \

@@ -15,8 +15,10 @@
 //! `supplychain` is its own token so a compromised pod holding the
 //! ingest (or read) token can't post a forged "clean" scan result.
 //! `catalog` is its own token for the same reason, and carries nothing
-//! else: a stolen one can only post node SBOMs for digests the broker
-//! granted, to nodes that run them (node_catalog.rs).
+//! else. The node a claim names is self-asserted (one token serves every
+//! node), so a stolen one can post node SBOMs for any digest the
+//! inventory sees running on some node, under a grant, and nothing else:
+//! no other source, no read (node_catalog.rs).
 //!
 //! Tokens come from the environment (the chart mounts them from one
 //! Secret with a key per scope):

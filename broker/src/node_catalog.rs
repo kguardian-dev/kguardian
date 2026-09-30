@@ -116,6 +116,19 @@ pub const SKIP_SECS: i64 = 24 * 3600;
 pub const BACKOFF_SECS: [i64; 3] = [3600, 6 * 3600, 24 * 3600];
 /// `NODE_CATALOG_RETENTION_DAYS` default.
 pub const DEFAULT_RETENTION_DAYS: u32 = 14;
+/// `NODE_CATALOG_MAX_EPOCH` default: the highest catalog epoch the broker
+/// accepts. The epoch is asserted by the caller, so without a ceiling one
+/// claim at i64::MAX would leave every done row un-re-catalogable.
+pub const DEFAULT_MAX_EPOCH: i64 = 1000;
+/// `NODE_CATALOG_MAX_HOLD_SECS` default: a claim is not renewed once held
+/// this long (twice the cataloger's 30 min scan ceiling, plus the upload).
+pub const DEFAULT_MAX_HOLD_SECS: i64 = 2 * 3600;
+/// Upload bodies being read or waiting for the ingest worker at once;
+/// beyond this a new upload gets 503 before its body is read.
+pub const UPLOAD_SLOTS: usize = 2 * supplychain::INGEST_QUEUE;
+/// Node uploads queued on the shared ingest worker at once: half its
+/// queue, so node traffic cannot fill it for the supply-chain sources.
+pub const NODE_QUEUE_SLOTS: usize = supplychain::INGEST_QUEUE / 2;
 
 /// Per-package flag bits in `node_sbom_package_flags`.
 pub const FLAG_FILES_TRUNCATED: i16 = 1;
@@ -139,6 +152,34 @@ pub struct CatalogConfig {
     pub grants: bool,
     /// `NODE_CATALOG_RETENTION_DAYS` (default 14; 0 keeps rows forever).
     pub retention_days: u32,
+    /// `NODE_CATALOG_MAX_EPOCH` (default 1000): higher epochs get 422.
+    pub max_epoch: i64,
+    /// `NODE_CATALOG_MAX_HOLD_SECS` (default 7200, at least the lease):
+    /// renewing a claim held longer gets 409.
+    pub max_hold_secs: i64,
+}
+
+impl Default for CatalogConfig {
+    fn default() -> Self {
+        CatalogConfig {
+            grants: true,
+            retention_days: DEFAULT_RETENTION_DAYS,
+            max_epoch: DEFAULT_MAX_EPOCH,
+            max_hold_secs: DEFAULT_MAX_HOLD_SECS,
+        }
+    }
+}
+
+pub(crate) fn parse_max_epoch(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|n| *n >= 0)
+        .unwrap_or(DEFAULT_MAX_EPOCH)
+}
+
+pub(crate) fn parse_max_hold(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|n| n.max(LEASE_SECS))
+        .unwrap_or(DEFAULT_MAX_HOLD_SECS)
 }
 
 pub(crate) fn parse_grants(raw: Option<&str>) -> bool {
@@ -159,6 +200,10 @@ impl CatalogConfig {
             grants: parse_grants(std::env::var("NODE_CATALOG_GRANTS").ok().as_deref()),
             retention_days: parse_retention_days(
                 std::env::var("NODE_CATALOG_RETENTION_DAYS").ok().as_deref(),
+            ),
+            max_epoch: parse_max_epoch(std::env::var("NODE_CATALOG_MAX_EPOCH").ok().as_deref()),
+            max_hold_secs: parse_max_hold(
+                std::env::var("NODE_CATALOG_MAX_HOLD_SECS").ok().as_deref(),
             ),
         }
     }
@@ -311,10 +356,10 @@ pub fn backoff_secs(failures: i32) -> i64 {
     BACKOFF_SECS[(failures.max(1) as usize - 1).min(BACKOFF_SECS.len() - 1)]
 }
 
-/// Whether an upload under epoch `payload` may write a row at epoch `row`:
-/// never below the stored epoch.
-pub fn accepts_epoch(row: i64, payload: i64) -> bool {
-    payload >= row
+/// Whether an upload under epoch `payload` may complete a claim granted
+/// under `grant`: never below the grant's epoch.
+pub fn accepts_epoch(grant: i64, payload: i64) -> bool {
+    payload >= grant
 }
 
 /// A node's pid_gone / drift failures for one digest.
@@ -392,7 +437,13 @@ pub fn release(
 // ---------------------------------------------------------------------
 
 /// Why a grant was possible.
-const GRANT_REASONS: [&str; 4] = ["pending", "backoff_elapsed", "lease_expired", "epoch"];
+const GRANT_REASONS: [&str; 5] = [
+    "pending",
+    "backoff_elapsed",
+    "lease_expired",
+    "epoch",
+    "sbom_missing",
+];
 /// How a claim became done.
 const CATALOGED_REASONS: [&str; 5] = [
     "full",
@@ -465,7 +516,7 @@ impl<const N: usize> Counters<N> {
     }
 }
 
-static GRANTED: Counters<4> = Counters::new(&GRANT_REASONS);
+static GRANTED: Counters<5> = Counters::new(&GRANT_REASONS);
 static CATALOGED: Counters<5> = Counters::new(&CATALOGED_REASONS);
 static FAILED: Counters<6> = Counters::new(&FAILED_REASONS);
 static SKIPPED: Counters<10> = Counters::new(&SKIPPED_REASONS);
@@ -598,7 +649,7 @@ pub struct Offer {
     pub digests: Vec<String>,
 }
 
-pub fn validate_offer(r: ClaimRequest) -> Result<Offer, Box<HttpResponse>> {
+pub fn validate_offer(r: ClaimRequest, max_epoch: i64) -> Result<Offer, Box<HttpResponse>> {
     let node = r.node.trim().to_string();
     if !valid_node(&node) {
         return Err(refuse("node must be a Kubernetes node name"));
@@ -609,6 +660,12 @@ pub fn validate_offer(r: ClaimRequest) -> Result<Offer, Box<HttpResponse>> {
     }
     if r.epoch < 0 {
         return Err(refuse("epoch must be >= 0"));
+    }
+    if r.epoch > max_epoch {
+        return Err(Box::new(HttpResponse::UnprocessableEntity().body(format!(
+            "epoch {} is above this broker's NODE_CATALOG_MAX_EPOCH ({max_epoch})",
+            r.epoch
+        ))));
     }
     if r.offer.len() > MAX_OFFER {
         return Err(Box::new(
@@ -672,21 +729,30 @@ ON CONFLICT DO NOTHING";
 /// picked and locked by the `LIMIT 1 FOR UPDATE SKIP LOCKED` subquery, so
 /// a row another claimer holds is skipped, never waited on; `why` is the
 /// clause that made it claimable (the granted counter's label).
+///
+/// The grant records its epoch in `grant_epoch` and never touches
+/// `epoch`, which only a stored SBOM sets: a node that asserts a high
+/// epoch and never uploads moves nothing, and after a rollback the older
+/// cataloger still takes every row that is not done. A done row is
+/// claimable again under a higher epoch, or when its node SBOM is gone
+/// (the supply-chain GC removed it while the image was away).
 pub(crate) const GRANT_SQL: &str = "\
 UPDATE node_catalog_claims c SET state = 'claimed', node = $2, claim_token = gen_random_uuid(), \
     lease_expires_at = now() + make_interval(secs => $5), attempts = c.attempts + 1, \
-    epoch = GREATEST(c.epoch, $3), updated_at = now() \
+    grant_epoch = $3, claimed_at = now(), updated_at = now() \
 FROM ( \
     SELECT inventory_digest, CASE state WHEN 'pending' THEN 'pending' \
         WHEN 'failed' THEN 'backoff_elapsed' WHEN 'claimed' THEN 'lease_expired' \
-        ELSE 'epoch' END AS why \
-    FROM node_catalog_claims \
+        ELSE CASE WHEN epoch < $3 THEN 'epoch' ELSE 'sbom_missing' END END AS why \
+    FROM node_catalog_claims n \
     WHERE inventory_digest = ANY($1) \
-      AND $3 >= epoch \
       AND ( state = 'pending' \
          OR (state = 'failed'  AND next_attempt_at <= now()) \
          OR (state = 'claimed' AND lease_expires_at <= now()) \
-         OR (state = 'done'    AND epoch < $3) ) \
+         OR (state = 'done'    AND (epoch < $3 \
+             OR (reason IS DISTINCT FROM 'no_packages_found' AND NOT EXISTS ( \
+                 SELECT 1 FROM vuln_sources vs WHERE vs.digest = n.inventory_digest \
+                   AND vs.source = 'node' AND vs.kind = 'sbom')))) ) \
       AND NOT COALESCE((skipped_nodes ->> $2)::timestamptz > now() - interval '24 hours', false) \
       AND kg_digest_runs_on_node(inventory_digest, $2, $4) \
     ORDER BY priority DESC, inventory_digest LIMIT 1 \
@@ -756,11 +822,12 @@ async fn post_claims(
     if !catalog_allowed(auth_of(&req)) {
         return Ok(not_configured());
     }
-    let offer = match validate_offer(body?.into_inner()) {
+    let cfg = config_of(&req);
+    let offer = match validate_offer(body?.into_inner(), cfg.max_epoch) {
         Ok(o) => o,
         Err(resp) => return Ok(*resp),
     };
-    let grants = config_of(&req).grants;
+    let grants = cfg.grants;
     let pool = pool_of(&req)?;
     let grant = web::block(move || {
         let mut conn = pool.get()?;
@@ -830,10 +897,17 @@ struct HeldRow {
     skipped_nodes: serde_json::Value,
     #[diesel(sql_type = Jsonb)]
     node_retries: serde_json::Value,
+    /// The stored SBOM's epoch.
     #[diesel(sql_type = BigInt)]
     epoch: i64,
+    /// The epoch this claim was granted under.
+    #[diesel(sql_type = BigInt)]
+    grant_epoch: i64,
     #[diesel(sql_type = Bool)]
     live: bool,
+    /// Seconds since the grant.
+    #[diesel(sql_type = Double)]
+    held_secs: f64,
     #[diesel(sql_type = Timestamptz)]
     now: DateTime<Utc>,
 }
@@ -842,7 +916,10 @@ struct HeldRow {
 fn held(conn: &mut PgConnection, digest: &str, token: &uuid::Uuid) -> QueryResult<Option<HeldRow>> {
     sql_query(
         "SELECT node, failures, skipped_nodes, node_retries, epoch, \
-             COALESCE(lease_expires_at > now(), false) AS live, now() AS now \
+             COALESCE(grant_epoch, epoch) AS grant_epoch, \
+             COALESCE(lease_expires_at > now(), false) AS live, \
+             COALESCE(extract(epoch FROM now() - claimed_at), 0)::float8 AS held_secs, \
+             now() AS now \
          FROM node_catalog_claims \
          WHERE inventory_digest = $1 AND claim_token = $2::uuid AND state = 'claimed' \
          FOR UPDATE",
@@ -870,6 +947,7 @@ pub fn update_claim(
     token: &uuid::Uuid,
     node: &str,
     action: &Action,
+    max_hold_secs: i64,
 ) -> Result<Updated, DbError> {
     let out = conn.transaction::<_, DbError, _>(|conn| {
         let Some(row) = held(conn, digest, token)? else {
@@ -886,6 +964,13 @@ pub fn update_claim(
             Action::Renew => {
                 if !row.live {
                     return Err(Box::new(StaleClaim("the lease has expired".into())));
+                }
+                if row.held_secs > max_hold_secs as f64 {
+                    return Err(Box::new(StaleClaim(format!(
+                        "the claim has been held for {:.0} s, over the {max_hold_secs} s limit; \
+                         let the lease expire",
+                        row.held_secs
+                    ))));
                 }
                 #[derive(QueryableByName)]
                 struct L {
@@ -922,7 +1007,7 @@ pub fn update_claim(
                     "UPDATE node_catalog_claims SET state = $2, failures = $3, \
                          next_attempt_at = $4, reason = $5, skipped_nodes = $6::jsonb, \
                          node_retries = $7::jsonb, claim_token = NULL, lease_expires_at = NULL, \
-                         updated_at = now() \
+                         epoch = CASE WHEN $2 = 'done' THEN $8 ELSE epoch END, updated_at = now() \
                      WHERE inventory_digest = $1",
                 )
                 .bind::<Text, _>(digest)
@@ -932,6 +1017,7 @@ pub fn update_claim(
                 .bind::<Text, _>(reason)
                 .bind::<Text, _>(serde_json::to_string(&r.skipped_nodes)?)
                 .bind::<Text, _>(serde_json::to_string(&r.node_retries)?)
+                .bind::<BigInt, _>(row.grant_epoch)
                 .execute(conn)?;
                 Ok((
                     Updated {
@@ -998,9 +1084,10 @@ async fn put_claim(
         Err(m) => return Ok(HttpResponse::UnprocessableEntity().body(m)),
     };
     let pool = pool_of(&req)?;
+    let max_hold = config_of(&req).max_hold_secs;
     let updated = web::block(move || -> Result<Updated, DbError> {
         let mut conn = pool.get()?;
-        update_claim(&mut conn, &digest, &token, &node, &action)
+        update_claim(&mut conn, &digest, &token, &node, &action, max_hold)
     })
     .await?
     .map_err(stale_or_error)?;
@@ -1223,9 +1310,12 @@ pub fn normalise_upload(
     digest: &str,
     w: WireNodeSbom,
     now: DateTime<Utc>,
+    max_epoch: i64,
 ) -> Result<Upload, supplychain::Reject> {
-    if w.epoch < 0 {
-        return Err(supplychain::Reject::Invalid("epoch must be >= 0".into()));
+    if w.epoch < 0 || w.epoch > max_epoch {
+        return Err(supplychain::Reject::Invalid(format!(
+            "epoch must be in [0, {max_epoch}] (NODE_CATALOG_MAX_EPOCH)"
+        )));
     }
     let completeness = w
         .completeness
@@ -1303,6 +1393,17 @@ pub fn normalise_upload(
     let manifest_digest = platform
         .as_ref()
         .and_then(|p| payload.header.platform_manifests.get(p).cloned());
+    // The SBOM belongs to the claimed digest only: the payload's manifest
+    // list, index and workloads never link it to another inventory image
+    // (supplychain WANTED_LINKS_CTE also refuses them for source node).
+    // The platform it was cataloged for is kept, as provenance.
+    payload.header.platform_manifests = match (&platform, &manifest_digest) {
+        (Some(p), Some(d)) => BTreeMap::from([(p.clone(), d.clone())]),
+        _ => BTreeMap::new(),
+    };
+    payload.header.manifest_digests = Vec::new();
+    payload.header.index_digest = None;
+    payload.header.observed_in = Vec::new();
     Ok(Upload {
         payload,
         meta: ScanMeta {
@@ -1322,6 +1423,7 @@ pub fn prepare_upload(
     raw: &[u8],
     gzip: bool,
     now: DateTime<Utc>,
+    max_epoch: i64,
 ) -> Result<Upload, PrepareError> {
     let inflated;
     let bytes: &[u8] = if gzip {
@@ -1347,7 +1449,7 @@ pub fn prepare_upload(
             PrepareError::Json(m)
         }
     })?;
-    normalise_upload(digest, w, now).map_err(PrepareError::Reject)
+    normalise_upload(digest, w, now, max_epoch).map_err(PrepareError::Reject)
 }
 
 /// Per-package flags of the SBOM that just replaced the stored one, from
@@ -1412,24 +1514,28 @@ pub fn store_upload(
         if !row.live {
             return Err(Box::new(StaleClaim("the lease has expired".into())));
         }
-        if !accepts_epoch(row.epoch, meta.epoch) {
+        if !accepts_epoch(row.grant_epoch, meta.epoch) {
             return Err(Box::new(StaleClaim(format!(
-                "epoch {} is below the stored epoch {}",
-                meta.epoch, row.epoch
+                "epoch {} is below the epoch {} this claim was granted under",
+                meta.epoch, row.grant_epoch
             ))));
         }
-        let outcome = store_sbom_with(conn, payload, &mut |conn, a| write_flags(conn, digest, a))?;
+        // A higher epoch than the stored SBOM's replaces it whatever the
+        // two scan times say (a node clock behind the last one's).
+        let supersedes = meta.epoch > row.epoch;
+        let outcome = store_sbom_with(conn, payload, supersedes, &mut |conn, a| {
+            write_flags(conn, digest, a)
+        })?;
         let label = match &outcome {
             Outcome::Staged { .. } | Outcome::DuplicatePage { .. } => return Ok((outcome, None)),
             Outcome::Stale { .. } => {
                 sql_query(
                     "UPDATE node_catalog_claims SET state = 'done', claim_token = NULL, \
                          lease_expires_at = NULL, failures = 0, next_attempt_at = NULL, \
-                         reason = 'superseded', epoch = GREATEST(epoch, $2), updated_at = now() \
+                         reason = 'superseded', updated_at = now() \
                      WHERE inventory_digest = $1",
                 )
                 .bind::<Text, _>(digest)
-                .bind::<BigInt, _>(meta.epoch)
                 .execute(conn)?;
                 "superseded"
             }
@@ -1471,7 +1577,7 @@ pub fn store_upload(
 
 pub(crate) const FINALIZE_SQL: &str = "\
 UPDATE node_catalog_claims SET state = 'done', claim_token = NULL, lease_expires_at = NULL, \
-    failures = 0, next_attempt_at = NULL, reason = $2, epoch = GREATEST(epoch, $3), \
+    failures = 0, next_attempt_at = NULL, reason = $2, epoch = $3, \
     platform = COALESCE($4, (SELECT p.platform FROM node_catalog_platforms p \
         WHERE p.node = node_catalog_claims.node), platform), \
     manifest_digest = COALESCE($5, manifest_digest), completeness = $6, \
@@ -1484,6 +1590,41 @@ WHERE inventory_digest = $1";
 enum UploadError {
     Prepare(PrepareError),
     Db(DbError),
+}
+
+/// Upload slots ([`UPLOAD_SLOTS`]); tests register their own.
+#[derive(Clone)]
+pub struct UploadSlots(pub std::sync::Arc<tokio::sync::Semaphore>);
+
+impl UploadSlots {
+    pub fn new(n: usize) -> Self {
+        UploadSlots(std::sync::Arc::new(tokio::sync::Semaphore::new(n)))
+    }
+}
+
+fn upload_slots(req: &HttpRequest) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static GLOBAL: std::sync::OnceLock<UploadSlots> = std::sync::OnceLock::new();
+    req.app_data::<web::Data<UploadSlots>>()
+        .map(|s| s.0.clone())
+        .unwrap_or_else(|| {
+            GLOBAL
+                .get_or_init(|| UploadSlots::new(UPLOAD_SLOTS))
+                .0
+                .clone()
+        })
+}
+
+fn node_queue_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static Q: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    Q.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(NODE_QUEUE_SLOTS)))
+        .clone()
+}
+
+fn busy(msg: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", "5"))
+        .body(msg.to_string())
 }
 
 async fn post_catalog_sbom(
@@ -1502,6 +1643,12 @@ async fn post_catalog_sbom(
         Ok(t) => t,
         Err(resp) => return *resp,
     };
+    // A slot before the body is read: at most UPLOAD_SLOTS bodies (8 MiB
+    // each) in memory at once, whatever the number of connections.
+    let Ok(slot) = upload_slots(&req).try_acquire_owned() else {
+        warn!(%digest, "node catalog upload refused: every upload slot is busy");
+        return busy("every node catalog upload slot is busy; retry");
+    };
     let (raw, gzip) = match supplychain::read_ingest_body_limited(
         &req,
         body,
@@ -1515,8 +1662,16 @@ async fn post_catalog_sbom(
     };
     let pool = req.app_data::<web::Data<DbPool>>().cloned();
     let d = digest.clone();
+    let max_epoch = config_of(&req).max_epoch;
+    // The node share of the shared ingest queue, held until the job ends.
+    let Ok(queued) = node_queue_slots().try_acquire_owned() else {
+        warn!(%digest, "node catalog upload refused: the node share of the ingest queue is full");
+        return busy("the node catalog's share of the ingest queue is full; retry");
+    };
     let work = move || -> Result<Uploaded, UploadError> {
-        let up = prepare_upload(&d, &raw, gzip, Utc::now()).map_err(UploadError::Prepare)?;
+        let _held = (slot, queued);
+        let up =
+            prepare_upload(&d, &raw, gzip, Utc::now(), max_epoch).map_err(UploadError::Prepare)?;
         drop(raw);
         let pool = pool.ok_or_else(|| UploadError::Db("no database pool".into()))?;
         let mut conn = pool.get().map_err(|e| UploadError::Db(Box::new(e)))?;
@@ -1623,9 +1778,9 @@ pub(crate) const COVERAGE_SQL: &str = concat!(
         SELECT r.digest, \
             EXISTS (SELECT 1 FROM supplychain_image_links l WHERE l.image_digest = r.digest \
                 AND l.source = 'trivy-operator') AS trivy, \
-            EXISTS (SELECT 1 FROM supplychain_image_links l JOIN vuln_sources vs \
-                ON vs.digest = l.digest AND vs.source = l.source AND vs.kind = 'sbom' \
-                WHERE l.image_digest = r.digest AND l.source = 'node') AS node \
+            EXISTS (SELECT 1 FROM node_catalog_claims c JOIN vuln_sources vs \
+                ON vs.digest = c.inventory_digest AND vs.source = 'node' AND vs.kind = 'sbom' \
+                WHERE c.inventory_digest = r.digest AND c.state = 'done') AS node \
         FROM running r \
      ) SELECT count(*) AS running, count(*) FILTER (WHERE trivy) AS trivy, \
         count(*) FILTER (WHERE node) AS node, count(*) FILTER (WHERE trivy OR node) AS trusted \
@@ -1899,19 +2054,38 @@ pub(crate) const PRIORITY_SQL: &str = concat!(
     "WITH n AS (SELECT wc.image_digest, count(*)::int AS n FROM workload_containers wc \
          WHERE ",
     running_sql!("$1"),
-    " GROUP BY wc.image_digest) \
-     UPDATE node_catalog_claims c SET priority = COALESCE(n.n, 0) \
-     FROM node_catalog_claims c2 LEFT JOIN n ON n.image_digest = c2.inventory_digest \
-     WHERE c.inventory_digest = c2.inventory_digest AND c.state <> 'claimed' \
-       AND c.priority <> COALESCE(n.n, 0)"
+    " GROUP BY wc.image_digest), \
+     t AS (SELECT c.inventory_digest, COALESCE(n.n, 0) AS p FROM node_catalog_claims c \
+         LEFT JOIN n ON n.image_digest = c.inventory_digest \
+         WHERE c.state <> 'claimed' AND c.priority <> COALESCE(n.n, 0) \
+         ORDER BY c.inventory_digest LIMIT $2 \
+         FOR UPDATE OF c SKIP LOCKED) \
+     UPDATE node_catalog_claims c SET priority = t.p FROM t \
+     WHERE c.inventory_digest = t.inventory_digest"
 );
 
-/// Set each row's priority to its running container count. Claimed rows
-/// are left alone (a grant holds them locked briefly anyway).
+/// Rows one priority transaction touches: small, and `SKIP LOCKED`, so a
+/// claimer never finds all its candidates locked by this pass for long
+/// and this pass never waits on a grant.
+pub const PRIORITY_BATCH: i64 = 200;
+const PRIORITY_MAX_BATCHES: usize = 100;
+
+/// Set each row's priority to its running container count, a small batch
+/// per transaction. Claimed rows, and rows a grant holds, are left for
+/// the next pass.
 pub fn refresh_priorities(conn: &mut PgConnection, window_secs: i64) -> QueryResult<usize> {
-    sql_query(PRIORITY_SQL)
-        .bind::<Double, _>(window_secs as f64)
-        .execute(conn)
+    let mut total = 0;
+    for _ in 0..PRIORITY_MAX_BATCHES {
+        let n = sql_query(PRIORITY_SQL)
+            .bind::<Double, _>(window_secs as f64)
+            .bind::<BigInt, _>(PRIORITY_BATCH)
+            .execute(conn)?;
+        total += n;
+        if (n as i64) < PRIORITY_BATCH {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 /// Refresh the table-derived gauges.

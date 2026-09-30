@@ -945,8 +945,20 @@ pub struct Component {
     pub licenses: Vec<String>,
     #[diesel(sql_type = Nullable<Text>)]
     pub layer_digest: Option<String>,
+    /// At most [`crate::supplychain::MAX_FILE_PATHS`] paths, whatever the
+    /// source stored (a node SBOM keeps up to 4096 for the in-use match).
     #[diesel(sql_type = Array<Text>)]
     pub file_paths: Vec<String>,
+    /// How many paths the component has when that is more than
+    /// `filePaths` holds; left out otherwise.
+    #[diesel(sql_type = Integer)]
+    #[serde(skip_serializing_if = "skip_paths_total")]
+    pub file_paths_total: i32,
+}
+
+/// `filePathsTotal` only when `filePaths` was cut.
+fn skip_paths_total(n: &i32) -> bool {
+    *n <= crate::supplychain::MAX_FILE_PATHS as i32
 }
 
 #[derive(Debug, Serialize)]
@@ -964,9 +976,12 @@ pub struct SbomPage {
     pub next_after: Option<i64>,
 }
 
+/// `file_paths` is cut to 16 in SQL (what [`COMPONENT_ROW_COST_BYTES`] is
+/// sized for) so a node SBOM's 4096-path rows never reach the broker here.
 const COMPONENTS_SQL: &str = "\
 SELECT id, name, version, purl, type AS comp_type, class, src_name, src_version, licenses, \
-    layer_digest, file_paths \
+    layer_digest, COALESCE(file_paths[1:16], '{}') AS file_paths, \
+    cardinality(file_paths) AS file_paths_total \
 FROM image_sbom_components WHERE digest = $1 AND source = $2 AND id > $3 \
 ORDER BY id LIMIT $4";
 

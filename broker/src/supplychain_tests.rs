@@ -4008,3 +4008,48 @@ fn live_database_a_node_sbom_produces_no_in_use_verdict() {
         ]
     );
 }
+
+/// The component rows every existing source is hashed and staged from are
+/// byte-identical to main's (the node catalog's `flags` is left out when
+/// unset). Pinned: the JSON and its md5, which is the stored
+/// `content_hash` of a whole SBOM.
+const GOLDEN_ROWS: &str = r#"[{"ord":0,"name":"busybox","version":"1.36.1-r29","purl":"pkg:apk/alpine/busybox@1.36.1-r29","type":"apk","class":"os-pkgs","src_name":null,"src_version":null,"licenses":["GPL-2.0-only"],"layer_digest":null,"file_paths":["/bin/busybox"]}]"#;
+const GOLDEN_MD5: &str = "01bf8c2f989fc716aec5f12eedd46db3";
+
+fn golden_sbom() -> serde_json::Value {
+    json!({
+        "schema_version": 1, "image": {"digest": d(90)}, "source": "trivy-operator",
+        "scanned_at": "2026-09-20T08:00:00Z",
+        "components": [{"name": "busybox", "version": "1.36.1-r29",
+            "purl": "pkg:apk/alpine/busybox@1.36.1-r29", "type": "apk", "class": "os-pkgs",
+            "licenses": ["GPL-2.0-only"], "file_paths": ["/bin/busybox"]}],
+    })
+}
+
+#[test]
+fn non_node_component_rows_serialise_exactly_as_before() {
+    let p = normalise_sbom(
+        &d(90),
+        serde_json::from_value(golden_sbom()).unwrap(),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_string(&p.rows).unwrap(), GOLDEN_ROWS);
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_non_node_content_hash_is_pinned() {
+    let mut conn = live_conn();
+    store_s(&mut conn, golden_sbom()).unwrap();
+    #[derive(QueryableByName)]
+    struct H {
+        #[diesel(sql_type = Text)]
+        content_hash: String,
+    }
+    let h: H = sql_query("SELECT content_hash FROM vuln_sources WHERE digest = $1")
+        .bind::<Text, _>(d(90))
+        .get_result(&mut conn)
+        .unwrap();
+    assert_eq!(h.content_hash, format!("md5:{GOLDEN_MD5}"));
+}

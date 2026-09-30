@@ -45,7 +45,7 @@ fn upload_json(
         "image": {"digest": digest, "digest_kind": "manifest"},
         "source": "node",
         "scanner": {"name": "kguardian-cataloger", "vendor": "kguardian", "version": "0.1.0"},
-        "scanned_at": (Utc::now() - chrono::Duration::hours(2) + chrono::Duration::minutes(epoch)).to_rfc3339(),
+        "scanned_at": (Utc::now() - chrono::Duration::hours(2) + chrono::Duration::minutes(epoch.min(60))).to_rfc3339(),
         "format": "kguardian-cataloger",
         "components": comps,
         "epoch": epoch,
@@ -100,25 +100,28 @@ fn offers_are_sorted_deduplicated_and_bounded() {
         epoch: 1,
         offer,
     };
-    let o = validate_offer(r(vec![d(3), d(1), d(3), d(2)])).unwrap();
+    let o = validate_offer(r(vec![d(3), d(1), d(3), d(2)]), DEFAULT_MAX_EPOCH).unwrap();
     assert_eq!(o.digests, [d(1), d(2), d(3)]);
     assert_eq!(o.node, "node-a");
     assert_eq!(o.platform, "linux/arm64");
     assert_eq!(
-        validate_offer(r(vec!["sha256:nope".into()]))
+        validate_offer(r(vec!["sha256:nope".into()]), DEFAULT_MAX_EPOCH)
             .unwrap_err()
             .status(),
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        validate_offer(r((0..=MAX_OFFER as u32).map(d).collect()))
-            .unwrap_err()
-            .status(),
+        validate_offer(
+            r((0..=MAX_OFFER as u32).map(d).collect()),
+            DEFAULT_MAX_EPOCH
+        )
+        .unwrap_err()
+        .status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
     let mut bad_epoch = r(vec![]);
     bad_epoch.epoch = -1;
-    assert!(validate_offer(bad_epoch).is_err());
+    assert!(validate_offer(bad_epoch, DEFAULT_MAX_EPOCH).is_err());
 }
 
 #[test]
@@ -271,15 +274,78 @@ fn state_machine_terminal_is_done() {
 }
 
 #[test]
-fn epochs_never_go_backwards() {
+fn epochs_move_only_with_a_stored_sbom() {
     assert!(accepts_epoch(2, 2));
     assert!(accepts_epoch(2, 3));
     assert!(!accepts_epoch(3, 2));
-    // The grant takes GREATEST(row, node) and only when node >= row.
-    assert!(GRANT_SQL.contains("$3 >= epoch"));
-    assert!(GRANT_SQL.contains("epoch = GREATEST(c.epoch, $3)"));
-    assert!(GRANT_SQL.contains("(state = 'done'    AND epoch < $3)"));
-    assert!(FINALIZE_SQL.contains("epoch = GREATEST(epoch, $3)"));
+    // A grant records its epoch apart and never raises the row's.
+    assert!(GRANT_SQL.contains("grant_epoch = $3"));
+    assert!(!GRANT_SQL.contains("GREATEST"));
+    assert!(
+        !GRANT_SQL.contains("$3 >= epoch"),
+        "no lock-out after a rollback"
+    );
+    assert!(GRANT_SQL.contains("(state = 'done'    AND (epoch < $3"));
+    // Only the stored SBOM sets it.
+    assert!(FINALIZE_SQL.contains("epoch = $3"));
+}
+
+#[test]
+fn epochs_above_the_ceiling_are_refused() {
+    let r = |epoch| ClaimRequest {
+        node: "a".into(),
+        platform: "linux/amd64".into(),
+        epoch,
+        offer: vec![],
+    };
+    assert!(validate_offer(r(DEFAULT_MAX_EPOCH), DEFAULT_MAX_EPOCH).is_ok());
+    for huge in [DEFAULT_MAX_EPOCH + 1, i64::MAX] {
+        assert_eq!(
+            validate_offer(r(huge), DEFAULT_MAX_EPOCH)
+                .unwrap_err()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let v = upload_json(&d(1), DEFAULT_MAX_EPOCH + 1, &["a"], None);
+    assert!(matches!(
+        parse(v),
+        Err(PrepareError::Reject(supplychain::Reject::Invalid(_)))
+    ));
+    let mut v = upload_json(&d(1), 1, &["a"], None);
+    v["epoch"] = json!(i64::MAX);
+    assert!(matches!(
+        parse(v),
+        Err(PrepareError::Reject(supplychain::Reject::Invalid(_)))
+    ));
+    assert_eq!(parse_max_epoch(None), 1000);
+    assert_eq!(parse_max_epoch(Some("5")), 5);
+    assert_eq!(parse_max_epoch(Some("-1")), 1000);
+    assert_eq!(parse_max_hold(None), 7200);
+    assert_eq!(
+        parse_max_hold(Some("10")),
+        LEASE_SECS,
+        "never below one lease"
+    );
+}
+
+#[test]
+fn uploads_link_only_the_claimed_digest() {
+    let mut v = upload_json(&d(1), 1, &["a"], None);
+    v["image"]["platform_manifests"] = json!({"linux/arm64": d(9), "linux/amd64": d(8)});
+    v["image"]["index_digest"] = json!(d(7));
+    v["observed_in"] =
+        json!([{"namespace": "x", "kind": "Deployment", "name": "y", "container": "c"}]);
+    let up = parse(v).unwrap();
+    let h = &up.payload.header;
+    assert!(h.manifest_digests.is_empty());
+    assert_eq!(h.index_digest, None);
+    assert!(h.observed_in.is_empty());
+    assert_eq!(
+        h.platform_manifests,
+        BTreeMap::from([("linux/arm64".to_string(), d(9))]),
+        "only the cataloged platform, as provenance"
+    );
 }
 
 #[test]
@@ -326,7 +392,13 @@ fn updates_are_validated() {
 
 fn parse(v: serde_json::Value) -> Result<Upload, PrepareError> {
     let digest = v["image"]["digest"].as_str().unwrap().to_string();
-    prepare_upload(&digest, &serde_json::to_vec(&v).unwrap(), false, t0())
+    prepare_upload(
+        &digest,
+        &serde_json::to_vec(&v).unwrap(),
+        false,
+        t0(),
+        DEFAULT_MAX_EPOCH,
+    )
 }
 
 #[test]
@@ -414,7 +486,7 @@ fn a_page_over_the_path_budget_is_413_not_parsed() {
     v["components"] = json!(comps);
     let body = serde_json::to_vec(&v).unwrap();
     assert!(body.len() < MAX_CATALOG_DECOMPRESSED_BYTES);
-    match prepare_upload(&d(1), &body, false, t0()) {
+    match prepare_upload(&d(1), &body, false, t0(), DEFAULT_MAX_EPOCH) {
         Err(PrepareError::TooMany(m)) => assert!(m.contains("file paths"), "{m}"),
         other => panic!("{other:?}"),
     }
@@ -488,7 +560,7 @@ fn the_catalog_routes_declare_their_scopes() {
 fn metrics_render_every_series_with_closed_labels() {
     let body = render_metrics_with(CatalogConfig {
         grants: false,
-        retention_days: 14,
+        ..Default::default()
     });
     for name in [
         "kguardian_node_catalog_granted_total{reason=\"pending\"}",
@@ -748,7 +820,13 @@ fn token(g: &Grant) -> uuid::Uuid {
 }
 
 fn upload(conn: &mut PgConnection, g: &Grant, v: serde_json::Value) -> Result<Uploaded, DbError> {
-    let up = normalise_upload(&g.digest, serde_json::from_value(v).unwrap(), Utc::now()).unwrap();
+    let up = normalise_upload(
+        &g.digest,
+        serde_json::from_value(v).unwrap(),
+        Utc::now(),
+        DEFAULT_MAX_EPOCH,
+    )
+    .unwrap();
     store_upload(conn, &g.digest, &token(g), up)
 }
 
@@ -895,7 +973,15 @@ fn live_database_an_expired_lease_is_regranted_and_the_old_token_is_stale() {
     assert!((first.lease_expires_at - Utc::now()).num_seconds() > LEASE_SECS - 60);
     assert_eq!(grant(&mut conn, "n2", 1, &[d(1)]), None, "held");
     // Renew keeps it.
-    let r = update_claim(&mut conn, &d(1), &token(&first), "n1", &Action::Renew).unwrap();
+    let r = update_claim(
+        &mut conn,
+        &d(1),
+        &token(&first),
+        "n1",
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS,
+    )
+    .unwrap();
     assert_eq!(r.state, "claimed");
     // Another node cannot renew or fail it with this token.
     assert!(is_stale(update_claim(
@@ -903,7 +989,8 @@ fn live_database_an_expired_lease_is_regranted_and_the_old_token_is_stale() {
         &d(1),
         &token(&first),
         "n2",
-        &Action::Renew
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS
     )));
     expire_lease(&mut conn, &d(1));
     assert!(is_stale(update_claim(
@@ -911,7 +998,8 @@ fn live_database_an_expired_lease_is_regranted_and_the_old_token_is_stale() {
         &d(1),
         &token(&first),
         "n1",
-        &Action::Renew
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS
     )));
     let second = grant(&mut conn, "n2", 1, &[d(1)]).expect("re-granted after expiry");
     assert_ne!(second.claim_token, first.claim_token);
@@ -979,43 +1067,221 @@ fn live_database_the_final_page_with_a_stale_token_is_409_and_writes_nothing() {
     )));
 }
 
+fn epoch_of(conn: &mut PgConnection) -> i64 {
+    count(conn, "SELECT epoch AS n FROM node_catalog_claims")
+}
+
+fn release_as(conn: &mut PgConnection, g: &Grant, node: &str, reason: &str) {
+    update_claim(
+        conn,
+        &g.digest,
+        &token(g),
+        node,
+        &Action::Release(reason.into(), classify(reason).unwrap()),
+        DEFAULT_MAX_HOLD_SECS,
+    )
+    .unwrap();
+}
+
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
-fn live_database_epochs_never_go_backwards() {
+fn live_database_epochs_move_only_with_a_stored_sbom_and_survive_a_rollback() {
     let mut conn = live_conn();
     seed(&mut conn, &d(1), "a", &["n1", "n2"]);
-    let g = grant(&mut conn, "n1", 2, &[d(1)]).unwrap();
-    assert_eq!(
-        count(&mut conn, "SELECT epoch AS n FROM node_catalog_claims"),
-        2
-    );
+    seed(&mut conn, &d(2), "b", &["n1", "n2"]);
+    // A grant at 3 records it apart; the row's epoch stays 0.
+    let g = grant(&mut conn, "n1", 3, &[d(1)]).unwrap();
+    assert_eq!(epoch_of(&mut conn), 0);
     assert!(
-        is_stale(upload(&mut conn, &g, upload_json(&d(1), 1, &["a"], None))),
-        "an older epoch cannot write"
+        is_stale(upload(&mut conn, &g, upload_json(&d(1), 2, &["a"], None))),
+        "below the grant's epoch"
     );
+    release_as(&mut conn, &g, "n1", "pid_gone");
+    // Rolled back to 2: the older cataloger still takes the row.
+    let g = grant(&mut conn, "n2", 2, &[d(1)]).expect("no lock-out after a rollback");
     upload(&mut conn, &g, upload_json(&d(1), 2, &["a"], None)).unwrap();
-    assert_eq!(state_of(&mut conn, &d(1)), "done");
-    // Done at epoch 2: an older or equal node gets nothing; a newer one
-    // re-catalogs it.
-    assert_eq!(grant(&mut conn, "n2", 1, &[d(1)]), None);
-    assert_eq!(grant(&mut conn, "n2", 2, &[d(1)]), None);
-    let g3 = grant(&mut conn, "n2", 3, &[d(1)]).expect("a newer epoch re-grants a done digest");
     assert_eq!(
-        count(&mut conn, "SELECT epoch AS n FROM node_catalog_claims"),
-        3
+        (state_of(&mut conn, &d(1)), epoch_of(&mut conn)),
+        ("done".into(), 2)
     );
-    // Released at epoch 3, a node still at 2 cannot take it back.
+    // Done at 2: equal or older gets nothing, newer re-catalogs.
+    assert_eq!(grant(&mut conn, "n1", 1, &[d(1)]), None);
+    assert_eq!(grant(&mut conn, "n1", 2, &[d(1)]), None);
+    let g = grant(&mut conn, "n1", 3, &[d(1)]).expect("a newer epoch re-grants a done digest");
+    // The node's clock is a day behind the last scan: the higher epoch
+    // still replaces the stored SBOM.
+    let mut v = upload_json(&d(1), 3, &["newer"], None);
+    v["scanned_at"] = json!((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+    let u = upload(&mut conn, &g, v).unwrap();
+    assert_eq!(u.outcome, Outcome::Stored { items: 1 });
+    assert_eq!(epoch_of(&mut conn), 3);
+    assert_eq!(
+        text(
+            &mut conn,
+            "SELECT string_agg(name, ',') AS t FROM image_sbom_components WHERE source = 'node'"
+        )
+        .as_deref(),
+        Some("newer")
+    );
+    // Rolled back to 2 again: every row that is not done is still
+    // claimable at 2.
+    assert!(grant(&mut conn, "n2", 2, &[d(2)]).is_some());
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_huge_asserted_epoch_moves_nothing() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1", "n2"]);
+    // A stolen token claims at the ceiling and never uploads.
+    let g = grant(&mut conn, "n1", DEFAULT_MAX_EPOCH, &[d(1)]).unwrap();
+    expire_lease(&mut conn, &d(1));
+    assert_eq!(epoch_of(&mut conn), 0);
+    let g1 = grant(&mut conn, "n2", 1, &[d(1)]).expect("an honest node still gets it");
+    assert!(is_stale(upload(
+        &mut conn,
+        &g,
+        upload_json(&d(1), DEFAULT_MAX_EPOCH, &["x"], None)
+    )));
+    upload(&mut conn, &g1, upload_json(&d(1), 1, &["a"], None)).unwrap();
+    assert_eq!(epoch_of(&mut conn), 1);
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_done_digest_whose_node_sbom_was_collected_is_claimable_again() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
+    upload(&mut conn, &g, upload_json(&d(1), 1, &["a"], None)).unwrap();
+    assert_eq!(grant(&mut conn, "n1", 1, &[d(1)]), None, "done and stored");
+    // What supplychain::gc_batch removes while the image is away.
+    exec(
+        &mut conn,
+        "DELETE FROM image_sbom_components WHERE source = 'node'; \
+         DELETE FROM supplychain_image_links WHERE source = 'node'; \
+         DELETE FROM vuln_sources WHERE source = 'node';",
+    );
+    let before = GRANTED.get("sbom_missing");
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).expect("re-cataloged when it returns");
+    assert_eq!(GRANTED.get("sbom_missing"), before + 1);
+    upload(&mut conn, &g, upload_json(&d(1), 1, &["a"], None)).unwrap();
+    assert_eq!(grant(&mut conn, "n1", 1, &[d(1)]), None);
+    // no_packages_found stores nothing, and is not re-granted for that.
+    seed(&mut conn, &d(2), "b", &["n1"]);
+    let g = grant(&mut conn, "n1", 1, &[d(2)]).unwrap();
+    release_as(&mut conn, &g, "n1", "no_packages_found");
+    assert_eq!(grant(&mut conn, "n1", 1, &[d(2)]), None);
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_node_sbom_links_and_counts_only_its_claimed_digest() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    // Another running inventory image the payload names as a manifest.
+    seed(&mut conn, &d(2), "b", &["n2"]);
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
+    let mut v = upload_json(&d(1), 1, &["a"], None);
+    v["image"]["platform_manifests"] = json!({"linux/arm64": d(2)});
+    v["image"]["index_digest"] = json!(d(2));
+    upload(&mut conn, &g, v).unwrap();
+    assert_eq!(
+        text(
+            &mut conn,
+            "SELECT string_agg(image_digest || ':' || join_kind, ',') AS t \
+             FROM supplychain_image_links WHERE source = 'node'"
+        ),
+        Some(format!("{}:image_id", d(1)))
+    );
+    let c = coverage(&mut conn, WINDOW, true, true).unwrap();
+    assert_eq!((c.running_images, c.node, c.trusted), (2, 1, 1));
+    // A node SBOM without a done claim (written by hand) is not counted.
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET state = 'pending'",
+    );
+    assert_eq!(coverage(&mut conn, WINDOW, true, true).unwrap().node, 0);
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_claim_held_too_long_is_not_renewed() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
     update_claim(
         &mut conn,
         &d(1),
-        &token(&g3),
-        "n2",
-        &Action::Release("pid_gone".into(), FailClass::Retry),
+        &token(&g),
+        "n1",
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS,
     )
     .unwrap();
-    assert_eq!(state_of(&mut conn, &d(1)), "pending");
-    assert_eq!(grant(&mut conn, "n1", 2, &[d(1)]), None);
-    assert!(grant(&mut conn, "n1", 3, &[d(1)]).is_some());
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET claimed_at = now() - interval '3 hours'",
+    );
+    assert!(is_stale(update_claim(
+        &mut conn,
+        &d(1),
+        &token(&g),
+        "n1",
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS
+    )));
+    // The upload under the lease it still has completes.
+    assert_eq!(
+        upload(&mut conn, &g, upload_json(&d(1), 1, &["a"], None))
+            .unwrap()
+            .claim,
+        "done"
+    );
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_component_reads_return_at_most_16_paths() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
+    let paths: Vec<String> = (0..MAX_CATALOG_PATHS)
+        .map(|i| format!("/usr/lib/l{i}.so"))
+        .collect();
+    let mut v = upload_json(&d(1), 1, &["big", "small"], None);
+    v["components"][0]["file_paths"] = json!(paths);
+    upload(&mut conn, &g, v).unwrap();
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT cardinality(file_paths)::bigint AS n FROM image_sbom_components \
+             WHERE name = 'big'"
+        ),
+        MAX_CATALOG_PATHS as i64,
+        "stored whole for the in-use match"
+    );
+    let page = crate::supplychain_read::image_sbom(&mut conn, &d(1), None, 0, 500).unwrap();
+    let big = &page.items[0];
+    assert_eq!(big.name, "big");
+    assert_eq!(big.file_paths.len(), supplychain::MAX_FILE_PATHS);
+    assert_eq!(big.file_paths_total, MAX_CATALOG_PATHS as i32);
+    let json = serde_json::to_value(&page.items).unwrap();
+    assert_eq!(json[0]["filePathsTotal"], MAX_CATALOG_PATHS);
+    assert!(
+        json[1].get("filePathsTotal").is_none(),
+        "absent when nothing was cut, as before"
+    );
+    // The export never reads paths at all.
+    match crate::supplychain_read::cyclonedx_for(&mut conn, &d(1), 100).unwrap() {
+        crate::supplychain_read::CycloneDx::Doc(doc, _, n) => {
+            assert_eq!(n, 2);
+            assert!(!serde_json::to_string(&doc)
+                .unwrap()
+                .contains("/usr/lib/l17.so"));
+        }
+        _ => panic!("expected a document"),
+    }
 }
 
 #[test]
@@ -1031,6 +1297,7 @@ fn live_database_skips_retry_caps_and_backoff_follow_the_database_clock() {
             &token(&g),
             node,
             &Action::Release(reason.into(), classify(reason).unwrap()),
+            DEFAULT_MAX_HOLD_SECS,
         )
         .unwrap()
     };
@@ -1091,7 +1358,15 @@ fn live_database_the_kill_switch_stops_grants_but_not_uploads() {
     // The offer is still recorded.
     assert_eq!(state_of(&mut conn, &d(2)), "pending");
     // The lease granted before the switch still completes.
-    update_claim(&mut conn, &d(1), &token(&held), "n1", &Action::Renew).unwrap();
+    update_claim(
+        &mut conn,
+        &d(1),
+        &token(&held),
+        "n1",
+        &Action::Renew,
+        DEFAULT_MAX_HOLD_SECS,
+    )
+    .unwrap();
     let u = upload(&mut conn, &held, upload_json(&d(1), 1, &["a"], None)).unwrap();
     assert_eq!(u.claim, "done");
 }
@@ -1275,7 +1550,15 @@ fn live_database_migration_is_reversible_and_idempotent() {
         )
     };
     assert_eq!(tables(&mut conn), 3);
-    let reverted = conn.revert_last_migration(TEST_MIGRATIONS).unwrap();
+    // This migration by name, not the last one: later migrations must not
+    // change what is reverted here.
+    use diesel::migration::MigrationSource;
+    let ours = MigrationSource::<diesel::pg::Pg>::migrations(&TEST_MIGRATIONS)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name().version().to_string() == "20261003100000")
+        .expect("the node catalog migration");
+    let reverted = conn.revert_migration(&*ours).unwrap();
     assert_eq!(reverted.to_string(), "20261003100000");
     assert_eq!(tables(&mut conn), 0);
     assert_eq!(
@@ -1436,4 +1719,81 @@ async fn live_database_http_node_sbom_end_to_end() {
     assert_eq!(st["platform"], "linux/arm64");
     assert_eq!(st["cataloged"], 1);
     assert_eq!(st["claims"], json!([]));
+}
+
+#[actix_web::test]
+async fn an_upload_waits_for_no_slot_it_gets_503_before_its_body_is_read() {
+    let slots = UploadSlots::new(1);
+    let app = atest::init_service(
+        App::new()
+            .wrap(from_fn(crate::auth::authenticate))
+            .app_data(web::Data::new(auth(&[("BROKER_TOKEN_CATALOG", CAT_TOK)])))
+            .app_data(web::Data::new(slots.clone()))
+            .configure(crate::routes::configure),
+    )
+    .await;
+    let up = format!("/catalog/images/{}/sbom", d(1));
+    let tok = uuid::Uuid::new_v4().to_string();
+    // A body over the limit: 413 once a slot is free, so reaching the
+    // body check proves the slot was granted.
+    let request = || {
+        req("POST", &up, CAT_TOK)
+            .insert_header((CLAIM_HEADER, tok.as_str()))
+            .insert_header((header::CONTENT_LENGTH, MAX_CATALOG_COMPRESSED_BYTES + 1))
+    };
+    let held = slots.0.clone().try_acquire_owned().unwrap();
+    let resp = atest::call_service(&app, request().to_request()).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers().get("Retry-After").unwrap(), "5");
+    drop(held);
+    assert_eq!(
+        status!(app, request()),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a free slot lets the next upload in"
+    );
+    assert_eq!(
+        slots.0.available_permits(),
+        1,
+        "a refused upload gives its slot back"
+    );
+    assert_eq!(UPLOAD_SLOTS, 2 * supplychain::INGEST_QUEUE);
+    assert_eq!(NODE_QUEUE_SLOTS, supplychain::INGEST_QUEUE / 2);
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_node_pages_have_half_the_staging_ceiling() {
+    let mut conn = live_conn();
+    seed(&mut conn, &d(1), "a", &["n1"]);
+    // Node sets already staging, up to its share.
+    for i in 0..supplychain::MAX_STAGED_SETS_NODE {
+        exec(
+            &mut conn,
+            &format!(
+                "INSERT INTO image_sbom_pages (digest, source, set_id, page_index, total, \
+                     scanned_at, components) \
+                 VALUES ('{}', 'node', 'held-{i}', 0, 2, timezone('UTC', now()), '[]')",
+                d(1000 + i as u32)
+            ),
+        );
+    }
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
+    let r = upload(&mut conn, &g, upload_json(&d(1), 1, &["a"], Some((0, 2))));
+    assert!(
+        matches!(&r, Err(e) if e.downcast_ref::<supplychain::StagingFull>().is_some()),
+        "{r:?}"
+    );
+    // The supply-chain sources still have the rest of the ceiling.
+    let trivy = json!({
+        "schema_version": 1, "image": {"digest": d(1)}, "source": "trivy-operator",
+        "scanned_at": "2026-09-20T08:00:00Z",
+        "page": {"set_id": "t1", "index": 0, "total": 2},
+        "components": [{"name": "a"}],
+    });
+    let p = supplychain::normalise_sbom(&d(1), serde_json::from_value(trivy).unwrap(), Utc::now())
+        .unwrap();
+    assert!(matches!(
+        supplychain::store_sbom(&mut conn, p).unwrap(),
+        Outcome::Staged { .. }
+    ));
 }

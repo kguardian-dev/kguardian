@@ -73,6 +73,8 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `BROKER_MAINTENANCE_VACUUM_INTERVAL_SECS` | `300` | How often the leader checks those tables' dead tuples (min 60). One schedule across replicas, like the retention loops (`leader_task_runs`) |
 | `BROKER_MAINTENANCE_VACUUM_DEAD_TUPLES` | `10000` | Dead tuples (heap + TOAST) a table needs, and at least a fifth of its live rows, before it is vacuumed (min 1000) |
 | `NODE_CATALOG_GRANTS` | `true` | `false` stops every node catalog grant (the kill switch); uploads under a live lease still complete |
+| `NODE_CATALOG_MAX_EPOCH` | `1000` | Highest catalog epoch accepted on claims and uploads (`422` above) |
+| `NODE_CATALOG_MAX_HOLD_SECS` | `7200` | A claim held longer is not renewed (`409`); at least the 15 minute lease |
 | `NODE_CATALOG_RETENTION_DAYS` | `14` | Delete node catalog claims, node SBOMs and package flags this many days after the digest left the image inventory (`images.last_seen`); `0` keeps them |
 | `RUST_LOG` | `info` | Log level |
 
@@ -156,13 +158,24 @@ the SBOM, stored as SBOM source `node` with trust `scanned`. The design is in
 
 The three writes answer `503` until `BROKER_TOKEN_CATALOG` is set. A claim
 token that no longer holds its digest (released, re-granted, lease expired),
-or an upload `epoch` below the stored one, gets `409` and writes nothing. A
+or an upload `epoch` below the one the claim was granted under, gets `409`
+and writes nothing. A grant never moves the digest's epoch; only a stored
+SBOM does, and a higher epoch replaces the stored SBOM whatever the scan
+times. At most 16 uploads are read or queued at once (the node share of the
+ingest queue is half of it, and of the SBOM page staging ceiling); beyond
+that `503` with `Retry-After`, before the body is read. The node name in a
+claim is self-asserted: one catalog token serves every node, so a stolen one
+can claim any digest running on some node, and nothing else. A
 lease lasts 15 minutes; `timeout`, `oom` and `error` back off 1 h, 6 h, then
 24 h; `pid_gone` and `drift` release the digest to other nodes at once, at
 most 3 times per node in 24 h before that node is skipped for 24 h; the
 per-node reasons (`lsm_denied`, `sandboxed`, ...) skip the node for 24 h.
 `GET /images` items gain `sbomSources` and `nodeCatalog {state, reason,
-platform, completeness, catalogedAt}`, both left out when empty.
+platform, completeness, catalogedAt}`, both left out when empty. `GET
+/images/{digest}/sbom` returns at most 16 `filePaths` per component, with
+`filePathsTotal` when there are more (a node SBOM keeps up to 4096 for the
+in-use match). A node SBOM links only to the digest it was claimed for, and
+feeds no in-use verdict yet.
 
 `/metrics`:
 

@@ -42,9 +42,15 @@ CREATE TABLE IF NOT EXISTS node_catalog_claims (
     -- {node: {"n": pid_gone/drift failures, "since": first of them}}: at
     -- 3 within 24 h the node goes into skipped_nodes.
     node_retries     JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    -- Catalog epoch (cataloger generation). Grants need a node epoch at
-    -- least this; a done row is re-granted to a node with a higher one.
+    -- Catalog epoch (cataloger generation) of the stored SBOM, set only
+    -- when an SBOM is stored. A done row is re-granted to a node with a
+    -- higher one.
     epoch            BIGINT      NOT NULL DEFAULT 0,
+    -- The epoch the current (or last) grant was made under, and when:
+    -- uploads must carry at least grant_epoch, and a renew is refused
+    -- once the claim has been held too long.
+    grant_epoch      BIGINT      NULL,
+    claimed_at       TIMESTAMPTZ NULL,
     -- full | partial | os_only, why it is not full, and the cataloger's
     -- stats (cataloger/PROTOCOL.md 4.1), from the page that completed
     -- the SBOM.
@@ -97,9 +103,12 @@ CREATE TABLE IF NOT EXISTS node_sbom_package_flags (
 --
 -- The inventory is per workload, not per pod, so during a rollout that
 -- runs two digests of one container on different nodes, a node running
--- either passes for both. The controller only offers digests it runs
--- locally; this check bounds what a stolen catalog token can post to
--- digests of workloads with a live pod on that node.
+-- either passes for both. The node name is the caller's own claim (one
+-- catalog token serves every node), so this is no proof of identity: it
+-- keeps an honest Controller from being granted digests it cannot reach,
+-- and it bounds a stolen catalog token to digests running on SOME node,
+-- which it can claim by naming that node. It cannot write any other
+-- source, and a node SBOM never replaces Trivy's.
 CREATE OR REPLACE FUNCTION kg_digest_runs_on_node(
     p_digest text, p_node text, p_window_secs double precision)
 RETURNS boolean LANGUAGE sql STABLE AS $fn$
