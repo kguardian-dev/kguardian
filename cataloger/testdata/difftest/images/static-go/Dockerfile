@@ -9,4 +9,8 @@ RUN go mod init example.com/hello \
 
 FROM scratch
 COPY --from=build /hello /usr/local/bin/hello
+# A test fixture that is only ever unpacked, never run: no health check,
+# and a non-root user (neither changes what the differential test sees).
+USER 65532:65532
+HEALTHCHECK NONE
 ENTRYPOINT ["/usr/local/bin/hello"]

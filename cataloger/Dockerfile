@@ -21,7 +21,9 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/kguardian-cataloger .
 
-# Distroless static: no shell, no package manager.
+# Distroless static: no shell, no package manager. No HEALTHCHECK (as for
+# the supplychain matcher): Kubernetes ignores it, and the chart probes the
+# worker with the binary's own "ping" subcommand as an exec probe.
 #
 # The image defaults to the nonroot user (65532). Run that way, the worker
 # can neither change uid nor hold CAP_DAC_READ_SEARCH, so it falls back to
