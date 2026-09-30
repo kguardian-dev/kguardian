@@ -321,3 +321,18 @@ func TestSameKeyNeverConcurrent(t *testing.T) {
 	c.block <- struct{}{}
 	waitFor(t, func() bool { return d.Pending() == 0 && c.sentDigests()["a"] == "2" })
 }
+
+// A match-only emission (an unchanged SBOM re-emitted for the matcher)
+// is never queued for the broker, nor does it replace a pending payload.
+func TestMatchOnlyIsNotSent(t *testing.T) {
+	d := New(newFake(), quiet(), nil)
+	d.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: "a", SBOM: &types.ImageSBOM{}, MatchOnly: true})
+	if d.Pending() != 0 {
+		t.Fatalf("pending = %d", d.Pending())
+	}
+	d.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: "a", SBOM: &types.ImageSBOM{Format: "x"}})
+	d.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: "a", SBOM: &types.ImageSBOM{}, MatchOnly: true})
+	if d.Pending() != 1 || d.pending[key{trivy.KindSBOM, "a"}].e.SBOM.Format != "x" {
+		t.Error("a match-only emission replaced the pending payload")
+	}
+}

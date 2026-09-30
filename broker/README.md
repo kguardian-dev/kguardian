@@ -177,8 +177,31 @@ per-node reasons (`lsm_denied`, `sandboxed`, ...) skip the node for 24 h.
 platform, completeness, catalogedAt}`, both left out when empty. `GET
 /images/{digest}/sbom` returns at most 16 `filePaths` per component, with
 `filePathsTotal` when there are more (a node SBOM keeps up to 4096 for the
-in-use match). A node SBOM links only to the digest it was claimed for, and
-feeds no in-use verdict yet.
+in-use match). A node SBOM links only to the digest it was claimed for.
+
+A node SBOM's file lists feed the in-use match (migration
+`2026-10-04-100000_node_in_use_guard`, design section 5). They give
+`executed` and `loaded` like any other SBOM, except that a path that ran
+from the writable layer, a memfd or a deleted file is never credited to a
+package by node data. `installed_not_observed` from a node file list needs
+all of: the claim's `completeness` is `full` (and describes the stored SBOM),
+every node that ran an instance in the window reported the platform the SBOM
+was cataloged for (a node with no recorded platform fails), capture in mode
+`full`, and the package is neither `files_truncated` nor
+`interpreted_content`. Otherwise the state is `unknown` with `sbom_incomplete`,
+`platform_mismatch`, `libraries_not_tracked` or `interpreted_content`. When
+the node SBOM is the image's only SBOM, `runtime_in_use_coverage` carries the
+first two as the container's reason; beside a Trivy Operator or registry
+SBOM, packages those list files for are judged exactly as before and only
+node-only packages are guarded. The guard is evaluated when a verdict is
+read, so a re-catalog, a platform change or a new instance on another node
+takes effect at once, not at the next in-use refresh.
+
+Changed reason value: `inUseDetail.reason` for a container captured in exec
+mode (or without the library probe) is now `libraries_not_tracked`, where it
+was `capture_gap`. The coverage function already reported it; the API folded
+it. `sbom_incomplete`, `platform_mismatch` and `interpreted_content` are new.
+Clients should show an unrecognised reason as sent.
 
 `/metrics`:
 

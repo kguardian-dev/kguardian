@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi, VulnApiError, type CveListQuery, type VulnApi } from '../services/vulnApi';
-import type { CveSummary, ExposedImage, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
+import type { CatalogCoverage, CveSummary, ExposedImage, Exposure, Finding, ImageDetail, ImageSummary, Report, SbomPage } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
@@ -348,7 +348,8 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
       const tasks = rows.map((r) => async () => {
         const [d, v] = await Promise.allSettled([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 })]);
         // No report means nothing was matched from an SBOM, so that read is skipped (most digests on a cluster without a scanner); a failed report read still looks.
-        const skipSbom = v.status === 'fulfilled' && v.value.reports.length === 0;
+        // The one exception: a registry SBOM beside a node one (`sbomSources`), the only case that renders chips and needs a read (a registry SBOM's trust varies). Trivy Operator and node SBOMs are always `scanned`; every other row reads as it always did.
+        const skipSbom = v.status === 'fulfilled' && v.value.reports.length === 0 && !(r.sbomSources?.includes('registry') && r.sbomSources.includes('node'));
         let sb: PromiseSettledResult<SbomPage> | null = null;
         if (!skipSbom) [sb] = await Promise.allSettled([api.getImageSbom(r.digest, { limit: 1 })]);
         const e: ImageEnrichment = {
@@ -540,4 +541,27 @@ export function usePssByWorkload(namespaces: readonly string[], api: ProfileApi 
     };
   }, [api, key]);
   return map;
+}
+
+/**
+ * `GET /catalog/coverage` for the Images page banner. Null while loading
+ * and whenever there is nothing to show: an older Broker (404), a busy one
+ * (503), any other failure, or a Broker whose node catalog was never
+ * enabled. It never gates the page and never shows an error.
+ */
+export function useCatalogCoverage(refreshTick = 0, api: VulnApi = vulnApi): CatalogCoverage | null {
+  const [coverage, setCoverage] = useState<CatalogCoverage | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    api.getCatalogCoverage(abort.signal).then(
+      (c) => {
+        if (!abort.signal.aborted) setCoverage(c);
+      },
+      () => {
+        if (!abort.signal.aborted) setCoverage(null);
+      },
+    );
+    return () => abort.abort();
+  }, [api, refreshTick]);
+  return coverage;
 }

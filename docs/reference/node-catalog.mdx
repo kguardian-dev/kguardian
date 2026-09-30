@@ -1,14 +1,171 @@
 ---
 title: "Node catalog"
-description: "The Controller's NODE_CATALOG_* env vars, how it verifies the worker and the container root, its kernel needs and its limits"
+description: "The nodeCatalog Helm values, the Controller's NODE_CATALOG_* env vars, how it verifies the worker and the container root, its kernel needs and its limits"
 icon: "box-archive"
 ---
 
 Reference for node SBOM cataloging: the Controller opens each running
 container's root filesystem and hands it to the `cataloger` sidecar, which
-returns the image's packages. The feature is off by default. The Helm values
-that render these variables arrive with the chart change; until then, set
-them on the Controller DaemonSet directly.
+returns the image's packages. The feature is off by default; with
+`nodeCatalog.enabled=false` the chart renders exactly what it rendered
+before the feature existed.
+
+## Enable it
+
+It needs scoped [Broker authentication](/installation) and a `catalog` key
+in the same Secret. The key is optional to the pods: without it the Broker
+answers the catalog routes `503` and the Controller idles, nothing crash
+loops.
+
+```bash
+kubectl -n kguardian patch secret kguardian-broker-auth \
+  -p "{\"stringData\":{\"catalog\":\"$(openssl rand -hex 32)\"}}"
+
+helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian -n kguardian \
+  --reset-then-reuse-values \
+  --set broker.auth.enabled=true \
+  --set broker.auth.existingSecret=kguardian-broker-auth \
+  --set nodeCatalog.enabled=true
+```
+
+Upgrade with `-f <your values file>` or `--reset-then-reuse-values`
+(Helm 3.14 and later). Plain `--reuse-values` renders the new chart over the
+previous chart's defaults, so none of the `nodeCatalog` defaults below are
+in the values; the chart then falls back to the same defaults, built in.
+With `--set`, use `--set-string` for a value that looks like a number but
+must stay a string (an image tag such as `1.2`, a Secret key name such as
+`2026`), or `--set-json` for an object such as `nodeCatalog.worker.appArmorProfile`.
+
+Enabling restarts the Controller DaemonSet and the Broker once (new env
+vars and the sidecar). Rotating the `catalog` key needs both restarted
+again. It also needs Broker and Controller releases that include the node
+catalog (the releases after Broker 1.19.7 and Controller 1.16.2) and the
+`cataloger` image; an older Broker answers `404` and the Controller idles.
+
+The chart refuses to render when `nodeCatalog.enabled=true` and
+`broker.auth` is off or in `shared` mode, when `nodeCatalog.epoch` is above
+`nodeCatalog.maxEpoch`, when `nodeCatalog.maxHoldSeconds` does not outlast
+`nodeCatalog.scanTimeoutSeconds`, and when the worker's memory limit cannot
+hold `memoryLimit` + `tmpLimit` + 128Mi. `values.schema.json` checks the
+types and ranges below.
+
+Check progress with `GET /catalog/coverage` and `GET /catalog/status?node=<name>`
+on the Broker (read scope). With `broker.metrics.prometheusRule.enabled`
+the chart also ships the `kguardian-broker-node-catalog` PrometheusRule:
+token missing, `lsm_denied` skips, scan failures (`timeout`, `oom`,
+`error`) above 20% of grants, grants with no completed SBOM in 6 hours
+that no node skipped (silenced while `grants=false`), queued work with no
+grant for 25 hours, and scans deferred by node pressure for 2 hours.
+
+**Kill switch:** `--set nodeCatalog.grants=false` stops every new grant at
+the Broker (a Broker restart, no Controller restart). Uploads under a live
+lease still complete.
+
+## Helm values
+
+| Key | Type | Default | Renders |
+|---|---|---|---|
+| `nodeCatalog.enabled` | bool | `false` | The sidecar, the Controller's `NODE_CATALOG=on` and the env below, `BROKER_TOKEN_CATALOG` on both pods. |
+| `nodeCatalog.epoch` | int | `1` | Controller `NODE_CATALOG_EPOCH`. 1 to `maxEpoch`. |
+| `nodeCatalog.grants` | bool | `true` | Broker `NODE_CATALOG_GRANTS` (the kill switch). |
+| `nodeCatalog.retentionDays` | int | `14` | Broker `NODE_CATALOG_RETENTION_DAYS`; `0` keeps rows. |
+| `nodeCatalog.maxEpoch` | int | `1000` | Broker `NODE_CATALOG_MAX_EPOCH`. |
+| `nodeCatalog.maxHoldSeconds` | int | `7200` | Broker `NODE_CATALOG_MAX_HOLD_SECS`. At least 900, above `scanTimeoutSeconds`. |
+| `nodeCatalog.scanTimeoutSeconds` | int | `600` | Controller `NODE_CATALOG_SCAN_TIMEOUT_SECS`, 10 to 1800. |
+| `nodeCatalog.maxFiles` | int | `2000000` | Controller `NODE_CATALOG_MAX_FILES`, at most 10 000 000 (the worker's ceiling). |
+| `nodeCatalog.maxComponents` | int | `50000` | Controller `NODE_CATALOG_MAX_COMPONENTS`, at most 50 000. |
+| `nodeCatalog.minScanIntervalSeconds` | int | `30` | Controller `NODE_CATALOG_MIN_SCAN_INTERVAL_SECS`, at least 30. |
+| `nodeCatalog.pressureThreshold` | int | `40` | Controller `NODE_CATALOG_PRESSURE_THRESHOLD`, 0 to 100. |
+| `nodeCatalog.maxPressureDeferSeconds` | int | `1800` | Controller `NODE_CATALOG_MAX_PRESSURE_DEFER_SECS`, at most 86 400. |
+| `nodeCatalog.readOnlyClone` | bool | `false` | Controller `NODE_CATALOG_RO_CLONE`. |
+| `nodeCatalog.worker.image.*` | | `ghcr.io/kguardian-dev/kguardian/cataloger`, tag `v0.1.0` | The sidecar image; `sha` pins a digest. |
+| `nodeCatalog.worker.memoryLimit` | string or int | `640Mi` | Worker `CATALOG_MEMORY_LIMIT`, rendered in bytes. Whole bytes or a whole number of `Ki`, `Mi`, `Gi` or `Ti`. |
+| `nodeCatalog.worker.tmpLimit` | string or int | `192Mi` | Worker `CATALOG_TMP_LIMIT` and the `/tmp` emptyDir `sizeLimit`, in bytes. Same forms. |
+| `nodeCatalog.worker.resources` | object | requests 50m / 512Mi, limits 500m / 1Gi | Sidecar resources (below). Override, don't null: `null` restores the default. |
+| `nodeCatalog.worker.seLinuxOptions` | object | `{type: container_t, level: "s0-s0:c0.c1023"}` | Sidecar SELinux label (below). Override, don't null: `null` restores the default and `{}` removes the label. |
+| `nodeCatalog.worker.appArmorProfile` | object | `{}` | Sidecar AppArmor profile (Kubernetes 1.30+). |
+| `nodeCatalog.worker.logLevel` | string | `info` | Worker `LOG_LEVEL`. |
+| `broker.auth.keys.catalog` | string | `catalog` | Secret key holding the catalog token. |
+
+The Controller's other `NODE_CATALOG_*` variables (below) keep their
+defaults; the chart pins `NODE_CATALOG_SOCKET` to
+`/run/kguardian/catalog/worker.sock` and sets `POD_UID` from the downward
+API.
+
+## The sidecar
+
+The `cataloger` container in the Controller pod runs capability model (i)
+from `cataloger/README.md`:
+
+- `runAsUser: 0`, `runAsNonRoot: false`, `allowPrivilegeEscalation: false`,
+  `readOnlyRootFilesystem: true`, `seccompProfile: RuntimeDefault`;
+  capabilities `drop: [ALL]`, `add: [DAC_READ_SEARCH, SETUID, SETGID]`. The
+  uid-0 parent parses nothing; every scan runs in a fresh child as uid
+  2000000000 with `DAC_READ_SEARCH` alone, under seccomp.
+- Network: the Controller pod is `hostNetwork`, so the sidecar shares the
+  node's network namespace. The uid-0 parent opens only its Unix socket,
+  but nothing but its own code stops it opening others. The scan child,
+  the only process that parses image content, has a seccomp filter that
+  denies `socket` and `socketpair` of every family.
+- No token: the pod mounts the service-account token for the Controller,
+  and the sidecar gets an empty directory over
+  `/var/run/secrets/kubernetes.io/serviceaccount` instead. No Broker token,
+  no host mounts.
+- `/run/kguardian/catalog`: an emptyDir shared with the Controller. The
+  worker makes it `0700` and the socket `0600`, both owned by uid 0, and the
+  Controller refuses anything else. An emptyDir is created owned by uid 0,
+  and `fsGroup` on `controller.podSecurityContext` changes only its group
+  and mode, never the owner, so the check holds with or without it (the
+  worker's `fchmod` to `0700` also clears the set-group-ID bit kubelet adds).
+- `/tmp`: a memory-backed emptyDir with `sizeLimit` equal to `tmpLimit`.
+  Its pages count against the sidecar's memory limit, which is why the
+  limit must hold `memoryLimit` + `tmpLimit` + 128Mi: the worker's own
+  limits then trip before a cgroup OOM kill, which on cgroup v2 takes the
+  whole container (kubelet sets `memory.oom.group`). Nodes with kubelet's
+  `singleProcessOOMKill: true` (Kubernetes 1.32 and later) kill only the
+  scan child.
+- Liveness runs `kguardian-cataloger ping`, which the worker answers even
+  while a scan runs; there is no readiness probe. The worker exits instead
+  of idling when it cannot run safely (a bad `CATALOG_*` setting, a
+  capability set it cannot reduce, a uid-0 parent without `SETUID`/`SETGID`,
+  a scan child that fails to start, a socket directory not owned by uid 0).
+  Kubernetes then restarts it, and while it is not running the Controller
+  pod reports NotReady, which also holds a DaemonSet rollout on that node.
+  The Controller itself keeps capturing; cataloging on that node reports
+  `worker_unavailable`.
+- Memory: requests 512Mi, limits 1Gi. The request is reserved on every
+  node. Under node memory pressure the kubelet evicts pods using more than
+  their request first, and this is the Controller's pod: a lower request
+  saves memory per node but makes the pod an earlier eviction candidate
+  while a large scan runs; a request equal to the limit avoids that at 1Gi
+  per node.
+
+**SELinux.** The default `container_t` with `s0-s0:c0.c1023` lets the
+worker read another container's files through the handle it is given: the
+category range lifts MCS separation only, and `container_t` stays the
+confined container domain. With the default per-pod label every read is
+denied (`lsm_denied`). Never use `super_t`, `spc_t` or `control_t`; the
+schema refuses them. Nodes without SELinux ignore the setting.
+
+**Cloud credentials.** Workload-identity webhooks inject credentials into
+every container of a pod whose service account carries an identity. If the
+Controller's service account is given one, the chart keeps it out of the
+sidecar with pod annotations the webhooks honour:
+`eks.amazonaws.com/skip-containers: cataloger` (the Amazon EKS pod identity
+webhook, which serves IRSA) and `azure.workload.identity/skip-containers:
+cataloger` (Azure Workload Identity). Check your EKS Pod Identity add-on
+version honours the same annotation before relying on it. GKE Workload
+Identity injects nothing, but it does not apply to `hostNetwork` pods: they
+use the node's service account through the metadata server. The same holds
+on every cloud: from the node's network namespace the sidecar's parent can
+reach the instance metadata service (EC2, Azure, GCE) and the node's
+credentials, exactly as the Controller already can. The scan child cannot
+(no sockets). Where that matters, restrict metadata access at the node.
+
+**Pod Security.** The Controller pod is already privileged, so its
+namespace must allow the `privileged` Pod Security level; the sidecar asks
+for less than the Controller container does. The chart ships no
+NetworkPolicy or admission policy that selects the Controller pod.
 
 ## Environment variables
 
@@ -152,3 +309,131 @@ a node as seen recently, with no claims.
 
 A 503 from the claim route (catalog not configured on the Broker) backs off
 from 60 s, doubling, to at most 30 minutes, and is logged once.
+
+## SBOM sources and trust
+
+The worker itself (its sandbox, protocol and Syft pin) is described in
+[`cataloger/README.md`](https://github.com/kguardian-dev/kguardian/blob/main/cataloger/README.md).
+Its SBOM is one source among several. The Broker keeps each source's SBOM
+separately, keyed `(digest, source)`, and one never replaces another:
+
+| Rank | Source (`source`) | `sbomTrust` | What it contributes |
+|---|---|---|---|
+| 1, authoritative | Trivy Operator (`trivy-operator`) | `scanned` | Its packages win every collision on (type, name, version): PURL, source package, version and the single OS component are Trivy's. Its own vulnerability reports stand beside anything matched. |
+| 2 | Node catalog (`node`) | `scanned` | Packages Trivy lacks (or every package where Trivy is not installed), and each package's executable file paths, which feed the in-use verdicts. It only adds: it never removes or changes a Trivy entry. The supplychain matcher matches it with Grype. |
+| 3, unverified | Registry SBOM (`registry`) | `attached-unbound` or `unverified` | Packages and file paths neither of the others has, and a PURL Trivy left empty. It only adds, and fills only the capacity left over under the 50 000-component cap. |
+
+`scanned` means a scanner read the running image in the cluster. Only
+`verified` may be presented as signed, and nothing produces it yet. The
+default SBOM a read returns is Trivy's if there is one, else the node's,
+else a registry one. The merge rules are in the
+[supplychain README](https://github.com/kguardian-dev/kguardian/blob/main/supplychain/README.md#sbom-trust-and-the-union).
+
+A node SBOM supports `installed_not_observed` (the Background tier) only
+when it is `full`, every node that ran the container reports the SBOM's
+platform, and the package's file list was neither cut nor included
+interpreted content. Otherwise the package stays `unknown`, with reason
+`sbom_incomplete`, `platform_mismatch` or `interpreted_content`, and is
+ranked as if loaded.
+
+In the UI, `#/images` shows a node SBOM as "Cataloged on node
+(linux/arm64)", with "partial" or "OS packages only" when it is not full.
+An image with no SBOM from any source and no vulnerability report, whose
+catalog found no packages (`no_packages_found`) or failed (backing off),
+reads "Not assessable" with the reason. It never reads as zero CVEs. A
+pending image whose last node could not catalog it (a per-node reason such
+as `lsm_denied`) reads "Node catalog: pending · last node: LSM denied":
+that reason skips one node for 24 hours, and other nodes may still catalog
+it. The coverage banner is cluster-wide, and shows only while the Broker
+has a catalog token.
+
+## Reading `/catalog/coverage` and `/catalog/status`
+
+Both need the Broker's `read` scope. A Broker without the node catalog
+answers `404`; the UI then hides its coverage banner.
+
+`GET /catalog/coverage` is cluster-wide:
+
+```json
+{
+  "grantsEnabled": true,
+  "tokenConfigured": true,
+  "runningImages": 120,
+  "trivy": 70,
+  "node": 64,
+  "trusted": 98,
+  "coverageRatio": 0.8167,
+  "byState": {"pending": 9, "claimed": 2, "done": 101, "failed": 3},
+  "byCompleteness": {"full": 88, "partial": 9, "os_only": 3},
+  "byReason": {"lsm_denied": 4, "oom": 2, "pid_gone": 1},
+  "platforms": {"linux/amd64": 6, "linux/arm64": 3}
+}
+```
+
+- `runningImages` counts the digests running now. `trivy` counts those
+  with an SBOM or report from Trivy Operator, `node` those with a node
+  SBOM; they overlap, and `trusted` is the union. `coverageRatio` is `trusted / runningImages`.
+- `grantsEnabled: false` means the kill switch is on; `tokenConfigured:
+  false` means the Broker has no `BROKER_TOKEN_CATALOG`, so no node SBOM
+  can be stored.
+- `byState` counts claim rows. `pending` includes rows released by a
+  node that could not catalog them (they wait for another node), and
+  `failed` rows back off before they are granted again.
+- `byReason` counts rows that are not done, by the reason their last
+  attempt ended. It says where to look: an LSM, a kernel, memory.
+- `platforms` counts the nodes that have offered, by platform. A node
+  missing here has never claimed: its Controller is off, idle, or refused.
+
+`GET /catalog/status?node=<name>` is one node:
+
+```json
+{
+  "node": "ip-10-0-3-17.eu-west-1.compute.internal",
+  "platform": "linux/arm64",
+  "seenAt": "2026-09-30T09:12:44Z",
+  "claims": [{"digest": "sha256:…", "leaseExpiresAt": "2026-09-30T09:27:44Z", "attempts": 1}],
+  "cataloged": 41,
+  "byReason": {"lsm_denied": 3},
+  "skipped": 3
+}
+```
+
+`platform` and `seenAt` are `null` for a node that never offered. `claims`
+are the leases it holds now (at most 64 listed), `cataloged` the digests it
+completed, `byReason` the digests it last released and why, and `skipped`
+the digests it is skipped for over the next 24 hours.
+
+## Runbook
+
+**Kill switch.** `nodeCatalog.grants=false`, as in [Enable it](#enable-it).
+Stored SBOMs stay, and the Controllers need no restart: they keep offering
+and get nothing back. `grantsEnabled` in `/catalog/coverage` reads
+`false`, and the stalled and not-claiming alerts are silenced. Set it back
+to `true` to resume.
+
+**Rotating the catalog token.** Write the new value under the Secret's
+`catalog` key, as in [Enable it](#enable-it), then restart both the Broker
+and the Controller DaemonSet; both read the token only at startup. Between
+the two restarts, a Controller on the old token is refused and retries;
+nothing is lost, since a lease that runs out is granted again.
+
+**Alerts** (the `kguardian-broker-node-catalog` PrometheusRule):
+
+| Alert | Means | Do |
+|---|---|---|
+| `KguardianNodeCatalogTokenMissing` | The Broker has no `BROKER_TOKEN_CATALOG`: the Secret lacks the `catalog` key. Uploads answer `503`. | Add the key, then restart the Broker and the Controller DaemonSet. |
+| `KguardianNodeCatalogLsmDenied` | SELinux or AppArmor denied the worker the container root on some node (`lsm_denied`). | Check `nodeCatalog.worker.seLinuxOptions` is the default `container_t` with `s0-s0:c0.c1023`, and `appArmorProfile`. `/catalog/status?node=` names the nodes (`byReason`). |
+| `KguardianNodeCatalogFailureRate` | Over 20% of grants in the last hour failed with `timeout`, `oom` or `error`. | `oom`: raise `nodeCatalog.worker.memoryLimit` (and the container limit with it). `timeout`: raise `nodeCatalog.scanTimeoutSeconds`. `error`: read the `cataloger` container's logs. |
+| `KguardianNodeCatalogStalled` | Grants that no node skipped, and no completed SBOM, in 6 hours. | Check `kguardian_node_catalog_failed_total` and `skipped_total` by reason, the `cataloger` logs, and `/catalog/status?node=` for leases that never finish. |
+| `KguardianNodeCatalogNotClaiming` | Work is queued and no node has claimed any in 25 hours. | Look for a Controller log naming a refused epoch (`nodeCatalog.epoch` above `nodeCatalog.maxEpoch`), a missing catalog token, or cataloging off. A node missing from `platforms` never offered. |
+| `KguardianNodeCatalogDeferredPressure` | Scans kept waiting for node pressure (host PSI) to drop for 2 hours. | If those nodes are always this busy, raise `nodeCatalog.pressureThreshold` or `nodeCatalog.maxPressureDeferSeconds`. Otherwise it clears once load drops. |
+
+Other reasons in `byReason` that are normal churn, not faults: `pid_gone`,
+`drift` and `exited_before_catalog` (the container went away or changed;
+another instance is tried). Per-node reasons (`sandboxed`,
+`lazy_snapshotter`, `unsupported_rootfs`, `kernel_unsupported`,
+`caps_unavailable`, `worker_unavailable`, `no_cataloger`) skip that node
+for 24 hours while others try; the image stays pending, and is retried on
+that node after the 24 hours.
+`no_packages_found` is final: the image has nothing the cataloger
+recognises.

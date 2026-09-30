@@ -65,6 +65,11 @@ const UNKNOWN_REASON: Record<string, string> = {
   capture_gap: 'the capture has a gap',
   host_network: 'a host-network container',
   no_package_files: 'no SBOM lists the package files',
+  probes_missing: 'the capture probes are not running on the node',
+  libraries_not_tracked: 'capture ran in exec-only mode, which cannot vouch for a shared library never being loaded',
+  sbom_incomplete: 'the node SBOM is partial, or its file list for this package was cut',
+  platform_mismatch: 'a node that ran the container has another platform than the SBOM was cataloged for',
+  interpreted_content: 'the package also owns scripts or data files that capture cannot see being read',
 };
 
 /** The Broker's in-use state as a chip (`inUseState` or a `in_use:<state>` factor). */

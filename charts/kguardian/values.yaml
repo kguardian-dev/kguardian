@@ -473,6 +473,119 @@ compute:
     # `COMPUTE_HISTORY_MINUTE_HOURS`.
     minuteResolutionHours: 24
 
+# Node SBOM cataloging (docs/reference/node-catalog). The Controller opens
+# each running container's root filesystem and hands it to a `cataloger`
+# sidecar in its own pod, which returns the image's packages; the Broker
+# stores them as SBOM source `node` (trust `scanned`, never overriding
+# Trivy). Off by default: with `enabled: false` nothing below renders.
+nodeCatalog:
+  # -- Catalog node SBOMs. Upgrade with `-f <values>` or
+  # `--reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`, which
+  # keeps the previous chart's defaults (every key below then falls back to
+  # the chart's built-in default, the same as listed here). With `--set`,
+  # use `--set-string` for a numeric-looking image tag or Secret key name.
+  # Requires `broker.auth.enabled=true` with
+  # `broker.auth.mode=scoped` and a `catalog` key in the auth Secret (key
+  # name `broker.auth.keys.catalog`). Enabling restarts the Controller
+  # DaemonSet and the Broker once. A missing key does not crash anything:
+  # the Broker answers the catalog routes 503 and the Controller idles.
+  # Needs Broker and Controller releases with the node catalog (after
+  # 1.19.7 and 1.16.2); older ones ignore it.
+  enabled: false
+  # -- Catalog generation (`NODE_CATALOG_EPOCH`). Raising it re-catalogs
+  # every digest once, for example after a cataloger fix. 1 to `maxEpoch`.
+  epoch: 1
+  # -- Broker kill switch (`NODE_CATALOG_GRANTS`). `false` stops every new
+  # grant at once; uploads under a live lease still complete.
+  grants: true
+  # -- Days the Broker keeps node catalog claims, node SBOMs and package
+  # flags after a digest leaves the image inventory
+  # (`NODE_CATALOG_RETENTION_DAYS`). `0` keeps them.
+  retentionDays: 14
+  # -- Highest catalog epoch the Broker accepts (`NODE_CATALOG_MAX_EPOCH`).
+  # `epoch` must not exceed it.
+  maxEpoch: 1000
+  # -- A claim held longer than this is not renewed
+  # (`NODE_CATALOG_MAX_HOLD_SECS`). At least 900 (the lease) and more than
+  # `scanTimeoutSeconds`.
+  maxHoldSeconds: 7200
+  # -- Worker scan deadline (`NODE_CATALOG_SCAN_TIMEOUT_SECS`), 10 to 1800.
+  scanTimeoutSeconds: 600
+  # -- Filesystem entries the worker indexes per scan
+  # (`NODE_CATALOG_MAX_FILES`).
+  maxFiles: 2000000
+  # -- Components per SBOM (`NODE_CATALOG_MAX_COMPONENTS`), at most 50000.
+  maxComponents: 50000
+  # -- Minimum gap between claims on one node
+  # (`NODE_CATALOG_MIN_SCAN_INTERVAL_SECS`), at least 30.
+  minScanIntervalSeconds: 30
+  # -- Host PSI `some avg10` percent (cpu, io or memory) above which scans
+  # wait (`NODE_CATALOG_PRESSURE_THRESHOLD`), a whole number 0 to 100.
+  pressureThreshold: 40
+  # -- Longest a scan waits for pressure to drop
+  # (`NODE_CATALOG_MAX_PRESSURE_DEFER_SECS`), at most 86400.
+  maxPressureDeferSeconds: 1800
+  # -- Hand the worker a read-only, submount-free clone of the container
+  # root instead of the plain handle (`NODE_CATALOG_RO_CLONE`, Linux 5.12
+  # and later; falls back to the handle when the kernel refuses).
+  readOnlyClone: false
+  worker:
+    image:
+      # -- Cataloger image repository
+      repository: ghcr.io/kguardian-dev/kguardian/cataloger
+      # -- Cataloger image pull policy
+      pullPolicy: IfNotPresent
+      # -- Cataloger version tag
+      tag: "v0.1.0"
+      # -- Overrides the image tag using SHA digest
+      sha: ""
+    # -- Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes
+    # (a number or a string) or a whole number of `Ki`, `Mi`, `Gi` or `Ti`;
+    # the chart hands the worker bytes. The worker reports `oom` and
+    # retries OS packages only when a scan passes it.
+    memoryLimit: 640Mi
+    # -- Scan temp space (`CATALOG_TMP_LIMIT`) and the `sizeLimit` of the
+    # memory-backed `/tmp` emptyDir, in the same forms as `memoryLimit`.
+    # Tmpfs pages count against the container's memory limit.
+    tmpLimit: 192Mi
+    # -- Worker resources. The memory limit must hold `memoryLimit` +
+    # `tmpLimit` + 128Mi (the child's burst margin and the parent), so the
+    # worker's own limits always trip before a cgroup OOM kill, which on
+    # cgroup v2 takes the whole container (kubelet sets
+    # `memory.oom.group`; `singleProcessOOMKill: true` on Kubernetes 1.32+
+    # kills only the child). The chart refuses a smaller limit. The
+    # request (512Mi, half the limit) is reserved on every node, since this
+    # runs in a DaemonSet. Under node memory pressure the
+    # kubelet evicts pods using more than their request first, and this
+    # pod is the Controller's. Lowering it saves that reservation per node
+    # but makes the Controller pod an earlier eviction candidate while a
+    # large scan runs; raising it to the limit (1Gi) takes it off that list
+    # at the cost of 1Gi per node. Override the keys you change; null
+    # restores this default rather than removing the resources.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    # -- SELinux label of the worker. Override its keys; setting it to
+    # null restores this default (the chart treats null as unset), and `{}`
+    # removes the label. The default lets it read other
+    # containers' files through the handle it is given (the full category
+    # range lifts MCS separation only; `container_t` stays confined). Never
+    # use `super_t`, `spc_t` or `control_t`. Ignored on nodes without
+    # SELinux.
+    seLinuxOptions:
+      type: container_t
+      level: "s0-s0:c0.c1023"
+    # -- AppArmor profile of the worker (Kubernetes 1.30+), for example
+    # `{type: Localhost, localhostProfile: kguardian-cataloger}`. Empty
+    # leaves the runtime default.
+    appArmorProfile: {}
+    # -- Worker log level (`LOG_LEVEL`): `info` or `debug`.
+    logLevel: info
+
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
@@ -1021,12 +1134,15 @@ broker:
     # the frontend then holds a token that can write).
     mode: scoped
     # -- Secret keys per scope (mode=scoped). read and ingest must exist;
-    # supplychain must exist when supplychain.enabled; admin is optional.
+    # supplychain must exist when supplychain.enabled; admin is optional;
+    # catalog is read only when nodeCatalog.enabled, and optional (without
+    # it the node catalog idles).
     keys:
       read: read
       ingest: ingest
       supplychain: supplychain
       admin: admin
+      catalog: catalog
     # -- Key of the single shared token (mode=shared only).
     secretKey: token
 

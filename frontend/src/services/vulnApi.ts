@@ -1,6 +1,6 @@
 import apiClient from './api';
 import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
-import type { CvePage, Exposure, ImageDetail, ImagePage, ImageVulnsPage, SbomPage, VulnSeverity } from '../types/vulns';
+import type { CatalogCoverage, CvePage, Exposure, ImageDetail, ImagePage, ImageVulnsPage, SbomPage, VulnSeverity } from '../types/vulns';
 import type { AdmissionFormat, ExportManifest, RunningSignaturePage } from '../types/attestations';
 import { busyMessage, retryAfterMs } from './brokerBusy';
 
@@ -202,6 +202,15 @@ export class VulnApi {
   /** `GET /images/{digest}/sbom`: every source's SBOM (reports) and one's components. */
   getImageSbom(digest: string, q: { limit?: number; after?: number; source?: string } = {}): Promise<SbomPage> {
     return this.json<SbomPage>(`/images/${seg(digest)}/sbom`, q);
+  }
+
+  /**
+   * `GET /catalog/coverage`: how many running images have a trusted SBOM
+   * (Trivy Operator or the node catalog), and the node catalog's queue.
+   * 404 (`unsupported`) on a Broker without the node catalog.
+   */
+  getCatalogCoverage(signal?: AbortSignal): Promise<CatalogCoverage> {
+    return this.json<CatalogCoverage>('/catalog/coverage', {}, 'This Broker predates the node catalog.', signal);
   }
 
   /** `GET /attestations/running`: running workload containers with their image's verdict (null = not checked). */

@@ -18,6 +18,40 @@
       "firstSeen": "2026-09-18T07:00:00",
       "lastSeen": "2026-09-19T14:12:03",
       "runningContainers": 0
+    },
+    {
+      "digest": "sha256:7f3c1d5e9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2d",
+      "repository": "ghcr.io/example/storefront",
+      "tags": ["2.1.0"],
+      "digestKind": "repo",
+      "firstSeen": "2026-09-28T08:00:00",
+      "lastSeen": "2026-09-30T09:00:00",
+      "runningContainers": 2,
+      "sbomSources": ["node"],
+      "nodeCatalog": {
+        "state": "done",
+        "reason": null,
+        "platform": "linux/arm64",
+        "completeness": "partial",
+        "catalogedAt": "2026-09-30T08:41:12.093Z",
+        "futureField": "dropped"
+      }
+    },
+    {
+      "digest": "sha256:c0ffee0000000000000000000000000000000000000000000000000000000001",
+      "repository": "ghcr.io/example/scratch-tool",
+      "tags": ["1.0.0"],
+      "digestKind": "repo",
+      "firstSeen": "2026-09-29T08:00:00",
+      "lastSeen": "2026-09-30T09:00:00",
+      "runningContainers": 1,
+      "nodeCatalog": {
+        "state": "done",
+        "reason": "no_packages_found",
+        "platform": null,
+        "completeness": null,
+        "catalogedAt": null
+      }
     }
   ],
   "nextAfter": null

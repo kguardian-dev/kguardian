@@ -239,6 +239,67 @@ A BuildKit attestation describes one **platform manifest**, not the index.
 The payload is keyed by that manifest digest (`digest_kind: "manifest"`)
 and carries `image.index_digest` for the index it belongs to.
 
+### Node SBOM source
+
+With the node catalog on ([design](../docs/design/node-catalog.md)), the
+Controller and its cataloger worker catalog each running image on one node
+that runs it and store the SBOM in the broker as `source: "node"`,
+`sbom_trust: "scanned"`. This source (`pkg/nodesource`) reads those SBOMs
+back and hands them to the Grype matcher. It is **off by default**:
+`NODE_SBOM_ENABLED=true`, and it only runs when the matcher is configured
+(`GRYPE_MATCHER_URL`).
+
+1. Every `NODE_SBOM_INTERVAL` (5 min) it lists the image inventory
+   (`GET /images`, read scope, paged) and picks the running digests whose
+   `sbomSources` include `node`. The source counts as ready for `/readyz` once that
+   listing has returned (or failed); it does not wait for the fetches.
+2. It fetches a node SBOM (`GET /images/{digest}/sbom?source=node`, pages
+   of 500, components only) when it is new, when its
+   `nodeCatalog.catalogedAt` changed, or once a day otherwise; and when the
+   coordinator wants it back (below), at most once per backoff window
+   (5 min, doubling, at most a day; counted as `wanted`). Steady
+   state is one listing per interval and no fetches. File paths are not
+   kept: this route cuts them to 16, and matching does not use them. A page
+   answered 503 is asked again after its `Retry-After` (at most 30 s, three
+   times per page).
+3. The SBOM goes straight to the match coordinator, never through the send
+   queue: the broker already has it, and its supply-chain ingest route does
+   not accept `source: "node"`. Findings come back as `source: "grype"`
+   with `node` in `sbom_sources`.
+
+When a node SBOM goes away (deleted: the digest is still in the inventory
+but `sbomSources` no longer lists `node`; stored again with no packages,
+`no_packages_found`; or grown past the matcher's 50 000-component limit),
+the one the coordinator holds is replaced by an empty one, so its packages
+stop being matched. Nothing is offered when the coordinator holds none. A
+digest that only stops running (a CronJob between runs) is left alone: its
+SBOM ages out of the coordinator like any other, and it is not fetched
+again when it runs again unchanged. A too-large SBOM is not read again
+until it changes.
+
+**Paging.** Every page repeats the report header; a page whose
+`scannedAt`/`receivedAt` differs from the first ends the read, which is
+retried on the next pass. A replacement the header cannot reveal heals on
+the next pass too (it changes `catalogedAt`), and meanwhile can only add or
+miss node packages: a node SBOM never touches what the other sources give.
+
+**Old broker.** Before listing, the source asks `GET /catalog/status`
+(read scope) once. A 404 there means the broker predates the node catalog:
+the source logs one info line, lists and fetches nothing, and asks again
+once an hour, resuming if the broker has been upgraded. A 503 (catalog
+token not configured) still counts as available, since SBOMs stored
+earlier can be read. A 401 or 403 (the token lacks the read scope) is
+logged once at error level, sets
+`kguardian_supplychain_source_healthy{source="node"}` to 0 and is asked
+again hourly. A network or 5xx failure warns once and is retried on the
+next interval. A 404 on the SBOM route itself is an ordinary fetch error.
+
+Counted in `kguardian_supplychain_node_sbom_fetches_total{result}`
+(`fetched`, `none`, `changed`, `too_large`, `error`, `released`,
+`wanted`, `list_error`, `probe_error`, `probe_denied`);
+`kguardian_supplychain_source_available{source="node"}` is 0 while idling
+on an old broker.
+
 ### SBOM trust and the union
 
 **Rule: an unverified document may only add information, never remove
@@ -251,14 +312,23 @@ weakest first:
 |---|---|
 | `attached-unbound` | A bare document attached to the image. Nothing binds it to the image. |
 | `unverified` | An in-toto statement whose subject is the image (or one of its platform manifests). The signature was not checked. |
-| `scanned` | Produced by a scanner that read the running image in the cluster (Trivy Operator). |
+| `scanned` | Produced by a scanner that read the running image in the cluster (Trivy Operator, or the node catalog). |
 | `verified` | Signature and signer identity checked. Nothing produces this yet (#1533 P2-1). |
 
 **Grype input is the union.** For each image the matcher gets every SBOM
-held for it: Trivy's SbomReport and any registry SBOM, merged.
+held for it: Trivy's SbomReport, any registry SBOM and the node catalog's
+SBOM, merged. Trivy's entries are authoritative, registry SBOMs only add to
+them, and the node SBOM only adds to both (see below).
 
-- Packages de-duplicate on (type, name, version) within the image; type
-  maps Trivy's distro names onto PURL types (`debian` → `deb`).
+- Packages de-duplicate within the image on (type, name, version); type
+  maps Trivy's distro names onto PURL types (`debian` → `deb`). A node
+  SBOM's package also matches an entry whose PURL names the same package
+  (type, namespace, name and version, qualifiers ignored), which catches
+  one package under two names (Trivy's Maven `group:artifact` and Syft's
+  `artifact`), a Debian or RPM epoch given as a qualifier by Trivy and in
+  the version by Syft, and Go's `stdlib` as `v1.22.1` or `go1.22.1`. That
+  PURL match is used for node packages only: Trivy's and registry packages
+  de-duplicate exactly as without a node SBOM.
 - **Trivy's entries are authoritative.** On a collision a registry entry
   may only add file paths and licences, and fill a PURL Trivy left empty.
   It never changes Trivy's PURL (distro, arch, upstream), source package
@@ -277,6 +347,18 @@ held for it: Trivy's SbomReport and any registry SBOM, merged.
   those can only add findings. A property test merges 500 random hostile
   registry SBOMs with a fixed Trivy SBOM and checks that Trivy's findings
   always survive.
+- **A node SBOM only adds.** It never removes, changes or re-attributes
+  anything Trivy's or a registry SBOM gives: a node entry colliding with
+  any other only adds file paths and licences (not even a missing PURL);
+  its operating-system component is used only when it is the only input
+  (the OS sets the distro every package is matched under); and under the
+  cap node components get only the room Trivy and the registry SBOMs
+  leave. So however partial the catalog (`partial`, `os_only`), adding it
+  can only add findings. Registry SBOMs are not replaced by it: they may
+  list packages the catalog misses, and they cannot hide anything anyway.
+  A property test merges 3000 random combinations of Trivy, registry and
+  node SBOMs (small ones included) under random caps and checks that the
+  union without the node SBOM survives unchanged inside the union with it.
 
 **Join key.** A platform-manifest registry SBOM (BuildKit) whose
 `index_digest` has a Trivy SBOM is folded into that index's group and
@@ -284,11 +366,74 @@ matched there. It is not matched on its own while Trivy's exists. A
 registry SBOM for an image Trivy has not scanned is matched alone, with its
 own trust level.
 
+**A node SBOM is single-platform.** It is the catalog of one platform
+(`nodeCatalog.platform`) of its inventory digest, and the broker links it to
+that digest only. It does not change grouping: on a platform digest whose
+index has Trivy's SBOM (with a registry SBOM naming that index) it joins
+the index's group. When it is its group's only input the payload is pinned
+to its platform: of `platform_manifests` (including what the registry
+lookup adds) only the node platform's entry is kept, and `index_digest` is
+dropped, so its findings reach no other platform of the index. The node
+reports `linux/arm64` or `linux/arm` where indexes often say
+`linux/arm64/v8` or `linux/arm/v7`: a platform without a variant pairs with
+the one entry of the same os/arch (for arm64 with `v8` among several); if
+the pairing is ambiguous nothing is pinned, since a wrong pin would drop a
+link. With Trivy's or a registry SBOM in the group the payload is not
+pinned: it keeps exactly the links those sources give, and the node SBOM
+only adds packages to it. Registry SBOMs of the index's other platforms
+keep their own groups and links.
+
+**Eviction.** Once a node SBOM is in play (its group's last match
+included one, or its union now does), a group is not matched without one
+of the other SBOMs of its last match (Trivy's, a registry one) while that
+SBOM is not held. After the budget drops such a group, a partial re-offer
+(the node SBOM alone, or Trivy's without a registry SBOM) is held but not
+matched, and the broker keeps the last complete payload.
+
+While such a group waits, the coordinator asks the sources of the missing
+SBOMs for them on every pass (each minute). Trivy's tracker answers from
+memory, handing back the SBOM it holds straight to the matcher, so it is
+asked every time. A registry SBOM costs a lookup, so it is asked at most
+once per SBOM per window (10 min, Trivy's resync period, doubling up to a
+day, also across matches, so repeated drops never become a lookup per
+pass and cannot trip registry rate limits for normal lookups), then looked up
+on the source's next pass and, if unchanged, emitted match-only. Refetches
+are counted in `kguardian_supplychain_grype_refetches_total{source,result}`.
+Dropping a group asks nothing, and neither answer reaches the broker
+again, so memory pressure cannot turn into a loop of drops and
+re-uploads.
+
+A source can declare an SBOM gone for good, which ends the wait for it:
+Trivy when a digest's last SbomReport has stayed deleted for a resync
+period (a report deleted and recreated does not count), the registry
+source when two consecutive complete lookups no longer find it (an error,
+a 429 or a partial answer never counts).
+
+The wait is capped at `GRYPE_NODE_GROUP_MAX_WAIT` (30 min), counted from
+the later of the start of the wait and the last registry refetch (so an
+SBOM asked for late still has the full cap to arrive), and never more than
+twice the cap from the start, so the wait always ends. Expiries are
+counted in `kguardian_supplychain_grype_node_group_wait_expired_total`, and
+a warning is logged at most once an hour. **Both are the signal that
+`GRYPE_SBOM_BUDGET_MIB` is too small for the node groups: raise it** (and
+the container's memory limit, `supplychain.resources.limits.memory` in the
+chart, with it) so their SBOMs stay held. At the cap
+the group is matched with what it holds, under the union rules above: a
+group without its Trivy SBOM then carries no Trivy-derived findings until
+Trivy's SBOM is back (and likewise for a registry SBOM). A waiting group's
+SBOMs can be dropped again under memory pressure: what it waits for is
+kept in its match state, not in held SBOMs. Once the other SBOMs are back,
+the coordinator `Wants` the node SBOM, the node source offers it again,
+and the group waits for it up to 10 min before it is matched without it.
+Without the node source none of this happens: groups are dropped and
+re-matched exactly as before.
+
 ### Source rules (contract for the broker)
 
 | Data | Rule |
 |---|---|
 | SBOMs | Store each source's SBOM separately, keyed `(digest, source)`. Serve each source separately, and/or the union as above. **Never let a registry SBOM replace or hide Trivy's in the SBOM view**, and always show `sbom_trust` next to it. `verified` is the only value that may be presented as signed. |
+| Node SBOMs | Stored by the node catalog, never sent by this component. Read back for matching only. |
 | Vulnerabilities | Keep sets **side by side**, tagged by `source` (`trivy-operator`, `grype`). Each payload replaces only its own `(digest, source)` set; do not merge or dedupe across sources at ingest. `grype` payloads list their inputs in `sbom_sources` and carry the weakest input trust in `sbom_trust`. |
 | Join | Kubelet imageID first, then index→`platform_manifests` / `index_digest`, then (workload, container, repository:tag). |
 
@@ -413,8 +558,11 @@ and no identity.
 | `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
 | `REGISTRY_SBOM_ENABLED` | `false` | Fetch registry-attached SBOMs for running digests (opt-in; egress to image registries). Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
+| `NODE_SBOM_ENABLED` | `false` | Match the node catalog's SBOMs (source `node`, stored in the broker) with Grype. Needs `GRYPE_MATCHER_URL` (ignored with a warning without it), `BROKER_URL` and a token with the read scope. The chart will set it from `supplychain.sources.node.enabled`, which defaults to `nodeCatalog.enabled`. See [Node SBOM source](#node-sbom-source). |
+| `NODE_SBOM_INTERVAL` | `5m` | How often to list running images for new or changed node SBOMs. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `GRYPE_ERROR_QUARANTINE_TTL` | `1h` | How long a digest whose match keeps failing waits before one more try; doubles per repeat, at most 24h. At least `5m`. |
+| `GRYPE_NODE_GROUP_MAX_WAIT` | `30m` | With the node source on: how long a group last matched with a node SBOM waits, after its SBOMs were dropped, for the other SBOMs of that match before it is matched with what it holds (from its last registry refetch; at most twice this from the start). At least `1m`. |
 | `GRYPE_SBOM_BUDGET_MIB` | `96` | Estimated heap, in MiB, for the SBOMs held so everything can be re-matched when the Grype DB changes. Past it the least recently offered digests are dropped (matched again when a source offers them again). At least `16`. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |

@@ -55,7 +55,15 @@ outside a package manager).
 
 Other `unknown` reasons: `no_runtime_data` (no capture for the container,
 or the capture coverage signal is not available yet), `capture_gap`,
-`host_network`, `no_package_files` (no SBOM lists the package's files).
+`host_network`, `probes_missing`, `libraries_not_tracked` (capture ran in
+exec mode, which cannot vouch for a shared library never being loaded),
+`no_package_files` (no SBOM lists the package's files). When the only file
+list for a package comes from a node catalog SBOM, three more:
+`sbom_incomplete` (the SBOM is not complete, or the package's file list was
+cut), `platform_mismatch` (a node that ran the container reports another
+platform than the SBOM was cataloged for, or none), `interpreted_content`
+(the package also owns interpreted or data files capture cannot see).
+Clients should show an unrecognised reason as sent.
 `installed_not_observed` is only claimed with a coverage signal from the
 runtime inventory; until the inventory provides one, every finding is
 `executed`, `loaded` or `unknown`. Unknown never means safe: it is ranked

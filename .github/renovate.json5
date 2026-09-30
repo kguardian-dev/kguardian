@@ -31,6 +31,15 @@
       "semanticCommitType": "fix",
     },
     {
+      // The cataloger tag lives twice in the chart: values.yaml (helm-values
+      // manager) and the fallback in _helpers.tpl (customManager below).
+      // One group keeps them in the same PR, so they never diverge.
+      "description": "Bump the chart's cataloger image tag in values.yaml and _helpers.tpl together",
+      "matchDatasources": ["docker"],
+      "matchDepNames": ["ghcr.io/kguardian-dev/kguardian/cataloger"],
+      "groupName": "cataloger image",
+    },
+    {
       // The SLSA generator's reusable workflows MUST be referenced by a version
       // tag (refs/tags/vX.Y.Z). The builder resolves its own ref to derive the
       // release version for provenance, so a commit SHA makes it fail with
@@ -42,6 +51,33 @@
       "matchManagers": ["github-actions"],
       "matchDepNames": ["slsa-framework/slsa-github-generator"],
       "pinDigests": false,
+    },
+    {
+      // The cataloger (Syft as a library) produces the SBOMs the supplychain
+      // matcher (Grype) matches, so both must resolve the same Syft and
+      // stereoscope (cataloger/hack/check-syft-version.sh fails CI when they
+      // differ). Syft usually releases ahead of Grype, so the cataloger
+      // never takes a Syft bump on its own: it follows whatever Grype
+      // resolves, via cataloger/hack/sync-syft.sh.
+      "description": "The cataloger's Syft follows the matcher's: never bump it alone",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["cataloger/go.mod"],
+      "matchDepNames": ["github.com/anchore/syft", "github.com/anchore/stereoscope"],
+      "enabled": false,
+    },
+    {
+      // A Grype bump moves the matcher's indirect Syft (go mod tidy). Its PR
+      // then fails the cataloger's lock check until someone runs
+      // cataloger/hack/sync-syft.sh on the branch, which also triggers
+      // cataloger-difftest.yaml. Not auto-merged: reviewed with the difftest.
+      "description": "Grype (supplychain-matcher) bumps: review with the cataloger's Syft sync",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["supplychain-matcher/go.mod"],
+      "matchDepNames": ["github.com/anchore/grype"],
+      "groupName": "syft-grype",
+      "postUpdateOptions": ["gomodTidy"],
+      "automerge": false,
+      "addLabels": ["needs-manual-review"],
     },
     {
       // TypeScript 7 (the Go-native compiler) is GA on npm's `latest`, but
@@ -56,6 +92,20 @@
     },
   ],
   "customManagers": [
+    {
+      // The chart's built-in fallback for the cataloger image tag
+      // (kguardian.nodeCatalog in _helpers.tpl, used when an upgrade with
+      // --reuse-values leaves nodeCatalog unset). Same depName and
+      // datasource as the helm-values entry in values.yaml, so both land in
+      // one PR (packageRules "cataloger image" below);
+      // test/helm-values-compat.sh fails if they ever differ.
+      "customType": "regex",
+      "managerFilePatterns": ["/^charts/kguardian/templates/_helpers\\.tpl$/"],
+      "matchStrings": [
+        "\"repository\" \"(?<depName>ghcr\\.io/kguardian-dev/kguardian/cataloger)\" \"pullPolicy\" \"[^\"]*\" \"tag\" \"(?<currentValue>[^\"]+)\"",
+      ],
+      "datasourceTemplate": "docker",
+    },
     {
       // Tracks Dockerfile ARGs annotated with "# renovate: datasource=... depName=..."
       // (e.g. DEBIAN_VERSION in controller/Dockerfile, which the native docker

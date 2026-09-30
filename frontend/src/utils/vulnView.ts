@@ -28,7 +28,7 @@ export const JOIN_LABEL: Record<JoinKind, { label: string; title: string; weak: 
 };
 
 export function sourceLabel(s: string): string {
-  return s === 'trivy-operator' ? 'Trivy Operator' : s === 'grype' ? 'Grype' : s === 'registry' ? 'Registry SBOM' : s;
+  return s === 'trivy-operator' ? 'Trivy Operator' : s === 'grype' ? 'Grype' : s === 'registry' ? 'Registry SBOM' : s === 'node' ? 'Node catalog' : s;
 }
 
 export type JumpTarget =

@@ -160,6 +160,22 @@ test("get_image_inventory: fixture replay invents no fields and keeps null repos
   assert.ok(r.text.length <= MAX_RESPONSE_CHARS);
 });
 
+test("get_image_inventory: node catalog fields pass through, known keys only; an older broker's items stay as they were", async () => {
+  const page = fixture("images_page.json") as { items: Record<string, unknown>[] };
+  routes["/images"] = { status: 200, body: page };
+  const got = JSON.parse((await executeInProcessTool("get_image_inventory", {})).text) as Record<string, unknown>;
+  const imgs = got.images as Record<string, unknown>[];
+  const node = imgs.find((i) => i.digest === page.items[2].digest)!;
+  assert.deepEqual(node.sbomSources, ["node"]);
+  assert.deepEqual(node.nodeCatalog, { state: "done", reason: null, platform: "linux/arm64", completeness: "partial", catalogedAt: "2026-09-30T08:41:12.093Z" });
+  const scratch = imgs.find((i) => i.digest === page.items[3].digest)!;
+  assert.equal((scratch.nodeCatalog as Record<string, unknown>).reason, "no_packages_found");
+  assert.equal("sbomSources" in scratch, false, "a missing sbomSources is not invented");
+  assert.equal("nodeCatalog" in imgs[0], false);
+  assert.match(String(got.note), /never that it has no vulnerabilities/);
+  assert.match(String(got.note), /no vulnerability report \(check get_image_vulnerabilities\)/);
+});
+
 test("get_image_inventory: a broker error is a tool error, not an empty inventory", async () => {
   routes["/images"] = { status: 503, body: "shed" };
   const r = await executeInProcessTool("get_image_inventory", {});

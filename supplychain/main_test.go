@@ -148,3 +148,41 @@ func TestRegistrySBOMIsOptIn(t *testing.T) {
 		t.Error("zero interval accepted")
 	}
 }
+
+func TestNodeSBOMIsOptIn(t *testing.T) {
+	for _, c := range []struct {
+		env  map[string]string
+		want bool
+	}{
+		{map[string]string{}, false},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true", "GRYPE_MATCHER_URL": "http://127.0.0.1:8090"}, false},
+		{map[string]string{"NODE_SBOM_ENABLED": "true"}, true},
+		{map[string]string{"NODE_SBOM_ENABLED": "false"}, false},
+	} {
+		got, err := loadConfig(envMap(c.env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.NodeSBOM != c.want || got.NodeSBOMInterval != 5*time.Minute {
+			t.Errorf("%v: %+v", c.env, got)
+		}
+	}
+	for _, bad := range []map[string]string{
+		{"NODE_SBOM_ENABLED": "on"},
+		{"NODE_SBOM_INTERVAL": "0s"},
+		{"NODE_SBOM_INTERVAL": "often"},
+		{"GRYPE_NODE_GROUP_MAX_WAIT": "30s"},
+		{"GRYPE_NODE_GROUP_MAX_WAIT": "later"},
+	} {
+		if _, err := loadConfig(envMap(bad)); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+	c, err := loadConfig(envMap(map[string]string{"NODE_SBOM_INTERVAL": "90s"}))
+	if err != nil || c.NodeSBOMInterval != 90*time.Second {
+		t.Errorf("interval: %v %v", c.NodeSBOMInterval, err)
+	}
+	if c.GrypeNodeGroupMaxWait != 30*time.Minute {
+		t.Errorf("node group max wait default %v", c.GrypeNodeGroupMaxWait)
+	}
+}

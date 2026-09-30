@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "broker"
-version = "1.19.7"
+version = "1.20.0"
 dependencies = [
  "actix-cors",
  "actix-web",

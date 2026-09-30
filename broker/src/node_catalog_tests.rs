@@ -1551,13 +1551,19 @@ fn live_database_migration_is_reversible_and_idempotent() {
     };
     assert_eq!(tables(&mut conn), 3);
     // This migration by name, not the last one: later migrations must not
-    // change what is reverted here.
+    // change what is reverted here. The in-use guard (2026-10-04-100000)
+    // builds on it, so it is reverted first, as a rollback would.
     use diesel::migration::MigrationSource;
-    let ours = MigrationSource::<diesel::pg::Pg>::migrations(&TEST_MIGRATIONS)
-        .unwrap()
-        .into_iter()
-        .find(|m| m.name().version().to_string() == "20261003100000")
-        .expect("the node catalog migration");
+    let by_version = |v: &str| {
+        MigrationSource::<diesel::pg::Pg>::migrations(&TEST_MIGRATIONS)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.name().version().to_string() == v)
+            .unwrap_or_else(|| panic!("migration {v}"))
+    };
+    let guard = by_version("20261004100000");
+    conn.revert_migration(&*guard).unwrap();
+    let ours = by_version("20261003100000");
     let reverted = conn.revert_migration(&*ours).unwrap();
     assert_eq!(reverted.to_string(), "20261003100000");
     assert_eq!(tables(&mut conn), 0);
@@ -1582,8 +1588,190 @@ fn live_database_migration_is_reversible_and_idempotent() {
     );
     conn.run_pending_migrations(TEST_MIGRATIONS).unwrap();
     assert_eq!(tables(&mut conn), 3);
-    assert_eq!(guarded(&mut conn), 1);
+    assert_eq!(in_use_definition(&mut conn), "guarded");
+    // Re-running this migration's up over the later one's function would
+    // put the exclusion back: the guard's own up is re-run after it, as
+    // the harness would never do, to leave the database as it found it.
     conn.batch_execute(up).unwrap();
+    assert_eq!(in_use_definition(&mut conn), "excluded");
+    conn.batch_execute(GUARD_UP).unwrap();
+    assert_eq!(in_use_definition(&mut conn), "guarded");
+    assert!(conn.pending_migrations(TEST_MIGRATIONS).unwrap().is_empty());
+}
+
+/// The in-use guard reads what the catalog path itself stores: the flags
+/// an upload carries (keyed name@version), and the completeness and
+/// platform FINALIZE records on the claim, against the platform the node
+/// offered with. Uploaded through the real claim and upload path, then
+/// judged by kg_pkg_in_use under full-mode capture on that node.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_uploaded_flags_and_platform_drive_the_in_use_guard() {
+    use crate::in_use_store as iu;
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'; \
+             TRUNCATE runtime_in_use_coverage, runtime_package_use, runtime_unowned_paths"
+        ),
+    );
+    crate::runtime_inventory::restore_coverage_function(&mut conn);
+    seed(&mut conn, &d(1), "api", &["n1"]);
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_coverage (container_id, pod_namespace, workload_kind, \
+                workload_name, container_name, image_digest, pod_name, node_name, mode, \
+                exec_probe, lib_probe, start_mode, tracking_since, covered_since, \
+                last_heartbeat, heartbeat_secs) \
+             VALUES ('nc-guard-1', '{NS}', 'Deployment', 'api', 'c', '{}', 'api-n1', 'n1', 'full', \
+                true, true, 'start', timezone('UTC', NOW()) - INTERVAL '48 hours', \
+                timezone('UTC', NOW()) - INTERVAL '48 hours', timezone('UTC', NOW()), 300)",
+            d(1)
+        ),
+    );
+    let states = |conn: &mut PgConnection| {
+        iu::refresh_coverage(
+            conn,
+            &crate::in_use::TierSettings::default(),
+            &iu::UseEvidence {
+                complete: true,
+                truncated: vec![],
+            },
+        )
+        .unwrap();
+        ["zlib", "busybox"].map(|p| {
+            text(
+                conn,
+                &format!(
+                    "SELECT kg_pkg_in_use('primary', '{NS}', 'Deployment', 'api', 'c', '{}', \
+                         '{p}', true) AS t",
+                    d(1)
+                ),
+            )
+            .unwrap()
+        })
+    };
+    // Cataloged for the node's own platform (the offer said linux/amd64);
+    // the first component comes flagged files_truncated.
+    let g = grant(&mut conn, "n1", 1, &[d(1)]).unwrap();
+    let mut v = upload_json(&d(1), 1, &["zlib", "busybox"], None);
+    v["platform"] = json!("linux/amd64");
+    upload(&mut conn, &g, v).unwrap();
+    assert_eq!(
+        states(&mut conn),
+        ["unknown:sbom_incomplete", "installed_not_observed"]
+    );
+    // Re-cataloged (a higher epoch) for another platform than the node's.
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET state = 'pending', claim_token = NULL",
+    );
+    let g = grant(&mut conn, "n1", 2, &[d(1)]).unwrap();
+    upload(
+        &mut conn,
+        &g,
+        upload_json(&d(1), 2, &["zlib", "busybox"], None),
+    )
+    .unwrap();
+    assert_eq!(
+        text(&mut conn, "SELECT platform AS t FROM node_catalog_claims").as_deref(),
+        Some("linux/arm64")
+    );
+    assert_eq!(
+        states(&mut conn),
+        ["unknown:platform_mismatch", "unknown:platform_mismatch"]
+    );
+    // A partial re-catalog for the right platform.
+    exec(
+        &mut conn,
+        "UPDATE node_catalog_claims SET state = 'pending', claim_token = NULL",
+    );
+    let g = grant(&mut conn, "n1", 3, &[d(1)]).unwrap();
+    let mut v = upload_json(&d(1), 3, &["zlib", "busybox"], None);
+    v["platform"] = json!("linux/amd64");
+    v["completeness"] = json!("partial");
+    v["partial_reasons"] = json!(["eacces"]);
+    upload(&mut conn, &g, v).unwrap();
+    assert_eq!(
+        states(&mut conn),
+        ["unknown:sbom_incomplete", "unknown:sbom_incomplete"]
+    );
+    exec(
+        &mut conn,
+        &format!("DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'"),
+    );
+}
+
+const GUARD_UP: &str = include_str!("../db/migrations/2026-10-04-100000_node_in_use_guard/up.sql");
+
+/// Which kg_pkg_in_use is installed: `guarded` (2026-10-04-100000, node
+/// file lists behind the node SBOM guard), `excluded` (2026-10-03-100000,
+/// source 'node' ignored) or `unguarded` (2026-09-28-200000).
+fn in_use_definition(conn: &mut PgConnection) -> &'static str {
+    let src = text(
+        conn,
+        "SELECT prosrc AS t FROM pg_proc WHERE proname = 'kg_pkg_in_use'",
+    )
+    .unwrap();
+    if src.contains("kg_node_pkg_flags(") {
+        "guarded"
+    } else if src.contains("sc.source <> 'node'") {
+        "excluded"
+    } else {
+        "unguarded"
+    }
+}
+
+/// The in-use guard migration: up over itself is a no-op, down restores
+/// the node catalog migration's kg_pkg_in_use exactly (source 'node'
+/// excluded) and drops the guard functions, up again restores the guard.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_the_in_use_guard_migration_is_reversible_and_idempotent() {
+    use diesel::connection::SimpleConnection;
+    use diesel::migration::MigrationSource;
+    use diesel_migrations::MigrationHarness;
+    let mut conn = live_conn();
+    let fns = |conn: &mut PgConnection| {
+        count(
+            conn,
+            "SELECT count(*) AS n FROM pg_proc \
+             WHERE proname IN ('kg_node_sbom_guard', 'kg_node_pkg_flags')",
+        )
+    };
+    conn.batch_execute(GUARD_UP).unwrap();
+    conn.batch_execute(GUARD_UP).unwrap();
+    assert_eq!(fns(&mut conn), 2);
+    assert_eq!(in_use_definition(&mut conn), "guarded");
+    let guard = MigrationSource::<diesel::pg::Pg>::migrations(&TEST_MIGRATIONS)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name().version().to_string() == "20261004100000")
+        .expect("the in-use guard migration");
+    assert_eq!(
+        conn.revert_migration(&*guard).unwrap().to_string(),
+        "20261004100000"
+    );
+    assert_eq!(fns(&mut conn), 0);
+    assert_eq!(in_use_definition(&mut conn), "excluded");
+    let src = text(
+        &mut conn,
+        "SELECT prosrc AS t FROM pg_proc WHERE proname = 'kg_pkg_in_use'",
+    )
+    .unwrap();
+    let pr1 = include_str!("../db/migrations/2026-10-03-100000_node_catalog/up.sql");
+    let body = &pr1[pr1.find("RETURNS text LANGUAGE sql STABLE AS $$").unwrap()
+        + "RETURNS text LANGUAGE sql STABLE AS $$".len()..];
+    assert_eq!(
+        src,
+        &body[..body.find("$$;").unwrap()],
+        "down restores the node catalog migration's body exactly"
+    );
+    conn.run_pending_migrations(TEST_MIGRATIONS).unwrap();
+    assert_eq!(fns(&mut conn), 2);
+    assert_eq!(in_use_definition(&mut conn), "guarded");
     assert!(conn.pending_migrations(TEST_MIGRATIONS).unwrap().is_empty());
 }
 

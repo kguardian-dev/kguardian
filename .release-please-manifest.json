@@ -1,11 +1,12 @@
 {
   "controller": "1.17.0",
-  "broker": "1.19.7",
+  "broker": "1.20.0",
   "frontend": "1.20.8",
   "advisor": "1.11.4",
   "charts/kguardian": "1.28.6",
-  "llm-bridge": "1.12.5",
+  "llm-bridge": "1.13.0",
   "evaluator": "0.5.1",
-  "supplychain": "0.1.1",
-  "supplychain-matcher": "0.1.1"
+  "supplychain": "0.2.0",
+  "supplychain-matcher": "0.1.1",
+  "cataloger": "0.1.1"
 }

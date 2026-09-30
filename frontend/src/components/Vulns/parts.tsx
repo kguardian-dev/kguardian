@@ -106,8 +106,8 @@ export function JoinBadge({ join }: { join: JoinKind }) {
   );
 }
 
-/** SBOM trust. Only `verified` may read as signed; null is "not stated", never inferred. */
-export function TrustBadge({ trust }: { trust: SbomTrust | null }) {
+/** SBOM trust. Only `verified` may read as signed; null is "not stated", never inferred. `source` names who scanned, for `scanned`. */
+export function TrustBadge({ trust, source }: { trust: SbomTrust | null; source?: string }) {
   if (trust === 'verified') {
     return <span className={`${pill} bg-state-enforcing/10 text-state-enforcing border-state-enforcing/30`} title="A signed attestation whose signature was verified"><BadgeCheck className="w-3 h-3" aria-hidden />Verified</span>;
   }
@@ -119,6 +119,7 @@ export function TrustBadge({ trust }: { trust: SbomTrust | null }) {
     unverified: ['Unverified', 'An in-toto statement naming the image; the signature was not checked'],
     'attached-unbound': ['Attached, unbound', 'A bare SBOM attached to the image in its registry, not bound to it by a signature'],
   };
+  if (source === 'node') text.scanned = ['Scanned in cluster', "kguardian's node cataloger read the running container's files"];
   const [label, title] = Object.hasOwn(text, trust) ? text[trust as Exclude<SbomTrust, 'verified'>] : [trust, ''];
   return <span className={`${pill} bg-hubble-border/30 text-secondary border-hubble-border`} title={title}><ShieldQuestion className="w-3 h-3" aria-hidden />{label}</span>;
 }

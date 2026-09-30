@@ -180,7 +180,8 @@ Broker-side token env. Emits nothing unless broker.auth.enabled.
 scoped: BROKER_TOKEN_<SCOPE> per key. read and ingest are required keys
 (the pod will not start without them, which is the point: a typo must not
 silently leave a scope open). supplychain is required only when a
-supply-chain component is enabled; admin is always optional.
+supply-chain component is enabled; admin is always optional; catalog renders
+only with nodeCatalog.enabled, and is optional.
 shared: BROKER_AUTH_TOKEN from broker.auth.secretKey.
 Usage: {{- include "kguardian.brokerAuthServerEnv" . | nindent 12 }}
 */}}
@@ -220,8 +221,169 @@ Usage: {{- include "kguardian.brokerAuthServerEnv" . | nindent 12 }}
       name: {{ $secret }}
       key: {{ $keys.admin }}
       optional: true
+{{- if include "kguardian.nodeCatalogEnabled" . }}
+{{- include "kguardian.catalogTokenEnv" . | nindent 0 }}
+{{- end }}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+True when node SBOM cataloging is on. A values file without the
+nodeCatalog block (or with it set to null) reads as off.
+*/}}
+{{- define "kguardian.nodeCatalogEnabled" -}}
+{{- $nc := .Values.nodeCatalog | default dict -}}
+{{- if and (kindIs "map" $nc) $nc.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The Secret key holding the catalog token. Defaults to "catalog" when the
+key is unset, which is what `helm upgrade --reuse-values` from a release
+before nodeCatalog existed leaves behind.
+*/}}
+{{- define "kguardian.catalogKey" -}}
+{{- ((.Values.broker.auth.keys | default dict).catalog | default "catalog") -}}
+{{- end -}}
+
+{{/*
+BROKER_TOKEN_CATALOG from the auth Secret's catalog key, for the Broker
+and the Controller alike. optional: a missing key makes the Broker answer
+the catalog routes 503 and the Controller idle, instead of a pod that
+never starts. Only rendered when nodeCatalog.enabled (the guard below has
+already required scoped auth).
+*/}}
+{{- define "kguardian.catalogTokenEnv" -}}
+- name: BROKER_TOKEN_CATALOG
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "kguardian.brokerAuthSecret" . }}
+      key: {{ include "kguardian.catalogKey" . }}
+      optional: true
+{{- end -}}
+
+{{/*
+kguardian.quantityBytes: a Kubernetes memory quantity in bytes, from a
+string ("640Mi", "1Gi", "512M", "268435456") or a number (YAML reads
+671088640 as a float). Binary (Ki..Ei) and decimal (k..E) suffixes are
+accepted; "m" (milli) and anything else fail, naming the value.
+Usage: include "kguardian.quantityBytes" (dict "q" "640Mi" "name" "nodeCatalog.worker.resources.limits.memory")
+*/}}
+{{- define "kguardian.quantityBytes" -}}
+{{- $q := .q -}}
+{{- if or (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q) -}}
+{{- $q = $q | int64 | toString -}}
+{{- end -}}
+{{- $q = toString $q | trim -}}
+{{- $re := "^([0-9]+(\\.[0-9]+)?)(Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E)?$" -}}
+{{- if not (regexMatch $re $q) -}}
+{{- fail (printf "%s: %q is not a memory quantity in bytes (for example 671088640, 640Mi or 1Gi; the milli suffix m is not a byte count)" .name $q) -}}
+{{- end -}}
+{{- $units := dict "" 1.0 "Ki" 1024.0 "Mi" 1048576.0 "Gi" 1073741824.0 "Ti" 1099511627776.0 "Pi" 1125899906842624.0 "Ei" 1152921504606846976.0 "k" 1000.0 "K" 1000.0 "M" 1000000.0 "G" 1000000000.0 "T" 1000000000000.0 "P" 1000000000000000.0 "E" 1000000000000000000.0 -}}
+{{- $num := regexReplaceAll $re $q "${1}" | float64 -}}
+{{- $unit := regexReplaceAll $re $q "${3}" -}}
+{{- printf "%d" (mulf $num (get $units $unit) | floor | int64) -}}
+{{- end -}}
+
+{{/*
+kguardian.workerBytes: a cataloger size (memoryLimit, tmpLimit) in bytes.
+Whole bytes (a number or a string) or Ki/Mi/Gi/Ti. The chart hands the
+worker plain bytes, so it never parses a suffix itself.
+Usage: include "kguardian.workerBytes" (dict "q" "640Mi" "name" "nodeCatalog.worker.memoryLimit")
+*/}}
+{{- define "kguardian.workerBytes" -}}
+{{- $q := .q -}}
+{{- if or (kindIs "float64" $q) (kindIs "int" $q) (kindIs "int64" $q) -}}
+{{- $q = $q | int64 | toString -}}
+{{- end -}}
+{{- $q = toString $q | trim -}}
+{{- if not (regexMatch "^[1-9][0-9]*(Ki|Mi|Gi|Ti)?$" $q) -}}
+{{- fail (printf "%s must be a whole number of bytes or a whole number of Ki, Mi, Gi or Ti (Pi, Ei, decimal suffixes, fractions and m are not accepted), got %q" .name $q) -}}
+{{- end -}}
+{{- include "kguardian.quantityBytes" (dict "q" $q "name" .name) -}}
+{{- end -}}
+
+{{/*
+kguardian.nodeCatalog: the nodeCatalog values, resolved and validated, as
+JSON (callers use `include "kguardian.nodeCatalog" . | fromJson`). Every
+key falls back to the same default as values.yaml, so a partial block
+renders: `helm upgrade --reuse-values` from a release before nodeCatalog
+existed keeps that release's values, and `--set nodeCatalog.enabled=true`
+then leaves every other key unset. Numbers come back as decimal strings
+ready to render; sizes in bytes. When enabled, a configuration that could
+not work or is unsafe fails here, at template time.
+
+Keep the defaults below in step with values.yaml `nodeCatalog`
+(test/helm-values-compat.sh section 17 renders both and compares). The
+cataloger tag is bumped by Renovate together with values.yaml's (the
+customManager in .github/renovate.json5 matches this exact line).
+*/}}
+{{- define "kguardian.nodeCatalog" -}}
+{{- $u := .Values.nodeCatalog | default dict -}}
+{{- if not (kindIs "map" $u) -}}{{- $u = dict -}}{{- end -}}
+{{- $uw := $u.worker | default dict -}}
+{{- $ui := $uw.image | default dict -}}
+{{- $d := dict "enabled" false "epoch" 1 "grants" true "retentionDays" 14 "maxEpoch" 1000 "maxHoldSeconds" 7200 "scanTimeoutSeconds" 600 "maxFiles" 2000000 "maxComponents" 50000 "minScanIntervalSeconds" 30 "pressureThreshold" 40 "maxPressureDeferSeconds" 1800 "readOnlyClone" false -}}
+{{- $dw := dict "memoryLimit" "640Mi" "tmpLimit" "192Mi" "logLevel" "info" "resources" (dict "requests" (dict "cpu" "50m" "memory" "512Mi") "limits" (dict "cpu" "500m" "memory" "1Gi")) "seLinuxOptions" (dict "type" "container_t" "level" "s0-s0:c0.c1023") "appArmorProfile" (dict) -}}
+{{- $di := dict "repository" "ghcr.io/kguardian-dev/kguardian/cataloger" "pullPolicy" "IfNotPresent" "tag" "v0.1.0" "sha" "" -}}
+{{- $v := dict -}}
+{{- range $k, $def := $d -}}
+{{- $_ := set $v $k (ternary (get $u $k) $def (and (hasKey $u $k) (not (kindIs "invalid" (get $u $k))))) -}}
+{{- end -}}
+{{- $w := dict -}}
+{{- range $k, $def := $dw -}}
+{{- $_ := set $w $k (ternary (get $uw $k) $def (and (hasKey $uw $k) (not (kindIs "invalid" (get $uw $k))))) -}}
+{{- end -}}
+{{- $img := dict -}}
+{{- range $k, $def := $di -}}
+{{- $_ := set $img $k (ternary (get $ui $k) $def (and (hasKey $ui $k) (not (kindIs "invalid" (get $ui $k)))) | toString) -}}
+{{- end -}}
+{{- $out := dict "enabled" (eq (include "kguardian.nodeCatalogEnabled" .) "true") -}}
+{{- range $k := list "epoch" "retentionDays" "maxEpoch" "maxHoldSeconds" "scanTimeoutSeconds" "maxFiles" "maxComponents" "minScanIntervalSeconds" "pressureThreshold" "maxPressureDeferSeconds" -}}
+{{- $_ := set $out $k (get $v $k | int64 | toString) -}}
+{{- end -}}
+{{- $_ := set $out "grants" (ne (toString $v.grants) "false") -}}
+{{- $_ := set $out "readOnlyClone" (eq (toString $v.readOnlyClone) "true") -}}
+{{- $_ := set $out "catalogKey" (include "kguardian.catalogKey" .) -}}
+{{- $mem := "" -}}
+{{- $tmp := "" -}}
+{{- if $out.enabled -}}
+{{- $mem = include "kguardian.workerBytes" (dict "q" $w.memoryLimit "name" "nodeCatalog.worker.memoryLimit") -}}
+{{- $tmp = include "kguardian.workerBytes" (dict "q" $w.tmpLimit "name" "nodeCatalog.worker.tmpLimit") -}}
+{{- end -}}
+{{- $_ := set $out "worker" (dict "image" $img "memoryLimitBytes" $mem "tmpLimitBytes" $tmp "logLevel" (toString $w.logLevel) "resources" $w.resources "seLinuxOptions" $w.seLinuxOptions "appArmorProfile" $w.appArmorProfile) -}}
+{{- if $out.enabled -}}
+{{- if not .Values.broker.auth.enabled -}}
+{{- fail "nodeCatalog.enabled=true requires broker.auth.enabled=true: the catalog routes accept SBOM uploads and are never served without authentication. Add a catalog key to the auth Secret (key name broker.auth.keys.catalog), then set broker.auth.enabled=true and broker.auth.existingSecret. See docs: Node catalog." -}}
+{{- end -}}
+{{- if eq (include "kguardian.brokerAuthMode" .) "shared" -}}
+{{- fail "nodeCatalog.enabled=true requires broker.auth.mode=scoped: the catalog token must be its own scope, held by the Controller only. Add a catalog key to the auth Secret and use scoped mode." -}}
+{{- end -}}
+{{- $maxEpoch := $out.maxEpoch | int64 -}}
+{{- $epoch := $out.epoch | int64 -}}
+{{- if lt $maxEpoch 1 -}}
+{{- fail (printf "nodeCatalog.maxEpoch must be at least 1 (got %v)" $v.maxEpoch) -}}
+{{- end -}}
+{{- if or (lt $epoch 1) (gt $epoch $maxEpoch) -}}
+{{- fail (printf "nodeCatalog.epoch must be between 1 and nodeCatalog.maxEpoch (%d), got %v: the Broker refuses claims above its NODE_CATALOG_MAX_EPOCH with 422 and the Controller stops cataloging. Raise nodeCatalog.maxEpoch first." $maxEpoch $v.epoch) -}}
+{{- end -}}
+{{- $timeout := $out.scanTimeoutSeconds | int64 -}}
+{{- if or (lt $timeout 10) (gt $timeout 1800) -}}
+{{- fail (printf "nodeCatalog.scanTimeoutSeconds must be between 10 and 1800, got %v" $v.scanTimeoutSeconds) -}}
+{{- end -}}
+{{- $hold := $out.maxHoldSeconds | int64 -}}
+{{- if or (lt $hold 900) (le $hold $timeout) -}}
+{{- fail (printf "nodeCatalog.maxHoldSeconds must be at least 900 (the claim lease) and above nodeCatalog.scanTimeoutSeconds (%d), got %v: a claim that cannot be renewed through one scan is lost every time." $timeout $v.maxHoldSeconds) -}}
+{{- end -}}
+{{- with (($w.resources | default dict).limits | default dict).memory -}}
+{{- $limit := include "kguardian.quantityBytes" (dict "q" . "name" "nodeCatalog.worker.resources.limits.memory") | int64 -}}
+{{- $need := add ($mem | int64) ($tmp | int64) 134217728 -}}
+{{- if lt $limit $need -}}
+{{- fail (printf "nodeCatalog.worker.resources.limits.memory (%d bytes) must hold memoryLimit (%s bytes) + tmpLimit (%s bytes) + 128Mi, %d bytes in all: the memory-backed /tmp counts against the limit, and a cgroup OOM kill takes the whole worker (memory.oom.group) instead of failing one scan. Raise the limit or lower memoryLimit/tmpLimit." $limit $mem $tmp $need) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $out -}}
 {{- end -}}
 
 {{/*

@@ -63,6 +63,7 @@ jobs:
               --set supplychain.grype.enabled=true \
               --set broker.auth.enabled=true \
               --set broker.auth.existingSecret=release-check \
+              --set nodeCatalog.enabled=true \
             | grep -oE 'image: *"?[^"]+"?' \
             | sed -E 's/image: *"?([^"]+)"?/\1/' \
             | grep '^ghcr.io/kguardian-dev/' | sort -u)

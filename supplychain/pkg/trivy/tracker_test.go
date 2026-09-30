@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 )
@@ -363,5 +365,64 @@ func TestWithFilePathsCapsEachFinding(t *testing.T) {
 	}
 	if len(p.Vulnerabilities[0].FilePaths) != 5 {
 		t.Error("input modified")
+	}
+}
+
+// Refetch hands back the SBOM the tracker holds, without emitting
+// anything (so nothing reaches the broker) or changing what a resync
+// sends.
+func TestTrackerRefetchReturnsTheHeldSBOM(t *testing.T) {
+	tr := NewTracker(nil)
+	es := tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-api-digest.yaml"))
+	if len(es) != 1 {
+		t.Fatalf("first: %v", kinds(es))
+	}
+	d := es[0].Digest
+	sb := tr.Refetch(d)
+	if sb == nil || sb.Image.Digest != d || len(sb.Components) != len(es[0].SBOM.Components) || len(sb.ObservedIn) == 0 {
+		t.Fatalf("refetched %+v", sb)
+	}
+	if es := tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-api-digest.yaml")); len(es) != 0 {
+		t.Errorf("resync after Refetch emitted %v", kinds(es))
+	}
+	if tr.Refetch("sha256:"+strings.Repeat("0", 64)) != nil {
+		t.Error("an unknown digest returned an SBOM")
+	}
+}
+
+// OnSBOMGone waits GoneDelay: a report deleted and recreated (a rescan)
+// never fires it; one that stays away fires it once, on a later report
+// event.
+func TestTrackerOnSBOMGoneIsDebounced(t *testing.T) {
+	now := time.Unix(1000, 0)
+	var gone []string
+	tr := NewTracker(nil)
+	tr.now = func() time.Time { return now }
+	tr.GoneDelay = 10 * time.Minute
+	tr.OnSBOMGone = func(d string) { gone = append(gone, d) }
+	api, docs := loadSBOM(t, "sbomreport-api-digest.yaml"), loadSBOM(t, "sbomreport-docs.yaml")
+	d := tr.UpsertSbomReport(ctx, api)[0].Digest
+	tr.UpsertSbomReport(ctx, docs)
+
+	tr.DeleteSbomReport(api)
+	now = now.Add(time.Minute)
+	tr.UpsertSbomReport(ctx, api) // recreated
+	now = now.Add(20 * time.Minute)
+	tr.UpsertSbomReport(ctx, docs) // resync
+	if len(gone) != 0 {
+		t.Fatalf("delete then recreate flapped: %v", gone)
+	}
+
+	tr.DeleteSbomReport(api)
+	now = now.Add(5 * time.Minute)
+	tr.UpsertSbomReport(ctx, docs)
+	if len(gone) != 0 {
+		t.Fatalf("fired before GoneDelay: %v", gone)
+	}
+	now = now.Add(6 * time.Minute)
+	tr.UpsertSbomReport(ctx, docs)
+	tr.UpsertSbomReport(ctx, docs)
+	if len(gone) != 1 || gone[0] != d {
+		t.Errorf("gone %v, want %s once", gone, d)
 	}
 }

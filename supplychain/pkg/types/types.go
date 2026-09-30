@@ -25,6 +25,11 @@ const (
 	// SourceGrype: vulnerabilities kguardian matched itself with Grype
 	// against an SBOM from one of the other sources.
 	SourceGrype = "grype"
+	// SourceNode: an SBOM the node catalog built from a running
+	// container's root filesystem (the Controller and its cataloger
+	// worker post it to the broker; supplychain only reads it back for
+	// matching, and never sends it).
+	SourceNode = "node"
 )
 
 // Scanner describes the tool that produced a report.
@@ -204,6 +209,10 @@ type ImageSBOM struct {
 	// Page is set when the SBOM is sent in several requests (see Page).
 	Page       *Page       `json:"page,omitempty"`
 	Components []Component `json:"components"`
+	// Platform ("os/arch[/variant]") is the single platform a node SBOM
+	// was cataloged for. In-process only (never sent): the matcher uses
+	// it to keep findings off the index's other platforms.
+	Platform string `json:"-"`
 }
 
 // Page identifies one request of an SBOM split across several. Every page
