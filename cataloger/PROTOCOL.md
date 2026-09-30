@@ -331,7 +331,7 @@ the `X-Kguardian-Claim` header carrying the claim token:
 | `format` | `kguardian-cataloger` |
 | `page` | `{set_id, index, total}`, as for any paged `ImageSBOM` |
 | `components` | response `components` **as they are, including `files_truncated` and `interpreted_content`**: the catalog route reads both per component (they end up in `node_sbom_package_flags`) |
-| `epoch` | **required on every page**; the grant's epoch (echoed in the response). Missing is 400; below the row's epoch is 409. |
+| `epoch` | **required on every page**; the epoch the Controller sent on the claim (echoed in the response). Missing is 400; below the claim's grant epoch is 409; above `NODE_CATALOG_MAX_EPOCH` (default 1000) is 422. |
 | `completeness` | response `completeness` |
 | `partial_reasons` | response `partial_reasons` (the broker keeps at most 16) |
 | `stats` | response `stats` (the broker keeps at most 16 KiB serialised) |
@@ -350,6 +350,15 @@ Catalog-route limits, which set how the Controller pages:
 | Components per page | 10 000 (the Controller uses 2 000, and fewer when the page would pass 200 000 paths) |
 | Components per SBOM | 50 000 |
 | Page body | 8 MiB compressed, 16 MiB inflated |
+
+Broker answers the Controller must handle:
+
+| Answer | Meaning | Controller |
+|---|---|---|
+| 503 with `Retry-After` on an upload page | every upload slot is busy | retry that page after `Retry-After`; never fail the claim for it |
+| 409 on an upload page | stale claim token, lease gone, or epoch below the claim's grant epoch | stop; the claim is lost |
+| 422 | epoch above `NODE_CATALOG_MAX_EPOCH` | a Controller bug; log and stop |
+| 409 on a lease renewal | the claim has been held for `NODE_CATALOG_MAX_HOLD_SECS` (default 7200) and cannot be renewed further | stop; the claim is lost |
 
 The response's `os` is for the Controller's logs; the SBOM carries the
 distro as its `operating-system` component.
