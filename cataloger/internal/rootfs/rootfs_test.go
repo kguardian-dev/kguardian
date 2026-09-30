@@ -155,7 +155,7 @@ func TestNothingOutsideTheRootIsRead(t *testing.T) {
 
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	done := make(chan struct{})
 	var res *Resolver
 	go func() {
@@ -238,7 +238,7 @@ func TestFIFOOpenDoesNotHang(t *testing.T) {
 	root, _, _ := corpus(t)
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	done := make(chan error, 1)
 	go func() {
 		f, err := r.OpenFile("/lib/apk/db/installed")
@@ -277,7 +277,7 @@ func TestDirectorySwappedForSymlinkMidScan(t *testing.T) {
 	t.Cleanup(func() { beforeOpenDir = nil })
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	res, err := NewResolver(r)
 	must(t, err)
 	if !swapped {
@@ -305,7 +305,7 @@ func TestFileSwappedForSymlinkAfterIndexing(t *testing.T) {
 	_ = events()
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	res, err := NewResolver(r)
 	must(t, err)
 	locs, _ := res.FilesByPath("/etc/os-release")
@@ -368,7 +368,7 @@ func TestDeepTree(t *testing.T) {
 
 	r, err := OpenPath(root, Options{MaxDepth: 4096})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	res, err := NewResolver(r)
 	must(t, err)
 	if r.Stats.DepthLimited.Load() == 0 {
@@ -394,7 +394,7 @@ func TestUnreadableEntriesAreCounted(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "private"), 0o755) })
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	_, err = NewResolver(r)
 	must(t, err)
 	if r.Stats.EACCES.Load() < 2 {
@@ -411,7 +411,7 @@ func TestUnreadableRootIsLSMDenied(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
 	r, err := OpenPath(root, Options{})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	if _, err := NewResolver(r); !errors.Is(err, ErrLSMDenied) {
 		t.Fatalf("got %v, want ErrLSMDenied", err)
 	}
@@ -424,7 +424,7 @@ func TestSubmountsAreNeverEntered(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "etc/hosts"), []byte("h"), 0o644))
 	r, err := OpenPath(root, Options{Submounts: []string{"/var/run/secrets/kubernetes.io/serviceaccount", "/etc/hosts"}})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	res, err := NewResolver(r)
 	must(t, err)
 	for _, p := range []string{"/var/run/secrets/kubernetes.io/serviceaccount/token", "/etc/hosts"} {
@@ -445,7 +445,7 @@ func TestCtimeAfterStartIsDropped(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "usr/bin/dropped"), []byte("\x7fELF"), 0o755))
 	r, err := OpenPath(root, Options{CtimeCutoffNanos: cut})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	res, err := NewResolver(r)
 	must(t, err)
 	if res.HasPath("/usr/bin/dropped") {
@@ -471,7 +471,7 @@ func TestFileBudget(t *testing.T) {
 	root, _, _ := corpus(t)
 	r, err := OpenPath(root, Options{MaxFiles: 5})
 	must(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	if _, err := NewResolver(r); !errors.Is(err, ErrTooManyFiles) {
 		t.Fatalf("got %v", err)
 	}
@@ -482,7 +482,7 @@ func TestFileBudget(t *testing.T) {
 	}
 	r2, err := OpenPath(root, Options{MaxFiles: 45, StopAtBudget: true, SystemFirst: true})
 	must(t, err)
-	defer r2.Close()
+	defer func() { _ = r2.Close() }()
 	res, err := NewResolver(r2)
 	must(t, err)
 	if !r2.Stats.FileBudget.Load() {
@@ -525,7 +525,7 @@ func TestSharedObjectName(t *testing.T) {
 func TestKernelSupported(t *testing.T) {
 	fd, err := unix.Open(t.TempDir(), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	must(t, err)
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if err := CheckKernel(fd); err != nil {
 		t.Fatalf("this kernel should support openat2 and STATX_MNT_ID: %v", err)
 	}

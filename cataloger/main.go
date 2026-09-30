@@ -181,7 +181,7 @@ func ping(socket string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	req := &protocol.Request{ProtocolVersion: protocol.Version, Op: protocol.OpPing, ScanID: "ping"}
 	if err := protocol.SendRequest(conn.(*net.UnixConn), req, -1); err != nil {
@@ -203,13 +203,13 @@ func request(socket, dir string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	conn, err := net.DialTimeout("unix", socket, 5*time.Second)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	req := &protocol.Request{ProtocolVersion: protocol.Version, Op: protocol.OpScan,
 		ScanID: fmt.Sprintf("request-%d", time.Now().UnixNano()), ContainerStartUnixNanos: time.Now().UnixNano()}
 	if err := protocol.SendRequest(conn.(*net.UnixConn), req, fd); err != nil {

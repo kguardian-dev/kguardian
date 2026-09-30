@@ -135,7 +135,7 @@ func secureDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("socket directory %s: %w", dir, err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return err
@@ -200,7 +200,7 @@ func (s *Server) reply(c *net.UnixConn, resp *protocol.Response) {
 
 // Handle serves one connection: one request, one response.
 func (s *Server) Handle(ctx context.Context, c *net.UnixConn) {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if pid, ok := s.peerAllowed(c); !ok {
 		s.log.WithField("peerPid", pid).Warn("refused a connection from a peer uid not in CATALOG_ALLOWED_PEER_UIDS")
 		return
@@ -222,7 +222,7 @@ func (s *Server) Handle(ctx context.Context, c *net.UnixConn) {
 	var root *os.File
 	if fd >= 0 {
 		root = os.NewFile(uintptr(fd), "root")
-		defer root.Close()
+		defer func() { _ = root.Close() }()
 	}
 	if err := req.Validate(); err != nil {
 		var re *protocol.RequestError

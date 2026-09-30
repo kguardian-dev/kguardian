@@ -266,7 +266,7 @@ func (ix *indexer) sniff(dirfd int, name string, st *unix.Statx_t) string {
 		}
 		return ""
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	fst, err := statx(fd, "")
 	if err != nil || fst.Mode&unix.S_IFMT != unix.S_IFREG || fst.Ino != st.Ino {
 		ix.r.Stats.Swapped.Add(1)

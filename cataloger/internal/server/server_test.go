@@ -118,7 +118,7 @@ func (e *env) controller(t *testing.T, req *protocol.Request, fd int) (*protocol
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	uc := c.(*net.UnixConn)
 	if err := protocol.SendRequest(uc, req, fd); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestBadRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fileFD)
+	defer func() { _ = unix.Close(fileFD) }()
 
 	v2 := req("v2")
 	v2.ProtocolVersion = 2
@@ -237,7 +237,7 @@ func TestTwoFDsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	body := []byte(`{"protocol_version":1,"op":"scan","scan_id":"x"}`)
 	frame := append([]byte{0, 0, 0, byte(len(body))}, body...)
 	if _, _, err := c.(*net.UnixConn).WriteMsgUnix(frame, unix.UnixRights(rootFD(t, root), rootFD(t, root)), nil); err != nil {
@@ -255,7 +255,7 @@ func TestPeerNotAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	// The worker hangs up at once: the send may already fail, and the read
 	// must never produce a response.
 	_ = protocol.SendRequest(c.(*net.UnixConn), req("peer"), rootFD(t, alpineRoot(t, 1)))

@@ -18,7 +18,6 @@ import (
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/sbom"
-	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 
 	"github.com/kguardian-dev/kguardian/cataloger/internal/protocol"
@@ -93,7 +92,7 @@ func Ours(ctx context.Context, dir, profile string, submounts ...string) (*sbom.
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	return syft.CreateSBOM(ctx, rootfs.NewSource(root), scan.SyftConfig(profile, "difftest"))
 }
 
@@ -105,9 +104,8 @@ func Stock(ctx context.Context, dir, profile string) (*sbom.SBOM, error) {
 	if err != nil {
 		return nil, err
 	}
-	var s source.Source = src
-	defer s.Close()
-	return syft.CreateSBOM(ctx, s, scan.SyftConfig(profile, "difftest"))
+	defer func() { _ = src.Close() }()
+	return syft.CreateSBOM(ctx, src, scan.SyftConfig(profile, "difftest"))
 }
 
 // Diff reports every difference between two summaries; excluded paths

@@ -141,7 +141,7 @@ func Main() int {
 		out.send(protocol.Failed(&req, protocol.ReasonError, "temp dir: "+err.Error()))
 		return 0
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	_ = os.Setenv("TMPDIR", tmp)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -82,7 +82,7 @@ func CheckKernel(dirfd int) error {
 		}
 		return fmt.Errorf("openat2: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if _, err := statx(fd, ""); err != nil {
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, ErrKernelUnsupported) {
 			return ErrKernelUnsupported

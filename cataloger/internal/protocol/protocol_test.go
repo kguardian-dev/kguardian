@@ -57,7 +57,7 @@ func TestRequestRoundTripWithFD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if req.ScanID != "s-1" || req.Epoch != 7 || len(req.Submounts) != 2 || req.Budgets.MaxFiles != 10 {
 		t.Errorf("req %+v", req)
 	}

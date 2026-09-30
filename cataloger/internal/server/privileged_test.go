@@ -127,7 +127,7 @@ func TestCapsModelHostFilesUnreachable(t *testing.T) {
 	}
 	ifd, err := unix.InotifyInit1(unix.IN_NONBLOCK | unix.IN_CLOEXEC)
 	must(t, err)
-	defer unix.Close(ifd)
+	defer func() { _ = unix.Close(ifd) }()
 	_, err = unix.InotifyAddWatch(ifd, outside, unix.IN_OPEN|unix.IN_ACCESS)
 	must(t, err)
 

@@ -112,11 +112,11 @@ func (s *Server) run(ctx context.Context, arg string, m Model, root *os.File, ms
 	}
 	mine := os.NewFile(uintptr(fds[0]), "child-conn")
 	peer := os.NewFile(uintptr(fds[1]), "child-conn-peer")
-	defer mine.Close()
+	defer func() { _ = mine.Close() }()
 
 	if root == nil {
 		root, _ = os.Open(os.DevNull)
-		defer root.Close()
+		defer func() { _ = root.Close() }()
 	}
 	stderr := &tailBuffer{max: 16 * 1024}
 	cmd := s.command(ctx, arg, m, root, peer, stderr)
@@ -141,7 +141,7 @@ func (s *Server) run(ctx context.Context, arg string, m Model, root *os.File, ms
 	// Not reaped until Wait, so the pid still names our child here.
 	if fd, err := unix.PidfdOpen(cmd.Process.Pid, 0); err == nil {
 		pidfd.Store(int32(fd))
-		defer unix.Close(fd)
+		defer func() { _ = unix.Close(fd) }()
 	}
 
 	var res childResult

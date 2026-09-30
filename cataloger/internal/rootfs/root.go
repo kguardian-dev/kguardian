@@ -207,6 +207,6 @@ func (r *Root) StatPath(p string) (unix.Statx_t, error) {
 	if err != nil {
 		return unix.Statx_t{}, err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	return statx(fd, "")
 }

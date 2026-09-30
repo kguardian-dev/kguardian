@@ -38,7 +38,7 @@ func TestListenSecuresSocketAndDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	var st unix.Stat_t
 	if err := unix.Lstat(dir, &st); err != nil || st.Mode&0o7777 != 0o700 || int(st.Uid) != os.Geteuid() {
 		t.Errorf("directory mode %o uid %d, want 0700 uid %d", st.Mode&0o7777, st.Uid, os.Geteuid())
@@ -95,12 +95,12 @@ func TestChildrenInheritOnlyTheirDescriptors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	root, err := os.Open(alpineRoot(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	r := e.srv.run(context.Background(), "probe-caps", e.srv.Model(), root, nil, 1<<20)
 	var p child.ProbeResult
 	if r.payload == nil || json.Unmarshal(r.payload, &p) != nil {

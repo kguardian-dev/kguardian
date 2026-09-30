@@ -71,7 +71,7 @@ func Run(ctx context.Context, fd int, o Options) *protocol.Response {
 		}
 		return fail(protocol.ReasonBadRequest, err.Error())
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	defer func() { fillStats(resp, root) }()
 
 	for _, p := range osReleasePaths {

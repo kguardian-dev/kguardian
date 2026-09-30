@@ -156,7 +156,7 @@ func OpenFDs() ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	buf := make([]byte, 8192)
 	var names []string
 	for {
