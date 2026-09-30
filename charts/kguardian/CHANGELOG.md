@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.29.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.29.0...chart/v1.29.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **chart:** move to the CVE patch releases ([#1908](https://github.com/kguardian-dev/kguardian/issues/1908)) ([f8663d4](https://github.com/kguardian-dev/kguardian/commit/f8663d49827817b09d1ac1fe0e53c769e9f1cf88))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/cataloger docker tag to v0.1.1 ([#1870](https://github.com/kguardian-dev/kguardian/issues/1870)) ([7603613](https://github.com/kguardian-dev/kguardian/commit/7603613c65109817762fb57126c2952fe42eaf2f))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.17.0 ([#1871](https://github.com/kguardian-dev/kguardian/issues/1871)) ([7fe4fe8](https://github.com/kguardian-dev/kguardian/commit/7fe4fe8d78deabc4fd2be7c9d068f899ec498b69))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.21.0 - abandoned ([#1872](https://github.com/kguardian-dev/kguardian/issues/1872)) ([a701e72](https://github.com/kguardian-dev/kguardian/commit/a701e726fbc8089aa6d8b176df2ebc6e99783af1))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.13.0 - abandoned ([#1873](https://github.com/kguardian-dev/kguardian/issues/1873)) ([5e0345a](https://github.com/kguardian-dev/kguardian/commit/5e0345a07560852f9cff2802749da31fa813589e))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/supplychain docker tag to v0.2.0 ([#1874](https://github.com/kguardian-dev/kguardian/issues/1874)) ([21922d1](https://github.com/kguardian-dev/kguardian/commit/21922d1341fedb4dd9af279041bfd1bcf52c5940))
+* **llm-bridge:** update vulnerable npm dependencies and restrict the default CORS origin ([#1885](https://github.com/kguardian-dev/kguardian/issues/1885)) ([b7a879e](https://github.com/kguardian-dev/kguardian/commit/b7a879e3880298a02a8b306ad5d93e602126ce90))
+
 ## [1.29.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.28.6...chart/v1.29.0) (2026-09-30)
 
 
