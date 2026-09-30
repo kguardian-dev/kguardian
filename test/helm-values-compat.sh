@@ -1101,11 +1101,13 @@ nc_cmp() { # nc_cmp <label> <helm-args...>: every variant renders the same bytes
   local base variant
   base="$(helm template compat "$CHART" --set database.password=cmp "$@" 2>&1)" || \
     { echo "FAIL [$label]: base did not render"; fail=1; return; }
-  grep -qE 'NODE_CATALOG|BROKER_TOKEN_CATALOG|cataloger|catalog-(socket|tmp|no-token)|node-catalog' <<<"$base" && \
+  grep -qE 'NODE_CATALOG|NODE_SBOM|GRYPE_NODE_GROUP|BROKER_TOKEN_CATALOG|cataloger|catalog-(socket|tmp|no-token)|node-catalog' <<<"$base" && \
     { echo "FAIL [$label]: node catalog output while nodeCatalog is off"; fail=1; }
   for v in "--set nodeCatalog=null" \
            "--set nodeCatalog.enabled=false --set nodeCatalog.epoch=5 --set nodeCatalog.maxEpoch=9 --set nodeCatalog.grants=false --set nodeCatalog.retentionDays=0 --set nodeCatalog.worker.image.tag=v9.9.9 --set nodeCatalog.worker.tmpLimit=64Mi --set nodeCatalog.readOnlyClone=true" \
-           "--set broker.auth.keys.catalog=node-sbom"; do
+           "--set broker.auth.keys.catalog=node-sbom" \
+           "--set supplychain.sources.node=null --set supplychain.grype.nodeGroupMaxWait=null" \
+           "--set supplychain.sources.node.interval=1m --set supplychain.grype.nodeGroupMaxWait=5m"; do
     # shellcheck disable=SC2086 # $v is a list of flags
     variant="$(helm template compat "$CHART" --set database.password=cmp "$@" $v 2>&1)" || \
       { echo "FAIL [$label]: did not render with $v"; fail=1; continue; }
@@ -1114,7 +1116,8 @@ nc_cmp() { # nc_cmp <label> <helm-args...>: every variant renders the same bytes
 }
 nc_cmp "node-catalog-off-defaults"
 nc_cmp "node-catalog-off-auth" --set broker.auth.enabled=true --set broker.auth.existingSecret=kg \
-  --set broker.metrics.prometheusRule.enabled=true --set supplychain.enabled=true
+  --set broker.metrics.prometheusRule.enabled=true --set supplychain.enabled=true \
+  --set supplychain.grype.enabled=true
 
 NC_ON=(--set broker.auth.enabled=true --set broker.auth.existingSecret=kg --set nodeCatalog.enabled=true)
 # container <name> — the named container's spec from the Controller DaemonSet.
@@ -1193,16 +1196,21 @@ trap 'rm -rf "$PRE"' EXIT
 cp -R "$CHART" "$PRE/kguardian"
 awk '/^nodeCatalog:/ { skip = 1; next }
      skip && /^[a-zA-Z]/ { skip = 0 }
-     !skip && !/^      catalog: catalog$/' "$CHART/values.yaml" > "$PRE/kguardian/values.yaml"
-if grep -qE '^nodeCatalog:|catalog: catalog' "$PRE/kguardian/values.yaml"; then
+     /^    node:$/ { sub_skip = 1; next }
+     sub_skip && /^ {0,4}[a-zA-Z]/ { sub_skip = 0 }
+     !skip && !sub_skip && !/^      catalog: catalog$/ && !/^    nodeGroupMaxWait:/' \
+  "$CHART/values.yaml" > "$PRE/kguardian/values.yaml"
+if grep -qE '^nodeCatalog:|catalog: catalog|^    node:$|nodeGroupMaxWait' "$PRE/kguardian/values.yaml"; then
   echo "FAIL [node-catalog-reuse-values]: could not strip the nodeCatalog defaults"; fail=1
 fi
 nc_workloads() { # nc_workloads <chart>: the Controller and Broker docs, enabled
   local out
-  out="$(helm template compat "$1" "${NC_ON[@]}" --set database.password=cmp 2>&1)" || { echo "RENDER FAILED: $out"; return; }
+  out="$(helm template compat "$1" "${NC_ON[@]}" --set database.password=cmp \
+    --set supplychain.enabled=true --set supplychain.grype.enabled=true 2>&1)" || { echo "RENDER FAILED: $out"; return; }
   OUT="$out"
-  { workload DaemonSet kguardian-controller; workload Deployment kguardian-broker; } | \
-    cat
+  workload DaemonSet kguardian-controller
+  workload Deployment kguardian-broker
+  workload Deployment kguardian-supplychain
 }
 helper_tag="$(sed -nE 's|.*"repository" "ghcr.io/kguardian-dev/kguardian/cataloger" "pullPolicy" "[^"]*" "tag" "([^"]+)".*|\1|p' \
   "$CHART/templates/_helpers.tpl")"
@@ -1238,6 +1246,62 @@ render "node-catalog-ti" "${NC_ON[@]}" --set nodeCatalog.worker.memoryLimit=1Ti 
 }
 assert_render_fails "node-catalog-limit-milli" "the milli suffix m is not a byte count" \
   "${NC_ON[@]}" --set nodeCatalog.worker.resources.limits.memory=1000000000000m
+
+# Supplychain node SBOM source: follows nodeCatalog.enabled unless set, and
+# GRYPE_NODE_GROUP_MAX_WAIT only comes with the matcher.
+SC_ON=(--set broker.auth.enabled=true --set broker.auth.existingSecret=kg --set supplychain.enabled=true)
+render "node-source-follows" "${SC_ON[@]}" --set nodeCatalog.enabled=true --set supplychain.grype.enabled=true && {
+  sc="$(workload Deployment kguardian-supplychain)"
+  grep -A1 'name: NODE_SBOM_ENABLED' <<<"$sc" | grep -q 'value: "true"' || \
+    { echo "FAIL [node-source-follows]: NODE_SBOM_ENABLED must follow nodeCatalog.enabled"; fail=1; }
+  grep -A1 'name: NODE_SBOM_INTERVAL' <<<"$sc" | grep -q 'value: "5m"' || \
+    { echo "FAIL [node-source-follows]: NODE_SBOM_INTERVAL must default to 5m"; fail=1; }
+  grep -A1 'name: GRYPE_NODE_GROUP_MAX_WAIT' <<<"$sc" | grep -q 'value: "30m"' || \
+    { echo "FAIL [node-source-follows]: GRYPE_NODE_GROUP_MAX_WAIT must default to 30m"; fail=1; }
+}
+render "node-source-off-override" "${SC_ON[@]}" --set nodeCatalog.enabled=true \
+  --set supplychain.grype.enabled=true --set supplychain.sources.node.enabled=false && \
+  assert_absent "node-source-off-override" "NODE_SBOM_ENABLED"
+render "node-source-on-no-matcher" "${SC_ON[@]}" --set supplychain.sources.node.enabled=true && {
+  assert_has    "node-source-on-no-matcher" "name: NODE_SBOM_ENABLED"
+  assert_absent "node-source-on-no-matcher" "GRYPE_NODE_GROUP_MAX_WAIT"
+}
+if notes="$(helm install compat "$CHART" --dry-run=client "${SC_ON[@]}" --set supplychain.sources.node.enabled=true 2>&1)"; then
+  grep -q 'Node SBOM source: ON but idle' <<<"$notes" || \
+    { echo "FAIL [node-source-notes]: NOTES must say the node source needs the matcher"; fail=1; }
+else
+  echo "FAIL [node-source-notes]: dry-run install failed"; fail=1
+fi
+assert_render_fails "node-source-schema-interval" "supplychain/sources/node/interval" \
+  "${SC_ON[@]}" --set-string supplychain.sources.node.interval=5
+# Durations the component refuses at startup (a crash loop would also stop
+# Trivy ingest) are refused at template time instead.
+assert_render_fails "node-source-interval-zero" "supplychain.sources.node.interval must be a positive duration" \
+  "${SC_ON[@]}" --set supplychain.sources.node.enabled=true --set supplychain.sources.node.interval=0s
+assert_render_fails "node-source-max-wait-short" "supplychain.grype.nodeGroupMaxWait must be at least 1m" \
+  "${SC_ON[@]}" --set supplychain.sources.node.enabled=true --set supplychain.grype.enabled=true \
+  --set supplychain.grype.nodeGroupMaxWait=59s
+render "node-source-durations-ok" "${SC_ON[@]}" --set supplychain.sources.node.enabled=true \
+  --set supplychain.grype.enabled=true --set supplychain.sources.node.interval=1h30m \
+  --set supplychain.grype.nodeGroupMaxWait=90000ms && {
+  grep -A1 'name: GRYPE_NODE_GROUP_MAX_WAIT' <<<"$OUT" | grep -q 'value: "90000ms"' || \
+    { echo "FAIL [node-source-durations-ok]: 90000ms is 1m30s and must render"; fail=1; }
+}
+# A name already in supplychain.env wins: the chart does not add its own
+# (a duplicate env name is rejected by server-side apply).
+render "node-source-env-override" "${SC_ON[@]}" --set supplychain.sources.node.enabled=true \
+  --set supplychain.grype.enabled=true \
+  --set 'supplychain.env[0].name=NODE_SBOM_INTERVAL' --set 'supplychain.env[0].value=10m' \
+  --set 'supplychain.env[1].name=GRYPE_NODE_GROUP_MAX_WAIT' --set 'supplychain.env[1].value=45m' \
+  --set 'supplychain.env[2].name=NODE_SBOM_ENABLED' --set-string 'supplychain.env[2].value=true' && {
+  sc="$(workload Deployment kguardian-supplychain)"
+  for v in NODE_SBOM_ENABLED NODE_SBOM_INTERVAL GRYPE_NODE_GROUP_MAX_WAIT; do
+    [ "$(grep -c "name: $v\$" <<<"$sc")" = "1" ] || \
+      { echo "FAIL [node-source-env-override]: $v must appear once (from supplychain.env)"; fail=1; }
+  done
+  grep -A1 'name: NODE_SBOM_INTERVAL' <<<"$sc" | grep -q 'value: 10m' || \
+    { echo "FAIL [node-source-env-override]: supplychain.env's NODE_SBOM_INTERVAL must win"; fail=1; }
+}
 
 # Guards, at template time and in values.schema.json.
 assert_render_fails "node-catalog-needs-auth" "nodeCatalog.enabled=true requires broker.auth.enabled=true" \

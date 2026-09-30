@@ -94,6 +94,39 @@ spec:
               value: {{ .Values.supplychain.sources.registry.enabled | default false | quote }}
             - name: REGISTRY_SBOM_INTERVAL
               value: {{ .Values.supplychain.sources.registry.interval | quote }}
+            {{- /* Follows nodeCatalog.enabled unless set. Takes effect only
+                 with the Grype matcher (GRYPE_MATCHER_URL below). A name
+                 the user already sets in supplychain.env wins, as for
+                 GOMEMLIMIT: a duplicate is rejected by server-side apply.
+                 The durations are checked here because the component
+                 refuses to start on one it rejects, which would also stop
+                 Trivy ingest. */}}
+            {{- if include "kguardian.supplychainNodeSource" . }}
+            {{- $userEnv := list }}
+            {{- range .Values.supplychain.env }}
+            {{- $userEnv = append $userEnv (toString .name) }}
+            {{- end }}
+            {{- if not (has "NODE_SBOM_ENABLED" $userEnv) }}
+            - name: NODE_SBOM_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if not (has "NODE_SBOM_INTERVAL" $userEnv) }}
+            {{- $interval := dig "sources" "node" "interval" "" .Values.supplychain | default "5m" }}
+            {{- if le (include "kguardian.durationSeconds" (dict "d" $interval "name" "supplychain.sources.node.interval") | float64) 0.0 }}
+            {{- fail (printf "supplychain.sources.node.interval must be a positive duration (for example 5m), got %q: the supplychain component refuses to start otherwise" (toString $interval)) }}
+            {{- end }}
+            - name: NODE_SBOM_INTERVAL
+              value: {{ $interval | quote }}
+            {{- end }}
+            {{- if and .Values.supplychain.grype.enabled (not (has "GRYPE_NODE_GROUP_MAX_WAIT" $userEnv)) }}
+            {{- $maxWait := .Values.supplychain.grype.nodeGroupMaxWait | default "30m" }}
+            {{- if lt (include "kguardian.durationSeconds" (dict "d" $maxWait "name" "supplychain.grype.nodeGroupMaxWait") | float64) 60.0 }}
+            {{- fail (printf "supplychain.grype.nodeGroupMaxWait must be at least 1m, got %q: the supplychain component refuses to start otherwise" (toString $maxWait)) }}
+            {{- end }}
+            - name: GRYPE_NODE_GROUP_MAX_WAIT
+              value: {{ $maxWait | quote }}
+            {{- end }}
+            {{- end }}
             {{- $sd := .Values.supplychain.signatureDiscovery | default dict }}
             {{- if $sd.enabled }}
             {{- if not .Values.supplychain.brokerIngest.enabled }}

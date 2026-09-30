@@ -61,6 +61,18 @@ grant for 25 hours, and scans deferred by node pressure for 2 hours.
 the Broker (a Broker restart, no Controller restart). Uploads under a live
 lease still complete.
 
+**Vulnerability matching.** The Broker stores node SBOMs; the supplychain
+component matches them with Grype. That needs `supplychain.enabled`,
+`supplychain.grype.enabled` (the matcher) and the node SBOM source,
+`supplychain.sources.node.enabled`, which follows `nodeCatalog.enabled`
+unless set to `true` or `false`. With the source on and the matcher off,
+the component ignores it with a warning and NOTES says so. Findings come
+back as source `grype` with `node` among their SBOM sources. It needs a
+supplychain release after 0.1.1; older ones ignore the setting. A name set
+in `supplychain.env` (for example `NODE_SBOM_INTERVAL`) replaces the
+chart's own, and the chart refuses an interval of zero or a
+`nodeGroupMaxWait` under `1m`, which the component would not start with.
+
 ## Helm values
 
 | Key | Type | Default | Renders |
@@ -86,6 +98,9 @@ lease still complete.
 | `nodeCatalog.worker.appArmorProfile` | object | `{}` | Sidecar AppArmor profile (Kubernetes 1.30+). |
 | `nodeCatalog.worker.logLevel` | string | `info` | Worker `LOG_LEVEL`. |
 | `broker.auth.keys.catalog` | string | `catalog` | Secret key holding the catalog token. |
+| `supplychain.sources.node.enabled` | bool or null | `null` (follows `nodeCatalog.enabled`) | Supplychain `NODE_SBOM_ENABLED`: match node SBOMs with Grype. Takes effect only with `supplychain.grype.enabled`. |
+| `supplychain.sources.node.interval` | string | `5m` | Supplychain `NODE_SBOM_INTERVAL`: how often it lists running images for new or changed node SBOMs. Rendered only with the source on. |
+| `supplychain.grype.nodeGroupMaxWait` | string | `30m` | Supplychain `GRYPE_NODE_GROUP_MAX_WAIT` (at least `1m`), rendered with the source and the matcher on. Frequent expiries mean the held-SBOM budget is too small: raise `GRYPE_SBOM_BUDGET_MIB` (default 96, at least 16) through `supplychain.env`, and the memory limit with it. |
 
 The Controller's other `NODE_CATALOG_*` variables (below) keep their
 defaults; the chart pins `NODE_CATALOG_SOCKET` to

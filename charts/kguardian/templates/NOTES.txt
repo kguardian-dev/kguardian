@@ -106,6 +106,10 @@ The supplychain component is enabled (preview). It reads Trivy Operator
 VulnerabilityReports/SbomReports (read-only) and, until broker ingest
 ships, only logs what it would send:
   kubectl -n {{ include "kguardian.namespace" . | trim }} logs deploy/{{ .Values.supplychain.service.name }}
+{{- if and (include "kguardian.supplychainNodeSource" .) (not .Values.supplychain.grype.enabled) }}
+Node SBOM source: ON but idle. It matches node catalog SBOMs with the Grype
+matcher, which is off: set supplychain.grype.enabled=true to use it.
+{{- end }}
 {{- end }}
 {{- $nc := include "kguardian.nodeCatalog" . | fromJson }}
 {{- if $nc.enabled }}
@@ -120,6 +124,10 @@ Otherwise add it with:
   kubectl -n {{ include "kguardian.namespace" . | trim }} rollout restart deploy/{{ include "kguardian.name" . }}-broker ds/{{ include "kguardian.name" . }}-controller
 Coverage and per-node state:
   GET /catalog/coverage and GET /catalog/status?node=<name> on the Broker (read scope)
+{{- if not (and .Values.supplychain.enabled .Values.supplychain.grype.enabled (include "kguardian.supplychainNodeSource" .)) }}
+Node SBOMs are stored but not matched for vulnerabilities until supplychain.enabled,
+supplychain.grype.enabled and supplychain.sources.node.enabled (which follows nodeCatalog.enabled) are on.
+{{- end }}
 Upgrade with -f <values> or --reset-then-reuse-values (Helm 3.14+) rather than --reuse-values,
 which keeps the previous chart's defaults (new keys then take the chart's built-in defaults).
 {{- end }}
