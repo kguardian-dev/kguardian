@@ -25,6 +25,8 @@ use client::*;
 
 pub mod bpf;
 pub mod capture_tiers;
+/// Node SBOM cataloging (NODE_CATALOG, default off).
+pub mod catalog;
 pub mod compute_config;
 pub mod compute_registry;
 pub mod compute_sampler;

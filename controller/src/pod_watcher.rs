@@ -803,6 +803,7 @@ async fn resync_pods(
                 crate::early_capture::retain_known_pods(&live, listed_at);
                 crate::early_capture::retain_host_network_pods(&live, listed_at);
                 crate::runtime_inventory::retain_pods(&live);
+                crate::catalog::feed::retain_pods(&live);
                 // Pods deleted between resyncs never reach the terminal
                 // branch (the watch decodes deletions away): retire
                 // their netns registrations here. Only entries older
@@ -896,6 +897,9 @@ async fn process_pod(
         if let (Some(ctx), Some(uid)) = (compute, pod.metadata.uid.as_deref()) {
             ctx.map.remove_pod(uid);
         }
+        // Node catalog: nothing of this pod is offered any more. A no-op
+        // with NODE_CATALOG off.
+        crate::catalog::feed::forget_pod(pod);
         // Startup capture keeps a finished pod known (with its final
         // container ids): a short-lived Job's startup syscalls are often
         // still buffered when it completes, and they are still its own.
@@ -929,6 +933,10 @@ async fn process_pod(
     if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
         crate::early_capture::note_known_pod(pod);
     }
+    // Node catalog: this pod's running containers, offered to the Broker
+    // for cataloging. Never waits (a bounded try_send), and a no-op with
+    // NODE_CATALOG off.
+    crate::catalog::feed::note_pod(pod);
     // Computed once here so the broker payload and the eBPF
     // registration can never disagree about a pod's tier.
     let capture_level = effective_capture_level(pod, cluster_capture_level);

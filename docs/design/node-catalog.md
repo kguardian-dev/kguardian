@@ -138,6 +138,35 @@ RETURNING c.inventory_digest, c.claim_token, c.lease_expires_at, g.why;
   does not enable them, since the Controller would have nothing to post with); the catalog token
   carries only `catalog`, not `read`.
 
+#### PR 3 implementation notes (Controller)
+Deviations from section 1b and the final review changes, with the reason:
+- **No `pidfd_open`.** The Controller does not run with `hostPID`, and `pidfd_open` resolves a pid in
+  the caller's namespace, while the pids it has (containerd `Tasks.Get`, host `/proc`) are host pids.
+  The process handle is instead a directory fd on `/proc/<pid>` of the host procfs: procfs binds it
+  to the process's `struct pid` (the object a pidfd names), so once the process exits every `openat`
+  through it fails with `ESRCH`, even if the number is reused. The sequence is unchanged: check
+  cgroup and start time through the handle, open `root` through it, check again.
+- **Worker verification** follows `cataloger/PROTOCOL.md` 1.1 rather than `SO_PEERCRED` plus the
+  peer's cgroup alone, because the worker is in another pid namespace and `SO_PEERCRED` reports pid
+  0. Before every connection the socket file is checked: socket and directory opened
+  `O_PATH|O_NOFOLLOW` and `fstat`ed (socket uid 0 mode 0600, directory uid 0 mode 0700), the connect
+  goes through `/proc/self/fd/<n>` of the checked fd, then `SO_PEERCRED` uid 0. On Linux 6.5 and
+  later `SO_PEERPIDFD` adds the same-pod cgroup check (decided once at startup; a runtime pidfd
+  error rejects one connection, never degrades).
+- **Snapshot binding via containerd.** The root is tied to the container's own snapshot: the `/`
+  mountinfo entry must be a whole overlay mount (root field `/`) with an upperdir, the root fd's
+  `STATX_MNT_ID` must be that entry's mount id, and its upperdir must equal the one containerd's
+  `Snapshots.Mounts` returns for the container's snapshotter and key. A mismatch is
+  `unsupported_rootfs`; containerd not answering is node-local (next replica, else `pid_gone`).
+- **Drift** also counts whiteouts and opaque directories (`trusted.`/`user.overlay.opaque` = `y` or
+  `x`) on the package-database paths, and forces `drift_unknown` when the Controller lacks
+  `CAP_SYS_ADMIN` (trusted xattrs read as absent without it).
+- **Language packages (I1).** Deletion of an application-local language package (a whiteout of a
+  `dist-info` or `package.json` under `/app/node_modules`, a virtualenv) is **not** detected.
+  `lang_whiteout` covers only the system-wide directories (`usr{,/local}/lib/python*/
+  {site,dist}-packages`, `usr{,/local}/lib/node_modules`, Ruby gem directories), read with a 64k
+  entry budget; an incomplete read is `lang_whiteout_unknown`.
+
 ## 3. Edge cases (case → handling → test)
 - Init containers, short-lived Jobs → running containers only in v1; exits first → `pending` / `exited_before_catalog`; recurring CronJobs caught later. → kind Job `sleep 2`, per-minute CronJob.
 - Distroless / scratch → dpkg `status.d`, Go build info, cargo-auditable; zero components with readable root → `no_packages_found`, shown "not assessable", never "0 CVEs". → distroless, static Go, stripped-C scratch.

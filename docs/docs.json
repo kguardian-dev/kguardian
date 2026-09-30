@@ -80,7 +80,8 @@
           {
             "group": "Configuration Reference",
             "pages": [
-              "reference/compute"
+              "reference/compute",
+              "reference/node-catalog"
             ]
           },
           {
