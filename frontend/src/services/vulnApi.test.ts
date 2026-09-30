@@ -21,6 +21,9 @@ describe('VulnApi error kinds', () => {
     expect(await kindOf(withStatus(404).listCves())).toBe('unsupported');
     expect(await kindOf(withStatus(404).listImages())).toBe('unsupported');
     expect(await kindOf(withStatus(404).getExposure('CVE-2099-0001'))).toBe('not_found');
+    // A Broker before the node catalog.
+    expect(await kindOf(withStatus(404).getCatalogCoverage())).toBe('unsupported');
+    expect(await kindOf(withStatus(503).getCatalogCoverage())).toBe('busy');
   });
   test('503 is busy, 400 bad request, 500 error, a network failure error', async () => {
     expect(await kindOf(withStatus(503).listCves())).toBe('busy');

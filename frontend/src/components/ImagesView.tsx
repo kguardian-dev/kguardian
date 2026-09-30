@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Bug, ChevronRight, Flame, Layers, Package, ShieldQuestion } from 'lucide-react';
-import { CVE_TOTALS_LIMIT, useCveList, useCveTotals, useImageList, type ImageEnrichment } from '../hooks/useVulns';
+import { CVE_TOTALS_LIMIT, useCatalogCoverage, useCveList, useCveTotals, useImageList, type ImageEnrichment } from '../hooks/useVulns';
 import { vulnErrorMessage, vulnApi, type VulnApi } from '../services/vulnApi';
 import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
@@ -14,6 +14,8 @@ import { Tabs } from './ui/Tabs';
 import { SectionSkeleton } from './Profile/parts';
 import { FactorChips, JoinBadge, SeverityBadge, TierBadge, TrustBadge, VulnErrorState } from './Vulns/parts';
 import { CveDrawer } from './Vulns/CveDrawer';
+import { CatalogPendingChip, CoverageBanner, NotAssessableState, ProvenanceChips } from './Vulns/NodeCatalogParts';
+import { catalogPending, notAssessable } from '../utils/nodeCatalog';
 import { ImageDrawer } from './Vulns/ImageDrawer';
 import { SupplyChainTab } from './Vulns/SupplyChainTab';
 
@@ -77,6 +79,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
   // The header tiles count the scope alone, not the table's filters or its first page.
   const totals = useCveTotals(ns, refreshTick, api);
   const [openedFrom, setOpenedFrom] = useState<CveSummary | undefined>(undefined);
+  // The inventory row an image was opened from: its SBOM sources and node catalog state (the image read does not carry them).
+  const [openedImage, setOpenedImage] = useState<ImageSummary | undefined>(undefined);
+  const coverage = useCatalogCoverage(refreshTick, api);
 
   // Tiers are the Broker's (#1678). A Broker without them sends no `tier`:
   // the rows say "Tier ?" and the tier tiles say unknown. Judged on the
@@ -164,6 +169,8 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
             </p>
           )}
         </div>
+
+        <CoverageBanner coverage={coverage} />
 
         <Tabs tabs={TABS} active={tab} onChange={(t) => onParamsChange({ tab: t === 'vulns' ? undefined : t })} label="Images sections" idPrefix="images" />
 
@@ -278,7 +285,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
             </section>
           )}
 
-          {tab === 'images' && <ImagesTable namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpen={(d) => onParamsChange({ digest: d, cve: undefined })} />}
+          {tab === 'images' && <ImagesTable namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpen={(img) => { setOpenedImage(img); onParamsChange({ digest: img.digest, cve: undefined }); }} />}
 
           {tab === 'supply' && <SupplyChainTab namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpenWorkload={onOpenWorkload} />}
         </div>
@@ -297,7 +304,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
         />
       )}
       {digest && !cve && (
-        <ImageDrawer digest={digest} onClose={() => onParamsChange({ digest: undefined })} onOpenCve={(id) => openCve(id)} onOpenWorkload={onOpenWorkload} api={api} />
+        <ImageDrawer digest={digest} summary={openedImage && openedImage.digest === digest ? openedImage : undefined} onClose={() => onParamsChange({ digest: undefined })} onOpenCve={(id) => openCve(id)} onOpenWorkload={onOpenWorkload} api={api} />
       )}
     </div>
   );
@@ -339,7 +346,7 @@ function SummaryFreshness({ computedAt, staleSeconds, receivedAt, loading }: { c
   );
 }
 
-function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { namespace?: string; scopeLabel: string; refreshTick?: number; api: VulnApi; onOpen: (digest: string) => void }) {
+function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { namespace?: string; scopeLabel: string; refreshTick?: number; api: VulnApi; onOpen: (img: ImageSummary) => void }) {
   const list = useImageList(namespace, refreshTick, api);
   return (
     <section aria-label="Images by digest" className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
@@ -365,7 +372,7 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
               </thead>
               <tbody className="divide-y divide-hubble-border">
                 {list.items.map((img) => (
-                  <ImageRow key={img.digest} img={img} e={list.enriched.get(img.digest)} onOpen={() => onOpen(img.digest)} />
+                  <ImageRow key={img.digest} img={img} e={list.enriched.get(img.digest)} onOpen={() => onOpen(img)} />
                 ))}
               </tbody>
             </table>
@@ -419,7 +426,34 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
   );
 }
 
-function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
+function SbomCell({ img, e }: { img: ImageSummary; e: ImageEnrichment | undefined }) {
+  // No SBOM from any source, no vulnerability report, and the node catalog could not make one: never "No SBOM" alone, and never 0 CVEs.
+  // A report from a scanner (Trivy Operator's without its SBOM) is an assessment, so it is not said then.
+  const na = e !== undefined && (e.vulnReports?.length ?? 0) === 0 ? notAssessable(img) : null;
+  if (na) return <NotAssessableState na={na} compact />;
+  const pending = catalogPending(img);
+  // A Broker that lists the sources (`sbomSources`) answers without the SBOM read; trust badges follow once it lands.
+  if (img.sbomSources?.length) {
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <ProvenanceChips sources={img.sbomSources} nodeCatalog={img.nodeCatalog} reports={e?.sbomReports ?? null} />
+        {pending && <CatalogPendingChip {...pending} />}
+      </div>
+    );
+  }
+  if (pending) {
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <SbomReadCell e={e} />
+        <CatalogPendingChip {...pending} />
+      </div>
+    );
+  }
+  return <SbomReadCell e={e} />;
+}
+
+/** The SBOM column from the per-digest reads alone (what an older Broker, without `sbomSources`, allows). */
+function SbomReadCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
   if (e.sbomError) return <UnknownPill error={e.sbomError} />;
   if (e.sbomSkipped) {
@@ -444,7 +478,7 @@ function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
     <div className="flex flex-col gap-1">
       {e.sbomReports?.map((r) => (
         <span key={r.source} className="inline-flex flex-wrap items-center gap-1 text-[11px] text-secondary">
-          {sourceLabel(r.source)} <TrustBadge trust={r.sbomTrust} />
+          {sourceLabel(r.source)} <TrustBadge trust={r.sbomTrust} source={r.source} />
         </span>
       ))}
     </div>
@@ -467,12 +501,12 @@ function ImageRow({ img, e, onOpen }: { img: ImageSummary; e: ImageEnrichment | 
         <div className="sm:hidden mt-2 space-y-1.5 text-xs">
           <WorkloadsCell e={e} />
           <VulnDataCell e={e} />
-          <SbomCell e={e} />
+          <SbomCell img={img} e={e} />
         </div>
       </td>
       <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs min-w-40"><WorkloadsCell e={e} /></td>
       <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><VulnDataCell e={e} /></td>
-      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><SbomCell e={e} /></td>
+      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><SbomCell img={img} e={e} /></td>
       <td className="px-2 py-2.5 align-top text-tertiary"><ChevronRight className="w-4 h-4" aria-hidden /></td>
     </tr>
   );
