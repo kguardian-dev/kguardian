@@ -1,0 +1,10 @@
+# libssl3 3.0.22-1~deb12u1 (debian bookworm, amd64): dpkg-deb -c, as '<mode> <path>' for regular files
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/afalg.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/padlock.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/libssl.so.3
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so
+-rw-r--r-- /usr/share/doc/libssl3/changelog.Debian.gz
+-rw-r--r-- /usr/share/doc/libssl3/changelog.gz
+-rw-r--r-- /usr/share/doc/libssl3/copyright

@@ -363,7 +363,7 @@ func TestInterpretedRules(t *testing.T) {
 		{"/opt/app/app.jar", 0o644, true},
 		{"/usr/lib/x/Foo.class", 0o644, true},
 		{"/usr/share/emacs/foo.el", 0o644, true},
-		{"/usr/lib/locale/C.utf8/LC_CTYPE", 0o644, true},
+		{"/usr/lib/locale/C.utf8/LC_CTYPE", 0o644, false},
 		{"/usr/libexec/helper", 0o755, false},
 		{"/usr/lib/libz.so.1", 0o644, false},
 		{"/usr/share/doc/x/README", 0o644, false},
@@ -373,8 +373,64 @@ func TestInterpretedRules(t *testing.T) {
 		{"/usr/local/share/info/x.info", 0o644, false},
 		{"/etc/x.conf", 0o644, false},
 		{"/usr/bin/tool", 0o755, false},
-		{"/usr/share/zoneinfo/UTC", 0o644, true},
+		{"/usr/share/zoneinfo/UTC", 0o644, false},
 		{"/usr/libfoo/x", 0o644, false},
+		// Still loaded or interpreted.
+		{"/usr/lib/python3.11/os.py", 0o644, true},
+		{"/usr/share/bash-completion/completions/git", 0o644, true},
+		{"/usr/share/perl5/Foo.pm", 0o644, true},
+		{"/usr/lib/x86_64-linux-gnu/gconv/UTF-7.so", 0o644, false}, // exec-mapped, captured
+		// Interpreter and foreign-runtime extensions, wherever they are.
+		{"/opt/app/app.pyz", 0o644, true},
+		{"/usr/local/bin/tool.phar", 0o755, true},
+		{"/opt/erl/lib/x.beam", 0o644, true},
+		{"/usr/share/emacs/x.elc", 0o644, true},
+		{"/etc/profile.d/x.zsh", 0o644, true},
+		{"/opt/app/plugin.dll", 0o644, true},
+		{"/opt/app/mod.wasm", 0o644, true},
+		{"/srv/x.R", 0o644, true},
+		{"/usr/lib/x.pyo", 0o644, true}, {"/x.luac", 0o644, true}, {"/x.awk", 0o644, true},
+		{"/x.ksh", 0o644, true}, {"/x.csh", 0o644, true}, {"/x.fish", 0o644, true}, {"/x.ps1", 0o644, true},
+		// Debian packaging metadata.
+		{"/usr/share/lintian/overrides/libc6", 0o644, false},
+		{"/usr/share/bug/bash/presubj", 0o644, false},
+		{"/usr/share/doc-base/foo", 0o644, false},
+		{"/usr/share/common-licenses/GPL-3", 0o644, false},
+		{"/usr/share/menu/foo", 0o644, false},
+		// Pure data.
+		{"/usr/share/terminfo/x/xterm", 0o644, false},
+		{"/lib/terminfo/l/linux", 0o644, false},
+		{"/usr/share/mime/packages/freedesktop.org.xml", 0o644, false},
+		{"/usr/share/xml/iso-codes/iso_639.xml", 0o644, false},
+		{"/usr/share/icons/hicolor/index.theme", 0o644, false},
+		{"/usr/share/pixmaps/foo.png", 0o644, false},
+		{"/usr/share/applications/foo.desktop", 0o644, false},
+		{"/usr/share/metainfo/foo.xml", 0o644, false},
+		{"/usr/share/pkgconfig/foo.pc", 0o644, false},
+		{"/usr/share/polkit-1/actions/foo.policy", 0o644, false},
+		{"/usr/share/dbus-1/system.d/foo.conf", 0o644, false},
+		// Host configuration.
+		{"/usr/lib/tmpfiles.d/foo.conf", 0o644, false},
+		{"/usr/lib/sysctl.d/50-default.conf", 0o644, false},
+		{"/usr/lib/sysusers.d/foo.conf", 0o644, false},
+		{"/lib/modprobe.d/aliases.conf", 0o644, false},
+		{"/usr/lib/modules-load.d/foo.conf", 0o644, false},
+		{"/usr/lib/binfmt.d/python3.11.conf", 0o644, false},
+		{"/usr/lib/environment.d/99-foo.conf", 0o644, false},
+		{"/lib/udev/rules.d/60-foo.rules", 0o644, false},
+		{"/lib/systemd/system/foo.service", 0o644, false},
+		{"/usr/lib/kernel/install.d/foo", 0o644, false},
+		{"/usr/lib/os-release", 0o644, false},
+		{"/usr/lib/mime/packages/foo", 0o644, false},
+		// gconv configuration (the modules themselves are *.so).
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.d/gconv-modules-extra.conf", 0o644, false},
+		// Build-time files.
+		{"/usr/lib/x86_64-linux-gnu/libfoo.a", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/libfoo.la", 0o644, false},
+		{"/usr/lib/x86_64-linux-gnu/pkgconfig/foo.pc", 0o644, false},
+		{"/usr/lib/gcc/x86_64-linux-gnu/12/include/stddef.h", 0o644, false},
 	} {
 		if got := Interpreted(c.path, c.mode); got != c.want {
 			t.Errorf("Interpreted(%s, %o) = %v, want %v", c.path, c.mode, got, c.want)
@@ -456,6 +512,66 @@ func TestPathsWithControlCharactersAreDropped(t *testing.T) {
 	for _, s := range []string{"a\tb", "x\x7f", "\x00"} {
 		if validField(s, 100) {
 			t.Errorf("%q accepted", s)
+		}
+	}
+}
+
+// ownedList reads testdata/owned/<pkg>.txt: the regular files of a real
+// Debian or Ubuntu package (dpkg-deb -c), as "<mode string> <path>".
+func ownedList(t *testing.T, pkg string) ([]string, fakeFR) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "owned", pkg+".txt"))
+	must(t, err)
+	fr := fakeFR{}
+	var owned []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		perm, p, ok := strings.Cut(line, " ")
+		if !ok || len(perm) != 10 {
+			t.Fatalf("%s: bad line %q", pkg, line)
+		}
+		var mode uint32
+		for i, c := range perm[1:] {
+			if c != '-' {
+				mode |= 1 << (8 - i)
+			}
+		}
+		fr[p] = struct {
+			real    string
+			mode    uint32
+			regular bool
+		}{p, mode & 0o777, true}
+		owned = append(owned, p)
+	}
+	return owned, fr
+}
+
+// The interpreted_content rule on real packages' complete file lists.
+// libc6 and libssl3/libssl3t64 used to be flagged only by packaging
+// metadata (lintian overrides) and gconv configuration, so they could
+// never be installed_not_observed; interpreted code still flags.
+func TestInterpretedContentOnRealPackages(t *testing.T) {
+	for pkg, want := range map[string]bool{
+		"libc6":                 false, // gconv config and a lintian override: not code
+		"libssl3":               false, // .so files and docs
+		"libssl3t64":            false, // Ubuntu: plus a lintian override
+		"libpython3.11-minimal": true,  // the stdlib .py files
+		"python3.11-minimal":    true,  // /usr/share/binfmts/python3.11
+		"bash-completion":       true,  // /usr/share/bash-completion scripts
+		"bash":                  true,  // /usr/share/debianutils/shells.d/bash is not on an exclusion list
+	} {
+		owned, fr := ownedList(t, pkg)
+		_, _, got := PackageFiles(owned, fr, 0)
+		if got != want {
+			var why []string
+			for _, p := range owned {
+				if Interpreted(p, fr[p].mode) {
+					why = append(why, p)
+				}
+			}
+			t.Errorf("%s: interpreted_content %v, want %v (flagging files: %v)", pkg, got, want, why)
 		}
 	}
 }

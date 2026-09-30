@@ -216,8 +216,14 @@ contents, digests, or data files. Each package also carries:
 - `files_truncated`: the path list is incomplete (over 4096, runtime drift,
   or trimmed to fit the response).
 - `interpreted_content`: the package owns interpreted or loadable
-  non-executable content (design §5 rules), computed from the complete
-  owned-file list before any trimming.
+  non-executable content, computed from the complete owned-file list
+  before any trimming (PROTOCOL.md §4.3 has the full rule): a file with an
+  interpreter, bytecode or foreign-runtime extension anywhere, or a
+  non-executable, non-`*.so*` file under a lib or share directory that is
+  not documentation, packaging metadata, pure data, host configuration,
+  gconv configuration or a build-time file. So libc6 and libssl3 (whose
+  only such files are lintian overrides and gconv configuration) are not
+  flagged, while Python's stdlib and bash-completion scripts are.
 
 ## SELinux
 

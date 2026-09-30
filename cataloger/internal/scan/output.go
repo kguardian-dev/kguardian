@@ -12,39 +12,104 @@ import (
 	"github.com/kguardian-dev/kguardian/cataloger/internal/rootfs"
 )
 
-// interpretedExts: owned files with these extensions are interpreted or
-// bytecode (design §5).
+// interpretedExts: an owned file with one of these extensions is
+// interpreted source, bytecode or code another runtime loads, wherever it
+// lives (design §5).
 var interpretedExts = map[string]bool{
-	".py": true, ".pyc": true, ".pl": true, ".pm": true, ".rb": true, ".js": true, ".mjs": true,
-	".cjs": true, ".php": true, ".lua": true, ".tcl": true, ".sh": true, ".bash": true,
-	".jar": true, ".class": true, ".el": true,
+	".py": true, ".pyc": true, ".pyo": true, ".pyz": true,
+	".pl": true, ".pm": true, ".rb": true,
+	".js": true, ".mjs": true, ".cjs": true, ".wasm": true,
+	".php": true, ".phar": true,
+	".lua": true, ".luac": true, ".tcl": true, ".r": true,
+	".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".csh": true, ".fish": true, ".awk": true, ".ps1": true,
+	".jar": true, ".class": true, ".beam": true,
+	".el": true, ".elc": true,
+	".dll": true,
 }
 
+// buildTimeExts are only read by compilers and linkers, never at run time.
+var buildTimeExts = map[string]bool{".a": true, ".la": true, ".pc": true, ".h": true}
+
 // loadableDirs: a non-executable, non-*.so* file under one of these can be
-// loaded or interpreted by something else (design §5), except under the
-// share subtrees in docShare.
+// loaded or interpreted by something else (design §5), unless it is one of
+// the excluded kinds below.
 var loadableDirs = []string{"/lib", "/usr/lib", "/usr/local/lib", "/usr/libexec", "/usr/share", "/usr/local/share"}
 
-var docShare = []string{"/usr/share/doc", "/usr/share/man", "/usr/share/info", "/usr/share/locale", "/usr/share/licenses",
-	"/usr/local/share/doc", "/usr/local/share/man", "/usr/local/share/info", "/usr/local/share/locale", "/usr/local/share/licenses"}
+// shareRoots and shareNotCode: under a share root, these subtrees are
+// documentation, packaging metadata or pure data, never loaded as code.
+var (
+	shareRoots   = []string{"/usr/share", "/usr/local/share"}
+	shareNotCode = []string{
+		// documentation
+		"doc", "man", "info", "locale", "licenses",
+		// Debian packaging metadata
+		"lintian", "bug", "doc-base", "common-licenses", "menu",
+		// pure data
+		"zoneinfo", "terminfo", "mime", "xml", "icons", "pixmaps", "applications", "metainfo",
+		"pkgconfig", "polkit-1", "dbus-1",
+	}
+)
+
+// libRoots and libNotCode: under a lib root, these are data or host
+// configuration read by the system, not code a process loads.
+var (
+	libRoots   = []string{"/lib", "/usr/lib", "/usr/local/lib"}
+	libNotCode = []string{
+		// pure data
+		"terminfo", "locale",
+		// host configuration
+		"tmpfiles.d", "sysctl.d", "sysusers.d", "modprobe.d", "modules-load.d", "binfmt.d",
+		"environment.d", "udev", "systemd", "kernel", "os-release", "mime/packages",
+	}
+)
 
 func under(p, dir string) bool {
 	return p == dir || strings.HasPrefix(p, dir+"/")
 }
 
+func underAny(p string, roots, subs []string) bool {
+	for _, r := range roots {
+		for _, sub := range subs {
+			if under(p, r+"/"+sub) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gconvConfig: glibc's gconv module lists and cache (gconv-modules,
+// gconv-modules.cache, gconv-modules.d/*.conf). The gconv modules
+// themselves are *.so, executable-looking, and captured when mapped.
+func gconvConfig(p string) bool {
+	dir, base := path.Dir(p), path.Base(p)
+	switch {
+	case path.Base(dir) == "gconv" && (base == "gconv-modules" || base == "gconv-modules.cache"):
+		return true
+	case path.Base(dir) == "gconv-modules.d" && strings.HasSuffix(base, ".conf"):
+		return true
+	}
+	return false
+}
+
 // Interpreted reports whether an owned regular file at p (real path) with
-// mode bits makes its package interpreted_content.
+// mode bits makes its package interpreted_content: an interpreter,
+// bytecode or foreign-runtime extension anywhere; or a non-executable,
+// non-*.so* file under a loadable directory that is not documentation,
+// packaging metadata, pure data, host configuration, gconv configuration
+// or a build-time file. Such a package can be used without any exec or
+// mmap the runtime capture would see, so it is never
+// installed_not_observed.
 func Interpreted(p string, mode uint32) bool {
-	if interpretedExts[strings.ToLower(path.Ext(p))] {
+	ext := strings.ToLower(path.Ext(p))
+	if interpretedExts[ext] {
 		return true
 	}
 	if mode&0o111 != 0 || rootfs.IsSharedObjectName(p) {
 		return false
 	}
-	for _, d := range docShare {
-		if under(p, d) {
-			return false
-		}
+	if buildTimeExts[ext] || gconvConfig(p) || underAny(p, shareRoots, shareNotCode) || underAny(p, libRoots, libNotCode) {
+		return false
 	}
 	for _, d := range loadableDirs {
 		if under(p, d) {

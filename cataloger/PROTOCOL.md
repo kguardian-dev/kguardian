@@ -316,12 +316,21 @@ per-package flags the Controller forwards to the catalog route (they end up in
 before the executable filter and the cap. It is `true` if any owned regular
 file:
 
-- has one of the extensions `.py .pyc .pl .pm .rb .js .mjs .cjs .php .lua
-  .tcl .sh .bash .jar .class .el`, or
+- has an interpreter, bytecode or foreign-runtime extension, wherever it
+  is: `.py .pyc .pyo .pyz .pl .pm .rb .js .mjs .cjs .wasm .php .phar .lua
+  .luac .tcl .r .sh .bash .zsh .ksh .csh .fish .awk .ps1 .jar .class .beam
+  .el .elc .dll`; or
 - is non-executable, does not match `*.so*`, and is under `/lib`, `/usr/lib`,
-  `/usr/local/lib`, `/usr/libexec`, `/usr/share` or `/usr/local/share`, but
-  not under `share/doc`, `share/man`, `share/info`, `share/locale` or
-  `share/licenses` of those.
+  `/usr/local/lib`, `/usr/libexec`, `/usr/share` or `/usr/local/share`,
+  unless it is one of these, which are never loaded as code:
+  - documentation and Debian packaging metadata: `share/{doc,man,info,locale,licenses,lintian,bug,doc-base,common-licenses,menu}`;
+  - pure data: `share/{zoneinfo,terminfo,mime,xml,icons,pixmaps,applications,metainfo,pkgconfig,polkit-1,dbus-1}`, `lib/terminfo`, `lib/locale`;
+  - host configuration: `lib/{tmpfiles.d,sysctl.d,sysusers.d,modprobe.d,modules-load.d,binfmt.d,environment.d,udev,systemd,kernel,mime/packages}`, `lib/os-release`;
+  - glibc gconv configuration: `gconv/gconv-modules`, `gconv/gconv-modules.cache`, `gconv-modules.d/*.conf` (the gconv modules are `*.so`, exec-mapped and captured);
+  - build-time files: `*.a *.la *.pc *.h`.
+
+  (`share` and `lib` mean each of the share and lib roots above.) Python's
+  stdlib `.py` files and `share/bash-completion` still flag their packages.
 
 Validation the worker applies before answering (so the Controller's own
 checks should never fire, but it must still apply them): a component with an

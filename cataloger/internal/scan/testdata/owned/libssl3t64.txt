@@ -1,0 +1,10 @@
+# libssl3t64 3.0.13-0ubuntu3 (ubuntu noble, amd64): dpkg-deb -c, as '<mode> <path>' for regular files
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/afalg.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/engines-3/padlock.so
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/libssl.so.3
+-rw-r--r-- /usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so
+-rw-r--r-- /usr/share/doc/libssl3t64/changelog.Debian.gz
+-rw-r--r-- /usr/share/doc/libssl3t64/copyright
+-rw-r--r-- /usr/share/lintian/overrides/libssl3t64
