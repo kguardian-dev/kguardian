@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.12.0...advisor/v1.13.0) (2026-10-01)
+
+
+### Features
+
+* **advisor:** images admission-policy command ([41200d6](https://github.com/kguardian-dev/kguardian/commit/41200d6144feb6656c05bb86c465392bdd39dde6))
+* **advisor:** images signers and images trust, with --fail-on gates ([52aeaff](https://github.com/kguardian-dev/kguardian/commit/52aeaff9382dfd24b355ebde4cf498f1c8f028fd))
+* **advisor:** profile get shows the ImageTrustPolicy results ([947a834](https://github.com/kguardian-dev/kguardian/commit/947a8341dd9aba0374322b34d181b08c3f19eee8))
+* **advisor:** profile get summarises drift and what was not evaluated ([44f2683](https://github.com/kguardian-dev/kguardian/commit/44f2683d7a89d780f43227d47799665748aa40f4))
+* **advisor:** show the worst signature verdict in profile get ([63b235e](https://github.com/kguardian-dev/kguardian/commit/63b235e5265709f5d7721c7c53f13bfb8c628bdf))
+* **broker:** judge node SBOM in-use verdicts behind a platform and completeness guard ([#1863](https://github.com/kguardian-dev/kguardian/issues/1863)) ([87fe158](https://github.com/kguardian-dev/kguardian/commit/87fe15845b52e39279cde801cdb371584732d723))
+
+
+### Bug Fixes
+
+* **advisor:** a key fingerprint names a signer only on a key signer ([e9c3f05](https://github.com/kguardian-dev/kguardian/commit/e9c3f05a593a1bef0017b0f127a49a501e7b3572))
+* **advisor:** allow a Service's targetPort, not its port, on egress rules ([947355f](https://github.com/kguardian-dev/kguardian/commit/947355fbcd16f7a9a9d00b4528cddc7fd3689cea))
+* **advisor:** give the Cilium deny-all policy the rule sections the CRD requires ([3dd0f77](https://github.com/kguardian-dev/kguardian/commit/3dd0f77b8c019e266755ab592534b3448dc2a278))
+* **advisor:** images signers treats a verified result without a signer identity as unknown ([96ada90](https://github.com/kguardian-dev/kguardian/commit/96ada90c5caee056a65b825d6f4074cced98c808))
+* **advisor:** never write a truncated admission policy ([1a3d9cc](https://github.com/kguardian-dev/kguardian/commit/1a3d9cceff6510b9a18db1e804de95938dcaac23))
+* **advisor:** profile get says how many drift checks were evaluated ([34c315f](https://github.com/kguardian-dev/kguardian/commit/34c315fccb948e76301aeabb3df8f9b6e2cb71ce))
+* **advisor:** resolve a named targetPort to its number for host-network Service backends ([725157e](https://github.com/kguardian-dev/kguardian/commit/725157eba685e3a25c9b15cec4f8985da40fe17c))
+* **advisor:** say the vulns list is ordered by tier ([4e6ed92](https://github.com/kguardian-dev/kguardian/commit/4e6ed92f34e352e164b87f47f50fd5cd323f751a))
+* **advisor:** write admission-policy -f through a temporary file and rename ([317d920](https://github.com/kguardian-dev/kguardian/commit/317d9207c5924debf8a8a2164b06844c736f6547))
+* **broker:** allow a Service's targetPort in generated egress rules ([82b8135](https://github.com/kguardian-dev/kguardian/commit/82b8135d3e9f92670e4ed80a0fd018cd79bc73df))
+* **broker:** filter image findings by CVE and rank the CVE list by tier from an index ([6b53778](https://github.com/kguardian-dev/kguardian/commit/6b537788db624bb84a318069ec32b48a4dec33f1))
+* emit Cilium deny-all policies with the rule sections the CRD requires ([4a56e7f](https://github.com/kguardian-dev/kguardian/commit/4a56e7fe8be6889fc593a26865428e109f6a9831))
+* name the aarch64 seccomp architecture SCMP_ARCH_AARCH64 so arm64 pods can start ([#1742](https://github.com/kguardian-dev/kguardian/issues/1742)) ([acb1cbd](https://github.com/kguardian-dev/kguardian/commit/acb1cbda8068ede73f37a30acf13787fa2485e01))
+
 ## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.4...advisor/v1.12.0) (2026-10-01)
 
 
