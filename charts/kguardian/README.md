@@ -394,7 +394,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.13.1"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.13.2"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
@@ -452,7 +452,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | nodeCatalog.worker.image.pullPolicy | string | `"IfNotPresent"` | Cataloger image pull policy |
 | nodeCatalog.worker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/cataloger"` | Cataloger image repository |
 | nodeCatalog.worker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| nodeCatalog.worker.image.tag | string | `"v0.1.3"` | Cataloger version tag |
+| nodeCatalog.worker.image.tag | string | `"v0.1.4"` | Cataloger version tag |
 | nodeCatalog.worker.logLevel | string | `"info"` | Worker log level (`LOG_LEVEL`): `info` or `debug`. |
 | nodeCatalog.worker.memoryLimit | string | `"640Mi"` | Heap cap of each scan child (`CATALOG_MEMORY_LIMIT`): whole bytes (a number or a string) or a whole number of `Ki`, `Mi`, `Gi` or `Ti`; the chart hands the worker bytes. The worker reports `oom` and retries OS packages only when a scan passes it. |
 | nodeCatalog.worker.resources | object | `{"limits":{"cpu":"500m","memory":"1Gi"},"requests":{"cpu":"50m","memory":"512Mi"}}` | Worker resources. The memory limit must hold `memoryLimit` + `tmpLimit` + 128Mi (the child's burst margin and the parent), so the worker's own limits always trip before a cgroup OOM kill, which on cgroup v2 takes the whole container (kubelet sets `memory.oom.group`; `singleProcessOOMKill: true` on Kubernetes 1.32+ kills only the child). The chart refuses a smaller limit. The request (512Mi, half the limit) is reserved on every node, since this runs in a DaemonSet. Under node memory pressure the kubelet evicts pods using more than their request first, and this pod is the Controller's. Lowering it saves that reservation per node but makes the Controller pod an earlier eviction candidate while a large scan runs; raising it to the limit (1Gi) takes it off that list at the cost of 1Gi per node. Override the keys you change; null restores this default rather than removing the resources. |
