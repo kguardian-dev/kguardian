@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { RisksView } from './RisksView';
 import api from '../services/api';
 import type { PodNodeData } from '../types';
@@ -63,6 +63,32 @@ test('every read of the only pod failed: its zeros are unknown, and the empty st
   expect(tile('Sensitive syscalls').textContent).toContain('—');
   expect(tile('Egress fan-out').textContent).toContain('—');
   expect(tile('Workloads').textContent).toContain('1');
+});
+
+test('a tile with findings takes you to them; a tile counting nothing is not a button', async () => {
+  const scrollIntoView = vi.fn();
+  // jsdom has no layout, so scrollIntoView is not implemented on elements.
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { value: scrollIntoView, writable: true, configurable: true });
+  const drop = (uuid: string) => ({
+    uuid, pod_name: 'api-1', pod_namespace: 'payments', pod_ip: '10.0.0.1', pod_port: '8080',
+    ip_protocol: 'TCP', traffic_type: 'EGRESS', traffic_in_out_ip: '10.0.0.9', traffic_in_out_port: '5432',
+    decision: 'DROP', time_stamp: 't',
+  });
+  render(view({ pods: [node({ traffic: [drop('a'), drop('b')] })] }));
+  await settleAudit();
+  // Scoped to the strip: with findings present, the section header carries the
+  // same words as the tile.
+  const strip = () => within(screen.getByRole('group', { name: 'Posture' }));
+  await waitFor(() => expect(strip().getByRole('button', { name: /Blocked connections/ }).textContent).toContain('2'));
+
+  fireEvent.click(strip().getByRole('button', { name: /Blocked connections/ }));
+  expect(scrollIntoView).toHaveBeenCalled();
+
+  // Nothing to show means nothing to scroll to: the tile stays a plain number.
+  expect(strip().getByText('Egress fan-out').closest('div')!.parentElement!.textContent).toContain('0');
+  expect(strip().queryByRole('button', { name: /Egress fan-out/ })).toBeNull();
+  // The workload count has no section of its own and is never a button.
+  expect(strip().queryByRole('button', { name: /Workloads/ })).toBeNull();
 });
 
 test('a loaded namespace with nothing to report still reads "No standout findings"', async () => {
