@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.4...advisor/v1.12.0) (2026-10-01)
+
+
+### Features
+
+* **broker:** judge node SBOM in-use verdicts behind a platform and completeness guard ([#1863](https://github.com/kguardian-dev/kguardian/issues/1863)) ([87fe158](https://github.com/kguardian-dev/kguardian/commit/87fe15845b52e39279cde801cdb371584732d723))
+
 ## [1.11.4](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.3...advisor/v1.11.4) (2026-09-29)
 
 
