@@ -13,7 +13,7 @@ import { DriftCell, NetworkPill } from './Workloads/cells';
 import { PostureCell } from './Workloads/PostureCell';
 import {
   applyColumnFilters, columnFilterClauses, COLUMN_FILTER_OPTIONS, joinClauses, NO_COLUMN_FILTERS, shownColumnFilters,
-  unknownRowsNote, type ColumnFilters,
+  unknownRowsNote, type ColumnFilterKey, type ColumnFilters,
 } from './Workloads/filters';
 import { POSTURE_AUTO_PAGES, useWorkloadPostures } from '../hooks/useWorkloadProfile';
 import { errorMessage } from '../services/profileApi';
@@ -52,6 +52,7 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
 ];
 
 const DRIFT_TITLE = 'Workloads with observed syscalls their deployed CR does not allow (blocked when enforcing). Syscalls the CR allows but never observed are not counted.';
+const AUDIT_TITLE = 'Workloads whose SeccompProfile CR logs unlisted syscalls instead of blocking them: ready to promote to enforcing.';
 const PARTIAL_TITLE = 'Workloads with a pod below full syscall capture';
 
 /** Why the filtered table reads empty, naming every active filter rather than the pod-discovery copy. */
@@ -103,16 +104,21 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
   // Under a posture filter the rows are the Broker's answer; without one there is nothing to filter by.
   const postureFilterUnread = !seccompMode && !!postureFilter && postures.byKey.size === 0 && (postures.loading || postures.error != null);
 
-  const filtered = useMemo(() => {
+  // Everything except the column filters. The tiles count these, so a tile's
+  // number does not change when another tile's filter is applied.
+  const matched = useMemo(() => {
     const qi = query.trim().toLowerCase();
-    const matched = allRows
+    return allRows
       .filter((r) => allNamespaces || r.namespace === namespace)
       .filter((r) => !seccompMode || r.profile)
       // A posture filter is server-side: keep the rows the Broker returned.
       .filter((r) => seccompMode || !postureFilter || postures.byKey.has(r.key))
       .filter((r) => !qi || r.key.toLowerCase().includes(qi));
-    return applyColumnFilters(matched, columnFilters, seccompMode, { verdictsUnknown: verdictsLoading || verdictsUnavailable });
-  }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey, columnFilters, verdictsLoading, verdictsUnavailable]);
+  }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey]);
+  const filtered = useMemo(
+    () => applyColumnFilters(matched, columnFilters, seccompMode, { verdictsUnknown: verdictsLoading || verdictsUnavailable }),
+    [matched, columnFilters, seccompMode, verdictsLoading, verdictsUnavailable],
+  );
   const { rows } = filtered;
   const unknownNote = unknownRowsNote(filtered);
   const columnClauses = columnFilterClauses(columnFilters, seccompMode);
@@ -132,28 +138,45 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
     void loadMore();
   }, [uncovered, hasMore, posturesLoading, loadingMore, pages, loadMore]);
 
+  // Each tile selects the same rows it counts (Workloads/filters.ts), so a
+  // tile's number is the row count with that filter on. Clicking the tile
+  // whose filter is already set clears it, making a tile a toggle.
+  const selectColumn = useCallback(
+    <K extends ColumnFilterKey>(key: K, value: Exclude<ColumnFilters[K], ''>) => () =>
+      setColumnFilters((f) => ({ ...NO_COLUMN_FILTERS, [key]: f[key] === value ? '' : value })),
+    [],
+  );
+
   const stats = useMemo<StatTileProps[]>(() => {
-    const enforcing = rows.filter((r) => r.seccomp === 'enforcing').length;
-    const partial = rows.filter((r) => r.capture && !r.capture.complete).length;
-    const drifted = rows.filter((r) => hasBlockingDrift(r.drift)).length;
-    const wouldDeny = rows.filter((r) => r.network.state === 'audit' && r.network.wouldDeny > 0).length;
+    const noProfile = matched.filter((r) => r.seccomp === 'none').length;
+    const enforcing = matched.filter((r) => r.seccomp === 'enforcing').length;
+    const auditMode = matched.filter((r) => r.seccomp === 'audit').length;
+    const partial = matched.filter((r) => r.capture && !r.capture.complete).length;
+    const drifted = matched.filter((r) => hasBlockingDrift(r.drift)).length;
+    const wouldDeny = matched.filter((r) => r.network.state === 'audit' && r.network.wouldDeny > 0).length;
     const warn = (n: number) => (n > 0 ? 'text-hubble-warning' : 'text-secondary');
     // A count from the seccomp profile list is not an answer while the list is loading or failed.
     const unknownTitle = loading ? 'Unknown until the seccomp profile list has loaded' : 'Unknown: the seccomp profile list could not be read';
-    const seccompTile = (t: StatTileProps): StatTileProps => (seccompUnavailable ? { ...t, value: '—', suffix: undefined, tone: 'text-tertiary', title: unknownTitle } : t);
+      const seccompTile = (t: StatTileProps): StatTileProps =>
+      seccompUnavailable ? { ...t, value: '—', suffix: undefined, tone: 'text-tertiary', title: unknownTitle, onClick: undefined } : t;
     if (seccompMode) {
       return [
-        seccompTile({ label: 'Workloads', value: rows.length, icon: Lock, tone: 'text-hubble-accent' }),
-        seccompTile({ label: 'Enforcing CRs', value: enforcing, icon: Lock, tone: enforcing > 0 ? 'text-state-enforcing' : 'text-secondary' }),
-        seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE }),
-        seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE }),
+        seccompTile({ label: 'Enforcing CRs', value: enforcing, suffix: `/${matched.length}`, icon: Lock, tone: enforcing > 0 ? 'text-state-enforcing' : 'text-secondary', title: 'Workloads whose SeccompProfile CR blocks unlisted syscalls', onClick: selectColumn('seccomp', 'enforcing') }),
+        seccompTile({ label: 'Audit mode', value: auditMode, icon: ShieldAlert, tone: auditMode > 0 ? 'text-hubble-warning' : 'text-secondary', title: AUDIT_TITLE, onClick: selectColumn('seccomp', 'audit') }),
+        seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE, onClick: selectColumn('drift', 'drifted') }),
+        seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE, onClick: selectColumn('capture', 'partial') }),
       ];
     }
     return [
-      { label: 'Workloads', value: rows.length, icon: Layers, tone: 'text-hubble-accent' },
       seccompTile({
-        label: 'Seccomp enforcing', value: enforcing, suffix: `/${rows.length}`, icon: Lock,
-        tone: rows.length > 0 && enforcing === rows.length ? 'text-state-enforcing' : 'text-secondary',
+        label: 'No seccomp CR', value: noProfile, suffix: `/${matched.length}`, icon: Layers,
+        tone: warn(noProfile),
+        title: 'Workloads with no SeccompProfile CR at all. The gap "Seccomp enforcing" cannot show: that counts only workloads that already have one.',
+        onClick: selectColumn('seccomp', 'none'),
+      }),
+      seccompTile({
+        label: 'Seccomp enforcing', value: enforcing, suffix: `/${matched.length}`, icon: Lock,
+        tone: matched.length > 0 && enforcing === matched.length ? 'text-state-enforcing' : 'text-secondary',
         title: 'Workloads whose SeccompProfile CR blocks unlisted syscalls',
         onClick: () => onControlChange('seccomp'),
       }),
@@ -165,11 +188,12 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
         : {
             label: 'Would-deny (recent)', value: wouldDeny, icon: ShieldAlert, tone: warn(wouldDeny),
             title: 'Workloads that are the subject of a WouldDeny verdict among the latest 500 audit verdicts of each kind. A recent window, not policy coverage: kguardian does not know which policies select a workload.',
+            onClick: selectColumn('network', 'would-deny'),
           },
-      seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE }),
-      seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE }),
+      seccompTile({ label: 'Drifted', value: drifted, icon: GitCompareArrows, tone: warn(drifted), title: DRIFT_TITLE, onClick: selectColumn('drift', 'drifted') }),
+      seccompTile({ label: 'Partial capture', value: partial, icon: AlertTriangle, tone: warn(partial), title: PARTIAL_TITLE, onClick: selectColumn('capture', 'partial') }),
     ];
-  }, [rows, seccompMode, seccompUnavailable, verdictsUnavailable, verdictsLoading, loading, onControlChange]);
+  }, [matched, seccompMode, seccompUnavailable, verdictsUnavailable, verdictsLoading, loading, onControlChange, selectColumn]);
 
   const scopeLabel = allNamespaces ? 'all namespaces' : namespace;
 

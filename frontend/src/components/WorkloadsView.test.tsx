@@ -145,7 +145,8 @@ test('column filters: each narrows to the rows its tile counts', async () => {
 
   choose('Seccomp', 'enforcing');
   expect(names()).toEqual(['api']);
-  expect(tileValue('Seccomp enforcing')).toBe('1/1');
+  // The suffix counts the workloads in scope, so it does not move as filters are applied.
+  expect(tileValue('Seccomp enforcing')).toBe('1/3');
   choose('Seccomp', '');
 
   choose('Network', 'would-deny');
@@ -294,6 +295,46 @@ test('a narrowed seccomp list passes its scope and control to the workload link'
   expect(api.querySelector('a')!.getAttribute('href')).toBe('#/workload?ns=payments&kind=Deployment&name=api&scope=ns&control=seccomp');
   fireEvent.click(api);
   expect(onOpenWorkload).toHaveBeenCalledWith({ ns: 'payments', kind: 'Deployment', name: 'api', scope: 'ns', control: 'seccomp' });
+});
+
+test('clicking a tile applies the filter it counts, and clicking it again clears it', async () => {
+  renderView();
+  await waitFor(() => expect(tileValue('Would-deny (recent)')).toBe('1'));
+
+  fireEvent.click(screen.getByRole('button', { name: /Drifted/ }));
+  expect(screen.getByLabelText('Drift')).toHaveProperty('value', 'drifted');
+  fireEvent.click(screen.getByRole('button', { name: /Drifted/ }));
+  expect(screen.getByLabelText('Drift')).toHaveProperty('value', '');
+
+  fireEvent.click(screen.getByRole('button', { name: /Partial capture/ }));
+  expect(screen.getByLabelText('Capture')).toHaveProperty('value', 'partial');
+  expect(names()).toEqual(['source-controller', 'grafana']);
+
+  // One tile's filter at a time: a second tile replaces the first rather than
+  // intersecting, so a tile's count always matches the rows it selects.
+  fireEvent.click(screen.getByRole('button', { name: /No seccomp CR/ }));
+  expect(screen.getByLabelText('Capture')).toHaveProperty('value', '');
+  expect(screen.getByLabelText('Seccomp')).toHaveProperty('value', 'none');
+  expect(names()).toEqual(['source-controller', 'grafana']);
+
+  fireEvent.click(screen.getByRole('button', { name: /Would-deny/ }));
+  expect(screen.getByLabelText('Network')).toHaveProperty('value', 'would-deny');
+  expect(names()).toEqual(['grafana']);
+});
+
+test('there is no bare workload-count tile: every tile names work to do', () => {
+  renderView();
+  const strip = screen.getByRole('group', { name: 'Coverage' });
+  expect(within(strip).queryByText('Workloads')).toBeNull();
+});
+
+test('a tile blanked because the profile list is unreadable is not clickable', async () => {
+  await withSeccomp({ profiles: [], loading: false, error: 'timeout' }, () => {
+    renderView();
+    for (const label of ['No seccomp CR', 'Drifted', 'Partial capture']) {
+      expect(tile(label).tagName).not.toBe('BUTTON');
+    }
+  });
 });
 
 test('the seccomp posture tile links into the seccomp columns', () => {
@@ -550,7 +591,7 @@ test('an empty posture filter explains the filter, not pod discovery', () => {
 });
 
 test('while the profile list loads, seccomp cells and tiles are unknown, never "no profile", "full" or 0', async () => {
-  await withSeccomp({ profiles: [], loading: true, error: null }, () => {
+  await withSeccomp({ profiles: [], loading: true, error: null }, async () => {
     renderView();
     expect(screen.queryByText('no profile')).toBeNull();
     expect(screen.queryByText('full')).toBeNull();
@@ -558,15 +599,16 @@ test('while the profile list loads, seccomp cells and tiles are unknown, never "
       expect(within(r).getByText('Unknown').getAttribute('title')).toMatch(/could not be read|unknown/i);
       expect(within(r).getByTestId('capture-unknown')).not.toBeNull();
     }
-    for (const label of ['Seccomp enforcing', 'Drifted', 'Partial capture']) {
+    for (const label of ['No seccomp CR', 'Seccomp enforcing', 'Drifted', 'Partial capture']) {
       expect(tile(label).textContent).toContain('—');
       expect(tile(label).textContent).not.toMatch(/\d/);
     }
-    // Workloads and would-deny do not come from the list, so they still count.
-    expect(tile('Workloads').textContent).toContain('3');
     expect(screen.queryByRole('alert')).toBeNull();
     // No fallback reads while the list is merely loading.
     expect(fallbackArgs.at(-1)![1]).toBe(false);
+    // Would-deny comes from the verdicts, not the profile list, so it counts
+    // even while the list is unknown — once the verdicts themselves land.
+    await waitFor(() => expect(tile('Would-deny (recent)').textContent).toMatch(/\d/));
   });
 });
 
@@ -615,7 +657,7 @@ test('seccomp mode: the skeleton while the list loads, and no "No seccomp profil
     renderView({ control: 'seccomp' });
     expect(screen.queryByText(/No seccomp profiles/)).toBeNull();
     expect(screen.getByText('Seccomp profiles could not be read')).not.toBeNull();
-    for (const label of ['Workloads', 'Enforcing CRs', 'Drifted', 'Partial capture']) expect(tile(label).textContent).toContain('—');
+    for (const label of ['Enforcing CRs', 'Audit mode', 'Drifted', 'Partial capture']) expect(tile(label).textContent).toContain('—');
   });
   cleanup();
   // A successful empty list is the one case for the empty state.
