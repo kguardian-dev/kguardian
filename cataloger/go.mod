@@ -9,7 +9,7 @@ require (
 	github.com/anchore/stereoscope v0.3.2
 	github.com/anchore/syft v1.52.0
 	github.com/bmatcuk/doublestar/v4 v4.10.2
-	github.com/sirupsen/logrus v1.9.4
+	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.60.1
 )
