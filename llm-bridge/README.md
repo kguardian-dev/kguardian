@@ -179,7 +179,7 @@ The server identifies itself as `kguardian` at the llm-bridge version and advert
 
 **Rate limit.** `MCP_RATE_LIMIT_PER_MIN`, default **300**. Far above the chat route's 20/min because one client session is many round-trips — `initialize`, `tools/list`, then a POST per tool call, and an agent investigating a dropped flow burns 30–60 calls in seconds. The counter is per-replica (in-memory), so with `replicaCount: 2` the cluster-wide ceiling is roughly double. It is a runaway-client guard, not a quota.
 
-**CORS.** `ALLOWED_ORIGIN` defaults to `*`, which is what lets a browser-based client send the `mcp-protocol-version` and `authorization` headers through preflight. Locking it to the UI's origin blocks MCP clients from every other origin — fine for the intended non-browser, port-forwarded clients, but a real constraint.
+**CORS.** CORS only matters to browser-based clients; the intended non-browser, port-forwarded clients are unaffected. Unset, `ALLOWED_ORIGIN` allows loopback origins only (`localhost`, `127.0.0.1`, `[::1]`, any port), so a browser client such as the MCP Inspector running locally can send the `mcp-protocol-version` and `authorization` headers through preflight. A browser client on any other origin needs `ALLOWED_ORIGIN` set to that origin (or `*`).
 
 Smoke-test it by hand:
 
@@ -204,7 +204,7 @@ Every value below is trimmed before use, and a whitespace-only value counts as u
 | `PORT` | No | Server port (default: `8080`) |
 | `BROKER_URL` | No | Broker URL (default: `http://kguardian-broker.kguardian.svc.cluster.local:9090`) |
 | `BROKER_AUTH_TOKEN` | No | Bearer token sent to the Broker when broker auth is on. The chart mounts the broker's `read` token here |
-| `ALLOWED_ORIGIN` | No | CORS allowed origin (default: `*`) |
+| `ALLOWED_ORIGIN` | No | CORS allowed origin (default: loopback origins only; the UI calls the bridge through its own server-side proxy and needs no CORS) |
 | `LOG_LEVEL` | No | Log level (default: `info`) |
 
 ### Providers

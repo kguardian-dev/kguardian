@@ -1,9 +1,7 @@
-extern crate dotenv;
-
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, CustomizeConnection};
 use diesel::{sql_query, QueryResult, RunQueryDsl};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use std::env;
 
 /// Apply Postgres `statement_timeout` to a single connection's session.

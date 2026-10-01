@@ -1,5 +1,14 @@
 # Upgrading the kguardian Helm chart
 
+## Upgrading to 1.29.1: llm-bridge CORS default
+
+llm-bridge now allows only loopback browser origins (`localhost`, `127.0.0.1`,
+`[::1]`) by default, instead of `*`. The UI is unaffected, since it reaches
+llm-bridge through its own server-side proxy. A browser-based MCP client served
+from a non-localhost origin must set `ALLOWED_ORIGIN` through
+`llmBridge.env`, for example
+`llmBridge.env: [{name: ALLOWED_ORIGIN, value: "https://mcp-client.example.com"}]`.
+
 ## Upgrading to 1.28.5: broker setting guards and a read-only UI
 
 **`helm upgrade` now fails** on two broker settings the chart used to accept

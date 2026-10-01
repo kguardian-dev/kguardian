@@ -7,7 +7,9 @@
 # on the same release when either moves.
 FROM rust:1-trixie AS build
 
-RUN apt update && apt-get install protobuf-compiler -y
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/broker
 
@@ -52,7 +54,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release
 FROM debian:13.7-slim AS app
 
 # ca-certificates: root store for the outbound HTTPS version check-in.
-RUN apt update && apt install -y libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
+# --no-install-recommends drops krb5-locales, libldap-common and
+# libsasl2-modules, none of which the broker's Postgres client uses.
+# ca-certificates still pulls openssl, whose dependency moves the base
+# image's libssl3t64 up to the current trixie-security release.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq5 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/broker/target/release/broker /broker
 
