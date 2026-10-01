@@ -305,11 +305,22 @@ export function RisksView({
     return { enforcing: inNs.filter((p) => crStatus(p) === 'enforcing').length, total: inNs.length };
   }, [seccompProfiles, namespace]);
 
+  // A tile takes you to the findings it counts. Nothing to show (zero, or a
+  // value that could not be read) means nothing to scroll to, so the tile
+  // stays a plain number rather than a button that does nothing.
+  const focusSection = (id: string, count: number) =>
+    count > 0
+      ? () => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      : undefined;
+
   const stats: StatTileProps[] = [
+    // The scope denominator for every finding below, and the one tile that
+    // still counts when the traffic and syscall reads fail. Deliberately not
+    // interactive: there is no "workloads" section to go to.
     { label: 'Workloads', value: workloads.length, icon: ShieldCheck, tone: 'text-hubble-accent', ...unknownTile(workloads.length, podsUnknown, podsWhy) },
-    { label: 'Blocked connections', value: totalDrops, icon: ShieldAlert, tone: totalDrops > 0 ? 'text-hubble-error' : 'text-secondary', ...unknownTile(totalDrops, trafficUnknown, podsWhy) },
-    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? SEVERITY_TEXT_CLASS[syscallFindings[0].worst] : 'text-secondary', ...unknownTile(syscallFindings.length, syscallsUnknown, podsWhy) },
-    { label: 'Egress fan-out', value: fanoutFindings.length, icon: Radar, tone: fanoutFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary', ...unknownTile(fanoutFindings.length, trafficUnknown, podsWhy) },
+    { label: 'Blocked connections', value: totalDrops, icon: ShieldAlert, tone: totalDrops > 0 ? 'text-hubble-error' : 'text-secondary', onClick: focusSection('risks-drops', totalDrops), ...unknownTile(totalDrops, trafficUnknown, podsWhy) },
+    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? SEVERITY_TEXT_CLASS[syscallFindings[0].worst] : 'text-secondary', onClick: focusSection('risks-syscalls', syscallFindings.length), ...unknownTile(syscallFindings.length, syscallsUnknown, podsWhy) },
+    { label: 'Egress fan-out', value: fanoutFindings.length, icon: Radar, tone: fanoutFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary', onClick: focusSection('risks-fanout', fanoutFindings.length), ...unknownTile(fanoutFindings.length, trafficUnknown, podsWhy) },
     ...(computeEnabled
       ? [{
           // Retention off means the engine has nothing to score: say so on
@@ -319,6 +330,7 @@ export function RisksView({
           icon: Cpu,
           tone: computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : computeUnavailable ? 'text-tertiary' : 'text-secondary',
           title: computeUnavailable ? 'The live compute feed is not answering right now; findings shown are from the last successful read.' : undefined,
+          onClick: focusSection('risks-compute', computeFindings.length),
         }]
       : []),
     ...(seccompPosture
@@ -436,7 +448,7 @@ export function RisksView({
 
             {/* Denied traffic */}
             {dropFindings.length > 0 && (
-              <Section icon={ShieldAlert} tone="text-hubble-error" title="Blocked connections" hint="Outbound connections that never completed. The cause is shown per flow: a policy is only one possibility">
+              <Section icon={ShieldAlert} tone="text-hubble-error" title="Blocked connections" id="risks-drops" hint="Outbound connections that never completed. The cause is shown per flow: a policy is only one possibility">
                 <ul className="divide-y divide-hubble-border">
                   {dropFindings.slice(0, 8).map(({ pod, drops }) => (
                     <FindingRow
@@ -453,7 +465,7 @@ export function RisksView({
 
             {/* Sensitive syscalls */}
             {syscallFindings.length > 0 && (
-              <Section icon={Terminal} tone="text-hubble-warning" title="Sensitive syscalls" hint="Workloads issuing container-escape, privilege, or kernel-tampering calls">
+              <Section icon={Terminal} tone="text-hubble-warning" title="Sensitive syscalls" id="risks-syscalls" hint="Workloads issuing container-escape, privilege, or kernel-tampering calls">
                 <ul className="divide-y divide-hubble-border">
                   {syscallFindings.slice(0, 8).map(({ pod, worst, calls }) => (
                     <FindingRow
@@ -483,6 +495,7 @@ export function RisksView({
               <Section
                 icon={Cpu}
                 tone={computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : 'text-secondary'}
+                id="risks-compute"
                 title="Compute contention"
                 hint="Pods starved of CPU or memory, and the pod on the same node starving them. Fix is the workload's resources, not a policy"
                 action={
@@ -581,7 +594,7 @@ export function RisksView({
 
             {/* Egress fan-out */}
             {fanoutFindings.length > 0 && (
-              <Section icon={Radar} tone="text-hubble-warning" title="High egress fan-out" hint={`Workloads reaching ${EGRESS_FANOUT_THRESHOLD}+ distinct destinations`}>
+              <Section icon={Radar} tone="text-hubble-warning" title="High egress fan-out" id="risks-fanout" hint={`Workloads reaching ${EGRESS_FANOUT_THRESHOLD}+ distinct destinations`}>
                 <ul className="divide-y divide-hubble-border">
                   {fanoutFindings.slice(0, 8).map(({ pod, peers }) => (
                     <FindingRow
@@ -627,6 +640,7 @@ function Section({
   tone,
   title,
   hint,
+  id,
   action,
   children,
 }: {
@@ -634,11 +648,13 @@ function Section({
   tone: string;
   title: string;
   hint: string;
+  /** Anchor for the posture tile that counts this section's findings. */
+  id?: string;
   action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
+    <section id={id} className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden scroll-mt-4">
       <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hubble-border">
         <div className="flex items-center gap-2 min-w-0">
           <Icon className={`w-4 h-4 shrink-0 ${tone}`} />

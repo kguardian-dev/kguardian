@@ -195,6 +195,33 @@ describe('ImagesView: header tiles count the scope (DATA-10, IMG-07)', () => {
     expect(screen.getByTestId('tiles-caption').textContent).toBe('The tiles count every CVE in all namespaces; the filters below narrow the table only.');
   });
 
+  test('a tile filters the table to what it counts, and clicking it again clears it', async () => {
+    render(view({ api: replayVulnApi().api }));
+    expect(await screen.findAllByTestId('cve-row')).toHaveLength(cvePage.items.length);
+
+    fireEvent.click(screen.getByRole('button', { name: /P0 act now/ }));
+    expect(screen.getByLabelText('Tier', { exact: false })).toHaveProperty('value', 'p0');
+    fireEvent.click(screen.getByRole('button', { name: /P0 act now/ }));
+    expect(screen.getByLabelText('Tier', { exact: false })).toHaveProperty('value', 'all');
+
+    // P1 selects P1 alone, not the P0 + P1 pair, so the table matches the count.
+    fireEvent.click(screen.getByRole('button', { name: /P1 schedule/ }));
+    expect(screen.getByLabelText('Tier', { exact: false })).toHaveProperty('value', 'p1');
+
+    fireEvent.click(screen.getByRole('button', { name: /CVEs on running workloads/ }));
+    expect(screen.getByLabelText('Running workloads only')).toHaveProperty('checked', true);
+    fireEvent.click(screen.getByRole('button', { name: /In CISA KEV/ }));
+    expect(screen.getByLabelText('In CISA KEV')).toHaveProperty('checked', true);
+  });
+
+  test('tiles are inert while the counts are unreadable: filtering to a number nobody could read selects nothing', async () => {
+    render(view({ api: failing(500) }));
+    const strip = screen.getByRole('group', { name: 'Vulnerability posture' });
+    // Nothing could be read, so every tile reads "—" rather than counting zero.
+    await waitFor(() => expect(within(strip).getAllByText('—').length).toBeGreaterThanOrEqual(4));
+    expect(within(strip).queryAllByRole('button')).toHaveLength(0);
+  });
+
   test('more CVEs than one read returns: the tiles say "+" and that they cover the first 500', async () => {
     const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=500', { ...cvePage, nextAfter: 'more' })]);
     render(view({ api }));

@@ -84,7 +84,10 @@ test('one row past the cap is requested, and the footer says older verdicts exis
   expect(bodyRows()).toHaveLength(400);
   expect(screen.getByText(/Showing 400 of the 400 newest verdicts; older verdicts exist/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'All (400)' })).toBeTruthy();
-});
+  // Rendering 400 rows sat just inside the 5s default and tipped over it as
+  // the suite grew. An explicit budget, since the cost is the row count this
+  // test exists to assert, not a regression.
+}, 20_000);
 
 test('a response within the cap keeps the plain count', async () => {
   getAuditVerdicts.mockResolvedValue([verdict(), verdict(), verdict()]);
