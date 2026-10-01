@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.29.1...chart/v1.29.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **deps:** bump cataloger and llm-bridge chart tags to latest release ([#1922](https://github.com/kguardian-dev/kguardian/issues/1922)) ([827b4b2](https://github.com/kguardian-dev/kguardian/commit/827b4b21b5e041db3759e2669265d768b657a614))
+
 ## [1.29.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.29.0...chart/v1.29.1) (2026-09-30)
 
 
