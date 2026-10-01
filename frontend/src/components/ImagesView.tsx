@@ -46,6 +46,7 @@ interface ImagesViewProps {
 const TIER_FILTERS: Array<{ id: string; label: string; value: string[] | undefined }> = [
   { id: 'all', label: 'All tiers', value: undefined },
   { id: 'p0', label: 'P0', value: ['P0'] },
+  { id: 'p1', label: 'P1', value: ['P1'] },
   { id: 'p01', label: 'P0 + P1', value: ['P0', 'P1'] },
   { id: 'bg', label: 'Background', value: ['Background'] },
 ];
@@ -73,9 +74,16 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
   const [fixable, setFixable] = useState(false);
   const [running, setRunning] = useState(false);
   const [tierId, setTierId] = useState('all');
+  // The KEV and in-use tiles count these; the filters let them select it, and
+  // the checkboxes below let it be seen and cleared like any other filter.
+  const [kevOnly, setKevOnly] = useState(false);
+  const [inUseOnly, setInUseOnly] = useState(false);
   const severity = SEVERITY_FILTERS.find((f) => f.id === sevId)?.value;
   const tierFilter = TIER_FILTERS.find((f) => f.id === tierId)?.value;
-  const cves = useCveList({ namespace: ns, severity, fixable: fixable || undefined, running: running || undefined, tier: tierFilter }, refreshTick, api);
+  const cves = useCveList({
+    namespace: ns, severity, fixable: fixable || undefined, running: running || undefined, tier: tierFilter,
+    kev: kevOnly || undefined, inUse: inUseOnly ? ['executed', 'loaded'] : undefined,
+  }, refreshTick, api);
   // The header tiles count the scope alone, not the table's filters or its first page.
   const totals = useCveTotals(ns, refreshTick, api);
   const [openedFrom, setOpenedFrom] = useState<CveSummary | undefined>(undefined);
@@ -124,7 +132,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
   // Loaded-package state is null (unknown) on every row until a Broker has runtime evidence.
   const loadedKnown = totals.items.some((c) => c.inUse !== null);
   const tierTile = (n: number) => (tiersKnown || totals.items.length === 0 ? n : 'unknown');
-  const filtered = sevId !== 'all' || tierId !== 'all' || fixable || running;
+  const filtered = sevId !== 'all' || tierId !== 'all' || fixable || running || kevOnly || inUseOnly;
   // Which CVEs a capped count covers depends on the list's order: by tier, every P0 comes first, but the other tiles are still lower bounds.
   const cappedNote = loadedAll ? '' : ` Counted over the first ${CVE_TOTALS_LIMIT} CVEs in scope, ${totals.order === 'tier' ? 'in tier order (P0 first)' : 'most severe first'}; more exist.`;
   const reloadAll = () => {
@@ -143,6 +151,15 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
     );
   };
 
+  // A tile is a filter link into the table below (StatTile renders a button
+  // when given onClick). Clicking the tile whose filter is already on clears
+  // it, so a tile is a toggle rather than a one-way trip. Tiles are inert
+  // while the counts are loading or unreadable: filtering to a number nobody
+  // could read is meaningless.
+  const tileFilter = (on: boolean, set: () => void, clear: () => void) =>
+    tilesLoading || unread ? undefined : () => (on ? clear() : set());
+  const selectTier = (id: string) => tileFilter(tierId === id, () => setTierId(id), () => setTierId('all'));
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 space-y-5">
@@ -155,12 +172,12 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
 
         <div className="space-y-1.5">
           <StatStrip count={5} label="Vulnerability posture">
-            <StatTile label="P0 act now" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={(tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts)." : TIER_UNKNOWN_TITLE) + cappedNote} />
-            <StatTile label="P1 schedule" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? cappedNote.trim() || undefined : TIER_UNKNOWN_TITLE + cappedNote} />
-            <StatTile label="CVEs on running workloads" value={tilesLoading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} title={cappedNote.trim() || undefined} />
-            <StatTile label="In CISA KEV" value={tilesLoading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={tilesLoading ? undefined : tileSuffix(counts.kevUnknown)} title={(counts.kevUnknown > 0 ? `${counts.kevUnknown} CVE${counts.kevUnknown === 1 ? '' : 's'}: no source said whether it is in KEV (unknown, not "no").` : '') + cappedNote || undefined} />
+            <StatTile label="P0 act now" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={(tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts). Filters the table to P0." : TIER_UNKNOWN_TITLE) + cappedNote} onClick={tiersKnown ? selectTier('p0') : undefined} />
+            <StatTile label="P1 schedule" value={tilesLoading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? `Filters the table to P1.${cappedNote}`.trim() : TIER_UNKNOWN_TITLE + cappedNote} onClick={tiersKnown ? selectTier('p1') : undefined} />
+            <StatTile label="CVEs on running workloads" value={tilesLoading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} title={`Filters the table to CVEs on running workloads.${cappedNote}`.trim()} onClick={tileFilter(running, () => setRunning(true), () => setRunning(false))} />
+            <StatTile label="In CISA KEV" value={tilesLoading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={tilesLoading ? undefined : tileSuffix(counts.kevUnknown)} title={`${counts.kevUnknown > 0 ? `${counts.kevUnknown} CVE${counts.kevUnknown === 1 ? '' : 's'}: no source said whether it is in KEV (unknown, not "no"). ` : ''}Filters the table to KEV CVEs.${cappedNote}`.trim()} onClick={tileFilter(kevOnly, () => setKevOnly(true), () => setKevOnly(false))} />
             {loadedKnown ? (
-              <StatTile label="Executed or loaded" value={tilesLoading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={tilesLoading ? undefined : tileSuffix(counts.loadedUnknown)} title={`CVEs whose package a workload was observed executing or loading. Unknown: no runtime evidence either way.${cappedNote}`} />
+              <StatTile label="Executed or loaded" value={tilesLoading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={tilesLoading ? undefined : tileSuffix(counts.loadedUnknown)} title={`CVEs whose package a workload was observed executing or loading. Unknown: no runtime evidence either way. Filters the table to those.${cappedNote}`} onClick={tileFilter(inUseOnly, () => setInUseOnly(true), () => setInUseOnly(false))} />
             ) : (
               <StatTile label="Executed or loaded" value={unread ? '—' : 'unknown'} icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
             )}
@@ -200,6 +217,12 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve: cvePa
                   </label>
                   <label className="flex items-center gap-1.5 text-secondary">
                     <input type="checkbox" checked={running} onChange={(e) => setRunning(e.target.checked)} /> Running workloads only
+                  </label>
+                  <label className="flex items-center gap-1.5 text-secondary">
+                    <input type="checkbox" checked={kevOnly} onChange={(e) => setKevOnly(e.target.checked)} /> In CISA KEV
+                  </label>
+                  <label className="flex items-center gap-1.5 text-secondary">
+                    <input type="checkbox" checked={inUseOnly} onChange={(e) => setInUseOnly(e.target.checked)} /> Executed or loaded
                   </label>
                 </div>
                 {!tableUnread && <SummaryFreshness computedAt={cves.computedAt} staleSeconds={cves.staleSeconds} receivedAt={cves.receivedAt} loading={cves.loading} />}
