@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.3...cataloger/v0.1.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/sirupsen/logrus to v1.10.2 ([#1856](https://github.com/kguardian-dev/kguardian/issues/1856)) ([77afdc7](https://github.com/kguardian-dev/kguardian/commit/77afdc71b64f2032efbdefe8d41bf7136c7e728a))
+
 ## [0.1.3](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.2...cataloger/v0.1.3) (2026-09-30)
 
 
