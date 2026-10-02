@@ -364,7 +364,7 @@ customManager in .github/renovate.json5 matches this exact line).
 {{- $ui := $uw.image | default dict -}}
 {{- $d := dict "enabled" false "epoch" 1 "grants" true "retentionDays" 14 "maxEpoch" 1000 "maxHoldSeconds" 7200 "scanTimeoutSeconds" 600 "maxFiles" 2000000 "maxComponents" 50000 "minScanIntervalSeconds" 30 "pressureThreshold" 40 "maxPressureDeferSeconds" 1800 "readOnlyClone" false -}}
 {{- $dw := dict "memoryLimit" "640Mi" "tmpLimit" "192Mi" "logLevel" "info" "resources" (dict "requests" (dict "cpu" "50m" "memory" "512Mi") "limits" (dict "cpu" "500m" "memory" "1Gi")) "seLinuxOptions" (dict "type" "container_t" "level" "s0-s0:c0.c1023") "appArmorProfile" (dict) -}}
-{{- $di := dict "repository" "ghcr.io/kguardian-dev/kguardian/cataloger" "pullPolicy" "IfNotPresent" "tag" "v0.1.3" "sha" "" -}}
+{{- $di := dict "repository" "ghcr.io/kguardian-dev/kguardian/cataloger" "pullPolicy" "IfNotPresent" "tag" "v0.1.4" "sha" "" -}}
 {{- $v := dict -}}
 {{- range $k, $def := $d -}}
 {{- $_ := set $v $k (ternary (get $u $k) $def (and (hasKey $u $k) (not (kindIs "invalid" (get $u $k))))) -}}
