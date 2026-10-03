@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.29.2...chart/v1.29.3) (2026-10-03)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/cataloger docker tag to v0.1.4 ([#1926](https://github.com/kguardian-dev/kguardian/issues/1926)) ([3323847](https://github.com/kguardian-dev/kguardian/commit/3323847937bc72b6c32caca9008b4a805b92747f))
+
 ## [1.29.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.29.1...chart/v1.29.2) (2026-10-01)
 
 
