@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.21.1...frontend/v1.21.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **frontend:** make the posture tiles clickable, and the Workloads tiles meaningful ([#1916](https://github.com/kguardian-dev/kguardian/issues/1916)) ([cc413b2](https://github.com/kguardian-dev/kguardian/commit/cc413b219e37daeff5bfe44c3e8a3dcad9902b36))
+
 ## [1.21.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.21.0...frontend/v1.21.1) (2026-09-30)
 
 
