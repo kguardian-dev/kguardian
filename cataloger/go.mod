@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/cataloger
 
 go 1.26.8
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/anchore/go-logger v0.2.0

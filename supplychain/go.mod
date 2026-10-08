@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/supplychain
 
 go 1.27.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/google/go-containerregistry v0.22.1
