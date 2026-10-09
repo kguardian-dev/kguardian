@@ -136,7 +136,7 @@ jobs:
         # The nightly toolchain this job used to install first (with miri and
         # rust-src) was immediately overridden by stable and never used: there
         # is no rust-toolchain.toml and no nightly feature in the crate.
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -283,7 +283,7 @@ jobs:
             protobuf-compiler
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -559,7 +559,7 @@ jobs:
             pkg-config
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           components: rustfmt, clippy
