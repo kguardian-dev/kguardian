@@ -31,14 +31,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: nightly
           targets: x86_64-unknown-linux-musl
           components: rustfmt, clippy, miri, rust-src
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
