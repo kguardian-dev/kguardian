@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.5.2...evaluator/v0.5.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** update module sigs.k8s.io/controller-runtime to v0.25.2 ([#1919](https://github.com/kguardian-dev/kguardian/issues/1919)) ([7078980](https://github.com/kguardian-dev/kguardian/commit/7078980492862fca11d11317f75c2c98b008878a))
+
 ## [0.5.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.5.1...evaluator/v0.5.2) (2026-09-30)
 
 
