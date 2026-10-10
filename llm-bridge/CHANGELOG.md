@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.13.2...llm-bridge/v1.13.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.132.0 ([#1953](https://github.com/kguardian-dev/kguardian/issues/1953)) ([fa88b30](https://github.com/kguardian-dev/kguardian/commit/fa88b301bbe11e432ab7cfd64ef582424571da8b))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.133.0 ([#1972](https://github.com/kguardian-dev/kguardian/issues/1972)) ([7d192bf](https://github.com/kguardian-dev/kguardian/commit/7d192bf6ff8bd9a83df89df7ced14c57d8f6414b))
+
 ## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.13.1...llm-bridge/v1.13.2) (2026-10-01)
 
 
