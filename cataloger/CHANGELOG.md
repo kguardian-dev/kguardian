@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.4...cataloger/v0.1.5) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/sys to v0.49.0 ([#1969](https://github.com/kguardian-dev/kguardian/issues/1969)) ([6c04eb5](https://github.com/kguardian-dev/kguardian/commit/6c04eb5040ead5acdf8944db671ee06c412e532e))
+
 ## [0.1.4](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.3...cataloger/v0.1.4) (2026-10-01)
 
 
