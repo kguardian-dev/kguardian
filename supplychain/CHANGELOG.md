@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.2...supplychain/v0.2.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/prometheus/client_golang to v1.25.0 ([#1961](https://github.com/kguardian-dev/kguardian/issues/1961)) ([a57f7bc](https://github.com/kguardian-dev/kguardian/commit/a57f7bc6cf816cfbe8907ab2b28ab093f5bef55d))
+
 ## [0.2.2](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.1...supplychain/v0.2.2) (2026-09-30)
 
 
