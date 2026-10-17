@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.4...cataloger/v0.1.5) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/bmatcuk/doublestar/v4 to v4.10.3 ([#1976](https://github.com/kguardian-dev/kguardian/issues/1976)) ([cc577f7](https://github.com/kguardian-dev/kguardian/commit/cc577f73c0b577d826295e8472c55f475197a90b))
+* **deps:** update module golang.org/x/sys to v0.49.0 ([#1969](https://github.com/kguardian-dev/kguardian/issues/1969)) ([6c04eb5](https://github.com/kguardian-dev/kguardian/commit/6c04eb5040ead5acdf8944db671ee06c412e532e))
+
 ## [0.1.4](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.3...cataloger/v0.1.4) (2026-10-01)
 
 
