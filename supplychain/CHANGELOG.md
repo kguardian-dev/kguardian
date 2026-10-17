@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.2...supplychain/v0.2.3) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/prometheus/client_golang to v1.25.0 ([#1961](https://github.com/kguardian-dev/kguardian/issues/1961)) ([a57f7bc](https://github.com/kguardian-dev/kguardian/commit/a57f7bc6cf816cfbe8907ab2b28ab093f5bef55d))
+* **deps:** update module github.com/sigstore/sigstore to v1.11.1 ([#1993](https://github.com/kguardian-dev/kguardian/issues/1993)) ([3cc2506](https://github.com/kguardian-dev/kguardian/commit/3cc2506c7f8a34e7564f80c5a11e4b2dfc90d432))
+
 ## [0.2.2](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.1...supplychain/v0.2.2) (2026-09-30)
 
 
