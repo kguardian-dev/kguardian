@@ -8,7 +8,7 @@ require (
 	github.com/anchore/go-logger v0.2.0
 	github.com/anchore/stereoscope v0.3.2
 	github.com/anchore/syft v1.52.0
-	github.com/bmatcuk/doublestar/v4 v4.10.3
+	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.61.0
