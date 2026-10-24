@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.5](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.4...cataloger/v0.1.5) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/bmatcuk/doublestar/v4 to v4.10.3 ([#1976](https://github.com/kguardian-dev/kguardian/issues/1976)) ([cc577f7](https://github.com/kguardian-dev/kguardian/commit/cc577f73c0b577d826295e8472c55f475197a90b))
+* **deps:** update module github.com/bmatcuk/doublestar/v4 to v4.10.4 ([#2024](https://github.com/kguardian-dev/kguardian/issues/2024)) ([8fa25c5](https://github.com/kguardian-dev/kguardian/commit/8fa25c5a64483dbf03239a152c68d67a1287cdd6))
+* **deps:** update module golang.org/x/sys to v0.49.0 ([#1969](https://github.com/kguardian-dev/kguardian/issues/1969)) ([6c04eb5](https://github.com/kguardian-dev/kguardian/commit/6c04eb5040ead5acdf8944db671ee06c412e532e))
+* **deps:** update module modernc.org/sqlite to v1.61.0 ([#2016](https://github.com/kguardian-dev/kguardian/issues/2016)) ([ad4c17b](https://github.com/kguardian-dev/kguardian/commit/ad4c17b6ad95760d09cc58d9468aa8e5aa8f94fd))
+
 ## [0.1.4](https://github.com/kguardian-dev/kguardian/compare/cataloger/v0.1.3...cataloger/v0.1.4) (2026-10-01)
 
 
