@@ -8,7 +8,7 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sigstore/protobuf-specs v0.5.2
-	github.com/sigstore/sigstore v1.11.1
+	github.com/sigstore/sigstore v1.11.2
 	github.com/sigstore/sigstore-go v1.4.0
 	github.com/sirupsen/logrus v1.10.2
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
