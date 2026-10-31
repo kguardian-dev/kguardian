@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.3](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.2...supplychain/v0.2.3) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.2 ([#2036](https://github.com/kguardian-dev/kguardian/issues/2036)) ([a7aa15b](https://github.com/kguardian-dev/kguardian/commit/a7aa15b3af24e1f951f1b1912786b38acf5f3fce))
+* **deps:** update module github.com/prometheus/client_golang to v1.25.0 ([#1961](https://github.com/kguardian-dev/kguardian/issues/1961)) ([a57f7bc](https://github.com/kguardian-dev/kguardian/commit/a57f7bc6cf816cfbe8907ab2b28ab093f5bef55d))
+* **deps:** update module github.com/sigstore/sigstore to v1.11.1 ([#1993](https://github.com/kguardian-dev/kguardian/issues/1993)) ([3cc2506](https://github.com/kguardian-dev/kguardian/commit/3cc2506c7f8a34e7564f80c5a11e4b2dfc90d432))
+* **deps:** update module github.com/sigstore/sigstore to v1.11.2 ([#2044](https://github.com/kguardian-dev/kguardian/issues/2044)) ([eb37d0c](https://github.com/kguardian-dev/kguardian/commit/eb37d0c11205e2e6b35870fc58a1e11941b8ca9d))
+* **deps:** update module github.com/sigstore/sigstore-go to v1.4.0 ([#2040](https://github.com/kguardian-dev/kguardian/issues/2040)) ([21016b7](https://github.com/kguardian-dev/kguardian/commit/21016b7e7f7566c7a9bc5c4c25d4d482db6abced))
+
 ## [0.2.2](https://github.com/kguardian-dev/kguardian/compare/supplychain/v0.2.1...supplychain/v0.2.2) (2026-09-30)
 
 
