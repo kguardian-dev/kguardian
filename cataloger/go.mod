@@ -11,7 +11,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/sys v0.49.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 )
 
 require (
