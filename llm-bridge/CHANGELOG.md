@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.13.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.13.2...llm-bridge/v1.13.3) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.132.0 ([#1953](https://github.com/kguardian-dev/kguardian/issues/1953)) ([fa88b30](https://github.com/kguardian-dev/kguardian/commit/fa88b301bbe11e432ab7cfd64ef582424571da8b))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.133.0 ([#1972](https://github.com/kguardian-dev/kguardian/issues/1972)) ([7d192bf](https://github.com/kguardian-dev/kguardian/commit/7d192bf6ff8bd9a83df89df7ced14c57d8f6414b))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.134.0 ([#1994](https://github.com/kguardian-dev/kguardian/issues/1994)) ([200a766](https://github.com/kguardian-dev/kguardian/commit/200a766138db8748a802304e0eb802ef873bd264))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.135.0 ([#1999](https://github.com/kguardian-dev/kguardian/issues/1999)) ([69c6bd9](https://github.com/kguardian-dev/kguardian/commit/69c6bd9ff721f45fe5a8c8236aa00d5f8ecd3fce))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.136.0 ([#2012](https://github.com/kguardian-dev/kguardian/issues/2012)) ([f2740bb](https://github.com/kguardian-dev/kguardian/commit/f2740bb9144ebad63df95e619b1590b715e611cb))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.137.0 ([#2013](https://github.com/kguardian-dev/kguardian/issues/2013)) ([9b77a8e](https://github.com/kguardian-dev/kguardian/commit/9b77a8e4e10ab87de1ac75635fb4307086e0db59))
+
 ## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.13.1...llm-bridge/v1.13.2) (2026-10-01)
 
 
