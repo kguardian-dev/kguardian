@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.12.0...advisor/v1.12.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.2 ([#2036](https://github.com/kguardian-dev/kguardian/issues/2036)) ([a7aa15b](https://github.com/kguardian-dev/kguardian/commit/a7aa15b3af24e1f951f1b1912786b38acf5f3fce))
+
 ## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.11.4...advisor/v1.12.0) (2026-10-01)
 
 
