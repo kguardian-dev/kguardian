@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/kguardian-dev/kguardian/compare/supplychain-matcher/v0.1.2...supplychain-matcher/v0.1.3) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/klauspost/compress to v1.20.3 ([#1982](https://github.com/kguardian-dev/kguardian/issues/1982)) ([6d72623](https://github.com/kguardian-dev/kguardian/commit/6d72623c8b2e82d11609ba2cd5313452f14e7873))
+
 ## [0.1.2](https://github.com/kguardian-dev/kguardian/compare/supplychain-matcher/v0.1.1...supplychain-matcher/v0.1.2) (2026-09-30)
 
 

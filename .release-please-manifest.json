@@ -7,6 +7,6 @@
   "llm-bridge": "1.13.2",
   "evaluator": "0.5.2",
   "supplychain": "0.2.2",
-  "supplychain-matcher": "0.1.2",
+  "supplychain-matcher": "0.1.3",
   "cataloger": "0.1.4"
 }
