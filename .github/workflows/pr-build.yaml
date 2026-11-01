@@ -288,19 +288,20 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Cache Rust build
+        # Same reasoning as build-controller: actions/cache never pruned
+        # controller/target/, so the debug profile plus every --all-targets
+        # test binary grew without bound toward the 10 GB per-repository limit.
+        #
+        # Deliberately a separate cache from build-controller's, not a
+        # shared-key. That job compiles --release for an explicit target
+        # triple; this one builds debug for the host. The two write disjoint
+        # paths under target/, so one key would mean each job restoring the
+        # other's artifacts and racing to save, for no reuse.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            controller/target/
-          key: ${{ runner.os }}-cargo-controller-test-${{ hashFiles('controller/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-controller-test-
-            ${{ runner.os }}-cargo-controller-
+          workspaces: controller -> target
+          key: test
 
       - name: cargo fmt --check
         working-directory: controller
