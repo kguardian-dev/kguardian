@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM node:24-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -48,7 +48,7 @@ RUN node -e ' \
   find node_modules -mindepth 1 -maxdepth 1 -type d -empty -delete
 
 # Stage 3: Production with Vite preview
-FROM node:24-alpine
+FROM node:26-alpine
 
 WORKDIR /app
 
