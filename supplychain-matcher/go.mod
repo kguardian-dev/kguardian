@@ -5,7 +5,7 @@ go 1.26.8
 toolchain go1.27.3
 
 require (
-	github.com/anchore/clio v0.1.1
+	github.com/anchore/clio v0.1.2
 	github.com/anchore/grype v0.119.0
 	github.com/klauspost/compress v1.20.3
 	github.com/sirupsen/logrus v1.10.2
@@ -44,7 +44,7 @@ require (
 	github.com/anchore/fangs v0.1.1 // indirect
 	github.com/anchore/go-collections v0.1.1 // indirect
 	github.com/anchore/go-homedir v0.1.1 // indirect
-	github.com/anchore/go-logger v0.1.1 // indirect
+	github.com/anchore/go-logger v0.2.0 // indirect
 	github.com/anchore/go-lzo v0.1.1 // indirect
 	github.com/anchore/go-macholibre v0.1.1 // indirect
 	github.com/anchore/go-rpmdb v0.2.0 // indirect
@@ -152,7 +152,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/googleapis/gax-go/v2 v2.24.0 // indirect
-	github.com/gookit/color v1.6.1 // indirect
+	github.com/gookit/color v1.6.3 // indirect
 	github.com/gpustack/gguf-parser-go v0.26.3 // indirect
 	github.com/hako/durafmt v0.0.0-20210608085754-5c1018a4e16b // indirect
 	github.com/hashicorp/aws-sdk-go-base/v2 v2.0.0-beta.74 // indirect
@@ -282,8 +282,8 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
