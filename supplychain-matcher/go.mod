@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/supplychain-matcher
 
 go 1.26.8
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/anchore/clio v0.1.1
